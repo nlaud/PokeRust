@@ -22,7 +22,7 @@ fn main() {
     if args.verbosity >= 2 { println!("Got paths: {}, {}", args.p1, args.p2) }
 
     //Put dex data into a hashmap
-
+    
     //Put move data into a hashmap
 
     //Parse teamsheets into teams
