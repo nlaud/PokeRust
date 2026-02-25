@@ -1,0 +1,62 @@
+Ninetales (M) @ Heavy-Duty Boots  
+Ability: Drought  
+Level: 85  
+Tera Type: Fire  
+EVs: 85 HP / 85 Def / 85 SpA / 85 SpD / 85 Spe  
+IVs: 0 Atk  
+- Fire Blast  
+- Scorching Sands  
+- Solar Beam  
+- Nasty Plot  
+
+Minior (Minior-Yellow) @ White Herb  
+Ability: Shields Down  
+Level: 79  
+Tera Type: Flying  
+EVs: 85 HP / 85 Atk / 85 Def / 85 SpA / 85 SpD / 85 Spe  
+- Earthquake  
+- Acrobatics  
+- Shell Smash  
+- Power Gem  
+
+Salazzle (F) @ Leftovers  
+Ability: Corrosion  
+Level: 83  
+Tera Type: Grass  
+EVs: 85 HP / 85 Def / 85 SpA / 85 SpD / 85 Spe  
+IVs: 0 Atk  
+- Toxic  
+- Protect  
+- Flamethrower  
+- Substitute  
+
+Vileplume (M) @ Leftovers  
+Ability: Effect Spore  
+Level: 85  
+Tera Type: Steel  
+EVs: 85 HP / 85 Def / 85 SpA / 85 SpD / 85 Spe  
+IVs: 0 Atk  
+- Giga Drain  
+- Sludge Bomb  
+- Strength Sap  
+- Leech Seed  
+
+Meowscarada (F) @ Heavy-Duty Boots  
+Ability: Protean  
+Level: 78  
+Tera Type: Dark  
+EVs: 85 HP / 85 Atk / 85 Def / 85 SpA / 85 SpD / 85 Spe  
+- Flower Trick  
+- Toxic Spikes  
+- Knock Off  
+- U-turn  
+
+Dondozo (F) @ Leftovers  
+Ability: Unaware  
+Level: 78  
+Tera Type: Dragon  
+EVs: 85 HP / 85 Atk / 85 Def / 85 SpA / 85 SpD / 85 Spe  
+- Rest  
+- Curse  
+- Wave Crash  
+- Sleep Talk  
