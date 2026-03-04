@@ -1018,7 +1018,7 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, PokemonMoveData> {
         let mut secondaries: Vec<PokemonSecondaryEffect> = Vec::new();
         let mut self_secondaries: Vec<PokemonSecondaryEffect> = Vec::new();
 
-        let mut crit_ratio: u8 = 0;
+        let mut crit_ratio: u8 = 1;
         let mut foul_play = false;
 
         let mut ignore_ability = false;
