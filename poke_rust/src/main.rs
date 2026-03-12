@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod dex_data;
+mod pokemon;
 
 #[derive(Parser, Debug)]
 #[command(author = "Blazestorm", version = "1.0", about = "Simulates Pokemon Battles")]
@@ -13,6 +14,14 @@ struct Args {
     #[arg(long)]
     p2: String,
 
+    /// Path to the first player's teamsheet
+    #[arg(long, default_value="../pokemon_info/showdownDex.txt")]
+    poke_dex: String,
+
+    /// Path to the second player's teamsheet
+    #[arg(long, default_value="../pokemon_info/showdownMoves.txt")]
+    move_dex: String,
+
     /// How verbose debug output is (0 = Nothing, 1 = Minimal, 2 = Debug Trace, 3 = High Debug, 4 = Max Debug)
     #[arg(short, long, default_value_t = 1)]
     verbosity: u8,
@@ -24,10 +33,10 @@ fn main() {
     if args.verbosity >= 2 { println!("Got paths: {}, {}", args.p1, args.p2) }
 
     //Put dex data into a hashmap
-    let pokemon_dex = dex_data::parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+    let pokemon_dex = dex_data::parse_pokemon_dex(&args.poke_dex);
 
     //Put move data into a hashmap
-    let move_dex = dex_data::parse_move_dex("../pokemon_info/showdownMoves.txt");
+    let move_dex = dex_data::parse_move_dex(&args.move_dex);
 
     if args.verbosity >= 1 {
         println!("Loaded {} Pokemon and {} moves", pokemon_dex.len(), move_dex.len());

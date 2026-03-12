@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 
-pub type PokemonBoostArr = [i8; 7]; // atk, def, spa, spd, spe, accuracy, evasion
+pub type PokemonBoostTable = [i8; 7]; // atk, def, spa, spd, spe, accuracy, evasion
 
 #[derive(Debug, Clone)]
 pub enum PokemonType {
@@ -26,20 +26,20 @@ pub enum PokemonType {
 }
 
 #[derive(Debug)]
-pub enum PokemonAccuracy {
+pub enum AccuracyType {
     True,
     Percent(u8),
 }
 
 #[derive(Debug)]
-pub enum PokemonMoveCategory {
+pub enum MoveCategory {
     Physical,
     Special,
     Status,
 }
 
 #[derive(Debug)]
-pub enum PokemonMoveTarget {
+pub enum MoveTarget {
     AdjacentAlly,
     AdjacentAllyOrSelf,
     AdjacentFoe,
@@ -58,7 +58,7 @@ pub enum PokemonMoveTarget {
 }
 
 #[derive(Debug, Clone)]
-pub enum PokemonMoveFlag {
+pub enum MoveFlag {
     BypassSub,
     Bite,
     Bullet,
@@ -97,7 +97,7 @@ pub enum PokemonMoveFlag {
 }
 
 #[derive(Debug)]
-pub enum PokemonDamageOverride {
+pub enum DamageOverride {
     Number(u16),
     Level,
     None,
@@ -113,7 +113,7 @@ pub enum PokemonStat {
 }
 
 #[derive(Debug)]
-pub enum PokemonSelfSwitchType {
+pub enum SelfSwitchType {
     ShedTail,
     BatonPass,
     Normal,
@@ -121,14 +121,14 @@ pub enum PokemonSelfSwitchType {
 }
 
 #[derive(Debug)]
-pub enum PokemonSelfDestructType {
+pub enum SelfDestructType {
     Always,
     IfHit,
     None,
 }
 
 #[derive(Debug, Clone)]
-pub enum PokemonNonVolatileStatusType {
+pub enum Status {
     Burn,
     Poison,
     ToxicPoison,
@@ -138,7 +138,7 @@ pub enum PokemonNonVolatileStatusType {
 }
 
 #[derive(Debug, Clone)]
-pub enum PokemonVolatileStatusType {
+pub enum VolatileStatus {
     Flinch,
     AquaRing,
     Attract,
@@ -207,7 +207,7 @@ pub enum PokemonVolatileStatusType {
 }
 
 #[derive(Debug)]
-pub enum PokemonSideCondition {
+pub enum SideCondition {
     AuroraVeil,
     Reflect,
     CraftyShield,
@@ -226,7 +226,7 @@ pub enum PokemonSideCondition {
 }
 
 #[derive(Debug, Clone)]
-pub enum PokemonSlotCondition {
+pub enum SlotCondition {
     FutureMove,
     HealingWish,
     LunarDance,
@@ -235,7 +235,7 @@ pub enum PokemonSlotCondition {
 }
 
 #[derive(Debug, Clone)]
-pub enum PokemonPseudoWeather {
+pub enum PseudoWeather {
     FairyLock,
     Gravity,
     IonDeluge,
@@ -246,7 +246,7 @@ pub enum PokemonPseudoWeather {
 }
 
 #[derive(Debug, Clone)]
-pub enum PokemonTerrain {
+pub enum Terrain {
     ElectricTerrain,
     GrassyTerrain,
     MistyTerrain,
@@ -254,7 +254,7 @@ pub enum PokemonTerrain {
 }
 
 #[derive(Debug, Clone)]
-pub enum PokemonWeather {
+pub enum Weather {
     Rain,
     Sandstorm,
     Snow,
@@ -262,46 +262,46 @@ pub enum PokemonWeather {
 }
 
 #[derive(Debug)]
-pub struct PokemonHitEffect {
-    pub boosts: PokemonBoostArr,
-    pub status: Option<PokemonNonVolatileStatusType>,
-    pub volatile_status: Option<PokemonVolatileStatusType>,
-    pub slot_condition: Option<PokemonSlotCondition>,
-    pub side_condition: Option<PokemonSideCondition>,
-    pub pseudo_weather: Option<PokemonPseudoWeather>,
-    pub terrain: Option<PokemonTerrain>,
-    pub weather: Option<PokemonWeather>,
+pub struct HitEffect {
+    pub boosts: PokemonBoostTable,
+    pub status: Option<Status>,
+    pub volatile_status: Option<VolatileStatus>,
+    pub slot_condition: Option<SlotCondition>,
+    pub side_condition: Option<SideCondition>,
+    pub pseudo_weather: Option<PseudoWeather>,
+    pub terrain: Option<Terrain>,
+    pub weather: Option<Weather>,
 }
 
 #[derive(Debug)]
 pub struct PokemonSecondaryEffect {
     pub chance: u8,
-    pub effect: PokemonHitEffect,
+    pub effect: HitEffect,
 }
 
 #[derive(Debug)]
-pub struct PokemonMoveData {
+pub struct MoveData {
     pub name: String,
     pub base_power: u16,
-    pub accuracy: PokemonAccuracy,
-    pub target: PokemonMoveTarget,
+    pub accuracy: AccuracyType,
+    pub target: MoveTarget,
     pub secondaries: Vec<PokemonSecondaryEffect>,
     pub self_secondaries: Vec<PokemonSecondaryEffect>,
     pub pp: u8,
 
-    pub category: PokemonMoveCategory,
+    pub category: MoveCategory,
     pub pokemon_type: PokemonType,
     pub priority: i8,
-    pub flags: Vec<PokemonMoveFlag>,
+    pub flags: Vec<MoveFlag>,
 
     // Hit Effects
     pub ohko: bool,
     pub thaws_target: bool,
     pub heal_fraction: [u8; 2],
     pub force_switch: bool,
-    pub self_switch: PokemonSelfSwitchType,
-    pub self_boost: PokemonBoostArr,
-    pub self_destruct: PokemonSelfDestructType,
+    pub self_switch: SelfSwitchType,
+    pub self_boost: PokemonBoostTable,
+    pub self_destruct: SelfDestructType,
     pub breaks_protect: bool,
     pub recoil_fraction: [u8; 2],
     pub drain_fraction: [u8; 2],
@@ -328,7 +328,7 @@ pub struct PokemonMoveData {
     pub calls_move: bool,
 
     pub has_crash_damage: bool,
-    pub damage_override: PokemonDamageOverride,
+    pub damage_override: DamageOverride,
 
     pub stalling_move: bool,
     pub override_offensive_stat: Option<PokemonStat>,
@@ -369,226 +369,226 @@ fn parse_type(s: &str) -> Option<PokemonType> {
     }
 }
 
-fn parse_target(s: &str) -> PokemonMoveTarget {
+fn parse_target(s: &str) -> MoveTarget {
     match s {
-        "adjacentAlly" => PokemonMoveTarget::AdjacentAlly,
-        "adjacentAllyOrSelf" => PokemonMoveTarget::AdjacentAllyOrSelf,
-        "adjacentFoe" => PokemonMoveTarget::AdjacentFoe,
-        "all" => PokemonMoveTarget::All,
-        "allAdjacent" => PokemonMoveTarget::AllAdjacent,
-        "allAdjacentFoes" => PokemonMoveTarget::AllAdjacentFoes,
-        "allies" => PokemonMoveTarget::Allies,
-        "allySide" => PokemonMoveTarget::AllySide,
-        "allyTeam" => PokemonMoveTarget::AllyTeam,
-        "any" => PokemonMoveTarget::Any,
-        "foeSide" => PokemonMoveTarget::FoeSide,
-        "normal" => PokemonMoveTarget::Normal,
-        "randomNormal" => PokemonMoveTarget::RandomNormal,
-        "scripted" => PokemonMoveTarget::Scripted,
-        "self" => PokemonMoveTarget::SelfTarget,
-        _ => PokemonMoveTarget::Normal,
+        "adjacentAlly" => MoveTarget::AdjacentAlly,
+        "adjacentAllyOrSelf" => MoveTarget::AdjacentAllyOrSelf,
+        "adjacentFoe" => MoveTarget::AdjacentFoe,
+        "all" => MoveTarget::All,
+        "allAdjacent" => MoveTarget::AllAdjacent,
+        "allAdjacentFoes" => MoveTarget::AllAdjacentFoes,
+        "allies" => MoveTarget::Allies,
+        "allySide" => MoveTarget::AllySide,
+        "allyTeam" => MoveTarget::AllyTeam,
+        "any" => MoveTarget::Any,
+        "foeSide" => MoveTarget::FoeSide,
+        "normal" => MoveTarget::Normal,
+        "randomNormal" => MoveTarget::RandomNormal,
+        "scripted" => MoveTarget::Scripted,
+        "self" => MoveTarget::SelfTarget,
+        _ => MoveTarget::Normal,
     }
 }
 
-fn parse_category(s: &str) -> PokemonMoveCategory {
+fn parse_category(s: &str) -> MoveCategory {
     match s {
-        "Physical" => PokemonMoveCategory::Physical,
-        "Special" => PokemonMoveCategory::Special,
-        _ => PokemonMoveCategory::Status,
+        "Physical" => MoveCategory::Physical,
+        "Special" => MoveCategory::Special,
+        _ => MoveCategory::Status,
     }
 }
 
-fn parse_flag(s: &str) -> Option<PokemonMoveFlag> {
+fn parse_flag(s: &str) -> Option<MoveFlag> {
     match s {
-        "bypasssub" => Some(PokemonMoveFlag::BypassSub),
-        "bite" => Some(PokemonMoveFlag::Bite),
-        "bullet" => Some(PokemonMoveFlag::Bullet),
-        "cantusetwice" => Some(PokemonMoveFlag::CantUseTwice),
-        "charge" => Some(PokemonMoveFlag::Charge),
-        "contact" => Some(PokemonMoveFlag::Contact),
-        "dance" => Some(PokemonMoveFlag::Dance),
-        "defrost" => Some(PokemonMoveFlag::Defrost),
-        "distance" => Some(PokemonMoveFlag::Distance),
-        "failcopycat" => Some(PokemonMoveFlag::FailCopyCat),
-        "failencore" => Some(PokemonMoveFlag::FailEncore),
-        "failinstruct" => Some(PokemonMoveFlag::FailInstruct),
-        "failmefirst" => Some(PokemonMoveFlag::FailMeFirst),
-        "failmimic" => Some(PokemonMoveFlag::FailMimic),
-        "futuremove" => Some(PokemonMoveFlag::FutureMove),
-        "gravity" => Some(PokemonMoveFlag::Gravity),
-        "heal" => Some(PokemonMoveFlag::Heal),
-        "metronome" => Some(PokemonMoveFlag::Metronome),
-        "mirror" => Some(PokemonMoveFlag::Mirror),
-        "mustpressure" => Some(PokemonMoveFlag::MustPressure),
-        "noassist" => Some(PokemonMoveFlag::NoAssist),
-        "noparentalbond" => Some(PokemonMoveFlag::NoParentalBond),
-        "nosketch" => Some(PokemonMoveFlag::NoSketch),
-        "nosleeptalk" => Some(PokemonMoveFlag::NoSleepTalk),
-        "pledgecombo" => Some(PokemonMoveFlag::PledgeCombo),
-        "powder" => Some(PokemonMoveFlag::Powder),
-        "protect" => Some(PokemonMoveFlag::Protect),
-        "pulse" => Some(PokemonMoveFlag::Pulse),
-        "punch" => Some(PokemonMoveFlag::Punch),
-        "recharge" => Some(PokemonMoveFlag::Recharge),
-        "reflectable" => Some(PokemonMoveFlag::Reflectable),
-        "slicing" => Some(PokemonMoveFlag::Slicing),
-        "snatch" => Some(PokemonMoveFlag::Snatch),
-        "sound" => Some(PokemonMoveFlag::Sound),
-        "wind" => Some(PokemonMoveFlag::Wind),
+        "bypasssub" => Some(MoveFlag::BypassSub),
+        "bite" => Some(MoveFlag::Bite),
+        "bullet" => Some(MoveFlag::Bullet),
+        "cantusetwice" => Some(MoveFlag::CantUseTwice),
+        "charge" => Some(MoveFlag::Charge),
+        "contact" => Some(MoveFlag::Contact),
+        "dance" => Some(MoveFlag::Dance),
+        "defrost" => Some(MoveFlag::Defrost),
+        "distance" => Some(MoveFlag::Distance),
+        "failcopycat" => Some(MoveFlag::FailCopyCat),
+        "failencore" => Some(MoveFlag::FailEncore),
+        "failinstruct" => Some(MoveFlag::FailInstruct),
+        "failmefirst" => Some(MoveFlag::FailMeFirst),
+        "failmimic" => Some(MoveFlag::FailMimic),
+        "futuremove" => Some(MoveFlag::FutureMove),
+        "gravity" => Some(MoveFlag::Gravity),
+        "heal" => Some(MoveFlag::Heal),
+        "metronome" => Some(MoveFlag::Metronome),
+        "mirror" => Some(MoveFlag::Mirror),
+        "mustpressure" => Some(MoveFlag::MustPressure),
+        "noassist" => Some(MoveFlag::NoAssist),
+        "noparentalbond" => Some(MoveFlag::NoParentalBond),
+        "nosketch" => Some(MoveFlag::NoSketch),
+        "nosleeptalk" => Some(MoveFlag::NoSleepTalk),
+        "pledgecombo" => Some(MoveFlag::PledgeCombo),
+        "powder" => Some(MoveFlag::Powder),
+        "protect" => Some(MoveFlag::Protect),
+        "pulse" => Some(MoveFlag::Pulse),
+        "punch" => Some(MoveFlag::Punch),
+        "recharge" => Some(MoveFlag::Recharge),
+        "reflectable" => Some(MoveFlag::Reflectable),
+        "slicing" => Some(MoveFlag::Slicing),
+        "snatch" => Some(MoveFlag::Snatch),
+        "sound" => Some(MoveFlag::Sound),
+        "wind" => Some(MoveFlag::Wind),
         _ => None,
     }
 }
 
-fn parse_nvstatus(s: &str) -> Option<PokemonNonVolatileStatusType> {
+fn parse_nvstatus(s: &str) -> Option<Status> {
     match s {
-        "brn" => Some(PokemonNonVolatileStatusType::Burn),
-        "psn" => Some(PokemonNonVolatileStatusType::Poison),
-        "tox" => Some(PokemonNonVolatileStatusType::ToxicPoison),
-        "par" => Some(PokemonNonVolatileStatusType::Paralysis),
-        "slp" => Some(PokemonNonVolatileStatusType::Sleep),
-        "frz" => Some(PokemonNonVolatileStatusType::Frozen),
+        "brn" => Some(Status::Burn),
+        "psn" => Some(Status::Poison),
+        "tox" => Some(Status::ToxicPoison),
+        "par" => Some(Status::Paralysis),
+        "slp" => Some(Status::Sleep),
+        "frz" => Some(Status::Frozen),
         _ => None,
     }
 }
 
-fn parse_volatile(s: &str) -> Option<PokemonVolatileStatusType> {
+fn parse_volatile(s: &str) -> Option<VolatileStatus> {
     match s {
-        "flinch" => Some(PokemonVolatileStatusType::Flinch),
-        "aquaring" => Some(PokemonVolatileStatusType::AquaRing),
-        "attract" => Some(PokemonVolatileStatusType::Attract),
-        "confusion" => Some(PokemonVolatileStatusType::Confusion),
-        "banefulbunker" => Some(PokemonVolatileStatusType::BanefulBunker),
-        "bide" => Some(PokemonVolatileStatusType::Bide),
-        "partiallytrapped" => Some(PokemonVolatileStatusType::PartiallyTrapped),
-        "mustrecharge" => Some(PokemonVolatileStatusType::MustRecharge),
-        "burningbulwark" => Some(PokemonVolatileStatusType::BurningBulwark),
-        "charge" => Some(PokemonVolatileStatusType::Charge),
-        "curse" => Some(PokemonVolatileStatusType::Curse),
-        "defensecurl" => Some(PokemonVolatileStatusType::DefenseCurl),
-        "destinybond" => Some(PokemonVolatileStatusType::DestinyBond),
-        "protect" => Some(PokemonVolatileStatusType::Protect),
-        "disable" => Some(PokemonVolatileStatusType::Disable),
-        "dragoncheer" => Some(PokemonVolatileStatusType::DragonCheer),
-        "electrify" => Some(PokemonVolatileStatusType::Electrify),
-        "embargo" => Some(PokemonVolatileStatusType::Embargo),
-        "encore" => Some(PokemonVolatileStatusType::Encore),
-        "endure" => Some(PokemonVolatileStatusType::Endure),
-        "focusenergy" => Some(PokemonVolatileStatusType::FocusEnergy),
-        "followme" => Some(PokemonVolatileStatusType::FollowMe),
-        "foresight" => Some(PokemonVolatileStatusType::Foresight),
-        "gastroacid" => Some(PokemonVolatileStatusType::GastroAcid),
-        "glaiverush" => Some(PokemonVolatileStatusType::GlaiveRush),
-        "grudge" => Some(PokemonVolatileStatusType::Grudge),
-        "healblock" => Some(PokemonVolatileStatusType::HealBlock),
-        "helpinghand" => Some(PokemonVolatileStatusType::HelpingHand),
-        "imprison" => Some(PokemonVolatileStatusType::Imprison),
-        "ingrain" => Some(PokemonVolatileStatusType::Ingrain),
-        "kingsshield" => Some(PokemonVolatileStatusType::KingsShield),
-        "laserfocus" => Some(PokemonVolatileStatusType::LaserFocus),
-        "leechseed" => Some(PokemonVolatileStatusType::LeechSeed),
-        "magiccoat" => Some(PokemonVolatileStatusType::MagicCoat),
-        "magnetrise" => Some(PokemonVolatileStatusType::MagnetRise),
-        "maxguard" => Some(PokemonVolatileStatusType::MaxGuard),
-        "minimize" => Some(PokemonVolatileStatusType::Minimize),
-        "miracleeye" => Some(PokemonVolatileStatusType::MiracleEye),
-        "nightmare" => Some(PokemonVolatileStatusType::NightMare),
-        "noretreat" => Some(PokemonVolatileStatusType::NoRetreat),
-        "obstruct" => Some(PokemonVolatileStatusType::Obstruct),
-        "octolock" => Some(PokemonVolatileStatusType::OctoLock),
-        "lockedmove" => Some(PokemonVolatileStatusType::LockedMove),
-        "powder" => Some(PokemonVolatileStatusType::Powder),
-        "powershift" => Some(PokemonVolatileStatusType::PowerShift),
-        "powertrick" => Some(PokemonVolatileStatusType::PowerTrick),
-        "rage" => Some(PokemonVolatileStatusType::Rage),
-        "ragepowder" => Some(PokemonVolatileStatusType::RagePowder),
-        "roost" => Some(PokemonVolatileStatusType::Roost),
-        "saltcure" => Some(PokemonVolatileStatusType::SaltCure),
-        "substitute" => Some(PokemonVolatileStatusType::Substitute),
-        "silktrap" => Some(PokemonVolatileStatusType::SilkTrap),
-        "smackdown" => Some(PokemonVolatileStatusType::SmackDown),
-        "snatch" => Some(PokemonVolatileStatusType::Snatch),
-        "sparklingaria" => Some(PokemonVolatileStatusType::SparklingAria),
-        "spikyshield" => Some(PokemonVolatileStatusType::SpikyShield),
-        "spotlight" => Some(PokemonVolatileStatusType::Spotlight),
-        "stockpile" => Some(PokemonVolatileStatusType::Stockpile),
-        "syrupbomb" => Some(PokemonVolatileStatusType::SyrupBomb),
-        "tarshot" => Some(PokemonVolatileStatusType::TarShot),
-        "taunt" => Some(PokemonVolatileStatusType::Taunt),
-        "telekinesis" => Some(PokemonVolatileStatusType::Telekinesis),
-        "torment" => Some(PokemonVolatileStatusType::Torment),
-        "uproar" => Some(PokemonVolatileStatusType::Uproar),
-        "yawn" => Some(PokemonVolatileStatusType::Yawn),
+        "flinch" => Some(VolatileStatus::Flinch),
+        "aquaring" => Some(VolatileStatus::AquaRing),
+        "attract" => Some(VolatileStatus::Attract),
+        "confusion" => Some(VolatileStatus::Confusion),
+        "banefulbunker" => Some(VolatileStatus::BanefulBunker),
+        "bide" => Some(VolatileStatus::Bide),
+        "partiallytrapped" => Some(VolatileStatus::PartiallyTrapped),
+        "mustrecharge" => Some(VolatileStatus::MustRecharge),
+        "burningbulwark" => Some(VolatileStatus::BurningBulwark),
+        "charge" => Some(VolatileStatus::Charge),
+        "curse" => Some(VolatileStatus::Curse),
+        "defensecurl" => Some(VolatileStatus::DefenseCurl),
+        "destinybond" => Some(VolatileStatus::DestinyBond),
+        "protect" => Some(VolatileStatus::Protect),
+        "disable" => Some(VolatileStatus::Disable),
+        "dragoncheer" => Some(VolatileStatus::DragonCheer),
+        "electrify" => Some(VolatileStatus::Electrify),
+        "embargo" => Some(VolatileStatus::Embargo),
+        "encore" => Some(VolatileStatus::Encore),
+        "endure" => Some(VolatileStatus::Endure),
+        "focusenergy" => Some(VolatileStatus::FocusEnergy),
+        "followme" => Some(VolatileStatus::FollowMe),
+        "foresight" => Some(VolatileStatus::Foresight),
+        "gastroacid" => Some(VolatileStatus::GastroAcid),
+        "glaiverush" => Some(VolatileStatus::GlaiveRush),
+        "grudge" => Some(VolatileStatus::Grudge),
+        "healblock" => Some(VolatileStatus::HealBlock),
+        "helpinghand" => Some(VolatileStatus::HelpingHand),
+        "imprison" => Some(VolatileStatus::Imprison),
+        "ingrain" => Some(VolatileStatus::Ingrain),
+        "kingsshield" => Some(VolatileStatus::KingsShield),
+        "laserfocus" => Some(VolatileStatus::LaserFocus),
+        "leechseed" => Some(VolatileStatus::LeechSeed),
+        "magiccoat" => Some(VolatileStatus::MagicCoat),
+        "magnetrise" => Some(VolatileStatus::MagnetRise),
+        "maxguard" => Some(VolatileStatus::MaxGuard),
+        "minimize" => Some(VolatileStatus::Minimize),
+        "miracleeye" => Some(VolatileStatus::MiracleEye),
+        "nightmare" => Some(VolatileStatus::NightMare),
+        "noretreat" => Some(VolatileStatus::NoRetreat),
+        "obstruct" => Some(VolatileStatus::Obstruct),
+        "octolock" => Some(VolatileStatus::OctoLock),
+        "lockedmove" => Some(VolatileStatus::LockedMove),
+        "powder" => Some(VolatileStatus::Powder),
+        "powershift" => Some(VolatileStatus::PowerShift),
+        "powertrick" => Some(VolatileStatus::PowerTrick),
+        "rage" => Some(VolatileStatus::Rage),
+        "ragepowder" => Some(VolatileStatus::RagePowder),
+        "roost" => Some(VolatileStatus::Roost),
+        "saltcure" => Some(VolatileStatus::SaltCure),
+        "substitute" => Some(VolatileStatus::Substitute),
+        "silktrap" => Some(VolatileStatus::SilkTrap),
+        "smackdown" => Some(VolatileStatus::SmackDown),
+        "snatch" => Some(VolatileStatus::Snatch),
+        "sparklingaria" => Some(VolatileStatus::SparklingAria),
+        "spikyshield" => Some(VolatileStatus::SpikyShield),
+        "spotlight" => Some(VolatileStatus::Spotlight),
+        "stockpile" => Some(VolatileStatus::Stockpile),
+        "syrupbomb" => Some(VolatileStatus::SyrupBomb),
+        "tarshot" => Some(VolatileStatus::TarShot),
+        "taunt" => Some(VolatileStatus::Taunt),
+        "telekinesis" => Some(VolatileStatus::Telekinesis),
+        "torment" => Some(VolatileStatus::Torment),
+        "uproar" => Some(VolatileStatus::Uproar),
+        "yawn" => Some(VolatileStatus::Yawn),
         _ => None,
     }
 }
 
-fn parse_side_condition(s: &str) -> Option<PokemonSideCondition> {
+fn parse_side_condition(s: &str) -> Option<SideCondition> {
     match s {
-        "auroraveil" => Some(PokemonSideCondition::AuroraVeil),
-        "reflect" => Some(PokemonSideCondition::Reflect),
-        "craftyshield" => Some(PokemonSideCondition::CraftyShield),
-        "lightscreen" => Some(PokemonSideCondition::LightScreen),
-        "luckychant" => Some(PokemonSideCondition::LuckyChant),
-        "matblock" => Some(PokemonSideCondition::MatBlock),
-        "mist" => Some(PokemonSideCondition::Mist),
-        "quickguard" => Some(PokemonSideCondition::QuickGuard),
-        "safeguard" => Some(PokemonSideCondition::SafeGuard),
-        "spikes" => Some(PokemonSideCondition::Spikes),
-        "stealthrock" => Some(PokemonSideCondition::StealthRock),
-        "stickyweb" => Some(PokemonSideCondition::StickyWeb),
-        "tailwind" => Some(PokemonSideCondition::TailWind),
-        "toxicspikes" => Some(PokemonSideCondition::ToxicSpikes),
-        "wideguard" => Some(PokemonSideCondition::WideGuard),
+        "auroraveil" => Some(SideCondition::AuroraVeil),
+        "reflect" => Some(SideCondition::Reflect),
+        "craftyshield" => Some(SideCondition::CraftyShield),
+        "lightscreen" => Some(SideCondition::LightScreen),
+        "luckychant" => Some(SideCondition::LuckyChant),
+        "matblock" => Some(SideCondition::MatBlock),
+        "mist" => Some(SideCondition::Mist),
+        "quickguard" => Some(SideCondition::QuickGuard),
+        "safeguard" => Some(SideCondition::SafeGuard),
+        "spikes" => Some(SideCondition::Spikes),
+        "stealthrock" => Some(SideCondition::StealthRock),
+        "stickyweb" => Some(SideCondition::StickyWeb),
+        "tailwind" => Some(SideCondition::TailWind),
+        "toxicspikes" => Some(SideCondition::ToxicSpikes),
+        "wideguard" => Some(SideCondition::WideGuard),
         _ => None,
     }
 }
 
-fn parse_terrain(s: &str) -> Option<PokemonTerrain> {
+fn parse_terrain(s: &str) -> Option<Terrain> {
     match s {
-        "electricterrain" => Some(PokemonTerrain::ElectricTerrain),
-        "grassyterrain" => Some(PokemonTerrain::GrassyTerrain),
-        "mistyterrain" => Some(PokemonTerrain::MistyTerrain),
-        "psychicterrain" => Some(PokemonTerrain::PsychicTerrain),
+        "electricterrain" => Some(Terrain::ElectricTerrain),
+        "grassyterrain" => Some(Terrain::GrassyTerrain),
+        "mistyterrain" => Some(Terrain::MistyTerrain),
+        "psychicterrain" => Some(Terrain::PsychicTerrain),
         _ => None,
     }
 }
 
-fn parse_weather_val(s: &str) -> Option<PokemonWeather> {
+fn parse_weather_val(s: &str) -> Option<Weather> {
     match s {
-        "raindance" | "primordialsea" => Some(PokemonWeather::Rain),
-        "sunnyday" | "desolateland" => Some(PokemonWeather::Sun),
-        "sandstorm" | "sandsear" => Some(PokemonWeather::Sandstorm),
-        "hail" | "snowscape" | "snow" => Some(PokemonWeather::Snow),
+        "raindance" | "primordialsea" => Some(Weather::Rain),
+        "sunnyday" | "desolateland" => Some(Weather::Sun),
+        "sandstorm" | "sandsear" => Some(Weather::Sandstorm),
+        "hail" | "snowscape" | "snow" => Some(Weather::Snow),
         _ => None,
     }
 }
 
-fn parse_pseudo_weather(s: &str) -> Option<PokemonPseudoWeather> {
+fn parse_pseudo_weather(s: &str) -> Option<PseudoWeather> {
     match s {
-        "fairylock" => Some(PokemonPseudoWeather::FairyLock),
-        "gravity" => Some(PokemonPseudoWeather::Gravity),
-        "iondeluge" => Some(PokemonPseudoWeather::IonDeluge),
-        "magicroom" => Some(PokemonPseudoWeather::MagicDeluge),
-        "mudsport" => Some(PokemonPseudoWeather::MudSport),
-        "watersport" => Some(PokemonPseudoWeather::WaterSport),
-        "wonderroom" => Some(PokemonPseudoWeather::WonderRoom),
+        "fairylock" => Some(PseudoWeather::FairyLock),
+        "gravity" => Some(PseudoWeather::Gravity),
+        "iondeluge" => Some(PseudoWeather::IonDeluge),
+        "magicroom" => Some(PseudoWeather::MagicDeluge),
+        "mudsport" => Some(PseudoWeather::MudSport),
+        "watersport" => Some(PseudoWeather::WaterSport),
+        "wonderroom" => Some(PseudoWeather::WonderRoom),
         _ => None,
     }
 }
 
-fn parse_slot_condition(s: &str) -> Option<PokemonSlotCondition> {
+fn parse_slot_condition(s: &str) -> Option<SlotCondition> {
     match s {
-        "futuremove" | "futuresight" | "doomdesire" => Some(PokemonSlotCondition::FutureMove),
-        "healingwish" => Some(PokemonSlotCondition::HealingWish),
-        "lunardance" => Some(PokemonSlotCondition::LunarDance),
-        "revivalblessing" => Some(PokemonSlotCondition::RevivalBlessing),
-        "wish" => Some(PokemonSlotCondition::Wish),
+        "futuremove" | "futuresight" | "doomdesire" => Some(SlotCondition::FutureMove),
+        "healingwish" => Some(SlotCondition::HealingWish),
+        "lunardance" => Some(SlotCondition::LunarDance),
+        "revivalblessing" => Some(SlotCondition::RevivalBlessing),
+        "wish" => Some(SlotCondition::Wish),
         _ => None,
     }
 }
 
-fn empty_hit_effect() -> PokemonHitEffect {
-    PokemonHitEffect {
+fn empty_hit_effect() -> HitEffect {
+    HitEffect {
         boosts: [0; 7],
         status: None,
         volatile_status: None,
@@ -636,8 +636,8 @@ fn extract_self_subblock(text: &str) -> (String, Option<String>) {
     (text.to_string(), None)
 }
 
-/// Parse boosts/status/volatileStatus from a text fragment into a PokemonHitEffect.
-fn parse_effect_from_text(text: &str) -> PokemonHitEffect {
+/// Parse boosts/status/volatileStatus from a text fragment into a HitEffect.
+fn parse_effect_from_text(text: &str) -> HitEffect {
     let mut effect = empty_hit_effect();
     if let Some(s) = extract_quoted(text, "status") {
         effect.status = parse_nvstatus(&s);
@@ -727,7 +727,7 @@ fn extract_array2(line: &str, key: &str) -> Option<[u8; 2]> {
 
 /// Parse boosts from a block of text like `{ atk: -1, def: 2 }`
 /// Returns [atk, def, spa, spd, spe, accuracy, evasion, 0]
-fn parse_boosts_from_text(text: &str) -> PokemonBoostArr {
+fn parse_boosts_from_text(text: &str) -> PokemonBoostTable {
     let mut boosts = [0i8; 7];
     for part in text.split(',') {
         let part = part.trim();
@@ -751,7 +751,7 @@ fn parse_boosts_from_text(text: &str) -> PokemonBoostArr {
 }
 
 /// Parse flags from text like `{ contact: 1, protect: 1, mirror: 1 }`
-fn parse_flags_from_text(text: &str) -> Vec<PokemonMoveFlag> {
+fn parse_flags_from_text(text: &str) -> Vec<MoveFlag> {
     let mut flags = Vec::new();
     let inner = text.trim().trim_start_matches('{').trim_end_matches('}');
     for part in inner.split(',') {
@@ -764,10 +764,10 @@ fn parse_flags_from_text(text: &str) -> Vec<PokemonMoveFlag> {
     flags
 }
 
-fn parse_damage_override(s: &str) -> Option<PokemonDamageOverride> {
+fn parse_damage_override(s: &str) -> Option<DamageOverride> {
     match s {
-        "level" => Some(PokemonDamageOverride::Level),
-        _ => Some(PokemonDamageOverride::Number(s.parse().ok()?)),
+        "level" => Some(DamageOverride::Level),
+        _ => Some(DamageOverride::Number(s.parse().ok()?)),
     }
 }
 
@@ -983,31 +983,31 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
     result
 }
 
-/// Parse showdownMoves.txt into a HashMap of PokemonMoveData keyed by move id.
-pub fn parse_move_dex(file_path: &str) -> HashMap<String, PokemonMoveData> {
+/// Parse showdownMoves.txt into a HashMap of MoveData keyed by move id.
+pub fn parse_move_dex(file_path: &str) -> HashMap<String, MoveData> {
     let content = fs::read_to_string(file_path).expect("Failed to read moves file");
     let entries = split_entries(&content);
     let mut result = HashMap::new();
 
     for (key, lines) in &entries {
         let mut name = String::new();
-        let mut accuracy = PokemonAccuracy::Percent(100);
+        let mut accuracy = AccuracyType::Percent(100);
         let mut pp: u8 = 0;
-        let mut category = PokemonMoveCategory::Status;
+        let mut category = MoveCategory::Status;
         let mut pokemon_type = PokemonType::Normal;
         let mut priority: i8 = 0;
-        let mut target = PokemonMoveTarget::Normal;
-        let mut flags: Vec<PokemonMoveFlag> = Vec::new();
+        let mut target = MoveTarget::Normal;
+        let mut flags: Vec<MoveFlag> = Vec::new();
         let mut base_power: u16 = 0;
 
         let mut ohko = false;
         let mut thaws_target = false;
         let mut heal_fraction: [u8; 2] = [0, 0];
         let mut force_switch = false;
-        let mut self_switch = PokemonSelfSwitchType::None;
+        let mut self_switch = SelfSwitchType::None;
         let mut self_boost = [0i8; 7];
         let mut top_level_boosts: Option<[i8; 7]> = None;
-        let mut self_destruct = PokemonSelfDestructType::None;
+        let mut self_destruct = SelfDestructType::None;
         let mut breaks_protect = false;
         let mut recoil_fraction: [u8; 2] = [0, 0];
         let mut drain_fraction: [u8; 2] = [0, 0];
@@ -1041,7 +1041,7 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, PokemonMoveData> {
         let mut i = 0;
         let mut depth: i32 = 0;
         let mut skip_until_depth: Option<i32> = None;
-        let mut damage_override: PokemonDamageOverride = PokemonDamageOverride::None;
+        let mut damage_override: DamageOverride = DamageOverride::None;
 
         while i < lines.len() {
             let line = &lines[i];
@@ -1094,9 +1094,9 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, PokemonMoveData> {
                 }
             } else if trimmed.starts_with("accuracy:") {
                 if extract_bool(trimmed, "accuracy") == Some(true) {
-                    accuracy = PokemonAccuracy::True;
+                    accuracy = AccuracyType::True;
                 } else if let Some(v) = extract_int::<u8>(trimmed, "accuracy") {
-                    accuracy = PokemonAccuracy::Percent(v);
+                    accuracy = AccuracyType::Percent(v);
                 }
             } else if trimmed.starts_with("pp:") {
                 if let Some(v) = extract_int::<u8>(trimmed, "pp") {
@@ -1166,20 +1166,20 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, PokemonMoveData> {
                 force_switch = extract_bool(trimmed, "forceSwitch").unwrap_or(false);
             } else if trimmed.starts_with("selfSwitch:") {
                 if extract_bool(trimmed, "selfSwitch") == Some(true) {
-                    self_switch = PokemonSelfSwitchType::Normal;
+                    self_switch = SelfSwitchType::Normal;
                 } else if let Some(s) = extract_quoted(trimmed, "selfSwitch") {
                     self_switch = match s.as_str() {
-                        "shedtail" => PokemonSelfSwitchType::ShedTail,
-                        "copyvolatile" => PokemonSelfSwitchType::BatonPass,
-                        _ => PokemonSelfSwitchType::Normal,
+                        "shedtail" => SelfSwitchType::ShedTail,
+                        "copyvolatile" => SelfSwitchType::BatonPass,
+                        _ => SelfSwitchType::Normal,
                     };
                 }
             } else if trimmed.starts_with("selfdestruct:") {
                 if let Some(s) = extract_quoted(trimmed, "selfdestruct") {
                     self_destruct = match s.as_str() {
-                        "always" => PokemonSelfDestructType::Always,
-                        "ifHit" => PokemonSelfDestructType::IfHit,
-                        _ => PokemonSelfDestructType::None,
+                        "always" => SelfDestructType::Always,
+                        "ifHit" => SelfDestructType::IfHit,
+                        _ => SelfDestructType::None,
                     };
                 }
             } else if trimmed.starts_with("breaksProtect:") {
@@ -1385,13 +1385,13 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, PokemonMoveData> {
                 i = end;
             } else if trimmed.starts_with("damage:") && depth <= 1 {
                 if let Some(s) = extract_quoted(trimmed, "damage") {
-                    damage_override = parse_damage_override(&s).unwrap_or(PokemonDamageOverride::None);
+                    damage_override = parse_damage_override(&s).unwrap_or(DamageOverride::None);
                 } else if let Some(v) = extract_int::<u16>(trimmed, "damage") {
-                    damage_override = PokemonDamageOverride::Number(v);
+                    damage_override = DamageOverride::Number(v);
                 }
             } else if trimmed.starts_with("damageOverride:") {
                 if let Some(s) = extract_quoted(trimmed, "damageOverride") {
-                    damage_override = parse_damage_override(&s).unwrap_or(PokemonDamageOverride::None);
+                    damage_override = parse_damage_override(&s).unwrap_or(DamageOverride::None);
                 }
             }
 
@@ -1402,9 +1402,9 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, PokemonMoveData> {
         if let Some(boosts) = top_level_boosts {
             let self_targeting = matches!(
                 target,
-                PokemonMoveTarget::SelfTarget
-                    | PokemonMoveTarget::AllySide
-                    | PokemonMoveTarget::AllyTeam
+                MoveTarget::SelfTarget
+                    | MoveTarget::AllySide
+                    | MoveTarget::AllyTeam
             );
             if self_targeting {
                 self_boost = boosts;
@@ -1416,7 +1416,7 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, PokemonMoveData> {
         }
 
         if !name.is_empty() {
-            result.insert(key.clone(), PokemonMoveData {
+            result.insert(key.clone(), MoveData {
                 name,
                 accuracy,
                 pp,
