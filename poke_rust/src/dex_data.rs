@@ -345,7 +345,7 @@ pub struct PokemonData {
 
 // --- Helpers ---
 
-fn parse_type(s: &str) -> Option<PokemonType> {
+pub fn parse_type(s: &str) -> Option<PokemonType> {
     match s {
         "Normal" => Some(PokemonType::Normal),
         "Fire" => Some(PokemonType::Fire),

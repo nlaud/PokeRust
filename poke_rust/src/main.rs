@@ -14,11 +14,11 @@ struct Args {
     #[arg(long)]
     p2: String,
 
-    /// Path to the first player's teamsheet
+    /// Path to the showdown pokedex data
     #[arg(long, default_value="../pokemon_info/showdownDex.txt")]
     poke_dex: String,
 
-    /// Path to the second player's teamsheet
+    /// Path to the showdown move data
     #[arg(long, default_value="../pokemon_info/showdownMoves.txt")]
     move_dex: String,
 
@@ -48,5 +48,16 @@ fn main() {
     }
 
     //Parse teamsheets
+    let preview = pokemon::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, 2);
+
+    if args.verbosity >= 1 {
+        println!("P1 team: {} Pokemon | P2 team: {} Pokemon",
+            preview.p1_mons.len(), preview.p2_mons.len());
+    }
+
+    if args.verbosity >= 3 {
+        println!("P1 team: {:#?}", preview.p1_mons);
+        println!("P2 team: {:#?}", preview.p2_mons);
+    }
 
 }
