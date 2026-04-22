@@ -10,7 +10,6 @@
 	flags: {},
 	isZ: "pikashuniumz",
 	critRatio: 3,
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cool",
@@ -25,7 +24,6 @@ absorb: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, heal: 1, metronome: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Clever",
@@ -39,7 +37,6 @@ accelerock: {
 	pp: 20,
 	priority: 1,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Cool",
@@ -75,7 +72,6 @@ acidarmor: {
 	boosts: {
 		def: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Poison",
 	zMove: { effect: 'clearnegativeboost' },
@@ -92,7 +88,6 @@ aciddownpour: {
 	priority: 0,
 	flags: {},
 	isZ: "poisoniumz",
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	contestType: "Cool",
@@ -132,7 +127,6 @@ acrobatics: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, distance: 1, metronome: 1 },
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cool",
@@ -163,7 +157,6 @@ acupressure: {
 			return false;
 		}
 	},
-	secondary: null,
 	target: "adjacentAllyOrSelf",
 	type: "Normal",
 	zMove: { effect: 'crit2' },
@@ -178,7 +171,6 @@ aerialace: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, distance: 1, metronome: 1, slicing: 1 },
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cool",
@@ -193,7 +185,6 @@ aeroblast: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, distance: 1, metronome: 1, wind: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cool",
@@ -217,7 +208,6 @@ afteryou: {
 			return false;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -235,7 +225,6 @@ agility: {
 	boosts: {
 		spe: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { effect: 'clearnegativeboost' },
@@ -251,7 +240,6 @@ aircutter: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, slicing: 1, wind: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Flying",
 	contestType: "Cool",
@@ -284,7 +272,6 @@ alloutpummeling: {
 	priority: 0,
 	flags: {},
 	isZ: "fightiniumz",
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -361,7 +348,6 @@ allyswitch: {
 			this.effectState.duration = 2;
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { boost: { spe: 2 } },
@@ -379,7 +365,6 @@ amnesia: {
 	boosts: {
 		spd: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { effect: 'clearnegativeboost' },
@@ -458,7 +443,6 @@ aquacutter: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Cool",
@@ -472,7 +456,6 @@ aquajet: {
 	pp: 20,
 	priority: 1,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Cool",
@@ -496,7 +479,6 @@ aquaring: {
 			this.heal(pokemon.baseMaxhp / 16);
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Water",
 	zMove: { boost: { def: 1 } },
@@ -532,7 +514,6 @@ aquatail: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Beautiful",
@@ -552,7 +533,6 @@ armorcannon: {
 			spd: -1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 },
@@ -566,7 +546,6 @@ armthrust: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -618,7 +597,6 @@ aromaticmist: {
 	boosts: {
 		spd: 1,
 	},
-	secondary: null,
 	target: "adjacentAlly",
 	type: "Fairy",
 	zMove: { boost: { spd: 2 } },
@@ -655,7 +633,6 @@ assist: {
 		this.actions.useMove(randomMove, target);
 	},
 	callsMove: true,
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	contestType: "Cute",
@@ -676,7 +653,6 @@ assurance: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -707,7 +683,6 @@ astralbarrage: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Ghost",
 },
@@ -721,7 +696,6 @@ attackorder: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Clever",
@@ -777,7 +751,6 @@ attract: {
 	onTryImmunity(target, source) {
 		return (target.gender === 'M' && source.gender === 'F') || (target.gender === 'F' && source.gender === 'M');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -792,7 +765,6 @@ aurasphere: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, distance: 1, metronome: 1, bullet: 1, pulse: 1 },
-	secondary: null,
 	target: "any",
 	type: "Fighting",
 	contestType: "Beautiful",
@@ -895,7 +867,6 @@ auroraveil: {
 			this.add('-sideend', side, 'move: Aurora Veil');
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Ice",
 	zMove: { boost: { spe: 1 } },
@@ -926,7 +897,6 @@ autotomize: {
 			this.add('-start', pokemon, 'Autotomize');
 		}
 	},
-	secondary: null,
 	target: "self",
 	type: "Steel",
 	zMove: { effect: 'clearnegativeboost' },
@@ -951,7 +921,6 @@ avalanche: {
 	pp: 10,
 	priority: -4,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	contestType: "Beautiful",
@@ -988,7 +957,6 @@ babydolleyes: {
 	boosts: {
 		atk: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	zMove: { boost: { def: 1 } },
@@ -1007,7 +975,6 @@ baddybad: {
 	self: {
 		sideCondition: 'reflect',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -1036,11 +1003,7 @@ banefulbunker: {
 		},
 		onTryHitPriority: 3,
 		onTryHit(target, source, move) {
-			if (!move.flags['protect']) {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target)) return;
 			if (move.smartTarget) {
 				move.smartTarget = false;
 			} else {
@@ -1064,7 +1027,6 @@ banefulbunker: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Poison",
 	zMove: { boost: { def: 1 } },
@@ -1102,7 +1064,6 @@ barrage: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, bullet: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cute",
@@ -1120,7 +1081,6 @@ barrier: {
 	boosts: {
 		def: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { effect: 'clearnegativeboost' },
@@ -1148,7 +1108,6 @@ batonpass: {
 		},
 	},
 	selfSwitch: 'copyvolatile',
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -1181,7 +1140,6 @@ beakblast: {
 	onAfterMove(pokemon) {
 		pokemon.removeVolatile('beakblast');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Flying",
 	contestType: "Tough",
@@ -1205,7 +1163,6 @@ beatup: {
 		move.allies = pokemon.side.pokemon.filter(ally => ally === pokemon || !ally.fainted && !ally.status);
 		move.multihit = move.allies.length;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -1219,7 +1176,6 @@ behemothbash: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, failcopycat: 1, failmimic: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 },
@@ -1232,7 +1188,6 @@ behemothblade: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, failcopycat: 1, failmimic: 1, slicing: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 },
@@ -1248,7 +1203,9 @@ belch: {
 	onDisableMove(pokemon) {
 		if (!pokemon.ateBerry) pokemon.disableMove('belch');
 	},
-	secondary: null,
+	onTry(source) {
+		return source.ateBerry;
+	},
 	target: "normal",
 	type: "Poison",
 	contestType: "Tough",
@@ -1269,7 +1226,6 @@ bellydrum: {
 		this.directDamage(target.maxhp / 2);
 		this.boost({ atk: 12 }, target);
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'heal' },
@@ -1297,7 +1253,6 @@ bestow: {
 		}
 		this.add('-item', target, myItem.name, '[from] move: Bestow', `[of] ${source}`);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 2 } },
@@ -1372,7 +1327,6 @@ bide: {
 			this.add('-end', pokemon, 'move: Bide', '[silent]');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	contestType: "Tough",
@@ -1387,7 +1341,6 @@ bind: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -1419,7 +1372,6 @@ bitterblade: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, heal: 1, metronome: 1, slicing: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 },
@@ -1452,7 +1404,6 @@ blackholeeclipse: {
 	priority: 0,
 	flags: {},
 	isZ: "darkiniumz",
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Cool",
@@ -1469,7 +1420,6 @@ blastburn: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Beautiful",
@@ -1567,7 +1517,6 @@ block: {
 	onHit(target, source, move) {
 		return target.addVolatile('trapped', source, move, 'trapper');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -1582,7 +1531,6 @@ bloodmoon: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, cantusetwice: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 },
@@ -1597,7 +1545,6 @@ bloomdoom: {
 	priority: 0,
 	flags: {},
 	isZ: "grassiumz",
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Cool",
@@ -1629,7 +1576,6 @@ bodypress: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1 },
 	overrideOffensiveStat: 'def',
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 },
@@ -1641,7 +1587,7 @@ bodyslam: {
 	name: "Body Slam",
 	pp: 15,
 	priority: 0,
-	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
+	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1, minimize: 1 },
 	secondary: {
 		chance: 30,
 		status: 'par',
@@ -1668,7 +1614,6 @@ boltbeak: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 },
@@ -1718,7 +1663,6 @@ bonemerang: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	multihit: 2,
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	maxMove: { basePower: 130 },
@@ -1734,7 +1678,6 @@ bonerush: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	zMove: { basePower: 140 },
@@ -1750,7 +1693,6 @@ boomburst: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, sound: 1, bypasssub: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacent",
 	type: "Normal",
 	contestType: "Tough",
@@ -1811,7 +1753,6 @@ bouncybubble: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, heal: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Clever",
@@ -1825,7 +1766,6 @@ branchpoke: {
 	pp: 40,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 },
@@ -1839,7 +1779,6 @@ bravebird: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, distance: 1, metronome: 1 },
 	recoil: [33, 100],
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cool",
@@ -1873,7 +1812,6 @@ breakneckblitz: {
 	priority: 0,
 	flags: {},
 	isZ: "normaliumz",
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -1893,7 +1831,6 @@ brickbreak: {
 		pokemon.side.removeSideCondition('lightscreen');
 		pokemon.side.removeSideCondition('auroraveil');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -1912,7 +1849,6 @@ brine: {
 			return this.chainModify(2);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Tough",
@@ -1926,7 +1862,6 @@ brutalswing: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacent",
 	type: "Dark",
 	contestType: "Tough",
@@ -1990,7 +1925,6 @@ bugbite: {
 			if (item.onEat) source.ateBerry = true;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cute",
@@ -2027,7 +1961,6 @@ bulkup: {
 		atk: 1,
 		def: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Fighting",
 	zMove: { boost: { atk: 1 } },
@@ -2061,7 +1994,6 @@ bulletpunch: {
 	pp: 30,
 	priority: 1,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	contestType: "Tough",
@@ -2076,7 +2008,6 @@ bulletseed: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, bullet: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { basePower: 140 },
@@ -2107,11 +2038,7 @@ burningbulwark: {
 		},
 		onTryHitPriority: 3,
 		onTryHit(target, source, move) {
-			if (!move.flags['protect'] || move.category === 'Status') {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target, false)) return;
 			if (move.smartTarget) {
 				move.smartTarget = false;
 			} else {
@@ -2135,7 +2062,6 @@ burningbulwark: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Fire",
 },
@@ -2182,7 +2108,6 @@ burnup: {
 			this.add('-start', pokemon, 'typechange', pokemon.getTypes().join('/'), '[from] move: Burn Up');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Clever",
@@ -2218,7 +2143,6 @@ calmmind: {
 		spa: 1,
 		spd: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { effect: 'clearnegativeboost' },
@@ -2249,7 +2173,6 @@ camouflage: {
 		if (target.getTypes().join() === newType || !target.setType(newType)) return false;
 		this.add('-start', target, 'typechange', newType);
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { evasion: 1 } },
@@ -2271,7 +2194,6 @@ captivate: {
 	boosts: {
 		spa: -2,
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Normal",
 	zMove: { boost: { spd: 2 } },
@@ -2288,7 +2210,6 @@ catastropika: {
 	priority: 0,
 	flags: { contact: 1 },
 	isZ: "pikaniumz",
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cool",
@@ -2303,7 +2224,7 @@ ceaselessedge: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	onAfterHit(target, source, move) {
-		if (!move.hasSheerForce && source.hp) {
+		if (!move.hasSheerForce) {
 			for (const side of source.side.foeSidesWithConditions()) {
 				side.addSideCondition('spikes');
 			}
@@ -2332,7 +2253,6 @@ celebrate: {
 	onTryHit(target, source) {
 		this.add('-activate', target, 'move: Celebrate');
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -2387,7 +2307,6 @@ charge: {
 	boosts: {
 		spd: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Electric",
 	zMove: { boost: { spd: 1 } },
@@ -2426,7 +2345,6 @@ charm: {
 	boosts: {
 		atk: -2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	zMove: { boost: { def: 1 } },
@@ -2486,7 +2404,6 @@ chillyreception: {
 	},
 	weather: 'snowscape',
 	selfSwitch: true,
-	secondary: null,
 	condition: {
 		duration: 1,
 		onBeforeMovePriority: 100,
@@ -2510,7 +2427,6 @@ chipaway: {
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	ignoreDefensive: true,
 	ignoreEvasion: true,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -2525,7 +2441,6 @@ chloroblast: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	// Recoil implemented in battle-actions.ts
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 },
@@ -2554,7 +2469,6 @@ clamp: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Tough",
@@ -2573,7 +2487,6 @@ clangingscales: {
 			def: -1,
 		},
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Dragon",
 	contestType: "Tough",
@@ -2604,7 +2517,6 @@ clangoroussoul: {
 		spd: 1,
 		spe: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Dragon",
 },
@@ -2648,7 +2560,6 @@ clearsmog: {
 		target.clearBoosts();
 		this.add('-clearboost', target);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	contestType: "Beautiful",
@@ -2668,7 +2579,6 @@ closecombat: {
 			spd: -1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -2682,7 +2592,6 @@ coaching: {
 	pp: 10,
 	priority: 0,
 	flags: { bypasssub: 1, allyanim: 1, metronome: 1 },
-	secondary: null,
 	boosts: {
 		atk: 1,
 		def: 1,
@@ -2704,7 +2613,6 @@ coil: {
 		def: 1,
 		accuracy: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Poison",
 	zMove: { effect: 'clearnegativeboost' },
@@ -2726,7 +2634,6 @@ collisioncourse: {
 			return this.chainModify([5461, 4096]);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -2762,7 +2669,6 @@ cometpunch: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	maxMove: { basePower: 100 },
@@ -2794,7 +2700,6 @@ comeuppance: {
 			targetRelayVar.target = this.getAtSlot(lastDamagedBy.slot);
 		}
 	},
-	secondary: null,
 	target: "scripted",
 	type: "Dark",
 	contestType: "Cool",
@@ -2811,7 +2716,6 @@ confide: {
 	boosts: {
 		spa: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spd: 1 } },
@@ -2827,7 +2731,6 @@ confuseray: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'confusion',
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	zMove: { boost: { spa: 1 } },
@@ -2881,7 +2784,6 @@ continentalcrush: {
 	priority: 0,
 	flags: {},
 	isZ: "rockiumz",
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Cool",
@@ -2900,7 +2802,6 @@ conversion: {
 		if (target.hasType(type) || !target.setType(type)) return false;
 		this.add('-start', target, 'typechange', type);
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -2936,7 +2837,6 @@ conversion2: {
 		if (!source.setType(randomType)) return false;
 		this.add('-start', source, 'typechange', randomType);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { effect: 'heal' },
@@ -2962,7 +2862,6 @@ copycat: {
 		this.actions.useMove(move.id, pokemon);
 	},
 	callsMove: true,
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { accuracy: 1 } },
@@ -2988,7 +2887,6 @@ coreenforcer: {
 		if (target.newlySwitched || this.queue.willMove(target)) return;
 		target.addVolatile('gastroacid');
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Dragon",
 	zMove: { basePower: 140 },
@@ -3005,7 +2903,6 @@ corkscrewcrash: {
 	priority: 0,
 	flags: {},
 	isZ: "steeliumz",
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	contestType: "Cool",
@@ -3028,7 +2925,6 @@ corrosivegas: {
 			this.add('-fail', target, 'move: Corrosive Gas');
 		}
 	},
-	secondary: null,
 	target: "allAdjacent",
 	type: "Poison",
 },
@@ -3045,7 +2941,6 @@ cosmicpower: {
 		def: 1,
 		spd: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { boost: { spd: 1 } },
@@ -3063,7 +2958,6 @@ cottonguard: {
 	boosts: {
 		def: 3,
 	},
-	secondary: null,
 	target: "self",
 	type: "Grass",
 	zMove: { effect: 'clearnegativeboost' },
@@ -3081,7 +2975,6 @@ cottonspore: {
 	boosts: {
 		spe: -2,
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Grass",
 	zMove: { effect: 'clearnegativeboost' },
@@ -3127,7 +3020,6 @@ counter: {
 			}
 		},
 	},
-	secondary: null,
 	target: "scripted",
 	type: "Fighting",
 	maxMove: { basePower: 75 },
@@ -3197,7 +3089,6 @@ courtchange: {
 		this.add('-swapsideconditions');
 		this.add('-activate', source, 'move: Court Change');
 	},
-	secondary: null,
 	target: "all",
 	type: "Normal",
 },
@@ -3227,7 +3118,6 @@ covet: {
 		}
 		this.add('-item', source, yourItem, '[from] move: Covet', `[of] ${target}`);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cute",
@@ -3242,7 +3132,6 @@ crabhammer: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Tough",
@@ -3273,7 +3162,6 @@ craftyshield: {
 			return this.NOT_FAIL;
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Fairy",
 	zMove: { boost: { spd: 1 } },
@@ -3289,7 +3177,6 @@ crosschop: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -3366,7 +3253,6 @@ crushgrip: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 190 },
@@ -3411,7 +3297,6 @@ curse: {
 			this.damage(pokemon.baseMaxhp / 4);
 		},
 	},
-	secondary: null,
 	target: "normal",
 	nonGhostTarget: "self",
 	type: "Ghost",
@@ -3428,7 +3313,6 @@ cut: {
 	pp: 30,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -3444,7 +3328,6 @@ darkestlariat: {
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	ignoreEvasion: true,
 	ignoreDefensive: true,
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Cool",
@@ -3477,14 +3360,13 @@ darkvoid: {
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1, nosketch: 1 },
 	status: 'slp',
 	onTry(source, target, move) {
-		if (source.species.name === 'Darkrai' || move.hasBounced) {
+		if (source.species.baseSpecies === 'Darkrai' || move.hasBounced) {
 			return;
 		}
 		this.add('-fail', source, 'move: Dark Void');
 		this.hint("Only a Pokemon whose form is Darkrai can use this move.");
 		return null;
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Dark",
 	zMove: { effect: 'clearnegativeboost' },
@@ -3499,7 +3381,6 @@ dazzlinggleam: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Fairy",
 	contestType: "Beautiful",
@@ -3513,7 +3394,6 @@ decorate: {
 	pp: 15,
 	priority: 0,
 	flags: { allyanim: 1 },
-	secondary: null,
 	boosts: {
 		atk: 2,
 		spa: 2,
@@ -3534,7 +3414,6 @@ defendorder: {
 		def: 1,
 		spd: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Bug",
 	zMove: { boost: { def: 1 } },
@@ -3557,7 +3436,6 @@ defensecurl: {
 		noCopy: true,
 		onRestart: () => null,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { accuracy: 1 } },
@@ -3593,7 +3471,6 @@ defog: {
 		this.field.clearTerrain();
 		return success;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Flying",
 	zMove: { boost: { accuracy: 1 } },
@@ -3638,7 +3515,6 @@ destinybond: {
 			pokemon.removeVolatile('destinybond');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Ghost",
 	zMove: { effect: 'redirect' },
@@ -3661,7 +3537,6 @@ detect: {
 	onHit(pokemon) {
 		pokemon.addVolatile('stall');
 	},
-	secondary: null,
 	target: "self",
 	type: "Fighting",
 	zMove: { boost: { evasion: 1 } },
@@ -3678,7 +3553,6 @@ devastatingdrake: {
 	priority: 0,
 	flags: {},
 	isZ: "dragoniumz",
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	contestType: "Cool",
@@ -3745,7 +3619,6 @@ dig: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	contestType: "Tough",
@@ -3762,14 +3635,8 @@ direclaw: {
 	secondary: {
 		chance: 50,
 		onHit(target, source) {
-			const result = this.random(3);
-			if (result === 0) {
-				target.trySetStatus('psn', source);
-			} else if (result === 1) {
-				target.trySetStatus('par', source);
-			} else {
-				target.trySetStatus('slp', source);
-			}
+			const status = this.sample(['psn', 'par', 'slp']);
+			target.trySetStatus(status, source);
 		},
 	},
 	target: "normal",
@@ -3839,7 +3706,6 @@ disable: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -3854,7 +3720,6 @@ disarmingvoice: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, sound: 1, bypasssub: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Fairy",
 	contestType: "Cute",
@@ -3920,7 +3785,6 @@ dive: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Beautiful",
@@ -3973,7 +3837,6 @@ doodle: {
 			return this.NOT_FAIL;
 		}
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Normal",
 },
@@ -4006,7 +3869,6 @@ doomdesire: {
 		this.add('-start', source, 'Doom Desire');
 		return this.NOT_FAIL;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	contestType: "Beautiful",
@@ -4021,7 +3883,6 @@ doubleedge: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	recoil: [33, 100],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -4036,7 +3897,6 @@ doublehit: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: 2,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 140 },
@@ -4074,7 +3934,6 @@ doublekick: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: 2,
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	maxMove: { basePower: 80 },
@@ -4101,7 +3960,6 @@ doubleshock: {
 			this.add('-start', pokemon, 'typechange', pokemon.getTypes().join('/'), '[from] move: Double Shock');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Clever",
@@ -4117,7 +3975,6 @@ doubleslap: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cute",
@@ -4134,7 +3991,6 @@ doubleteam: {
 	boosts: {
 		evasion: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -4154,7 +4010,6 @@ dracometeor: {
 			spa: -2,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	contestType: "Beautiful",
@@ -4223,7 +4078,6 @@ dragoncheer: {
 			return critRatio + (this.effectState.hasDragonType ? 2 : 1);
 		},
 	},
-	secondary: null,
 	target: "adjacentAlly",
 	type: "Dragon",
 },
@@ -4236,7 +4090,6 @@ dragonclaw: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	contestType: "Cool",
@@ -4254,7 +4107,6 @@ dragondance: {
 		atk: 1,
 		spe: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Dragon",
 	zMove: { effect: 'clearnegativeboost' },
@@ -4271,7 +4123,6 @@ dragondarts: {
 	flags: { protect: 1, mirror: 1, metronome: 1, noparentalbond: 1 },
 	multihit: 2,
 	smartTarget: true,
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	maxMove: { basePower: 130 },
@@ -4290,7 +4141,6 @@ dragonenergy: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Dragon",
 },
@@ -4303,7 +4153,6 @@ dragonhammer: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	contestType: "Tough",
@@ -4317,7 +4166,6 @@ dragonpulse: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, distance: 1, metronome: 1, pulse: 1 },
-	secondary: null,
 	target: "any",
 	type: "Dragon",
 	contestType: "Beautiful",
@@ -4333,7 +4181,6 @@ dragonrage: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	contestType: "Cool",
@@ -4346,7 +4193,7 @@ dragonrush: {
 	name: "Dragon Rush",
 	pp: 10,
 	priority: 0,
-	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
+	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, minimize: 1 },
 	secondary: {
 		chance: 20,
 		volatileStatus: 'flinch',
@@ -4379,7 +4226,6 @@ drainingkiss: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, heal: 1, metronome: 1 },
 	drain: [3, 4],
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Cute",
@@ -4394,7 +4240,6 @@ drainpunch: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1, heal: 1, metronome: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -4412,7 +4257,6 @@ dreameater: {
 	onTryImmunity(target) {
 		return target.status === 'slp' || target.hasAbility('comatose');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Clever",
@@ -4426,7 +4270,6 @@ drillpeck: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, distance: 1, metronome: 1 },
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cool",
@@ -4441,7 +4284,6 @@ drillrun: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	contestType: "Tough",
@@ -4475,7 +4317,6 @@ dualchop: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: 2,
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	maxMove: { basePower: 130 },
@@ -4491,7 +4332,6 @@ dualwingbeat: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: 2,
-	secondary: null,
 	target: "normal",
 	type: "Flying",
 	maxMove: { basePower: 130 },
@@ -4505,7 +4345,6 @@ dynamaxcannon: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, failencore: 1, nosleeptalk: 1, failcopycat: 1, failmimic: 1, failinstruct: 1, noparentalbond: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 },
@@ -4554,7 +4393,6 @@ earthquake: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacent",
 	type: "Ground",
 	contestType: "Tough",
@@ -4593,7 +4431,6 @@ echoedvoice: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Beautiful",
@@ -4610,7 +4447,6 @@ eerieimpulse: {
 	boosts: {
 		spa: -2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	zMove: { boost: { spd: 1 } },
@@ -4651,7 +4487,6 @@ eggbomb: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, bullet: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cute",
@@ -4710,7 +4545,6 @@ electricterrain: {
 			this.add('-fieldend', 'move: Electric Terrain');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Electric",
 	zMove: { boost: { spe: 1 } },
@@ -4743,7 +4577,6 @@ electrify: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	zMove: { boost: { spa: 1 } },
@@ -4765,7 +4598,6 @@ electroball: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, bullet: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	zMove: { basePower: 160 },
@@ -4788,7 +4620,6 @@ electrodrift: {
 			return this.chainModify([5461, 4096]);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cool",
@@ -4819,8 +4650,7 @@ electroshot: {
 		attacker.addVolatile('twoturnmove', defender);
 		return null;
 	},
-	secondary: null,
-	hasSheerForce: true,
+	hasSheerForceBoost: true,
 	target: "normal",
 	type: "Electric",
 },
@@ -4866,7 +4696,6 @@ embargo: {
 			this.add('-end', pokemon, 'Embargo');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { boost: { spa: 1 } },
@@ -4944,7 +4773,6 @@ encore: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -4965,7 +4793,6 @@ endeavor: {
 	onTryImmunity(target, pokemon) {
 		return pokemon.hp < target.hp;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 160 },
@@ -5002,7 +4829,6 @@ endure: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -5051,7 +4877,6 @@ entrainment: {
 		if (!oldAbility) return oldAbility as false | null;
 		if (!target.isAlly(source)) target.volatileStaleness = 'external';
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spd: 1 } },
@@ -5071,7 +4896,6 @@ eruption: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Fire",
 	contestType: "Beautiful",
@@ -5110,7 +4934,6 @@ eternabeam: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 },
@@ -5134,7 +4957,6 @@ expandingforce: {
 			move.target = 'allAdjacentFoes';
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 },
@@ -5148,7 +4970,6 @@ explosion: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, noparentalbond: 1 },
 	selfdestruct: "always",
-	secondary: null,
 	target: "allAdjacent",
 	type: "Normal",
 	contestType: "Beautiful",
@@ -5188,7 +5009,6 @@ extremeevoboost: {
 		spd: 2,
 		spe: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	contestType: "Beautiful",
@@ -5202,7 +5022,6 @@ extremespeed: {
 	pp: 5,
 	priority: 2,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -5221,7 +5040,6 @@ facade: {
 			return this.chainModify(2);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cute",
@@ -5245,7 +5063,6 @@ fairylock: {
 			pokemon.tryTrap();
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Fairy",
 	zMove: { boost: { def: 1 } },
@@ -5260,7 +5077,6 @@ fairywind: {
 	pp: 30,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, wind: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Beautiful",
@@ -5300,7 +5116,6 @@ faketears: {
 	boosts: {
 		spd: -2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { boost: { spa: 1 } },
@@ -5315,7 +5130,6 @@ falsesurrender: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 },
@@ -5332,7 +5146,6 @@ falseswipe: {
 	onDamage(damage, target, source, effect) {
 		if (damage >= target.hp) return target.hp - 1;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -5349,7 +5162,6 @@ featherdance: {
 	boosts: {
 		atk: -2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Flying",
 	zMove: { boost: { def: 1 } },
@@ -5366,7 +5178,6 @@ feint: {
 	flags: { mirror: 1, noassist: 1, failcopycat: 1 },
 	breaksProtect: true,
 	// Breaking protection implemented in scripts.js
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Clever",
@@ -5381,7 +5192,6 @@ feintattack: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -5398,7 +5208,6 @@ fellstinger: {
 	onAfterMoveSecondarySelf(pokemon, target, move) {
 		if (!target || target.fainted || target.hp <= 0) this.boost({ atk: 3 }, pokemon, pokemon, move);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cool",
@@ -5419,7 +5228,6 @@ ficklebeam: {
 			return this.chainModify(2);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 },
@@ -5484,7 +5292,6 @@ filletaway: {
 		spa: 2,
 		spe: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 },
@@ -5503,7 +5310,6 @@ finalgambit: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, metronome: 1, noparentalbond: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	zMove: { basePower: 180 },
@@ -5626,7 +5432,6 @@ firepledge: {
 			this.add('-sideend', targetSide, 'Fire Pledge');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Beautiful",
@@ -5658,7 +5463,6 @@ firespin: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Beautiful",
@@ -5678,7 +5482,6 @@ firstimpression: {
 			return false;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cute",
@@ -5701,7 +5504,6 @@ fishiousrend: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, bite: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Water",
 },
@@ -5715,7 +5517,6 @@ fissure: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
 	ohko: true,
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	zMove: { basePower: 180 },
@@ -5750,7 +5551,6 @@ flail: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 160 },
@@ -5777,7 +5577,6 @@ flameburst: {
 			this.damage(ally.baseMaxhp / 16, ally, source, this.dex.conditions.get('Flame Burst'));
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Beautiful",
@@ -5868,7 +5667,6 @@ flash: {
 	boosts: {
 		accuracy: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { evasion: 1 } },
@@ -5906,7 +5704,6 @@ flatter: {
 	boosts: {
 		spa: 1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { boost: { spd: 1 } },
@@ -5926,7 +5723,6 @@ fleurcannon: {
 			spa: -2,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Beautiful",
@@ -5981,7 +5777,6 @@ fling: {
 			pokemon.removeVolatile('fling');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Cute",
@@ -5996,7 +5791,6 @@ flipturn: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	selfSwitch: true,
-	secondary: null,
 	target: "normal",
 	type: "Water",
 },
@@ -6043,7 +5837,6 @@ floralhealing: {
 		}
 		return success;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	zMove: { effect: 'clearnegativeboost' },
@@ -6077,7 +5870,6 @@ flowershield: {
 		}
 		return success;
 	},
-	secondary: null,
 	target: "all",
 	type: "Fairy",
 	zMove: { boost: { def: 1 } },
@@ -6093,7 +5885,6 @@ flowertrick: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	willCrit: true,
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 },
@@ -6134,7 +5925,6 @@ fly: {
 			}
 		},
 	},
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Clever",
@@ -6146,12 +5936,11 @@ flyingpress: {
 	category: "Physical",
 	name: "Flying Press",
 	pp: 10,
-	flags: { contact: 1, protect: 1, mirror: 1, gravity: 1, distance: 1, nonsky: 1, metronome: 1 },
+	flags: { contact: 1, protect: 1, mirror: 1, gravity: 1, distance: 1, nonsky: 1, metronome: 1, minimize: 1 },
 	onEffectiveness(typeMod, target, type, move) {
 		return typeMod + this.dex.getEffectiveness('Flying', type);
 	},
 	priority: 0,
-	secondary: null,
 	target: "any",
 	type: "Fighting",
 	zMove: { basePower: 170 },
@@ -6201,7 +5990,6 @@ focusenergy: {
 			return critRatio + 2;
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { accuracy: 1 } },
@@ -6241,7 +6029,6 @@ focuspunch: {
 			if (status.id === 'flinch') return null;
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -6277,7 +6064,6 @@ followme: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -6328,7 +6114,6 @@ foresight: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { effect: 'crit2' },
@@ -6348,7 +6133,6 @@ forestscurse: {
 		if (!target.addType('Grass')) return false;
 		this.add('-start', target, 'typeadd', 'Grass', '[from] move: Forest\'s Curse');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -6364,7 +6148,6 @@ foulplay: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	overrideOffensivePokemon: 'target',
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -6449,7 +6232,6 @@ freezyfrost: {
 			pokemon.clearBoosts();
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	contestType: "Clever",
@@ -6466,7 +6248,6 @@ frenzyplant: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Cool",
@@ -6481,7 +6262,6 @@ frostbreath: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	willCrit: true,
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	contestType: "Beautiful",
@@ -6499,7 +6279,6 @@ frustration: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 160 },
@@ -6516,7 +6295,6 @@ furyattack: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -6550,7 +6328,6 @@ furycutter: {
 			this.effectState.duration = 2;
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cool",
@@ -6565,7 +6342,6 @@ furyswipes: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	maxMove: { basePower: 100 },
@@ -6586,7 +6362,6 @@ fusionbolt: {
 			return this.chainModify(2);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cool",
@@ -6606,7 +6381,6 @@ fusionflare: {
 			return this.chainModify(2);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Beautiful",
@@ -6642,7 +6416,6 @@ futuresight: {
 		this.add('-start', source, 'move: Future Sight');
 		return this.NOT_FAIL;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Clever",
@@ -6677,7 +6450,6 @@ gastroacid: {
 			if (pokemon.getAbility().flags['cantsuppress']) pokemon.removeVolatile('gastroacid');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	zMove: { boost: { spe: 1 } },
@@ -6694,7 +6466,6 @@ geargrind: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: 2,
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	zMove: { basePower: 180 },
@@ -6723,7 +6494,6 @@ gearup: {
 		}
 		return didSomething;
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Steel",
 	zMove: { boost: { spa: 1 } },
@@ -6778,7 +6548,6 @@ geomancy: {
 		spd: 2,
 		spe: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Fairy",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -6794,7 +6563,6 @@ gigadrain: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, heal: 1, metronome: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Clever",
@@ -6811,7 +6579,6 @@ gigaimpact: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -6825,7 +6592,6 @@ gigatonhammer: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, cantusetwice: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 },
@@ -6840,7 +6606,6 @@ gigavolthavoc: {
 	priority: 0,
 	flags: {},
 	isZ: "electriumz",
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cool",
@@ -6854,7 +6619,6 @@ glaciallance: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Ice",
 },
@@ -6906,7 +6670,6 @@ glaiverush: {
 			pokemon.removeVolatile('glaiverush');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 },
@@ -6920,7 +6683,6 @@ glare: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	status: 'par',
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spd: 1 } },
@@ -6939,7 +6701,6 @@ glitzyglow: {
 	self: {
 		sideCondition: 'lightscreen',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Clever",
@@ -6958,14 +6719,8 @@ gmaxbefuddle: {
 	self: {
 		onHit(source) {
 			for (const pokemon of source.foes()) {
-				const result = this.random(3);
-				if (result === 0) {
-					pokemon.trySetStatus('slp', source);
-				} else if (result === 1) {
-					pokemon.trySetStatus('par', source);
-				} else {
-					pokemon.trySetStatus('psn', source);
-				}
+				const status = this.sample(['slp', 'par', 'psn']);
+				pokemon.trySetStatus(status, source);
 			}
 		},
 	},
@@ -7007,7 +6762,6 @@ gmaxcannonade: {
 			this.add('-sideend', targetSide, 'G-Max Cannonade');
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Water",
 	contestType: "Cool",
@@ -7030,7 +6784,6 @@ gmaxcentiferno: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Fire",
 	contestType: "Cool",
@@ -7072,7 +6825,6 @@ gmaxchistrike: {
 			return critRatio + this.effectState.layers;
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Fighting",
 	contestType: "Cool",
@@ -7095,7 +6847,6 @@ gmaxcuddle: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Normal",
 	contestType: "Cool",
@@ -7127,7 +6878,6 @@ gmaxdepletion: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Dragon",
 	contestType: "Cool",
@@ -7144,7 +6894,6 @@ gmaxdrumsolo: {
 	flags: {},
 	isMax: "Rillaboom",
 	ignoreAbility: true,
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Grass",
 	contestType: "Cool",
@@ -7167,7 +6916,6 @@ gmaxfinale: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Fairy",
 	contestType: "Cool",
@@ -7184,7 +6932,6 @@ gmaxfireball: {
 	flags: {},
 	isMax: "Cinderace",
 	ignoreAbility: true,
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Fire",
 	contestType: "Cool",
@@ -7207,7 +6954,6 @@ gmaxfoamburst: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Water",
 	contestType: "Cool",
@@ -7230,7 +6976,6 @@ gmaxgoldrush: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Normal",
 	contestType: "Cool",
@@ -7265,7 +7010,6 @@ gmaxhydrosnipe: {
 	flags: {},
 	isMax: "Inteleon",
 	ignoreAbility: true,
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Water",
 	contestType: "Cool",
@@ -7310,7 +7054,6 @@ gmaxmeltdown: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Steel",
 	contestType: "Cool",
@@ -7326,7 +7069,6 @@ gmaxoneblow: {
 	priority: 0,
 	flags: {},
 	isMax: "Urshifu",
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Dark",
 	contestType: "Cool",
@@ -7342,7 +7084,6 @@ gmaxrapidflow: {
 	priority: 0,
 	flags: {},
 	isMax: "Urshifu-Rapid-Strike",
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Water",
 	contestType: "Cool",
@@ -7373,7 +7114,6 @@ gmaxreplenish: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Normal",
 	contestType: "Cool",
@@ -7392,7 +7132,6 @@ gmaxresonance: {
 	self: {
 		sideCondition: 'auroraveil',
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Ice",
 	contestType: "Cool",
@@ -7415,7 +7154,6 @@ gmaxsandblast: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Ground",
 	contestType: "Cool",
@@ -7438,7 +7176,6 @@ gmaxsmite: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Fairy",
 	contestType: "Cool",
@@ -7464,7 +7201,6 @@ gmaxsnooze: {
 		if (this.randomChance(1, 2)) return;
 		target.addVolatile('yawn');
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Dark",
 	contestType: "Cool",
@@ -7503,7 +7239,6 @@ gmaxsteelsurge: {
 			this.damage(pokemon.maxhp * (2 ** typeMod) / 8);
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Steel",
 	contestType: "Cool",
@@ -7526,7 +7261,6 @@ gmaxstonesurge: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Water",
 	contestType: "Cool",
@@ -7554,7 +7288,6 @@ gmaxstunshock: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Electric",
 	contestType: "Cool",
@@ -7577,7 +7310,6 @@ gmaxsweetness: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Grass",
 	contestType: "Cool",
@@ -7600,7 +7332,6 @@ gmaxtartness: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Grass",
 	contestType: "Cool",
@@ -7623,7 +7354,6 @@ gmaxterror: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Ghost",
 	contestType: "Cool",
@@ -7662,7 +7392,6 @@ gmaxvinelash: {
 			this.add('-sideend', targetSide, 'G-Max Vine Lash');
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Grass",
 	contestType: "Cool",
@@ -7701,7 +7430,6 @@ gmaxvolcalith: {
 			this.add('-sideend', targetSide, 'G-Max Volcalith');
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Rock",
 	contestType: "Cool",
@@ -7724,7 +7452,6 @@ gmaxvoltcrash: {
 			}
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Electric",
 	contestType: "Cool",
@@ -7763,7 +7490,6 @@ gmaxwildfire: {
 			this.add('-sideend', targetSide, 'G-Max Wildfire');
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Fire",
 	contestType: "Cool",
@@ -7801,7 +7527,6 @@ gmaxwindrage: {
 			return success;
 		},
 	},
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Flying",
 	contestType: "Cool",
@@ -7841,7 +7566,6 @@ grassknot: {
 			return null;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { basePower: 160 },
@@ -7905,7 +7629,6 @@ grasspledge: {
 			return this.chainModify(0.25);
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Beautiful",
@@ -7921,7 +7644,6 @@ grasswhistle: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, sound: 1, bypasssub: 1, metronome: 1 },
 	status: 'slp',
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { boost: { spe: 1 } },
@@ -7941,7 +7663,6 @@ grassyglide: {
 			return priority + 1;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Cool",
@@ -7999,7 +7720,6 @@ grassyterrain: {
 			this.add('-fieldend', 'move: Grassy Terrain');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Grass",
 	zMove: { boost: { def: 1 } },
@@ -8112,7 +7832,6 @@ gravity: {
 			this.add('-fieldend', 'move: Gravity');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Psychic",
 	zMove: { boost: { spa: 1 } },
@@ -8130,7 +7849,6 @@ growl: {
 	boosts: {
 		atk: -1,
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -8152,7 +7870,6 @@ growth: {
 		atk: 1,
 		spa: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { spa: 1 } },
@@ -8193,7 +7910,6 @@ grudge: {
 			pokemon.removeVolatile('grudge');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Ghost",
 	zMove: { effect: 'redirect' },
@@ -8221,7 +7937,6 @@ guardianofalola: {
 	priority: 0,
 	flags: {},
 	isZ: "tapuniumz",
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Tough",
@@ -8244,7 +7959,6 @@ guardsplit: {
 		source.storedStats.spd = newspd;
 		this.add('-activate', source, 'move: Guard Split', `[of] ${target}`);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 1 } },
@@ -8274,7 +7988,6 @@ guardswap: {
 
 		this.add('-swapboost', source, target, 'def, spd', '[from] move: Guard Swap');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 1 } },
@@ -8290,7 +8003,6 @@ guillotine: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	ohko: true,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 180 },
@@ -8323,7 +8035,6 @@ gust: {
 	pp: 35,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, distance: 1, metronome: 1, wind: 1 },
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Clever",
@@ -8344,7 +8055,6 @@ gyroball: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, bullet: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	zMove: { basePower: 160 },
@@ -8362,7 +8072,6 @@ hail: {
 	priority: 0,
 	flags: { metronome: 1 },
 	weather: 'hail',
-	secondary: null,
 	target: "all",
 	type: "Ice",
 	zMove: { boost: { spe: 1 } },
@@ -8382,7 +8091,6 @@ hammerarm: {
 			spe: -1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -8399,7 +8107,6 @@ happyhour: {
 	onTryHit(target, source) {
 		this.add('-activate', target, 'move: Happy Hour');
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Normal",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -8417,7 +8124,6 @@ harden: {
 	boosts: {
 		def: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -8439,7 +8145,6 @@ hardpress: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 },
@@ -8458,7 +8163,6 @@ haze: {
 			pokemon.clearBoosts();
 		}
 	},
-	secondary: null,
 	target: "all",
 	type: "Ice",
 	zMove: { effect: 'heal' },
@@ -8492,7 +8196,6 @@ headcharge: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	recoil: [1, 4],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -8512,7 +8215,6 @@ headlongrush: {
 			spd: -1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 },
@@ -8526,7 +8228,6 @@ headsmash: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	recoil: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Tough",
@@ -8605,7 +8306,7 @@ healblock: {
 				return false;
 			}
 		},
-		onModifyMove(move, pokemon, target) {
+		onModifyMove(move, pokemon) {
 			if (move.flags['heal'] && !move.isZ && !move.isMax) {
 				this.add('cant', pokemon, 'move: Heal Block', move);
 				return false;
@@ -8628,13 +8329,12 @@ healblock: {
 		onRestart(target, source, effect) {
 			if (effect?.name === 'Psychic Noise') return;
 
-			this.add('-fail', target, 'move: Heal Block'); // Succeeds to supress downstream messages
+			this.add('-fail', target, 'move: Heal Block'); // Succeeds to suppress downstream messages
 			if (!source.moveThisTurnResult) {
 				source.moveThisTurnResult = false;
 			}
 		},
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Psychic",
 	zMove: { boost: { spa: 2 } },
@@ -8671,7 +8371,6 @@ healingwish: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	contestType: "Beautiful",
@@ -8687,7 +8386,6 @@ healorder: {
 	priority: 0,
 	flags: { snatch: 1, heal: 1, metronome: 1 },
 	heal: [1, 2],
-	secondary: null,
 	target: "self",
 	type: "Bug",
 	zMove: { effect: 'clearnegativeboost' },
@@ -8718,7 +8416,6 @@ healpulse: {
 		}
 		return success;
 	},
-	secondary: null,
 	target: "any",
 	type: "Psychic",
 	zMove: { effect: 'clearnegativeboost' },
@@ -8766,7 +8463,6 @@ heartswap: {
 
 		this.add('-swapboost', source, target, '[from] move: Heart Swap');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { effect: 'crit2' },
@@ -8798,7 +8494,7 @@ heatcrash: {
 	name: "Heat Crash",
 	pp: 10,
 	priority: 0,
-	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
+	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1, minimize: 1 },
 	onTryHit(target, pokemon, move) {
 		if (target.volatiles['dynamax']) {
 			this.add('-fail', pokemon, 'Dynamax');
@@ -8806,7 +8502,6 @@ heatcrash: {
 			return null;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	zMove: { basePower: 160 },
@@ -8856,7 +8551,7 @@ heavyslam: {
 	name: "Heavy Slam",
 	pp: 10,
 	priority: 0,
-	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
+	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1, minimize: 1 },
 	onTryHit(target, pokemon, move) {
 		if (target.volatiles['dynamax']) {
 			this.add('-fail', pokemon, 'Dynamax');
@@ -8864,7 +8559,6 @@ heavyslam: {
 			return null;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	zMove: { basePower: 160 },
@@ -8900,7 +8594,6 @@ helpinghand: {
 			return this.chainModify(this.effectState.multiplier);
 		},
 	},
-	secondary: null,
 	target: "adjacentAlly",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -8922,7 +8615,6 @@ hex: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	zMove: { basePower: 160 },
@@ -8941,7 +8633,6 @@ hiddenpower: {
 	onModifyType(move, pokemon) {
 		move.type = pokemon.hpType || 'Dark';
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Clever",
@@ -8957,7 +8648,6 @@ hiddenpowerbug: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Clever",
@@ -8973,7 +8663,6 @@ hiddenpowerdark: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -8989,7 +8678,6 @@ hiddenpowerdragon: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	contestType: "Clever",
@@ -9005,7 +8693,6 @@ hiddenpowerelectric: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Clever",
@@ -9021,7 +8708,6 @@ hiddenpowerfighting: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Clever",
@@ -9037,7 +8723,6 @@ hiddenpowerfire: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Clever",
@@ -9053,7 +8738,6 @@ hiddenpowerflying: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Flying",
 	contestType: "Clever",
@@ -9069,7 +8753,6 @@ hiddenpowerghost: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Clever",
@@ -9085,7 +8768,6 @@ hiddenpowergrass: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Clever",
@@ -9101,7 +8783,6 @@ hiddenpowerground: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	contestType: "Clever",
@@ -9117,7 +8798,6 @@ hiddenpowerice: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	contestType: "Clever",
@@ -9133,7 +8813,6 @@ hiddenpowerpoison: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	contestType: "Clever",
@@ -9149,7 +8828,6 @@ hiddenpowerpsychic: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Clever",
@@ -9165,7 +8843,6 @@ hiddenpowerrock: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Clever",
@@ -9181,7 +8858,6 @@ hiddenpowersteel: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	contestType: "Clever",
@@ -9197,7 +8873,6 @@ hiddenpowerwater: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Clever",
@@ -9211,7 +8886,6 @@ highhorsepower: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	contestType: "Tough",
@@ -9229,7 +8903,6 @@ highjumpkick: {
 	onMoveFail(target, source, move) {
 		this.damage(source.baseMaxhp / 2, source, source, this.dex.conditions.get('High Jump Kick'));
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -9248,7 +8921,6 @@ holdback: {
 	onDamage(damage, target, source, effect) {
 		if (damage >= target.hp) return target.hp - 1;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -9263,7 +8935,6 @@ holdhands: {
 	pp: 40,
 	priority: 0,
 	flags: { bypasssub: 1, nosleeptalk: 1, noassist: 1, failcopycat: 1, failmimic: 1, failinstruct: 1 },
-	secondary: null,
 	target: "adjacentAlly",
 	type: "Normal",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -9282,7 +8953,6 @@ honeclaws: {
 		atk: 1,
 		accuracy: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Dark",
 	zMove: { boost: { atk: 1 } },
@@ -9297,7 +8967,6 @@ hornattack: {
 	pp: 25,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -9312,7 +8981,6 @@ horndrill: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	ohko: true,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 180 },
@@ -9329,7 +8997,6 @@ hornleech: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, heal: 1, metronome: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Tough",
@@ -9346,7 +9013,6 @@ howl: {
 	boosts: {
 		atk: 1,
 	},
-	secondary: null,
 	target: "allies",
 	type: "Normal",
 	zMove: { boost: { atk: 1 } },
@@ -9393,7 +9059,6 @@ hydrocannon: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Beautiful",
@@ -9407,7 +9072,6 @@ hydropump: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Beautiful",
@@ -9423,7 +9087,6 @@ hydrosteam: {
 	flags: { protect: 1, mirror: 1, defrost: 1, metronome: 1 },
 	// Damage boost in Sun applied in conditions.ts
 	thawsTarget: true,
-	secondary: null,
 	target: "normal",
 	type: "Water",
 },
@@ -9438,7 +9101,6 @@ hydrovortex: {
 	priority: 0,
 	flags: {},
 	isZ: "wateriumz",
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Cool",
@@ -9455,7 +9117,6 @@ hyperbeam: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -9469,7 +9130,6 @@ hyperdrill: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Clever",
@@ -9521,7 +9181,6 @@ hyperspacefury: {
 			def: -1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Tough",
@@ -9536,7 +9195,6 @@ hyperspacehole: {
 	priority: 0,
 	flags: { mirror: 1, bypasssub: 1 },
 	breaksProtect: true,
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Clever",
@@ -9550,7 +9208,6 @@ hypervoice: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, sound: 1, bypasssub: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Normal",
 	contestType: "Cool",
@@ -9565,7 +9222,6 @@ hypnosis: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	status: 'slp',
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 1 } },
@@ -9634,7 +9290,6 @@ iceball: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	contestType: "Beautiful",
@@ -9720,7 +9375,6 @@ icehammer: {
 			spe: -1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	contestType: "Tough",
@@ -9751,7 +9405,6 @@ iceshard: {
 	pp: 30,
 	priority: 1,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	contestType: "Beautiful",
@@ -9766,16 +9419,13 @@ icespinner: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	onAfterHit(target, source) {
-		if (source.hp) {
-			this.field.clearTerrain();
-		}
+		this.field.clearTerrain();
 	},
 	onAfterSubDamage(damage, target, source) {
 		if (source.hp) {
 			this.field.clearTerrain();
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 },
@@ -9806,7 +9456,6 @@ iciclespear: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	zMove: { basePower: 140 },
@@ -9862,7 +9511,6 @@ imprison: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { boost: { spd: 2 } },
@@ -9883,7 +9531,6 @@ incinerate: {
 			this.add('-enditem', pokemon, item.name, '[from] move: Incinerate');
 		}
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Fire",
 	contestType: "Tough",
@@ -9936,7 +9583,6 @@ infernooverdrive: {
 	priority: 0,
 	flags: {},
 	isZ: "firiumz",
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Cool",
@@ -9951,7 +9597,6 @@ infestation: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cute",
@@ -9983,7 +9628,6 @@ ingrain: {
 			return null;
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Grass",
 	zMove: { boost: { spd: 1 } },
@@ -10018,7 +9662,6 @@ instruct: {
 			targetLoc: target.lastMoveTargetLoc!,
 		})[0] as MoveAction);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spa: 1 } },
@@ -10049,7 +9692,6 @@ iondeluge: {
 			}
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Electric",
 	zMove: { boost: { spa: 1 } },
@@ -10067,7 +9709,6 @@ irondefense: {
 	boosts: {
 		def: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Steel",
 	zMove: { effect: 'clearnegativeboost' },
@@ -10137,7 +9778,6 @@ ivycudgel: {
 			break;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 },
@@ -10154,7 +9794,6 @@ jawlock: {
 		source.addVolatile('trapped', target, move, 'trapper');
 		target.addVolatile('trapped', source, move, 'trapper');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 },
@@ -10167,7 +9806,6 @@ jetpunch: {
 	pp: 15,
 	priority: 1,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Cool",
@@ -10188,7 +9826,6 @@ judgment: {
 			move.type = item.onPlate;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Beautiful",
@@ -10207,7 +9844,6 @@ jumpkick: {
 	onMoveFail(target, source, move) {
 		this.damage(source.baseMaxhp / 2, source, source, this.dex.conditions.get('Jump Kick'));
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -10225,7 +9861,6 @@ junglehealing: {
 		const success = !!this.heal(this.modify(pokemon.maxhp, 0.25));
 		return pokemon.cureStatus() || success;
 	},
-	secondary: null,
 	target: "allies",
 	type: "Grass",
 },
@@ -10240,7 +9875,6 @@ karatechop: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -10258,7 +9892,6 @@ kinesis: {
 	boosts: {
 		accuracy: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { evasion: 1 } },
@@ -10289,11 +9922,7 @@ kingsshield: {
 		},
 		onTryHitPriority: 3,
 		onTryHit(target, source, move) {
-			if (!move.flags['protect'] || move.category === 'Status') {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target, false)) return;
 			if (move.smartTarget) {
 				move.smartTarget = false;
 			} else {
@@ -10317,7 +9946,6 @@ kingsshield: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Steel",
 	zMove: { effect: 'clearnegativeboost' },
@@ -10340,14 +9968,11 @@ knockoff: {
 		}
 	},
 	onAfterHit(target, source) {
-		if (source.hp) {
-			const item = target.takeItem();
-			if (item) {
-				this.add('-enditem', target, item.name, '[from] move: Knock Off', `[of] ${source}`);
-			}
+		const item = target.takeItem();
+		if (item) {
+			this.add('-enditem', target, item.name, '[from] move: Knock Off', `[of] ${source}`);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -10361,7 +9986,6 @@ kowtowcleave: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 },
@@ -10375,7 +9999,6 @@ landswrath: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Ground",
 	zMove: { basePower: 185 },
@@ -10412,7 +10035,6 @@ laserfocus: {
 			this.add('-end', pokemon, 'move: Laser Focus', '[silent]');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { atk: 1 } },
@@ -10433,7 +10055,6 @@ lashout: {
 			return this.chainModify(2);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 },
@@ -10458,7 +10079,6 @@ lastresort: {
 		}
 		return hasLastResort;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cute",
@@ -10475,7 +10095,6 @@ lastrespects: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 },
@@ -10505,7 +10124,6 @@ leafage: {
 	pp: 40,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Tough",
@@ -10520,7 +10138,6 @@ leafblade: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Cool",
@@ -10539,7 +10156,6 @@ leafstorm: {
 			spa: -2,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Beautiful",
@@ -10574,7 +10190,6 @@ leechlife: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, heal: 1, metronome: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Clever",
@@ -10609,7 +10224,6 @@ leechseed: {
 	onTryImmunity(target) {
 		return !target.hasType('Grass');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { effect: 'clearnegativeboost' },
@@ -10627,7 +10241,6 @@ leer: {
 	boosts: {
 		def: -1,
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Normal",
 	zMove: { boost: { atk: 1 } },
@@ -10644,7 +10257,6 @@ letssnuggleforever: {
 	priority: 0,
 	flags: { contact: 1 },
 	isZ: "mimikiumz",
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Cool",
@@ -10676,7 +10288,6 @@ lifedew: {
 	priority: 0,
 	flags: { snatch: 1, heal: 1, bypasssub: 1 },
 	heal: [1, 4],
-	secondary: null,
 	target: "allies",
 	type: "Water",
 },
@@ -10691,7 +10302,6 @@ lightofruin: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
 	recoil: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Beautiful",
@@ -10732,7 +10342,6 @@ lightscreen: {
 			this.add('-sideend', side, 'move: Light Screen');
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Psychic",
 	zMove: { boost: { spd: 1 } },
@@ -10753,7 +10362,6 @@ lightthatburnsthesky: {
 	},
 	ignoreAbility: true,
 	isZ: "ultranecroziumz",
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Cool",
@@ -10804,7 +10412,6 @@ lockon: {
 			if (move && source === this.effectState.target && target === this.effectState.source) return true;
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -10821,7 +10428,6 @@ lovelykiss: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	status: 'slp',
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -10862,7 +10468,6 @@ lowkick: {
 			return null;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	zMove: { basePower: 160 },
@@ -10910,7 +10515,6 @@ luckychant: {
 			this.add('-sideend', side, 'move: Lucky Chant'); // "[side.name]'s team's Lucky Chant wore off!"
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Normal",
 	zMove: { boost: { evasion: 1 } },
@@ -10947,7 +10551,6 @@ lunarblessing: {
 		const success = !!this.heal(this.modify(pokemon.maxhp, 0.25));
 		return pokemon.cureStatus() || success;
 	},
-	secondary: null,
 	target: "allies",
 	type: "Psychic",
 },
@@ -10991,7 +10594,6 @@ lunardance: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	contestType: "Beautiful",
@@ -11043,7 +10645,6 @@ machpunch: {
 	pp: 30,
 	priority: 1,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -11057,7 +10658,6 @@ magicalleaf: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Beautiful",
@@ -11124,7 +10724,6 @@ magiccoat: {
 			return null;
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { boost: { spd: 2 } },
@@ -11143,7 +10742,6 @@ magicpowder: {
 		if (target.getTypes().join() === 'Psychic' || !target.setType('Psychic')) return false;
 		this.add('-start', target, 'typechange', 'Psychic');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 },
@@ -11186,7 +10784,6 @@ magicroom: {
 			this.add('-fieldend', 'move: Magic Room', '[of] ' + this.effectState.source);
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Psychic",
 	zMove: { boost: { spd: 1 } },
@@ -11202,7 +10799,6 @@ magmastorm: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Tough",
@@ -11217,7 +10813,6 @@ magnetbomb: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, bullet: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	contestType: "Cool",
@@ -11244,7 +10839,6 @@ magneticflux: {
 		}
 		return didSomething;
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Electric",
 	zMove: { boost: { spd: 1 } },
@@ -11282,7 +10876,6 @@ magnetrise: {
 			this.add('-end', target, 'Magnet Rise');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Electric",
 	zMove: { boost: { evasion: 1 } },
@@ -11326,7 +10919,6 @@ magnitude: {
 	onUseMoveMessage(pokemon, target, move) {
 		this.add('-activate', pokemon, 'move: Magnitude', move.magnitude);
 	},
-	secondary: null,
 	target: "allAdjacent",
 	type: "Ground",
 	zMove: { basePower: 140 },
@@ -11347,7 +10939,6 @@ makeitrain: {
 			spa: -1,
 		},
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Steel",
 	contestType: "Beautiful",
@@ -11361,9 +10952,8 @@ maliciousmoonsault: {
 	name: "Malicious Moonsault",
 	pp: 1,
 	priority: 0,
-	flags: { contact: 1 },
+	flags: { contact: 1, minimize: 1 },
 	isZ: "inciniumz",
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Cool",
@@ -11410,12 +11000,8 @@ matblock: {
 		},
 		onTryHitPriority: 3,
 		onTryHit(target, source, move) {
-			if (!move.flags['protect']) {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
-			if (move && (move.target === 'self' || move.category === 'Status')) return;
+			if (move.target === 'self') return;
+			if (this.checkMoveBypassesProtect(move, source, target, false)) return;
 			this.add('-activate', target, 'move: Mat Block', move.name);
 			const lockedmove = source.getVolatile('lockedmove');
 			if (lockedmove) {
@@ -11427,7 +11013,6 @@ matblock: {
 			return this.NOT_FAIL;
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Fighting",
 	zMove: { boost: { def: 1 } },
@@ -11607,7 +11192,6 @@ maxguard: {
 			return this.NOT_FAIL;
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	contestType: "Cool",
@@ -11911,7 +11495,6 @@ meanlook: {
 	onHit(target, source, move) {
 		return target.addVolatile('trapped', source, move, 'trapper');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spd: 1 } },
@@ -11930,7 +11513,6 @@ meditate: {
 	boosts: {
 		atk: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { boost: { atk: 1 } },
@@ -11970,7 +11552,6 @@ mefirst: {
 		},
 	},
 	callsMove: true,
-	secondary: null,
 	target: "adjacentFoe",
 	type: "Normal",
 	zMove: { boost: { spe: 2 } },
@@ -11986,7 +11567,6 @@ megadrain: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, heal: 1, metronome: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { basePower: 120 },
@@ -12001,7 +11581,6 @@ megahorn: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cool",
@@ -12015,7 +11594,6 @@ megakick: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -12029,7 +11607,6 @@ megapunch: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -12048,7 +11625,6 @@ memento: {
 		spa: -2,
 	},
 	selfdestruct: "ifHit",
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { effect: 'healreplacement' },
@@ -12066,7 +11642,6 @@ menacingmoonrazemaelstrom: {
 	flags: {},
 	isZ: "lunaliumz",
 	ignoreAbility: true,
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -12097,7 +11672,6 @@ metalburst: {
 			targetRelayVar.target = this.getAtSlot(lastDamagedBy.slot);
 		}
 	},
-	secondary: null,
 	target: "scripted",
 	type: "Steel",
 	contestType: "Cool",
@@ -12135,7 +11709,6 @@ metalsound: {
 	boosts: {
 		spd: -2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	zMove: { boost: { spa: 1 } },
@@ -12154,7 +11727,6 @@ meteorassault: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 },
@@ -12179,7 +11751,6 @@ meteorbeam: {
 		attacker.addVolatile('twoturnmove', defender);
 		return null;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 },
@@ -12227,7 +11798,6 @@ metronome: {
 		this.actions.useMove(randomMove, pokemon);
 	},
 	callsMove: true,
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	contestType: "Cute",
@@ -12241,7 +11811,6 @@ mightycleave: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, mirror: 1, metronome: 1, slicing: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 },
@@ -12255,7 +11824,6 @@ milkdrink: {
 	priority: 0,
 	flags: { snatch: 1, heal: 1, metronome: 1 },
 	heal: [1, 2],
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -12294,7 +11862,6 @@ mimic: {
 		};
 		this.add('-start', source, 'Mimic', move.name);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { accuracy: 1 } },
@@ -12320,7 +11887,6 @@ mindblown: {
 			}
 		}
 	},
-	secondary: null,
 	target: "allAdjacent",
 	type: "Fire",
 	contestType: "Cool",
@@ -12342,7 +11908,6 @@ mindreader: {
 		source.addVolatile('lockon', target);
 		this.add('-activate', source, 'move: Mind Reader', `[of] ${target}`);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spa: 1 } },
@@ -12362,18 +11927,12 @@ minimize: {
 		noCopy: true,
 		onRestart: () => null,
 		onSourceModifyDamage(damage, source, target, move) {
-			const boostedMoves = [
-				'stomp', 'steamroller', 'bodyslam', 'flyingpress', 'dragonrush', 'heatcrash', 'heavyslam', 'maliciousmoonsault', 'supercellslam',
-			];
-			if (boostedMoves.includes(move.id)) {
+			if (move.flags['minimize']) {
 				return this.chainModify(2);
 			}
 		},
 		onAccuracy(accuracy, target, source, move) {
-			const boostedMoves = [
-				'stomp', 'steamroller', 'bodyslam', 'flyingpress', 'dragonrush', 'heatcrash', 'heavyslam', 'maliciousmoonsault', 'supercellslam',
-			];
-			if (boostedMoves.includes(move.id)) {
+			if (move.flags['minimize']) {
 				return true;
 			}
 			return accuracy;
@@ -12382,7 +11941,6 @@ minimize: {
 	boosts: {
 		evasion: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -12416,7 +11974,6 @@ miracleeye: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spa: 1 } },
@@ -12462,7 +12019,6 @@ mirrorcoat: {
 			}
 		},
 	},
-	secondary: null,
 	target: "scripted",
 	type: "Psychic",
 	contestType: "Beautiful",
@@ -12486,7 +12042,6 @@ mirrormove: {
 		return null;
 	},
 	callsMove: true,
-	secondary: null,
 	target: "normal",
 	type: "Flying",
 	zMove: { boost: { atk: 2 } },
@@ -12549,7 +12104,6 @@ mist: {
 			this.add('-sideend', side, 'Mist');
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Ice",
 	zMove: { effect: 'heal' },
@@ -12590,7 +12144,6 @@ mistyexplosion: {
 			return this.chainModify(1.5);
 		}
 	},
-	secondary: null,
 	target: "allAdjacent",
 	type: "Fairy",
 },
@@ -12647,7 +12200,6 @@ mistyterrain: {
 			this.add('-fieldend', 'Misty Terrain');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Fairy",
 	zMove: { boost: { spd: 1 } },
@@ -12682,7 +12234,6 @@ moongeistbeam: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
 	ignoreAbility: true,
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -12698,7 +12249,7 @@ moonlight: {
 	flags: { snatch: 1, heal: 1, metronome: 1 },
 	onHit(pokemon) {
 		let factor = 0.5;
-		switch (pokemon.effectiveWeather()) {
+		switch (pokemon.effectiveWeather(true)) {
 		case 'sunnyday':
 		case 'desolateland':
 			factor = 0.667;
@@ -12718,7 +12269,6 @@ moonlight: {
 		}
 		return success;
 	},
-	secondary: null,
 	target: "self",
 	type: "Fairy",
 	zMove: { effect: 'clearnegativeboost' },
@@ -12735,7 +12285,7 @@ morningsun: {
 	flags: { snatch: 1, heal: 1, metronome: 1 },
 	onHit(pokemon) {
 		let factor = 0.5;
-		switch (pokemon.effectiveWeather()) {
+		switch (pokemon.effectiveWeather(true)) {
 		case 'sunnyday':
 		case 'desolateland':
 			factor = 0.667;
@@ -12755,7 +12305,6 @@ morningsun: {
 		}
 		return success;
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -12772,16 +12321,16 @@ mortalspin: {
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	onAfterHit(target, pokemon, move) {
 		if (!move.hasSheerForce) {
-			if (pokemon.hp && pokemon.removeVolatile('leechseed')) {
+			if (pokemon.removeVolatile('leechseed')) {
 				this.add('-end', pokemon, 'Leech Seed', '[from] move: Mortal Spin', `[of] ${pokemon}`);
 			}
 			const sideConditions = ['spikes', 'toxicspikes', 'stealthrock', 'stickyweb', 'gmaxsteelsurge'];
 			for (const condition of sideConditions) {
-				if (pokemon.hp && pokemon.side.removeSideCondition(condition)) {
+				if (pokemon.side.removeSideCondition(condition)) {
 					this.add('-sideend', pokemon.side, this.dex.conditions.get(condition).name, '[from] move: Mortal Spin', `[of] ${pokemon}`);
 				}
 			}
-			if (pokemon.hp && pokemon.volatiles['partiallytrapped']) {
+			if (pokemon.volatiles['partiallytrapped']) {
 				pokemon.removeVolatile('partiallytrapped');
 			}
 		}
@@ -12931,7 +12480,6 @@ mudsport: {
 			this.add('-fieldend', 'move: Mud Sport');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Ground",
 	zMove: { boost: { spd: 1 } },
@@ -12951,7 +12499,6 @@ multiattack: {
 		if (pokemon.ignoringItem()) return;
 		move.type = this.runEvent('Memory', pokemon, null, move, 'Normal');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 185 },
@@ -13009,7 +12556,6 @@ nastyplot: {
 	boosts: {
 		spa: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Dark",
 	zMove: { effect: 'clearnegativeboost' },
@@ -13042,7 +12588,6 @@ naturalgift: {
 		pokemon.usedItemThisTurn = true;
 		this.runEvent('AfterUseItem', pokemon, null, null, item);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 160 },
@@ -13074,7 +12619,6 @@ naturepower: {
 		return null;
 	},
 	callsMove: true,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Beautiful",
@@ -13092,7 +12636,6 @@ naturesmadness: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Tough",
@@ -13126,7 +12669,6 @@ neverendingnightmare: {
 	priority: 0,
 	flags: {},
 	isZ: "ghostiumz",
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -13174,7 +12716,6 @@ nightmare: {
 			this.damage(pokemon.baseMaxhp / 4);
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	zMove: { boost: { spa: 1 } },
@@ -13190,7 +12731,6 @@ nightshade: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Clever",
@@ -13205,7 +12745,6 @@ nightslash: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Cool",
@@ -13223,7 +12762,6 @@ nihillight: {
 	ignoreEvasion: true,
 	ignoreDefensive: true,
 	ignoreImmunity: { 'Fairy': true },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Dragon",
 },
@@ -13240,7 +12778,6 @@ nobleroar: {
 		atk: -1,
 		spa: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -13277,7 +12814,6 @@ noretreat: {
 		spd: 1,
 		spe: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Fighting",
 },
@@ -13329,7 +12865,6 @@ oblivionwing: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, distance: 1, heal: 1, metronome: 1 },
 	drain: [3, 4],
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cool",
@@ -13359,11 +12894,7 @@ obstruct: {
 		},
 		onTryHitPriority: 3,
 		onTryHit(target, source, move) {
-			if (!move.flags['protect'] || move.category === 'Status') {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target, false)) return;
 			if (move.smartTarget) {
 				move.smartTarget = false;
 			} else {
@@ -13387,7 +12918,6 @@ obstruct: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Dark",
 },
@@ -13402,7 +12932,6 @@ oceanicoperetta: {
 	priority: 0,
 	flags: {},
 	isZ: "primariumz",
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Cool",
@@ -13459,7 +12988,6 @@ octolock: {
 			if (this.effectState.source?.isActive) pokemon.tryTrap();
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 },
@@ -13477,7 +13005,6 @@ odorsleuth: {
 	onTryHit(target) {
 		if (target.volatiles['miracleeye']) return false;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { atk: 1 } },
@@ -13534,8 +13061,7 @@ orderup: {
 			break;
 		}
 	},
-	secondary: null,
-	hasSheerForce: true,
+	hasSheerForceBoost: true,
 	target: "normal",
 	type: "Dragon",
 },
@@ -13564,7 +13090,6 @@ outrage: {
 	self: {
 		volatileStatus: 'lockedmove',
 	},
-	secondary: null,
 	target: "randomNormal",
 	type: "Dragon",
 	contestType: "Cool",
@@ -13578,7 +13103,6 @@ overdrive: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, sound: 1, bypasssub: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Electric",
 },
@@ -13596,7 +13120,6 @@ overheat: {
 			spa: -2,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	contestType: "Beautiful",
@@ -13619,7 +13142,6 @@ painsplit: {
 		pokemon.sethp(averagehp);
 		this.add('-sethp', pokemon, pokemon.getHealth, '[from] move: Pain Split');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -13635,7 +13157,6 @@ paraboliccharge: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, heal: 1, metronome: 1 },
 	drain: [1, 2],
-	secondary: null,
 	target: "allAdjacent",
 	type: "Electric",
 	contestType: "Clever",
@@ -13656,7 +13177,6 @@ partingshot: {
 		}
 	},
 	selfSwitch: true,
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { effect: 'healreplacement' },
@@ -13679,7 +13199,6 @@ payback: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Tough",
@@ -13693,7 +13212,6 @@ payday: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Clever",
@@ -13707,7 +13225,6 @@ peck: {
 	pp: 35,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, distance: 1, metronome: 1 },
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cool",
@@ -13752,7 +13269,6 @@ perishsong: {
 			this.add('-start', pokemon, `perish${duration}`);
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -13767,7 +13283,6 @@ petalblizzard: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, wind: 1 },
-	secondary: null,
 	target: "allAdjacent",
 	type: "Grass",
 	contestType: "Beautiful",
@@ -13784,7 +13299,6 @@ petaldance: {
 	self: {
 		volatileStatus: 'lockedmove',
 	},
-	secondary: null,
 	target: "randomNormal",
 	type: "Grass",
 	contestType: "Beautiful",
@@ -13814,7 +13328,6 @@ phantomforce: {
 		duration: 2,
 		onInvulnerability: false,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -13832,7 +13345,6 @@ photongeyser: {
 		if (pokemon.getStat('atk', false, true) > pokemon.getStat('spa', false, true)) move.category = 'Physical';
 	},
 	ignoreAbility: true,
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Cool",
@@ -13852,7 +13364,6 @@ pikapapow: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cute",
@@ -13867,7 +13378,6 @@ pinmissile: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	zMove: { basePower: 140 },
@@ -13885,7 +13395,6 @@ plasmafists: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1 },
 	pseudoWeather: 'iondeluge',
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cool",
@@ -13902,7 +13411,6 @@ playnice: {
 	boosts: {
 		atk: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -13947,7 +13455,6 @@ pluck: {
 			if (item.onEat) source.ateBerry = true;
 		}
 	},
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cute",
@@ -13979,7 +13486,6 @@ poisongas: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	status: 'psn',
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Poison",
 	zMove: { boost: { def: 1 } },
@@ -14012,7 +13518,6 @@ poisonpowder: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1, powder: 1 },
 	status: 'psn',
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	zMove: { boost: { def: 1 } },
@@ -14082,7 +13587,6 @@ pollenpuff: {
 			}
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cute",
@@ -14102,7 +13606,6 @@ poltergeist: {
 	onTryHit(target, source, move) {
 		this.add('-activate', target, 'move: Poltergeist', this.dex.items.get(target.item).name);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 },
@@ -14117,7 +13620,6 @@ populationbomb: {
 	flags: { contact: 1, protect: 1, mirror: 1, slicing: 1 },
 	multihit: 10,
 	multiaccuracy: true,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 },
@@ -14149,7 +13651,6 @@ pound: {
 	pp: 35,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -14180,7 +13681,6 @@ powder: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	zMove: { boost: { spd: 2 } },
@@ -14212,7 +13712,6 @@ powergem: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Beautiful",
@@ -14253,7 +13752,6 @@ powershift: {
 			pokemon.removeVolatile('Power Shift');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 },
@@ -14275,7 +13773,6 @@ powersplit: {
 		source.storedStats.spa = newspa;
 		this.add('-activate', source, 'move: Power Split', `[of] ${target}`);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 1 } },
@@ -14305,7 +13802,6 @@ powerswap: {
 
 		this.add('-swapboost', source, target, 'atk, spa', '[from] move: Power Swap');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 1 } },
@@ -14346,7 +13842,6 @@ powertrick: {
 			pokemon.removeVolatile('Power Trick');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { boost: { atk: 1 } },
@@ -14366,7 +13861,6 @@ powertrip: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { basePower: 160 },
@@ -14404,7 +13898,6 @@ powerwhip: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Tough",
@@ -14444,7 +13937,6 @@ present: {
 			move.basePower = 120;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cute",
@@ -14461,7 +13953,6 @@ prismaticlaser: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Cool",
@@ -14490,11 +13981,7 @@ protect: {
 		},
 		onTryHitPriority: 3,
 		onTryHit(target, source, move) {
-			if (!move.flags['protect']) {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target)) return;
 			if (move.smartTarget) {
 				move.smartTarget = false;
 			} else {
@@ -14510,7 +13997,6 @@ protect: {
 			return this.NOT_FAIL;
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -14542,7 +14028,6 @@ psyblade: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
-	secondary: null,
 	onBasePower(basePower, source) {
 		if (this.field.isTerrain('electricterrain')) {
 			this.debug('psyblade electric terrain boost');
@@ -14586,7 +14071,6 @@ psychicfangs: {
 		pokemon.side.removeSideCondition('lightscreen');
 		pokemon.side.removeSideCondition('auroraveil');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Clever",
@@ -14635,7 +14119,7 @@ psychicterrain: {
 			if (!target.isGrounded()) {
 				const baseMove = this.dex.moves.get(effect.id);
 				if (baseMove.priority > 0) {
-					this.hint("Psychic Terrain doesn't affect Pokémon immune to Ground.");
+					this.hint("Psychic Terrain doesn't affect airborne Pokémon.");
 				}
 				return;
 			}
@@ -14662,7 +14146,6 @@ psychicterrain: {
 			this.add('-fieldend', 'move: Psychic Terrain');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Psychic",
 	zMove: { boost: { spa: 1 } },
@@ -14682,7 +14165,6 @@ psychoboost: {
 			spa: -2,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Clever",
@@ -14697,7 +14179,6 @@ psychocut: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Cool",
@@ -14721,7 +14202,6 @@ psychoshift: {
 			pokemon.cureStatus();
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spa: 2 } },
@@ -14755,7 +14235,6 @@ psychup: {
 		}
 		this.add('-copyboost', source, target, '[from] move: Psych Up');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { effect: 'heal' },
@@ -14791,7 +14270,6 @@ psyshock: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Beautiful",
@@ -14806,7 +14284,6 @@ psystrike: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Cool",
@@ -14824,7 +14301,6 @@ psywave: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Clever",
@@ -14840,7 +14316,6 @@ pulverizingpancake: {
 	priority: 0,
 	flags: { contact: 1 },
 	isZ: "snorliumz",
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -14861,7 +14336,6 @@ punishment: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { basePower: 160 },
@@ -14886,7 +14360,6 @@ purify: {
 		}
 		this.heal(Math.ceil(source.maxhp * 0.5), source);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -14911,10 +14384,9 @@ pursuit: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	beforeTurnCallback(pokemon) {
-		for (const side of this.sides) {
-			if (side.hasAlly(pokemon)) continue;
-			side.addSideCondition('pursuit', pokemon);
-			const data = side.getSideConditionData('pursuit');
+		for (const target of pokemon.foes()) {
+			target.addVolatile('pursuit');
+			const data = target.volatiles['pursuit'];
 			if (!data.sources) {
 				data.sources = [];
 			}
@@ -14923,9 +14395,6 @@ pursuit: {
 	},
 	onModifyMove(move, source, target) {
 		if (target?.beingCalledBack || target?.switchFlag) move.accuracy = true;
-	},
-	onTryHit(target, pokemon) {
-		target.side.removeSideCondition('pursuit');
 	},
 	condition: {
 		duration: 1,
@@ -14961,7 +14430,6 @@ pursuit: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -14999,7 +14467,6 @@ quash: {
 		action.order = 201;
 		this.add('-activate', target, 'move: Quash');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { boost: { spe: 1 } },
@@ -15014,7 +14481,6 @@ quickattack: {
 	pp: 30,
 	priority: 1,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -15045,11 +14511,7 @@ quickguard: {
 			// Quick Guard blocks moves with positive priority, even those given increased priority by Prankster or Gale Wings.
 			// (e.g. it blocks 0 priority moves boosted by Prankster or Gale Wings; Quick Claw/Custap Berry do not count)
 			if (move.priority <= 0.1) return;
-			if (!move.flags['protect']) {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target)) return;
 			this.add('-activate', target, 'move: Quick Guard');
 			const lockedmove = source.getVolatile('lockedmove');
 			if (lockedmove) {
@@ -15061,7 +14523,6 @@ quickguard: {
 			return this.NOT_FAIL;
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Fighting",
 	zMove: { boost: { def: 1 } },
@@ -15081,7 +14542,6 @@ quiverdance: {
 		spd: 1,
 		spe: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Bug",
 	zMove: { effect: 'clearnegativeboost' },
@@ -15115,7 +14575,6 @@ rage: {
 			pokemon.removeVolatile('rage');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -15132,7 +14591,6 @@ ragefist: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 },
@@ -15166,7 +14624,6 @@ ragepowder: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Bug",
 	zMove: { effect: 'clearnegativeboost' },
@@ -15200,7 +14657,6 @@ ragingbull: {
 			break;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 },
@@ -15216,7 +14672,6 @@ ragingfury: {
 	self: {
 		volatileStatus: 'lockedmove',
 	},
-	secondary: null,
 	target: "randomNormal",
 	type: "Fire",
 },
@@ -15230,7 +14685,6 @@ raindance: {
 	priority: 0,
 	flags: { metronome: 1 },
 	weather: 'RainDance',
-	secondary: null,
 	target: "all",
 	type: "Water",
 	zMove: { boost: { spe: 1 } },
@@ -15247,16 +14701,16 @@ rapidspin: {
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	onAfterHit(target, pokemon, move) {
 		if (!move.hasSheerForce) {
-			if (pokemon.hp && pokemon.removeVolatile('leechseed')) {
+			if (pokemon.removeVolatile('leechseed')) {
 				this.add('-end', pokemon, 'Leech Seed', '[from] move: Rapid Spin', `[of] ${pokemon}`);
 			}
 			const sideConditions = ['spikes', 'toxicspikes', 'stealthrock', 'stickyweb', 'gmaxsteelsurge'];
 			for (const condition of sideConditions) {
-				if (pokemon.hp && pokemon.side.removeSideCondition(condition)) {
+				if (pokemon.side.removeSideCondition(condition)) {
 					this.add('-sideend', pokemon.side, this.dex.conditions.get(condition).name, '[from] move: Rapid Spin', `[of] ${pokemon}`);
 				}
 			}
-			if (pokemon.hp && pokemon.volatiles['partiallytrapped']) {
+			if (pokemon.volatiles['partiallytrapped']) {
 				pokemon.removeVolatile('partiallytrapped');
 			}
 		}
@@ -15299,7 +14753,6 @@ razorleaf: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Grass",
 	contestType: "Cool",
@@ -15345,7 +14798,6 @@ razorwind: {
 		return null;
 	},
 	critRatio: 2,
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Normal",
 	contestType: "Cool",
@@ -15360,7 +14812,6 @@ recover: {
 	priority: 0,
 	flags: { snatch: 1, heal: 1, metronome: 1 },
 	heal: [1, 2],
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -15382,7 +14833,6 @@ recycle: {
 		this.add('-item', pokemon, this.dex.items.get(item), '[from] move: Recycle');
 		pokemon.setItem(item, source, move);
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { spe: 2 } },
@@ -15424,7 +14874,6 @@ reflect: {
 			this.add('-sideend', side, 'Reflect');
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Psychic",
 	zMove: { boost: { def: 1 } },
@@ -15457,7 +14906,6 @@ reflecttype: {
 		source.knownType = target.isAlly(source) && target.knownType;
 		if (!source.knownType) source.apparentType = oldApparentType;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spa: 1 } },
@@ -15477,7 +14925,6 @@ refresh: {
 		if (['', 'slp', 'frz'].includes(pokemon.status)) return false;
 		pokemon.cureStatus();
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'heal' },
@@ -15496,13 +14943,8 @@ relicsong: {
 		chance: 10,
 		status: 'slp',
 	},
-	onHit(target, pokemon, move) {
+	onAfterMoveSecondarySelf(pokemon) {
 		if (pokemon.baseSpecies.baseSpecies === 'Meloetta' && !pokemon.transformed) {
-			move.willChangeForme = true;
-		}
-	},
-	onAfterMoveSecondarySelf(pokemon, target, move) {
-		if (move.willChangeForme) {
 			const meloettaForme = pokemon.species.id === 'meloettapirouette' ? '' : '-Pirouette';
 			pokemon.formeChange('Meloetta' + meloettaForme, this.effect, false, '0', '[msg]');
 		}
@@ -15544,7 +14986,6 @@ rest: {
 		target.statusState.startTime = 3;
 		this.heal(target.maxhp); // Aesthetic only as the healing happens after you fall asleep in-game
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { effect: 'clearnegativeboost' },
@@ -15565,7 +15006,6 @@ retaliate: {
 			return this.chainModify(2);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -15583,7 +15023,6 @@ return: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 160 },
@@ -15606,7 +15045,6 @@ revelationdance: {
 		if (type === '???' && types[1]) type = types[1];
 		move.type = type;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Beautiful",
@@ -15631,7 +15069,6 @@ revenge: {
 	pp: 10,
 	priority: -4,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -15664,7 +15101,6 @@ reversal: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	zMove: { basePower: 160 },
@@ -15694,7 +15130,6 @@ revivalblessing: {
 		duration: 1,
 		// reviving implemented in side.ts, kind of
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 },
@@ -15714,7 +15149,6 @@ risingvoltage: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	maxMove: { basePower: 140 },
@@ -15729,7 +15163,6 @@ roar: {
 	priority: -6,
 	flags: { reflectable: 1, mirror: 1, sound: 1, bypasssub: 1, allyanim: 1, metronome: 1, noassist: 1, failcopycat: 1 },
 	forceSwitch: true,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -15747,7 +15180,6 @@ roaroftime: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	contestType: "Beautiful",
@@ -15762,7 +15194,6 @@ rockblast: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, bullet: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	zMove: { basePower: 140 },
@@ -15799,7 +15230,6 @@ rockpolish: {
 	boosts: {
 		spe: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Rock",
 	zMove: { effect: 'clearnegativeboost' },
@@ -15850,7 +15280,6 @@ rockthrow: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Tough",
@@ -15886,7 +15315,6 @@ rockwrecker: {
 	self: {
 		volatileStatus: 'mustrecharge',
 	},
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Tough",
@@ -15908,7 +15336,6 @@ roleplay: {
 		const oldAbility = source.setAbility(target.ability, target);
 		if (!oldAbility) return oldAbility as false | null;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 1 } },
@@ -15993,7 +15420,6 @@ rollout: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Cute",
@@ -16029,7 +15455,6 @@ roost: {
 			return types.filter(type => type !== 'Flying');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Flying",
 	zMove: { effect: 'clearnegativeboost' },
@@ -16064,7 +15489,6 @@ rototiller: {
 			this.boost({ atk: 1, spa: 1 }, pokemon, source);
 		}
 	},
-	secondary: null,
 	target: "all",
 	type: "Ground",
 	zMove: { boost: { atk: 1 } },
@@ -16095,7 +15519,6 @@ round: {
 			}
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Beautiful",
@@ -16112,7 +15535,6 @@ ruination: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Tough",
@@ -16145,7 +15567,6 @@ sacredsword: {
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	ignoreEvasion: true,
 	ignoreDefensive: true,
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -16175,7 +15596,7 @@ safeguard: {
 			if (effect.effectType === 'Move' && effect.infiltrates && !target.isAlly(source)) return;
 			if (target !== source) {
 				this.debug('interrupting setStatus');
-				if (effect.name === 'Synchronize' || (effect.effectType === 'Move' && !effect.secondaries)) {
+				if (effect.id === 'synchronize' || (effect.effectType === 'Move' && !effect.secondaries)) {
 					this.add('-activate', target, 'move: Safeguard');
 				}
 				return null;
@@ -16202,7 +15623,6 @@ safeguard: {
 			this.add('-sideend', side, 'Safeguard');
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -16249,7 +15669,6 @@ sandattack: {
 	boosts: {
 		accuracy: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	zMove: { boost: { evasion: 1 } },
@@ -16286,7 +15705,6 @@ sandstorm: {
 	priority: 0,
 	flags: { metronome: 1, wind: 1 },
 	weather: 'Sandstorm',
-	secondary: null,
 	target: "all",
 	type: "Rock",
 	zMove: { boost: { spe: 1 } },
@@ -16302,7 +15720,6 @@ sandtomb: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	contestType: "Clever",
@@ -16321,7 +15738,6 @@ sappyseed: {
 		if (target.hasType('Grass')) return null;
 		target.addVolatile('leechseed', source);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Clever",
@@ -16337,7 +15753,6 @@ savagespinout: {
 	priority: 0,
 	flags: {},
 	isZ: "buginiumz",
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cool",
@@ -16376,7 +15791,6 @@ scaleshot: {
 			spe: 1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	zMove: { basePower: 140 },
@@ -16394,7 +15808,6 @@ scaryface: {
 	boosts: {
 		spe: -2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -16426,7 +15839,6 @@ scratch: {
 	pp: 35,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -16443,7 +15855,6 @@ screech: {
 	boosts: {
 		def: -2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { atk: 1 } },
@@ -16479,7 +15890,6 @@ searingsunrazesmash: {
 	flags: { contact: 1 },
 	isZ: "solganiumz",
 	ignoreAbility: true,
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	contestType: "Cool",
@@ -16541,7 +15951,6 @@ secretsword: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, slicing: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Beautiful",
@@ -16555,7 +15964,6 @@ seedbomb: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, bullet: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Tough",
@@ -16589,7 +15997,6 @@ seismictoss: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	maxMove: { basePower: 75 },
@@ -16605,7 +16012,6 @@ selfdestruct: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, noparentalbond: 1 },
 	selfdestruct: "always",
-	secondary: null,
 	target: "allAdjacent",
 	type: "Normal",
 	contestType: "Beautiful",
@@ -16659,7 +16065,6 @@ shadowclaw: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -16689,7 +16094,6 @@ shadowforce: {
 		duration: 2,
 		onInvulnerability: false,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -16703,7 +16107,6 @@ shadowpunch: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Clever",
@@ -16717,7 +16120,6 @@ shadowsneak: {
 	pp: 30,
 	priority: 1,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Clever",
@@ -16735,7 +16137,6 @@ sharpen: {
 	boosts: {
 		atk: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { atk: 1 } },
@@ -16752,7 +16153,6 @@ shatteredpsyche: {
 	priority: 0,
 	flags: {},
 	isZ: "psychiumz",
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Cool",
@@ -16790,7 +16190,6 @@ shedtail: {
 		},
 	},
 	selfSwitch: 'shedtail',
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -16804,7 +16203,6 @@ sheercold: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	ohko: 'Ice',
 	target: "normal",
 	type: "Ice",
@@ -16869,7 +16267,6 @@ shellsmash: {
 		spa: 2,
 		spe: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -16910,7 +16307,6 @@ shelltrap: {
 			}
 		},
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Fire",
 	contestType: "Tough",
@@ -16927,7 +16323,6 @@ shelter: {
 	boosts: {
 		def: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Steel",
 },
@@ -16944,7 +16339,6 @@ shiftgear: {
 		spe: 2,
 		atk: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Steel",
 	zMove: { effect: 'clearnegativeboost' },
@@ -16959,7 +16353,6 @@ shockwave: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cool",
@@ -16985,7 +16378,6 @@ shoreup: {
 		}
 		return success;
 	},
-	secondary: null,
 	target: "self",
 	type: "Ground",
 	zMove: { effect: 'clearnegativeboost' },
@@ -17033,10 +16425,7 @@ silktrap: {
 		},
 		onTryHitPriority: 3,
 		onTryHit(target, source, move) {
-			if (!move.flags['protect'] || move.category === 'Status') {
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target, false)) return;
 			if (move.smartTarget) {
 				move.smartTarget = false;
 			} else {
@@ -17107,7 +16496,6 @@ simplebeam: {
 		const oldAbility = target.setAbility('simple');
 		if (!oldAbility) return oldAbility as false | null;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spa: 1 } },
@@ -17123,7 +16511,6 @@ sing: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, sound: 1, bypasssub: 1, metronome: 1 },
 	status: 'slp',
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -17140,7 +16527,6 @@ sinisterarrowraid: {
 	priority: 0,
 	flags: {},
 	isZ: "decidiumz",
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -17195,7 +16581,6 @@ sketch: {
 		source.baseMoveSlots[sketchIndex] = sketchedMove;
 		this.add('-activate', source, 'move: Sketch', move.name);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -17210,37 +16595,9 @@ skillswap: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, bypasssub: 1, allyanim: 1, metronome: 1 },
-	onTryHit(target, source) {
-		const targetAbility = target.getAbility();
-		const sourceAbility = source.getAbility();
-		if (sourceAbility.flags['failskillswap'] || targetAbility.flags['failskillswap'] || target.volatiles['dynamax']) {
-			return false;
-		}
-		const sourceCanBeSet = this.runEvent('SetAbility', source, source, this.effect, targetAbility);
-		if (!sourceCanBeSet) return sourceCanBeSet;
-		const targetCanBeSet = this.runEvent('SetAbility', target, source, this.effect, sourceAbility);
-		if (!targetCanBeSet) return targetCanBeSet;
-	},
 	onHit(target, source, move) {
-		const targetAbility = target.getAbility();
-		const sourceAbility = source.getAbility();
-		if (target.isAlly(source)) {
-			this.add('-activate', source, 'move: Skill Swap', '', '', `[of] ${target}`);
-		} else {
-			this.add('-activate', source, 'move: Skill Swap', targetAbility, sourceAbility, `[of] ${target}`);
-		}
-		this.singleEvent('End', sourceAbility, source.abilityState, source);
-		this.singleEvent('End', targetAbility, target.abilityState, target);
-		source.ability = targetAbility.id;
-		target.ability = sourceAbility.id;
-		source.abilityState = this.initEffectState({ id: this.toID(source.ability), target: source });
-		target.abilityState = this.initEffectState({ id: this.toID(target.ability), target });
-		source.volatileStaleness = undefined;
-		if (!target.isAlly(source)) target.volatileStaleness = 'external';
-		this.singleEvent('Start', targetAbility, source.abilityState, source);
-		this.singleEvent('Start', sourceAbility, target.abilityState, target);
+		return this.skillSwap(source, target);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 1 } },
@@ -17286,7 +16643,6 @@ skullbash: {
 		attacker.addVolatile('twoturnmove', defender);
 		return null;
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -17430,7 +16786,6 @@ skydrop: {
 			}
 		},
 	},
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Tough",
@@ -17445,7 +16800,6 @@ skyuppercut: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -17460,7 +16814,6 @@ slackoff: {
 	priority: 0,
 	flags: { snatch: 1, heal: 1, metronome: 1 },
 	heal: [1, 2],
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -17475,7 +16828,6 @@ slam: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -17490,7 +16842,6 @@ slash: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -17505,7 +16856,6 @@ sleeppowder: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1, powder: 1 },
 	status: 'slp',
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { boost: { spe: 1 } },
@@ -17543,7 +16893,6 @@ sleeptalk: {
 		this.actions.useMove(randomMove, pokemon);
 	},
 	callsMove: true,
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'crit2' },
@@ -17642,7 +16991,6 @@ smackdown: {
 		},
 		// groundedness implemented in battle.engine.js:BattlePokemon#isGrounded
 	},
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Tough",
@@ -17656,7 +17004,6 @@ smartstrike: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	contestType: "Cool",
@@ -17681,7 +17028,6 @@ smellingsalts: {
 	onHit(target) {
 		if (target.status === 'par') target.cureStatus();
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -17715,7 +17061,6 @@ smokescreen: {
 	boosts: {
 		accuracy: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { evasion: 1 } },
@@ -17732,7 +17077,6 @@ snaptrap: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 },
@@ -17784,7 +17128,6 @@ snatch: {
 			return null;
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Dark",
 	zMove: { boost: { spe: 2 } },
@@ -17801,7 +17144,6 @@ snipeshot: {
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
 	tracksTarget: true,
-	secondary: null,
 	target: "normal",
 	type: "Water",
 },
@@ -17836,7 +17178,6 @@ snowscape: {
 	priority: 0,
 	flags: {},
 	weather: 'snowscape',
-	secondary: null,
 	target: "all",
 	type: "Ice",
 },
@@ -17858,7 +17199,6 @@ soak: {
 		}
 		this.add('-start', target, 'typechange', 'Water');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	zMove: { boost: { spa: 1 } },
@@ -17874,7 +17214,6 @@ softboiled: {
 	priority: 0,
 	flags: { snatch: 1, heal: 1, metronome: 1 },
 	heal: [1, 2],
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -17894,7 +17233,7 @@ solarbeam: {
 			return;
 		}
 		this.add('-prepare', attacker, move.name);
-		if (['sunnyday', 'desolateland'].includes(attacker.effectiveWeather())) {
+		if (['sunnyday', 'desolateland'].includes(attacker.effectiveWeather(true))) {
 			this.attrLastMove('[still]');
 			this.addMove('-anim', attacker, move.name, defender);
 			return;
@@ -17912,7 +17251,6 @@ solarbeam: {
 			return this.chainModify(0.5);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Cool",
@@ -17931,7 +17269,7 @@ solarblade: {
 			return;
 		}
 		this.add('-prepare', attacker, move.name);
-		if (['sunnyday', 'desolateland'].includes(attacker.effectiveWeather())) {
+		if (['sunnyday', 'desolateland'].includes(attacker.effectiveWeather(true))) {
 			this.attrLastMove('[still]');
 			this.addMove('-anim', attacker, move.name, defender);
 			return;
@@ -17949,7 +17287,6 @@ solarblade: {
 			return this.chainModify(0.5);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Cool",
@@ -17965,7 +17302,6 @@ sonicboom: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -17981,7 +17317,6 @@ soulstealing7starstrike: {
 	priority: 0,
 	flags: { contact: 1 },
 	isZ: "marshadiumz",
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -17996,7 +17331,6 @@ spacialrend: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Dragon",
 	contestType: "Beautiful",
@@ -18071,7 +17405,6 @@ sparklyswirl: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Clever",
@@ -18088,7 +17421,6 @@ spectralthief: {
 	flags: { contact: 1, protect: 1, mirror: 1, bypasssub: 1 },
 	stealsBoosts: true,
 	// Boost stealing implemented in scripts.js
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	contestType: "Cool",
@@ -18108,7 +17440,6 @@ speedswap: {
 		source.storedStats.spe = targetSpe;
 		this.add('-activate', source, 'move: Speed Swap', `[of] ${target}`);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 1 } },
@@ -18127,7 +17458,6 @@ spicyextract: {
 		atk: 2,
 		def: -2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 },
@@ -18144,7 +17474,6 @@ spiderweb: {
 	onHit(target, source, move) {
 		return target.addVolatile('trapped', source, move, 'trapper');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	zMove: { boost: { def: 1 } },
@@ -18161,7 +17490,6 @@ spikecannon: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	maxMove: { basePower: 120 },
@@ -18194,7 +17522,6 @@ spikes: {
 			this.damage(damageAmounts[this.effectState.layers] * pokemon.maxhp / 24);
 		},
 	},
-	secondary: null,
 	target: "foeSide",
 	type: "Ground",
 	zMove: { boost: { def: 1 } },
@@ -18224,11 +17551,7 @@ spikyshield: {
 		},
 		onTryHitPriority: 3,
 		onTryHit(target, source, move) {
-			if (!move.flags['protect']) {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				if (move.isZ || move.isMax) target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target)) return;
 			if (move.smartTarget) {
 				move.smartTarget = false;
 			} else {
@@ -18252,7 +17575,6 @@ spikyshield: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Grass",
 	zMove: { boost: { def: 1 } },
@@ -18272,7 +17594,6 @@ spinout: {
 			spe: -2,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 },
@@ -18331,7 +17652,6 @@ spite: {
 		if (!ppDeducted) return false;
 		this.add("-activate", target, 'move: Spite', move.name, ppDeducted);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	zMove: { effect: 'heal' },
@@ -18356,7 +17676,6 @@ spitup: {
 	onAfterMove(pokemon) {
 		pokemon.removeVolatile('stockpile');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -18380,7 +17699,6 @@ splash: {
 	onTryHit(target, source) {
 		this.add('-nothing');
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { atk: 3 } },
@@ -18403,7 +17721,6 @@ splinteredstormshards: {
 		this.field.clearTerrain();
 	},
 	isZ: "lycaniumz",
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Cool",
@@ -18436,7 +17753,6 @@ spore: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1, powder: 1 },
 	status: 'slp',
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { effect: 'clearnegativeboost' },
@@ -18470,7 +17786,6 @@ spotlight: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spd: 1 } },
@@ -18515,7 +17830,6 @@ stealthrock: {
 			this.damage(pokemon.maxhp * (2 ** typeMod) / 8);
 		},
 	},
-	secondary: null,
 	target: "foeSide",
 	type: "Rock",
 	zMove: { boost: { def: 1 } },
@@ -18548,7 +17862,7 @@ steamroller: {
 	name: "Steamroller",
 	pp: 20,
 	priority: 0,
-	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
+	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, minimize: 1 },
 	secondary: {
 		chance: 30,
 		volatileStatus: 'flinch',
@@ -18576,7 +17890,6 @@ steelbeam: {
 			}
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 },
@@ -18598,7 +17911,6 @@ steelroller: {
 	onAfterSubDamage() {
 		this.field.clearTerrain();
 	},
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 },
@@ -18643,7 +17955,6 @@ stickyweb: {
 			this.boost({ spe: -1 }, pokemon, pokemon.side.foe.active[0], this.dex.getActiveMove('stickyweb'));
 		},
 	},
-	secondary: null,
 	target: "foeSide",
 	type: "Bug",
 	zMove: { boost: { spe: 1 } },
@@ -18697,7 +18008,6 @@ stockpile: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'heal' },
@@ -18730,7 +18040,7 @@ stomp: {
 	name: "Stomp",
 	pp: 20,
 	priority: 0,
-	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
+	flags: { contact: 1, protect: 1, mirror: 1, nonsky: 1, metronome: 1, minimize: 1 },
 	secondary: {
 		chance: 30,
 		volatileStatus: 'flinch',
@@ -18755,7 +18065,6 @@ stompingtantrum: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	contestType: "Tough",
@@ -18770,7 +18079,7 @@ stoneaxe: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	onAfterHit(target, source, move) {
-		if (!move.hasSheerForce && source.hp) {
+		if (!move.hasSheerForce) {
 			for (const side of source.side.foeSidesWithConditions()) {
 				side.addSideCondition('stealthrock');
 			}
@@ -18797,7 +18106,6 @@ stoneedge: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	critRatio: 2,
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 	contestType: "Tough",
@@ -18816,7 +18124,6 @@ storedpower: {
 	pp: 10,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { basePower: 160 },
@@ -18834,7 +18141,6 @@ stormthrow: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	willCrit: true,
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -18864,7 +18170,6 @@ strength: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -18884,7 +18189,6 @@ strengthsap: {
 		const success = this.boost({ atk: -1 }, target, source, null, false, true);
 		return !!(this.heal(atk, source, target) || success);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { boost: { def: 1 } },
@@ -18902,7 +18206,6 @@ stringshot: {
 	boosts: {
 		spe: -2,
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Bug",
 	zMove: { boost: { spe: 1 } },
@@ -18926,7 +18229,6 @@ struggle: {
 		this.add('-activate', pokemon, 'move: Struggle');
 	},
 	struggleRecoil: true,
-	secondary: null,
 	target: "randomNormal",
 	type: "Normal",
 	contestType: "Tough",
@@ -18969,7 +18271,6 @@ stuffcheeks: {
 		if (!this.boost({ def: 2 })) return null;
 		pokemon.eatItem(true);
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 },
@@ -18983,7 +18284,6 @@ stunspore: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1, powder: 1 },
 	status: 'par',
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { boost: { spd: 1 } },
@@ -19000,7 +18300,6 @@ submission: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	recoil: [1, 4],
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -19077,7 +18376,6 @@ substitute: {
 			this.add('-end', target, 'Substitute');
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -19094,7 +18392,6 @@ subzeroslammer: {
 	priority: 0,
 	flags: {},
 	isZ: "iciumz",
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	contestType: "Cool",
@@ -19115,7 +18412,6 @@ suckerpunch: {
 			return false;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Clever",
@@ -19130,7 +18426,6 @@ sunnyday: {
 	priority: 0,
 	flags: { metronome: 1 },
 	weather: 'sunnyday',
-	secondary: null,
 	target: "all",
 	type: "Fire",
 	zMove: { boost: { spe: 1 } },
@@ -19146,7 +18441,6 @@ sunsteelstrike: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1 },
 	ignoreAbility: true,
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	contestType: "Cool",
@@ -19159,12 +18453,11 @@ supercellslam: {
 	name: "Supercell Slam",
 	pp: 15,
 	priority: 0,
-	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
+	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, minimize: 1 },
 	hasCrashDamage: true,
 	onMoveFail(target, source, move) {
 		this.damage(source.baseMaxhp / 2, source, source, this.dex.conditions.get('Supercell Slam'));
 	},
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 },
@@ -19180,7 +18473,6 @@ superfang: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -19200,7 +18492,6 @@ superpower: {
 			def: -1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -19215,7 +18506,6 @@ supersonic: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, sound: 1, bypasssub: 1, metronome: 1 },
 	volatileStatus: 'confusion',
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -19232,7 +18522,6 @@ supersonicskystrike: {
 	priority: 0,
 	flags: {},
 	isZ: "flyiniumz",
-	secondary: null,
 	target: "normal",
 	type: "Flying",
 	contestType: "Cool",
@@ -19246,7 +18535,6 @@ surf: {
 	pp: 15,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, nonsky: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacent",
 	type: "Water",
 	contestType: "Beautiful",
@@ -19262,7 +18550,6 @@ surgingstrikes: {
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1 },
 	willCrit: true,
 	multihit: 3,
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	zMove: { basePower: 140 },
@@ -19281,7 +18568,6 @@ swagger: {
 	boosts: {
 		atk: 2,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -19308,7 +18594,6 @@ swallow: {
 		pokemon.removeVolatile('stockpile');
 		return success || this.NOT_FAIL;
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -19324,7 +18609,6 @@ sweetkiss: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'confusion',
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	zMove: { boost: { spa: 1 } },
@@ -19342,7 +18626,6 @@ sweetscent: {
 	boosts: {
 		evasion: -2,
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Normal",
 	zMove: { boost: { accuracy: 1 } },
@@ -19357,7 +18640,6 @@ swift: {
 	pp: 20,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Normal",
 	contestType: "Cool",
@@ -19377,7 +18659,7 @@ switcheroo: {
 	onHit(target, source, move) {
 		const yourItem = target.takeItem(source);
 		const myItem = source.takeItem();
-		if (target.item || source.item || (!yourItem && !myItem)) {
+		if (yourItem === false || myItem === false || (!yourItem && !myItem)) {
 			if (yourItem) target.item = yourItem.id;
 			if (myItem) source.item = myItem.id;
 			return false;
@@ -19404,7 +18686,6 @@ switcheroo: {
 			this.add('-enditem', source, myItem, '[silent]', '[from] move: Switcheroo');
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { boost: { spe: 2 } },
@@ -19422,7 +18703,6 @@ swordsdance: {
 	boosts: {
 		atk: 2,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { effect: 'clearnegativeboost' },
@@ -19441,7 +18721,6 @@ synchronoise: {
 	onTryImmunity(target, source) {
 		return target.hasType(source.getTypes());
 	},
-	secondary: null,
 	target: "allAdjacent",
 	type: "Psychic",
 	contestType: "Clever",
@@ -19457,7 +18736,7 @@ synthesis: {
 	flags: { snatch: 1, heal: 1, metronome: 1 },
 	onHit(pokemon) {
 		let factor = 0.5;
-		switch (pokemon.effectiveWeather()) {
+		switch (pokemon.effectiveWeather(true)) {
 		case 'sunnyday':
 		case 'desolateland':
 			factor = 0.667;
@@ -19477,7 +18756,6 @@ synthesis: {
 		}
 		return success;
 	},
-	secondary: null,
 	target: "self",
 	type: "Grass",
 	zMove: { effect: 'clearnegativeboost' },
@@ -19528,7 +18806,6 @@ tachyoncutter: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1, slicing: 1 },
 	multihit: 2,
-	secondary: null,
 	target: "normal",
 	type: "Steel",
 	zMove: { basePower: 180 },
@@ -19544,7 +18821,6 @@ tackle: {
 	pp: 35,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -19561,7 +18837,6 @@ tailglow: {
 	boosts: {
 		spa: 3,
 	},
-	secondary: null,
 	target: "self",
 	type: "Bug",
 	zMove: { effect: 'clearnegativeboost' },
@@ -19577,7 +18852,6 @@ tailslap: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 140 },
@@ -19596,7 +18870,6 @@ tailwhip: {
 	boosts: {
 		def: -1,
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Normal",
 	zMove: { boost: { atk: 1 } },
@@ -19637,7 +18910,6 @@ tailwind: {
 			this.add('-sideend', side, 'move: Tailwind');
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Flying",
 	zMove: { effect: 'crit2' },
@@ -19653,7 +18925,6 @@ takedown: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	recoil: [1, 4],
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -19671,7 +18942,6 @@ takeheart: {
 		const success = !!this.boost({ spa: 1, spd: 1 });
 		return pokemon.cureStatus() || success;
 	},
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 },
@@ -19701,7 +18971,6 @@ tarshot: {
 	boosts: {
 		spe: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Rock",
 },
@@ -19743,7 +19012,6 @@ taunt: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { boost: { atk: 1 } },
@@ -19762,7 +19030,6 @@ tearfullook: {
 		atk: -1,
 		spa: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -19796,7 +19063,6 @@ teatime: {
 			pokemon.eatItem(true);
 		}
 	},
-	secondary: null,
 	target: "all",
 	type: "Normal",
 },
@@ -19814,7 +19080,6 @@ technoblast: {
 		if (pokemon.ignoringItem()) return;
 		move.type = this.runEvent('Drive', pokemon, null, move, 'Normal');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cool",
@@ -19830,7 +19095,6 @@ tectonicrage: {
 	priority: 0,
 	flags: {},
 	isZ: "groundiumz",
-	secondary: null,
 	target: "normal",
 	type: "Ground",
 	contestType: "Cool",
@@ -19845,7 +19109,6 @@ teeterdance: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, dance: 1, metronome: 1 },
 	volatileStatus: 'confusion',
-	secondary: null,
 	target: "allAdjacent",
 	type: "Normal",
 	zMove: { boost: { spa: 1 } },
@@ -19899,7 +19162,6 @@ telekinesis: {
 			this.add('-end', target, 'Telekinesis');
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spa: 1 } },
@@ -19918,7 +19180,6 @@ teleport: {
 		return !!this.canSwitch(source.side);
 	},
 	selfSwitch: true,
-	secondary: null,
 	target: "self",
 	type: "Psychic",
 	zMove: { effect: 'heal' },
@@ -19940,7 +19201,6 @@ temperflare: {
 	pp: 10,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 },
@@ -19977,7 +19237,6 @@ terablast: {
 			move.self = { boosts: { atk: -1, spa: -1 } };
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 },
@@ -20003,7 +19262,6 @@ terastarstorm: {
 			move.target = 'allAdjacentFoes';
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 },
@@ -20039,7 +19297,6 @@ terrainpulse: {
 			this.debug('BP doubled in Terrain');
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 160 },
@@ -20070,7 +19327,6 @@ thief: {
 		this.add('-enditem', target, yourItem, '[silent]', '[from] move: Thief', `[of] ${source}`);
 		this.add('-item', source, yourItem, '[from] move: Thief', `[of] ${target}`);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	contestType: "Tough",
@@ -20095,7 +19351,6 @@ thousandarrows: {
 	},
 	volatileStatus: 'smackdown',
 	ignoreImmunity: { 'Ground': true },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Ground",
 	zMove: { basePower: 180 },
@@ -20114,7 +19369,6 @@ thousandwaves: {
 	onHit(target, source, move) {
 		if (source.isActive) target.addVolatile('trapped', source, move, 'trapper');
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Ground",
 	contestType: "Tough",
@@ -20131,7 +19385,6 @@ thrash: {
 	self: {
 		volatileStatus: 'lockedmove',
 	},
-	secondary: null,
 	target: "randomNormal",
 	type: "Normal",
 	contestType: "Tough",
@@ -20241,7 +19494,6 @@ thundercage: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 },
@@ -20261,7 +19513,6 @@ thunderclap: {
 			return false;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Clever",
@@ -20351,7 +19602,6 @@ thunderwave: {
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	status: 'par',
 	ignoreImmunity: false,
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	zMove: { boost: { spd: 1 } },
@@ -20370,7 +19620,6 @@ tickle: {
 		atk: -1,
 		def: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { def: 1 } },
@@ -20403,7 +19652,6 @@ tidyup: {
 		if (success) this.add('-activate', pokemon, 'move: Tidy Up');
 		return !!this.boost({ atk: 1, spe: 1 }, pokemon, pokemon, null, false, true) || success;
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 },
@@ -20427,7 +19675,6 @@ topsyturvy: {
 		if (!success) return false;
 		this.add('-invertboost', target, '[from] move: Topsy-Turvy');
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { boost: { atk: 1 } },
@@ -20481,7 +19728,6 @@ torment: {
 			if (pokemon.lastMove && pokemon.lastMove.id !== 'struggle') pokemon.disableMove(pokemon.lastMove.id);
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 	zMove: { boost: { def: 1 } },
@@ -20498,7 +19744,6 @@ toxic: {
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	// No Guard-like effect for Poison-type users implemented in Scripts#tryMoveHit
 	status: 'tox',
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	zMove: { boost: { def: 1 } },
@@ -20539,7 +19784,6 @@ toxicspikes: {
 			}
 		},
 	},
-	secondary: null,
 	target: "foeSide",
 	type: "Poison",
 	zMove: { boost: { def: 1 } },
@@ -20558,7 +19802,6 @@ toxicthread: {
 	boosts: {
 		spe: -1,
 	},
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	zMove: { boost: { spe: 1 } },
@@ -20599,7 +19842,6 @@ transform: {
 			return false;
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { effect: 'heal' },
@@ -20617,14 +19859,8 @@ triattack: {
 	secondary: {
 		chance: 20,
 		onHit(target, source) {
-			const result = this.random(3);
-			if (result === 0) {
-				target.trySetStatus('brn', source);
-			} else if (result === 1) {
-				target.trySetStatus('par', source);
-			} else {
-				target.trySetStatus('frz', source);
-			}
+			const status = this.sample(['brn', 'par', 'frz']);
+			target.trySetStatus(status, source);
 		},
 	},
 	target: "normal",
@@ -20646,7 +19882,7 @@ trick: {
 	onHit(target, source, move) {
 		const yourItem = target.takeItem(source);
 		const myItem = source.takeItem();
-		if (target.item || source.item || (!yourItem && !myItem)) {
+		if (yourItem === false || myItem === false || (!yourItem && !myItem)) {
 			if (yourItem) target.item = yourItem.id;
 			if (myItem) source.item = myItem.id;
 			return false;
@@ -20673,7 +19909,6 @@ trick: {
 			this.add('-enditem', source, myItem, '[silent]', '[from] move: Trick');
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	zMove: { boost: { spe: 2 } },
@@ -20702,7 +19937,6 @@ trickortreat: {
 			}
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Ghost",
 	zMove: { boost: { atk: 1, def: 1, spa: 1, spd: 1, spe: 1 } },
@@ -20744,7 +19978,6 @@ trickroom: {
 			this.add('-fieldend', 'move: Trick Room');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Psychic",
 	zMove: { boost: { accuracy: 1 } },
@@ -20788,7 +20021,6 @@ tripleaxel: {
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: 3,
 	multiaccuracy: true,
-	secondary: null,
 	target: "normal",
 	type: "Ice",
 	zMove: { basePower: 120 },
@@ -20804,7 +20036,6 @@ tripledive: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: 3,
-	secondary: null,
 	target: "normal",
 	type: "Water",
 },
@@ -20822,7 +20053,6 @@ triplekick: {
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	multihit: 3,
 	multiaccuracy: true,
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	zMove: { basePower: 120 },
@@ -20885,10 +20115,8 @@ trumpcard: {
 	isNonstandard: "Past",
 	name: "Trump Card",
 	pp: 5,
-	noPPBoosts: true,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 160 },
@@ -20905,7 +20133,6 @@ twinbeam: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1 },
 	multihit: 2,
-	secondary: null,
 	target: "normal",
 	type: "Psychic",
 	contestType: "Cool",
@@ -20941,7 +20168,6 @@ twinkletackle: {
 	priority: 0,
 	flags: {},
 	isZ: "fairiumz",
-	secondary: null,
 	target: "normal",
 	type: "Fairy",
 	contestType: "Cool",
@@ -21040,7 +20266,6 @@ uproar: {
 			}
 		},
 	},
-	secondary: null,
 	target: "randomNormal",
 	type: "Normal",
 	contestType: "Cute",
@@ -21055,7 +20280,6 @@ uturn: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	selfSwitch: true,
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cute",
@@ -21069,7 +20293,6 @@ vacuumwave: {
 	pp: 30,
 	priority: 1,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -21091,7 +20314,6 @@ vcreate: {
 			spd: -1,
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	zMove: { basePower: 220 },
@@ -21112,7 +20334,6 @@ veeveevolley: {
 	pp: 20,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Cute",
@@ -21133,7 +20354,6 @@ venomdrench: {
 		}
 		return false;
 	},
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Poison",
 	zMove: { boost: { def: 1 } },
@@ -21153,7 +20373,6 @@ venoshock: {
 			return this.chainModify(2);
 		}
 	},
-	secondary: null,
 	target: "normal",
 	type: "Poison",
 	contestType: "Beautiful",
@@ -21172,7 +20391,6 @@ victorydance: {
 		def: 1,
 		spe: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Fighting",
 },
@@ -21185,7 +20403,6 @@ vinewhip: {
 	pp: 25,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Cool",
@@ -21199,7 +20416,6 @@ visegrip: {
 	pp: 30,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -21214,7 +20430,6 @@ vitalthrow: {
 	pp: 10,
 	priority: -1,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Cool",
@@ -21229,7 +20444,6 @@ voltswitch: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	selfSwitch: true,
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Cool",
@@ -21272,7 +20486,6 @@ wakeupslap: {
 	onHit(target) {
 		if (target.status === 'slp') target.cureStatus();
 	},
-	secondary: null,
 	target: "normal",
 	type: "Fighting",
 	contestType: "Tough",
@@ -21303,7 +20516,6 @@ watergun: {
 	pp: 25,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Cute",
@@ -21375,7 +20587,6 @@ waterpledge: {
 			}
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Beautiful",
@@ -21414,7 +20625,6 @@ watershuriken: {
 	priority: 1,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	multihit: [2, 5],
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Cool",
@@ -21448,7 +20658,6 @@ watersport: {
 			this.add('-fieldend', 'move: Water Sport');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Water",
 	zMove: { boost: { spd: 1 } },
@@ -21468,7 +20677,6 @@ waterspout: {
 	pp: 5,
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "allAdjacentFoes",
 	type: "Water",
 	contestType: "Beautiful",
@@ -21483,7 +20691,6 @@ wavecrash: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	recoil: [33, 100],
-	secondary: null,
 	target: "normal",
 	type: "Water",
 },
@@ -21535,7 +20742,6 @@ weatherball: {
 		}
 		this.debug(`BP: ${move.basePower}`);
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 160 },
@@ -21552,7 +20758,6 @@ whirlpool: {
 	priority: 0,
 	flags: { protect: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Water",
 	contestType: "Beautiful",
@@ -21567,7 +20772,6 @@ whirlwind: {
 	priority: -6,
 	flags: { reflectable: 1, mirror: 1, bypasssub: 1, allyanim: 1, metronome: 1, noassist: 1, failcopycat: 1, wind: 1 },
 	forceSwitch: true,
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spd: 1 } },
@@ -21583,7 +20787,6 @@ wickedblow: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, punch: 1 },
 	willCrit: true,
-	secondary: null,
 	target: "normal",
 	type: "Dark",
 },
@@ -21634,11 +20837,7 @@ wideguard: {
 			if (move?.target !== 'allAdjacent' && move.target !== 'allAdjacentFoes') {
 				return;
 			}
-			if (move.isZ || move.isMax) {
-				if (['gmaxoneblow', 'gmaxrapidflow'].includes(move.id)) return;
-				target.getMoveHitData(move).zBrokeProtect = true;
-				return;
-			}
+			if (this.checkMoveBypassesProtect(move, source, target)) return;
 			this.add('-activate', target, 'move: Wide Guard');
 			const lockedmove = source.getVolatile('lockedmove');
 			if (lockedmove) {
@@ -21650,7 +20849,6 @@ wideguard: {
 			return this.NOT_FAIL;
 		},
 	},
-	secondary: null,
 	target: "allySide",
 	type: "Rock",
 	zMove: { boost: { def: 1 } },
@@ -21687,7 +20885,6 @@ wildcharge: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	recoil: [1, 4],
-	secondary: null,
 	target: "normal",
 	type: "Electric",
 	contestType: "Tough",
@@ -21702,7 +20899,6 @@ willowisp: {
 	priority: 0,
 	flags: { protect: 1, reflectable: 1, mirror: 1, metronome: 1 },
 	status: 'brn',
-	secondary: null,
 	target: "normal",
 	type: "Fire",
 	zMove: { boost: { atk: 1 } },
@@ -21717,7 +20913,6 @@ wingattack: {
 	pp: 35,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, distance: 1, metronome: 1 },
-	secondary: null,
 	target: "any",
 	type: "Flying",
 	contestType: "Cool",
@@ -21754,7 +20949,6 @@ wish: {
 			}
 		},
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { spd: 1 } },
@@ -21772,7 +20966,6 @@ withdraw: {
 	boosts: {
 		def: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Water",
 	zMove: { boost: { def: 1 } },
@@ -21822,7 +21015,6 @@ wonderroom: {
 			this.add('-fieldend', 'move: Wonder Room');
 		},
 	},
-	secondary: null,
 	target: "all",
 	type: "Psychic",
 	zMove: { boost: { spd: 1 } },
@@ -21838,7 +21030,6 @@ woodhammer: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	recoil: [33, 100],
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	contestType: "Tough",
@@ -21856,7 +21047,6 @@ workup: {
 		atk: 1,
 		spa: 1,
 	},
-	secondary: null,
 	target: "self",
 	type: "Normal",
 	zMove: { boost: { atk: 1 } },
@@ -21888,7 +21078,6 @@ worryseed: {
 		if (!oldAbility) return oldAbility as false | null;
 		if (target.status === 'slp') target.cureStatus();
 	},
-	secondary: null,
 	target: "normal",
 	type: "Grass",
 	zMove: { boost: { spe: 1 } },
@@ -21904,7 +21093,6 @@ wrap: {
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
 	volatileStatus: 'partiallytrapped',
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	contestType: "Tough",
@@ -21926,7 +21114,6 @@ wringout: {
 	pp: 5,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { basePower: 190 },
@@ -21942,7 +21129,6 @@ xscissor: {
 	pp: 15,
 	priority: 0,
 	flags: { contact: 1, protect: 1, mirror: 1, metronome: 1, slicing: 1 },
-	secondary: null,
 	target: "normal",
 	type: "Bug",
 	contestType: "Cool",
@@ -21974,7 +21160,6 @@ yawn: {
 			target.trySetStatus('slp', this.effectState.source);
 		},
 	},
-	secondary: null,
 	target: "normal",
 	type: "Normal",
 	zMove: { boost: { spe: 1 } },
@@ -22110,13 +21295,8 @@ polarflare: {
 		chance: 10,
 		status: 'frz',
 	},
-	onHit(target, pokemon, move) {
+	onAfterMoveSecondarySelf(pokemon) {
 		if (pokemon.baseSpecies.baseSpecies === 'Ramnarok' && !pokemon.transformed) {
-			move.willChangeForme = true;
-		}
-	},
-	onAfterMoveSecondarySelf(pokemon, target, move) {
-		if (move.willChangeForme) {
 			const forme = pokemon.species.id === 'ramnarokradiant' ? '' : '-Radiant';
 			pokemon.formeChange('Ramnarok' + forme, this.effect, false, '0', '[msg]');
 		}

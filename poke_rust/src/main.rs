@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod dex_data;
+mod item;
 mod pokemon;
 
 #[derive(Parser, Debug)]

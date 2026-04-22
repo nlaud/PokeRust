@@ -1,4 +1,5 @@
 use crate::dex_data::{PokemonBoostTable, PokemonData, PokemonType, VolatileStatus, Status, parse_type};
+use crate::item::Item;
 use std::collections::HashMap;
 use std::fs;
 
@@ -45,33 +46,114 @@ pub enum Nature{
     Serious
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PokemonState{
     pub fainted: bool,
     pub species: String,//should be all lower case, all non-alpha characters removed
     pub types: Vec<PokemonType>,
-    pub tera_type: PokemonType,
     pub is_tera: bool,
-
-    pub stats: PokemonStatsTable,
-    pub boosts: PokemonBoostTable,
+    pub is_mega: bool,
+    pub can_mega_evolve: bool,
 
     pub level: u8,
     pub hp: u16,
     pub moves: [String; 4],
-    pub item: String,
+    pub item: Item,
     pub nature: Nature,
 
+    pub boosts: PokemonBoostTable,
+    pub stats: PokemonStatsTable,
+    
     pub status: Option<Status>,
     pub volatiles: Vec<VolatileStatusState>,
 
     pub base_ability: String,
     pub ability: String,
 
-    pub last_move_failed: bool,//For stomping tantrum
-    
     pub gender: PokemonGender,
     pub weight_hg: u16,
+
+    pub tera_type: PokemonType,
+
+    pub mega_species: Option<String>,
+    pub mega_ability: Option<String>,
+
+    pub last_move_failed: bool,//For stomping tantrum
+
+    pub evs: [u8; 6],
+    pub ivs: [u8; 6],
+}
+
+impl std::fmt::Display for PokemonState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let gender_str = match self.gender {
+            PokemonGender::Male => " (M)",
+            PokemonGender::Female => " (F)",
+            PokemonGender::Genderless => "",
+        };
+        
+        let item_str = match &self.item {
+            Item::None => String::new(),
+            _ => format!(" @ {:?}", self.item),
+        };
+
+        let mut speciesChars = self.species.chars();
+        let species_str = match speciesChars.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().collect::<String>() + speciesChars.as_str(),
+        };
+
+
+        writeln!(f, "{}{}{}", species_str, gender_str, item_str)?;
+        writeln!(f, "Ability: {}", self.ability)?;
+        
+        if self.level != 100 {
+            writeln!(f, "Level: {}", self.level)?;
+        }
+        
+        writeln!(f, "Tera Type: {:?}", self.tera_type)?;
+        
+        let stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
+        
+        let mut ev_strs = Vec::new();
+        for i in 0..6 {
+            if self.evs[i] > 0 {
+                ev_strs.push(format!("{} {}", self.evs[i], stat_names[i]));
+            }
+        }
+        if !ev_strs.is_empty() {
+            writeln!(f, "EVs: {}", ev_strs.join(" / "))?;
+        }
+        
+        let mut iv_strs = Vec::new();
+        for i in 0..6 {
+            if self.ivs[i] < 31 {
+                iv_strs.push(format!("{} {}", self.ivs[i], stat_names[i]));
+            }
+        }
+        if !iv_strs.is_empty() {
+            writeln!(f, "IVs: {}", iv_strs.join(" / "))?;
+        }
+        
+        writeln!(f, "{:?} Nature", self.nature)?;
+        
+        for mov in &self.moves {
+            if !mov.is_empty() {
+                writeln!(f, "- {}", mov)?;
+            }
+        }
+        
+        write!(f, "Stats: {} HP / {} Atk / {} Def / {} SpA / {} SpD / {} Spe\n",
+            self.stats[0], self.stats[1], self.stats[2], self.stats[3], self.stats[4], self.stats[5])?;
+
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for PokemonState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,7 +162,7 @@ pub enum Player{
     P2,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FieldSlot{
     pub player: Player,
     pub slot_index: u8,
@@ -139,6 +221,38 @@ pub enum MatchState{
     BattleState(BattleState),
     TeamPreviewState(TeamPreviewState),
     GameOverState{winner:Player},
+}
+
+#[derive(Debug, Clone)]
+pub struct AttackCommand {
+    pub move_slot: usize,
+    pub target: Option<FieldSlot>,
+    pub terastallize: bool,
+    pub mega_evolve: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchCommand {
+    pub party_index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum BattleCommand {
+    Attack(AttackCommand),
+    Switch(SwitchCommand),
+}
+
+#[derive(Debug, Clone)]
+pub struct TeamPreviewCommand {
+    pub active_indices: Vec<usize>,
+    pub back_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PlayerCommand {
+    Battle(Vec<BattleCommand>),
+    TeamPreview(TeamPreviewCommand),
+    Forfeit,
 }
 
 // --- Stat Calculation Helpers ---
@@ -228,6 +342,70 @@ fn calc_stat(base: u16, iv: u8, ev: u8, level: u8, nature_mod: f32) -> u16 {
     (inner as f32 * nature_mod).floor() as u16
 }
 
+fn calc_stats_for_level(
+    base_stats: [u16; 6],
+    ivs: [u8; 6],
+    evs: [u8; 6],
+    level: u8,
+    nature: &Nature,
+) -> PokemonStatsTable {
+    let hp = calc_hp(base_stats[0], ivs[0], evs[0], level);
+    let mods = nature_stat_modifiers(nature);
+    [
+        hp,
+        calc_stat(base_stats[1], ivs[1], evs[1], level, mods[0]),
+        calc_stat(base_stats[2], ivs[2], evs[2], level, mods[1]),
+        calc_stat(base_stats[3], ivs[3], evs[3], level, mods[2]),
+        calc_stat(base_stats[4], ivs[4], evs[4], level, mods[3]),
+        calc_stat(base_stats[5], ivs[5], evs[5], level, mods[4]),
+    ]
+}
+
+fn is_mega_dex_entry(species_key: &str, data: &PokemonData) -> bool {
+    let forme_is_mega = data
+        .forme
+        .as_deref()
+        .map(|f| f.starts_with("mega"))
+        .unwrap_or(false);
+
+    forme_is_mega || species_key.contains("mega")
+}
+
+fn resolve_mega_species(
+    base_species_key: &str,
+    item_key: &str,
+    pokemon_dex: &HashMap<String, PokemonData>,
+) -> Option<String> {
+    if item_key.is_empty() {
+        return None;
+    }
+
+
+    let mut fallback: Option<String> = None;
+
+    for (candidate_key, data) in pokemon_dex {
+        if data.required_item.as_deref() != Some(item_key) {
+            continue;
+        }
+
+        let matches_base_species = data.base_species.as_deref() == Some(base_species_key)
+            || data.battle_only.as_deref() == Some(base_species_key);
+        if !matches_base_species {
+            continue;
+        }
+
+        if is_mega_dex_entry(candidate_key, data) {
+            return Some(candidate_key.clone());
+        }
+
+        if fallback.is_none() {
+            fallback = Some(candidate_key.clone());
+        }
+    }
+
+    fallback
+}
+
 // --- Team Sheet Parsing ---
 
 /// Parses a Showdown-format teamsheet file and returns a Vec of PokemonStates.
@@ -279,10 +457,10 @@ pub fn parse_team_sheet(path: &str, pokemon_dex: &HashMap<String, PokemonData>) 
         };
 
         // Check if the last paren group is a gender marker
-        let gender = match paren_groups.last() {
-            Some(&"M") => PokemonGender::Male,
-            Some(&"F") => PokemonGender::Female,
-            _          => PokemonGender::Genderless,
+        let explicit_gender = match paren_groups.last() {
+            Some(&"M") => Some(PokemonGender::Male),
+            Some(&"F") => Some(PokemonGender::Female),
+            _          => None,
         };
         let non_gender_groups: Vec<&str> = paren_groups.iter()
             .filter(|&&g| g != "M" && g != "F")
@@ -302,6 +480,11 @@ pub fn parse_team_sheet(path: &str, pokemon_dex: &HashMap<String, PokemonData>) 
                 normalize_string(text_before_parens)
             }
         };
+
+        let dex_entry = pokemon_dex.get(&species_key);
+        let gender = explicit_gender.unwrap_or_else(|| {
+            dex_entry.map(|data| data.default_gender).unwrap_or(PokemonGender::Genderless)
+        });
 
         // --- Parse remaining lines ---
         let mut ability = String::new();
@@ -376,31 +559,43 @@ pub fn parse_team_sheet(path: &str, pokemon_dex: &HashMap<String, PokemonData>) 
         };
 
         // --- Compute actual stats from base stats, EVs, IVs, level, nature ---
-        let hp = calc_hp(base_stats[0], ivs[0], evs[0], level);
-        let mods = nature_stat_modifiers(&nature);
-        // stats layout: [hp, atk, def, spa, spd, spe]
-        let stats: PokemonStatsTable = [
-            hp,
-            calc_stat(base_stats[1], ivs[1], evs[1], level, mods[0]),
-            calc_stat(base_stats[2], ivs[2], evs[2], level, mods[1]),
-            calc_stat(base_stats[3], ivs[3], evs[3], level, mods[2]),
-            calc_stat(base_stats[4], ivs[4], evs[4], level, mods[3]),
-            calc_stat(base_stats[5], ivs[5], evs[5], level, mods[4]),
-        ];
+        let stats = calc_stats_for_level(base_stats, ivs, evs, level, &nature);
+        let hp = stats[0];
 
         let normalized_ability = normalize_string(&ability);
+        let normalized_item_str = normalize_string(&item);
+        let item_enum = Item::from_str(&item);
+        let is_mega = dex_entry
+            .map(|data| is_mega_dex_entry(&species_key, data))
+            .unwrap_or(false);
+        let mega_species = if is_mega {
+            None
+        } else {
+            resolve_mega_species(&species_key, &normalized_item_str, pokemon_dex)
+        };
+        let mega_ability = mega_species
+            .as_ref()
+            .and_then(|key| pokemon_dex.get(key))
+            .and_then(|data| data.primary_ability.clone());
+
         team.push(PokemonState {
             fainted: false,
             species: species_key,
             types,
             tera_type,
             is_tera: false,
+            is_mega,
+            can_mega_evolve: mega_species.is_some(),
+            mega_species,
+            mega_ability,
             stats,
+            evs,
+            ivs,
             boosts: [0; 7],
             level,
             hp,
             moves,
-            item: normalize_string(item),
+            item: item_enum,
             nature,
             status: None,
             volatiles: Vec::new(),
@@ -413,6 +608,45 @@ pub fn parse_team_sheet(path: &str, pokemon_dex: &HashMap<String, PokemonData>) 
     }
 
     team
+}
+
+/// Applies Mega Evolution to a Pokemon if it is eligible.
+/// Returns true if Mega Evolution was applied.
+pub fn try_mega_evolution(mon: &mut PokemonState, pokemon_dex: &HashMap<String, PokemonData>) -> bool {
+    if mon.fainted || mon.is_mega || !mon.can_mega_evolve {
+        return false;
+    }
+
+    let mega_species_key = match mon.mega_species.clone() {
+        Some(key) => key,
+        None => return false,
+    };
+
+    let mega_data = match pokemon_dex.get(&mega_species_key) {
+        Some(data) => data,
+        None => return false,
+    };
+
+    let old_max_hp = mon.stats[0].max(1);
+    let hp_ratio = mon.hp.min(old_max_hp) as f32 / old_max_hp as f32;
+    let stats = calc_stats_for_level(mega_data.base_stats, mon.ivs, mon.evs, mon.level, &mon.nature);
+    let new_max_hp = stats[0].max(1);
+    let scaled_hp = (hp_ratio * new_max_hp as f32).floor() as u16;
+    let hp = if mon.hp == 0 { 0 } else { scaled_hp.clamp(1, new_max_hp) };
+
+    mon.species = mega_species_key;
+    mon.types = mega_data.types.clone();
+    mon.stats = stats;
+    mon.hp = hp;
+    mon.weight_hg = mega_data.weight;
+    if let Some(ability) = mega_data.primary_ability.as_ref() {
+        mon.ability = ability.clone();
+    }
+    mon.is_mega = true;
+    mon.can_mega_evolve = false;
+    mon.mega_species = None;
+
+    true
 }
 
 /// Builds a TeamPreviewState from two teamsheet file paths.

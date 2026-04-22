@@ -341,6 +341,12 @@ pub struct PokemonData {
     pub types: Vec<PokemonType>,
     pub base_stats: [u16; 6],
     pub weight: u16,
+    pub primary_ability: Option<String>,
+    pub base_species: Option<String>,
+    pub forme: Option<String>,
+    pub required_item: Option<String>,
+    pub battle_only: Option<String>,
+    pub default_gender: crate::pokemon::PokemonGender,
 }
 
 // --- Helpers ---
@@ -782,6 +788,39 @@ fn parse_stat(s: &str) -> Option<PokemonStat> {
     }
 }
 
+fn normalize_dex_id(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn extract_first_quoted_value(text: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        if let Some(start) = text.find(quote) {
+            let rest = &text[start + 1..];
+            if let Some(end) = rest.find(quote) {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_primary_ability_from_text(text: &str) -> Option<String> {
+    for key in ["\"0\":", "0:"] {
+        if let Some(pos) = text.find(key) {
+            let rest = &text[pos + key.len()..];
+            if let Some(ability) = extract_first_quoted_value(rest) {
+                return Some(normalize_dex_id(&ability));
+            }
+        }
+    }
+
+    // Fallback: take the first quoted ability-like value if key `0` wasn't found.
+    extract_first_quoted_value(text).map(|s| normalize_dex_id(&s))
+}
+
 /// Split file content into top-level entry blocks.
 /// Returns Vec of (key, block_lines) where block_lines are the lines inside the braces.
 fn split_entries(content: &str) -> Vec<(String, Vec<String>)> {
@@ -804,7 +843,7 @@ fn split_entries(content: &str) -> Vec<(String, Vec<String>)> {
             current_key = key;
             current_lines.clear();
             in_entry = true;
-            depth += open - close;
+            depth += open;
             continue;
         }
 
@@ -915,6 +954,13 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
         let mut types: Vec<PokemonType> = Vec::new();
         let mut base_stats = [0u16; 6];
         let mut weight: u16 = 0;
+        let mut primary_ability: Option<String> = None;
+        let mut base_species: Option<String> = None;
+        let mut forme: Option<String> = None;
+        let mut required_item: Option<String> = None;
+        let mut battle_only: Option<String> = None;
+        let mut default_gender = crate::pokemon::PokemonGender::Male;
+        let mut has_explicit_gender = false;
 
         for line in lines {
             let trimmed = line.trim();
@@ -967,6 +1013,65 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
                         weight = (w * 10.0).round() as u16; // hectograms
                     }
                 }
+            } else if trimmed.starts_with("abilities:") {
+                primary_ability = parse_primary_ability_from_text(trimmed);
+            } else if trimmed.starts_with("baseSpecies:") {
+                if let Some(val) = extract_quoted(trimmed, "baseSpecies") {
+                    base_species = Some(normalize_dex_id(&val));
+                }
+            } else if trimmed.starts_with("forme:") {
+                if let Some(val) = extract_quoted(trimmed, "forme") {
+                    forme = Some(normalize_dex_id(&val));
+                }
+            } else if trimmed.starts_with("requiredItem:") {
+                if let Some(val) = extract_quoted(trimmed, "requiredItem") {
+                    required_item = Some(normalize_dex_id(&val));
+                }
+            } else if trimmed.starts_with("battleOnly:") {
+                // Handles both `battleOnly: "X"` and `battleOnly: ["X", ...]`.
+                if let Some(val) = extract_first_quoted_value(trimmed) {
+                    battle_only = Some(normalize_dex_id(&val));
+                }
+            } else if trimmed.starts_with("gender:") {
+                if let Some(val) = extract_quoted(trimmed, "gender") {
+                    has_explicit_gender = true;
+                    if val == "M" {
+                        default_gender = crate::pokemon::PokemonGender::Male;
+                    } else if val == "F" {
+                        default_gender = crate::pokemon::PokemonGender::Female;
+                    } else if val == "N" {
+                        default_gender = crate::pokemon::PokemonGender::Genderless;
+                    }
+                }
+            } else if trimmed.starts_with("genderRatio:") && !has_explicit_gender {
+                // genderRatio: { M: 0.875, F: 0.125 }
+                let mut m_ratio = 0.5;
+                let mut f_ratio = 0.5;
+                if let Some(start) = trimmed.find('{') {
+                    if let Some(end) = trimmed.find('}') {
+                        let inner = &trimmed[start + 1..end];
+                        for part in inner.split(',') {
+                            if let Some((k, v)) = part.split_once(':') {
+                                let k = k.trim();
+                                if let Ok(val) = v.trim().parse::<f64>() {
+                                    if k == "M" {
+                                        m_ratio = val;
+                                    } else if k == "F" {
+                                        f_ratio = val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if m_ratio > f_ratio {
+                    default_gender = crate::pokemon::PokemonGender::Male;
+                } else if f_ratio > m_ratio {
+                    default_gender = crate::pokemon::PokemonGender::Female;
+                } else {
+                    // Default to Male if equal
+                    default_gender = crate::pokemon::PokemonGender::Male;
+                }
             }
         }
 
@@ -976,6 +1081,12 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
                 types,
                 base_stats,
                 weight,
+                primary_ability,
+                base_species,
+                forme,
+                required_item,
+                battle_only,
+                default_gender,
             });
         }
     }
