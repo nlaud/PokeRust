@@ -1,10 +1,13 @@
 use clap::Parser;
-use pokemon::MatchState;
+use battle::MatchState;
 
 mod dex_data;
 mod data;
 mod pokemon;
+mod battle;
 mod simulator;
+
+use std::io::Write;
 
 #[derive(Parser, Debug)]
 #[command(author = "Blazestorm", version = "1.0", about = "Simulates Pokemon Battles")]
@@ -51,7 +54,7 @@ fn main() {
     }
 
     //Parse teamsheets
-    let preview = simulator::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, 2);
+    let preview = simulator::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, &move_dex, 2, 4);
 
     if args.verbosity >= 1 {
         println!("P1 team: {} Pokemon | P2 team: {} Pokemon",
@@ -63,10 +66,50 @@ fn main() {
         println!("P2 team: {:#?}", preview.p2_mons);
     }
     
-    let state = MatchState::TeamPreviewState(preview);
-    if args.verbosity >= 3 {
-        let (p1_cmds, p2_cmds) = simulator::get_possible_commands(&state, &move_dex);
-        println!("P1 possible commands: {:#?}", p1_cmds);
-        println!("P2 possible commands: {:#?}", p2_cmds);
+    let mut state = MatchState::TeamPreviewState(preview);
+    if args.verbosity >= 1 {
+        let (p1_cmds, p2_cmds) = simulator::get_possible_commands(&state, &move_dex, &pokemon_dex);
+        
+        println!("--- P1 Possible Team Preview Commands ---");
+        for (i, cmd) in p1_cmds.iter().enumerate() {
+            println!("{}: {:?}", i, cmd);
+        }
+        
+        println!("\n--- P2 Possible Team Preview Commands ---");
+        for (i, cmd) in p2_cmds.iter().enumerate() {
+            println!("{}: {:?}", i, cmd);
+        }
+        
+        let mut p1_input = String::new();
+        let mut p2_input = String::new();
+        
+        print!("\nEnter P1 command index: ");
+        std::io::stdout().flush().unwrap();
+        std::io::stdin().read_line(&mut p1_input).unwrap();
+        let p1_idx: usize = p1_input.trim().parse().unwrap_or(0);
+        
+        print!("Enter P2 command index: ");
+        std::io::stdout().flush().unwrap();
+        std::io::stdin().read_line(&mut p2_input).unwrap();
+        let p2_idx: usize = p2_input.trim().parse().unwrap_or(0);
+        
+        println!("\nApplying commands P1: {}, P2: {}", p1_idx, p2_idx);
+        let next_states = simulator::apply_player_commands(&state, &p1_cmds[p1_idx], &p2_cmds[p2_idx]);
+        
+        if let Some((next_state, _prob)) = next_states.into_iter().next() {
+            state = next_state;
+            if let MatchState::BattleState(ref battle) = state {
+                println!("\nNew Battle State:\n{}", battle);
+                
+                let (new_p1_cmds, new_p2_cmds) = simulator::get_possible_commands(&state, &move_dex, &pokemon_dex);
+                println!("--- Next Possible Battle Commands ---");
+                println!("P1 possible commands count: {}", new_p1_cmds.len());
+                println!("P2 possible commands count: {}", new_p2_cmds.len());
+                if args.verbosity >= 3 {
+                    println!("P1 commands: {:#?}", new_p1_cmds);
+                    println!("P2 commands: {:#?}", new_p2_cmds);
+                }
+            }
+        }
     }
 }

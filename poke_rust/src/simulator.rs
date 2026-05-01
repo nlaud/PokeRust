@@ -1,7 +1,9 @@
 use std::collections::HashMap;
-use crate::pokemon::{
+use crate::battle::{
     MatchState, BattleState, TeamPreviewState, PlayerCommand, BattleCommand,
     AttackCommand, SwitchCommand, TeamPreviewCommand, Player, FieldSlot,
+};
+use crate::pokemon::{
     PokemonState, parse_team_sheet
 };
 use crate::dex_data::{MoveData, MoveTarget, PokemonData};
@@ -13,12 +15,15 @@ pub fn team_preview_state_from_teamsheets(
     p1_path: &str,
     p2_path: &str,
     pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
     active_per_side: u8,
+    brought_per_side: u8,
 ) -> TeamPreviewState {
     TeamPreviewState {
         active_per_side,
-        p1_mons: parse_team_sheet(p1_path, pokemon_dex),
-        p2_mons: parse_team_sheet(p2_path, pokemon_dex),
+        brought_per_side,
+        p1_mons: parse_team_sheet(p1_path, pokemon_dex, move_dex),
+        p2_mons: parse_team_sheet(p2_path, pokemon_dex, move_dex),
     }
 }
 
@@ -49,23 +54,30 @@ fn team_preview_commands(state: &TeamPreviewState, player: Player) -> Vec<Player
         Player::P2 => state.p2_mons.len(),
     };
     
-    let active_len = (state.active_per_side as usize).min(mons_len);
+    let brought_len = (state.brought_per_side as usize).min(mons_len);
+    let active_len = (state.active_per_side as usize).min(brought_len);
     
     let mut commands = Vec::new();
     if mons_len == 0 { return commands; }
     
-    let combos = get_combinations(mons_len, active_len);
-    for active in combos {
-        let mut back = Vec::new();
-        for i in 0..mons_len {
-            if !active.contains(&i) {
-                back.push(i);
+    let brought_combos = get_combinations(mons_len, brought_len);
+    for brought in brought_combos {
+        let active_combos_indices = get_combinations(brought_len, active_len);
+        for act_idx in active_combos_indices {
+            let mut active = Vec::new();
+            let mut back = Vec::new();
+            for i in 0..brought_len {
+                if act_idx.contains(&i) {
+                    active.push(brought[i]);
+                } else {
+                    back.push(brought[i]);
+                }
             }
+            commands.push(PlayerCommand::TeamPreview(TeamPreviewCommand {
+                active_indices: active,
+                back_indices: back,
+            }));
         }
-        commands.push(PlayerCommand::TeamPreview(TeamPreviewCommand {
-            active_indices: active,
-            back_indices: back,
-        }));
     }
     
     commands
@@ -134,7 +146,8 @@ fn generate_commands_for_active(
     player: Player,
     slot_idx: usize,
     state: &BattleState,
-    move_dex: &HashMap<PokemonMove, MoveData>
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>
 ) -> Vec<BattleCommand> {
     let (my_active, my_back, _has_tera) = match player {
         Player::P1 => (&state.p1_active_mons, &state.p1_back_mons, state.p1_has_tera),
@@ -161,7 +174,20 @@ fn generate_commands_for_active(
     }
     
     let can_tera = !_has_tera && !mon.is_tera;
-    let can_mega = mon.can_mega_evolve;
+    
+    let mut can_mega = mon.has_mega_form;
+    if can_mega {
+        if let Some(mega_sp) = &mon.mega_species {
+            if let Some(mega_data) = pokemon_dex.get(mega_sp) {
+                if let Some(req_item) = &mega_data.required_item {
+                    let held_item_str = format!("{:?}", mon.item).to_lowercase();
+                    if held_item_str != *req_item {
+                        can_mega = false;
+                    }
+                }
+            }
+        }
+    }
 
     // Attacks (Moves)
     for (i, move_name_opt) in mon.moves.iter().enumerate() {
@@ -279,7 +305,7 @@ fn is_valid_command_combination(cmds: &[BattleCommand]) -> bool {
     true
 }
 
-fn battle_commands(state: &BattleState, player: Player, move_dex: &HashMap<PokemonMove, MoveData>) -> Vec<PlayerCommand> {
+fn battle_commands(state: &BattleState, player: Player, move_dex: &HashMap<PokemonMove, MoveData>, pokemon_dex: &HashMap<Species, PokemonData>) -> Vec<PlayerCommand> {
     let active_len = match player {
         Player::P1 => state.p1_active_mons.len(),
         Player::P2 => state.p2_active_mons.len(),
@@ -287,7 +313,7 @@ fn battle_commands(state: &BattleState, player: Player, move_dex: &HashMap<Pokem
     
     let mut slot_cmds = Vec::new();
     for i in 0..active_len {
-        let cmds = generate_commands_for_active(player, i, state, move_dex);
+        let cmds = generate_commands_for_active(player, i, state, move_dex, pokemon_dex);
         slot_cmds.push(cmds);
     }
     
@@ -300,7 +326,8 @@ fn battle_commands(state: &BattleState, player: Player, move_dex: &HashMap<Pokem
 
 pub fn get_possible_commands(
     state: &MatchState,
-    move_dex: &HashMap<PokemonMove, MoveData>
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>
 ) -> (Vec<PlayerCommand>, Vec<PlayerCommand>) {
     match state {
         MatchState::TeamPreviewState(preview) => {
@@ -311,12 +338,110 @@ pub fn get_possible_commands(
         }
         MatchState::BattleState(battle) => {
             (
-                battle_commands(battle, Player::P1, move_dex),
-                battle_commands(battle, Player::P2, move_dex)
+                battle_commands(battle, Player::P1, move_dex, pokemon_dex),
+                battle_commands(battle, Player::P2, move_dex, pokemon_dex)
             )
         }
         MatchState::GameOverState { .. } => {
             (vec![], vec![])
+        }
+    }
+}
+
+pub fn step_match_state(
+    state: &MatchState,
+    p1_cmd: &PlayerCommand,
+    p2_cmd: &PlayerCommand
+) -> Vec<(MatchState, f64)> {
+    match state {
+        MatchState::TeamPreviewState(preview) => {
+            let p1_preview = match p1_cmd {
+                PlayerCommand::TeamPreview(c) => c,
+                _ => panic!("Expected TeamPreview command for P1"),
+            };
+            let p2_preview = match p2_cmd {
+                PlayerCommand::TeamPreview(c) => c,
+                _ => panic!("Expected TeamPreview command for P2"),
+            };
+
+            let p1_active_mons: Vec<PokemonState> = p1_preview.active_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
+            let p1_back_mons: Vec<PokemonState> = p1_preview.back_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
+            
+            let p2_active_mons: Vec<PokemonState> = p2_preview.active_indices.iter().map(|&i| preview.p2_mons[i].clone()).collect();
+            let p2_back_mons: Vec<PokemonState> = p2_preview.back_indices.iter().map(|&i| preview.p2_mons[i].clone()).collect();
+
+            let next_state = MatchState::BattleState(BattleState {
+                active_per_side: preview.active_per_side,
+                p1_active_mons,
+                p2_active_mons,
+                p1_back_mons,
+                p2_back_mons,
+                action_queue: vec![],
+                turn_number: 1,
+                turn_started: false,
+                turn_ended: false,
+                p1_has_tera: true,
+                p2_has_tera: true,
+                p1_has_mega: true,
+                p2_has_mega: true,
+            });
+
+            vec![(next_state, 1.0)]
+        }
+        MatchState::BattleState(_) => {
+            unimplemented!("BattleState stepping is not yet implemented");
+        }
+        MatchState::GameOverState { .. } => {
+            vec![(state.clone(), 1.0)]
+        }
+    }
+}
+
+pub fn apply_player_commands(
+    state: &MatchState,
+    p1_cmd: &PlayerCommand,
+    p2_cmd: &PlayerCommand
+) -> Vec<(MatchState, f64)> {
+    match state {
+        MatchState::TeamPreviewState(preview) => {
+            let p1_preview = match p1_cmd {
+                PlayerCommand::TeamPreview(c) => c,
+                _ => panic!("Expected TeamPreview command for P1"),
+            };
+            let p2_preview = match p2_cmd {
+                PlayerCommand::TeamPreview(c) => c,
+                _ => panic!("Expected TeamPreview command for P2"),
+            };
+
+            let p1_active_mons: Vec<PokemonState> = p1_preview.active_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
+            let p1_back_mons: Vec<PokemonState> = p1_preview.back_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
+            
+            let p2_active_mons: Vec<PokemonState> = p2_preview.active_indices.iter().map(|&i| preview.p2_mons[i].clone()).collect();
+            let p2_back_mons: Vec<PokemonState> = p2_preview.back_indices.iter().map(|&i| preview.p2_mons[i].clone()).collect();
+
+            let next_state = MatchState::BattleState(BattleState {
+                active_per_side: preview.active_per_side,
+                p1_active_mons,
+                p2_active_mons,
+                p1_back_mons,
+                p2_back_mons,
+                action_queue: vec![],
+                turn_number: 1,
+                turn_started: false,
+                turn_ended: false,
+                p1_has_tera: true,
+                p2_has_tera: true,
+                p1_has_mega: true,
+                p2_has_mega: true,
+            });
+
+            vec![(next_state, 1.0)]
+        }
+        MatchState::BattleState(_) => {
+            unimplemented!("BattleState stepping is not yet implemented");
+        }
+        MatchState::GameOverState { .. } => {
+            vec![(state.clone(), 1.0)]
         }
     }
 }

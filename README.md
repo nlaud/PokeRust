@@ -1,3 +1,24 @@
-## USAGE
-set RUST_BACKTRACE=1 (For Backtrace)
+# USAGE
 cargo run -- --p1 ./teamsheets/{teamsheet path} --p2 ./teamsheets/{teamsheet path} -v 3
+
+# TODO
+
+### Fixes
+
+### New features
+- Create a function to take in battle state and battle actions, then apply those to create a vector of tuples possible battle states resulting from that along with their probabilities.
+    - Start this with taking in a TeamPreviewState and MoveSpecs to creating a BattleState
+    - Later focus SLOWLY on implementing actual battle functions
+        - Move Damage
+        - Status effects + chance effects
+        - Flinching
+        - Follow Me, Helping Hand
+        - Trick Room + Tailwind
+        - Berries, Unnerve?, Other Consumables (sash), Type Boost Items
+        - Leftovers, misc. items (bright powder?)
+        - Choice Items
+        - Weather + Weather Abilities
+        - Other significant abilities (Prankster, sturdy, pixilate + dragonize, spicy spray, shadow tag, clear body, huge power, zero to hero, scrappy, parental bond, intimidate, competetive + defiant, mega sol, mega launcher, levitate, telepathy, cloud nine, multiscale, stamina, mold breaker)
+        - Moves with unique effects (explosion, encore, disable, etc..)
+        - Implement Struggle
+- Eventually create nash solver and recursive evaluation
