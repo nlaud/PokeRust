@@ -85,14 +85,36 @@ impl std::fmt::Display for BattleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Turn {} (Started: {}, Ended: {})", self.turn_number, self.turn_started, self.turn_ended)?;
         
-        let p1_active_names: Vec<String> = self.p1_active_mons.iter().map(|m| format!("{:?} ({} HP)", m.species, m.hp)).collect();
-        let p1_back_names: Vec<String> = self.p1_back_mons.iter().map(|m| format!("{:?} ({} HP)", m.species, m.hp)).collect();
-        
-        let p2_active_names: Vec<String> = self.p2_active_mons.iter().map(|m| format!("{:?} ({} HP)", m.species, m.hp)).collect();
-        let p2_back_names: Vec<String> = self.p2_back_mons.iter().map(|m| format!("{:?} ({} HP)", m.species, m.hp)).collect();
+        let format_mon = |m: &PokemonState| -> String {
+            let mut parts = vec![format!("{:?} ({}/{} HP)", m.species, m.hp, m.stats[0])];
+            if let Some(status) = &m.status {
+                parts.push(format!("{:?}", status));
+            }
+            if !m.volatiles.is_empty() {
+                let vol_strs: Vec<String> = m.volatiles.iter().map(|v| format!("{:?}", v)).collect();
+                parts.push(format!("Vols: [{}]", vol_strs.join(", ")));
+            }
+            let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
+            let mut boost_strs = Vec::new();
+            for i in 0..7 {
+                if m.boosts[i] != 0 {
+                    boost_strs.push(format!("{}{:+}", boost_names[i], m.boosts[i]));
+                }
+            }
+            if !boost_strs.is_empty() {
+                parts.push(format!("Boosts: {}", boost_strs.join(", ")));
+            }
+            parts.join(", ")
+        };
 
-        writeln!(f, "P1 Active: [{}] | Back: [{}] | Tera: {} | Mega: {}", p1_active_names.join(", "), p1_back_names.join(", "), self.p1_has_tera, self.p1_has_mega)?;
-        writeln!(f, "P2 Active: [{}] | Back: [{}] | Tera: {} | Mega: {}", p2_active_names.join(", "), p2_back_names.join(", "), self.p2_has_tera, self.p2_has_mega)?;
+        let p1_active_names: Vec<String> = self.p1_active_mons.iter().map(format_mon).collect();
+        let p1_back_names: Vec<String> = self.p1_back_mons.iter().map(format_mon).collect();
+        
+        let p2_active_names: Vec<String> = self.p2_active_mons.iter().map(format_mon).collect();
+        let p2_back_names: Vec<String> = self.p2_back_mons.iter().map(format_mon).collect();
+
+        writeln!(f, "P1 Active: [{}] | Back: [{}] | Tera: {} | Mega: {}", p1_active_names.join(" | "), p1_back_names.join(" | "), self.p1_has_tera, self.p1_has_mega)?;
+        writeln!(f, "P2 Active: [{}] | Back: [{}] | Tera: {} | Mega: {}", p2_active_names.join(" | "), p2_back_names.join(" | "), self.p2_has_tera, self.p2_has_mega)?;
         Ok(())
     }
 }
