@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
+use crate::data::species::Species;
+use crate::data::ability::Ability;
+use crate::data::pokemon_move::PokemonMove;
 
 pub type PokemonBoostTable = [i8; 7]; // atk, def, spa, spd, spe, accuracy, evasion
 
@@ -281,7 +284,7 @@ pub struct PokemonSecondaryEffect {
 
 #[derive(Debug)]
 pub struct MoveData {
-    pub name: String,
+    pub name: PokemonMove,
     pub base_power: u16,
     pub accuracy: AccuracyType,
     pub target: MoveTarget,
@@ -337,15 +340,15 @@ pub struct MoveData {
 
 #[derive(Debug)]
 pub struct PokemonData {
-    pub species: String,
+    pub species: Species,
     pub types: Vec<PokemonType>,
     pub base_stats: [u16; 6],
     pub weight: u16,
-    pub primary_ability: Option<String>,
-    pub base_species: Option<String>,
-    pub forme: Option<String>,
+    pub primary_ability: Option<Ability>,
+    pub base_species: Option<Species>,
+    pub forme: Option<Species>,
     pub required_item: Option<String>,
-    pub battle_only: Option<String>,
+    pub battle_only: Option<Species>,
     pub default_gender: crate::pokemon::PokemonGender,
 }
 
@@ -807,18 +810,18 @@ fn extract_first_quoted_value(text: &str) -> Option<String> {
     None
 }
 
-fn parse_primary_ability_from_text(text: &str) -> Option<String> {
+fn parse_primary_ability_from_text(text: &str) -> Option<Ability> {
     for key in ["\"0\":", "0:"] {
         if let Some(pos) = text.find(key) {
             let rest = &text[pos + key.len()..];
             if let Some(ability) = extract_first_quoted_value(rest) {
-                return Some(normalize_dex_id(&ability));
+                return Some(Ability::from_str(&ability));
             }
         }
     }
 
     // Fallback: take the first quoted ability-like value if key `0` wasn't found.
-    extract_first_quoted_value(text).map(|s| normalize_dex_id(&s))
+    extract_first_quoted_value(text).map(|s| Ability::from_str(&s))
 }
 
 /// Split file content into top-level entry blocks.
@@ -944,21 +947,21 @@ fn parse_secondary_block(lines: &[String], start_idx: usize)
 // --- Public Dex Parsing ---
 
 /// Parse showdownDex.txt into a HashMap of PokemonData keyed by species id.
-pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
+pub fn parse_pokemon_dex(file_path: &str) -> HashMap<Species, PokemonData> {
     let content = fs::read_to_string(file_path).expect("Failed to read Pokemon dex file");
     let entries = split_entries(&content);
     let mut result = HashMap::new();
 
-    for (key, lines) in &entries {
-        let mut species = String::new();
+    for (_key, lines) in &entries {
+        let mut species: Option<Species> = None;
         let mut types: Vec<PokemonType> = Vec::new();
         let mut base_stats = [0u16; 6];
         let mut weight: u16 = 0;
-        let mut primary_ability: Option<String> = None;
-        let mut base_species: Option<String> = None;
-        let mut forme: Option<String> = None;
+        let mut primary_ability: Option<Ability> = None;
+        let mut base_species: Option<Species> = None;
+        let mut forme: Option<Species> = None;
         let mut required_item: Option<String> = None;
-        let mut battle_only: Option<String> = None;
+        let mut battle_only: Option<Species> = None;
         let mut default_gender = crate::pokemon::PokemonGender::Male;
         let mut has_explicit_gender = false;
 
@@ -967,7 +970,7 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
 
             if trimmed.starts_with("name:") {
                 if let Some(name) = extract_quoted(trimmed, "name") {
-                    species = name;
+                    species = Some(Species::from_str(&name));
                 }
             } else if trimmed.starts_with("types:") {
                 // types: ["Grass", "Poison"],
@@ -1017,11 +1020,11 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
                 primary_ability = parse_primary_ability_from_text(trimmed);
             } else if trimmed.starts_with("baseSpecies:") {
                 if let Some(val) = extract_quoted(trimmed, "baseSpecies") {
-                    base_species = Some(normalize_dex_id(&val));
+                    base_species = Some(Species::from_str(&val));
                 }
             } else if trimmed.starts_with("forme:") {
                 if let Some(val) = extract_quoted(trimmed, "forme") {
-                    forme = Some(normalize_dex_id(&val));
+                    forme = Some(Species::from_str(&val));
                 }
             } else if trimmed.starts_with("requiredItem:") {
                 if let Some(val) = extract_quoted(trimmed, "requiredItem") {
@@ -1030,7 +1033,7 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
             } else if trimmed.starts_with("battleOnly:") {
                 // Handles both `battleOnly: "X"` and `battleOnly: ["X", ...]`.
                 if let Some(val) = extract_first_quoted_value(trimmed) {
-                    battle_only = Some(normalize_dex_id(&val));
+                    battle_only = Some(Species::from_str(&val));
                 }
             } else if trimmed.starts_with("gender:") {
                 if let Some(val) = extract_quoted(trimmed, "gender") {
@@ -1075,9 +1078,9 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
             }
         }
 
-        if !species.is_empty() {
-            result.insert(key.clone(), PokemonData {
-                species,
+        if let Some(s) = species.clone() {
+            result.insert(s.clone(), PokemonData {
+                species: s,
                 types,
                 base_stats,
                 weight,
@@ -1095,13 +1098,13 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<String, PokemonData> {
 }
 
 /// Parse showdownMoves.txt into a HashMap of MoveData keyed by move id.
-pub fn parse_move_dex(file_path: &str) -> HashMap<String, MoveData> {
+pub fn parse_move_dex(file_path: &str) -> HashMap<PokemonMove, MoveData> {
     let content = fs::read_to_string(file_path).expect("Failed to read moves file");
     let entries = split_entries(&content);
     let mut result = HashMap::new();
 
-    for (key, lines) in &entries {
-        let mut name = String::new();
+    for (_key, lines) in &entries {
+        let mut name: Option<PokemonMove> = None;
         let mut accuracy = AccuracyType::Percent(100);
         let mut pp: u8 = 0;
         let mut category = MoveCategory::Status;
@@ -1201,7 +1204,7 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, MoveData> {
             // -- Simple fields --
             if trimmed.starts_with("name:") {
                 if let Some(n) = extract_quoted(trimmed, "name") {
-                    name = n;
+                    name = Some(PokemonMove::from_str(&n));
                 }
             } else if trimmed.starts_with("accuracy:") {
                 if extract_bool(trimmed, "accuracy") == Some(true) {
@@ -1526,9 +1529,9 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<String, MoveData> {
             }
         }
 
-        if !name.is_empty() {
-            result.insert(key.clone(), MoveData {
-                name,
+        if let Some(n) = name.clone() {
+            result.insert(n.clone(), MoveData {
+                name: n,
                 accuracy,
                 pp,
                 category,

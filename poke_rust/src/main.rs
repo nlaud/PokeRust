@@ -1,8 +1,10 @@
 use clap::Parser;
+use pokemon::MatchState;
 
 mod dex_data;
-mod item;
+mod data;
 mod pokemon;
+mod simulator;
 
 #[derive(Parser, Debug)]
 #[command(author = "Blazestorm", version = "1.0", about = "Simulates Pokemon Battles")]
@@ -49,7 +51,7 @@ fn main() {
     }
 
     //Parse teamsheets
-    let preview = pokemon::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, 2);
+    let preview = simulator::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, 2);
 
     if args.verbosity >= 1 {
         println!("P1 team: {} Pokemon | P2 team: {} Pokemon",
@@ -60,5 +62,11 @@ fn main() {
         println!("P1 team: {:#?}", preview.p1_mons);
         println!("P2 team: {:#?}", preview.p2_mons);
     }
-
+    
+    let state = MatchState::TeamPreviewState(preview);
+    if args.verbosity >= 3 {
+        let (p1_cmds, p2_cmds) = simulator::get_possible_commands(&state, &move_dex);
+        println!("P1 possible commands: {:#?}", p1_cmds);
+        println!("P2 possible commands: {:#?}", p2_cmds);
+    }
 }
