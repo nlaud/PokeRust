@@ -28,25 +28,22 @@ pub struct MoveAction{
     pub move_name: PokemonMove,
     pub priority: i8,
     pub user_slot: FieldSlot,
-    pub target_slot: FieldSlot,
+    pub target_slot: Option<FieldSlot>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SwitchAction{
-    pub speed: u16,
     pub user_slot: FieldSlot,
     pub switch_index: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct MegaAction{
-    pub speed: u16,
     pub user_slot: FieldSlot,
 }
 
 #[derive(Debug, Clone)]
 pub struct TeraAction{
-    pub speed: u16,
     pub user_slot: FieldSlot,
 }
 
@@ -71,6 +68,9 @@ pub struct BattleState{
 
     pub turn_number: u16,
 
+    //Both false = waiting for moves from both players
+    //Started true, ended false = processing actions from action_queue
+    //Both true = check if players have active fainted mons to send out
     pub turn_started: bool,
     pub turn_ended: bool,
 
@@ -113,8 +113,19 @@ impl std::fmt::Display for BattleState {
         let p2_active_names: Vec<String> = self.p2_active_mons.iter().map(format_mon).collect();
         let p2_back_names: Vec<String> = self.p2_back_mons.iter().map(format_mon).collect();
 
-        writeln!(f, "P1 Active: [{}] | Back: [{}] | Tera: {} | Mega: {}", p1_active_names.join(" | "), p1_back_names.join(" | "), self.p1_has_tera, self.p1_has_mega)?;
-        writeln!(f, "P2 Active: [{}] | Back: [{}] | Tera: {} | Mega: {}", p2_active_names.join(" | "), p2_back_names.join(" | "), self.p2_has_tera, self.p2_has_mega)?;
+        writeln!(f, "P1 Active: [{}]", p1_active_names.join(" | "))?;
+        writeln!(f, "P1 Back:  [{}]", p1_back_names.join(" | "))?;
+        writeln!(f, "P1 Has Tera: {} | Has Mega: {}", self.p1_has_tera, self.p1_has_mega)?;
+
+        writeln!(f, "P2 Active: [{}]", p2_active_names.join(" | "))?;
+        writeln!(f, "P2 Back:  [{}]", p2_back_names.join(" | "))?;
+        writeln!(f, "P2 Has Tera: {} | Has Mega: {}", self.p2_has_tera, self.p2_has_mega)?;
+        if !self.action_queue.is_empty() {
+            writeln!(f, "Action Queue:")?;
+            for (i, action) in self.action_queue.iter().enumerate() {
+                writeln!(f, "  {}: {:?}", i, action)?;
+            }
+        }
         Ok(())
     }
 }
