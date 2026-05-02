@@ -11,6 +11,10 @@ use crate::dex_data::{MoveData, MoveTarget, PokemonData};
 use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
 
+fn get_verbosity() -> u8 {
+    crate::VERBOSITY.get().copied().unwrap_or(1)
+}
+
 pub fn team_preview_state_from_teamsheets(
     p1_path: &str,
     p2_path: &str,
@@ -418,6 +422,163 @@ pub fn get_possible_commands_for_active_slot(
     generate_commands_for_active(player, slot_idx, state, move_dex, pokemon_dex)
 }
 
+fn get_pokemon_at_slot<'a>(state: &'a BattleState, slot: FieldSlot) -> Option<&'a PokemonState> {
+    let mons = match slot.player {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    };
+    mons.get(slot.slot_index as usize)
+}
+
+fn get_effective_speed(mon: &PokemonState) -> f32 {
+    // Speed stat is at index 5 in the stats array
+    // Speed boost is at index 4 in the boosts array
+    let base_speed = mon.stats[5] as f32;
+    let speed_boost = mon.boosts[4];
+    
+    // Apply boost multiplier
+    let multiplier = if speed_boost > 0 {
+        1.0 + (0.5 * speed_boost as f32)
+    } else if speed_boost < 0 {
+        1.0 / (1.0 + (0.5 * (-speed_boost) as f32))
+    } else {
+        1.0
+    };
+    
+    base_speed * multiplier
+}
+
+fn compare_pokemon_speed(p1: &PokemonState, p2: &PokemonState) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let speed1 = get_effective_speed(p1);
+    let speed2 = get_effective_speed(p2);
+    
+    // Compare with a small epsilon for floating point comparison
+    if (speed2 - speed1).abs() < 0.01 {
+        Ordering::Equal
+    } else if speed2 > speed1 {
+        Ordering::Greater
+    } else {
+        Ordering::Less
+    }
+}
+
+fn get_action_type_priority(action: &Action) -> u8 {
+    match action {
+        Action::SwitchAction(_) => 0,
+        Action::MegaAction(_) => 1,
+        Action::TeraAction(_) => 2,
+        Action::MoveAction(_) => 3,
+    }
+}
+
+fn compare_action_order(action1: &Action, action2: &Action, state: &BattleState, move_dex: &HashMap<PokemonMove, MoveData>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    
+    let type_priority1 = get_action_type_priority(action1);
+    let type_priority2 = get_action_type_priority(action2);
+    
+    // Different action types: order by type priority
+    if type_priority1 != type_priority2 {
+        return type_priority1.cmp(&type_priority2);
+    }
+    
+    // Same type: compare by move priority and speed for move actions
+    match (action1, action2) {
+        (Action::MoveAction(m1), Action::MoveAction(m2)) => {
+            // First compare move priority (higher priority goes first)
+            if m1.priority != m2.priority {
+                return m2.priority.cmp(&m1.priority);
+            }
+            
+            // Then compare speed stats (higher speed goes first)
+            let user1 = get_pokemon_at_slot(state, m1.user_slot);
+            let user2 = get_pokemon_at_slot(state, m2.user_slot);
+            
+            match (user1, user2) {
+                (Some(p1), Some(p2)) => {
+                    compare_pokemon_speed(p1, p2)
+                }
+                _ => Ordering::Equal,
+            }
+        }
+        _ => Ordering::Equal,
+    }
+}
+
+fn step_action_queue(
+    state: &BattleState,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> Vec<(MatchState, f64)> {
+    let mut next_state = state.clone();
+    
+    if next_state.action_queue.is_empty() {
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+    
+    // Find the next action to execute (lowest index in type priority order)
+    let mut next_action_idx = 0;
+    for i in 1..next_state.action_queue.len() {
+        if compare_action_order(&next_state.action_queue[next_action_idx], &next_state.action_queue[i], state, move_dex) == std::cmp::Ordering::Greater {
+            next_action_idx = i;
+        }
+    }
+    
+    let action = next_state.action_queue.remove(next_action_idx);
+    
+    if get_verbosity() >= 2 {
+        println!("Processing action: {:?}", action);
+    }
+    
+    match action {
+        Action::MoveAction(m) => {
+            println!("Unhandled action: {:?}", m);
+            vec![(MatchState::BattleState(next_state), 1.0)]
+        }
+        Action::SwitchAction(s) => {
+            println!("Unhandled action: {:?}", s);
+            vec![(MatchState::BattleState(next_state), 1.0)]
+        }
+        Action::MegaAction(m) => {
+            let slot_idx = m.user_slot.slot_index as usize;
+            let mons = match m.user_slot.player {
+                Player::P1 => &mut next_state.p1_active_mons,
+                Player::P2 => &mut next_state.p2_active_mons,
+            };
+            
+            if let Some(mon) = mons.get_mut(slot_idx) {
+                crate::battle::try_mega_evolution(mon, pokemon_dex);
+            }
+            
+            match m.user_slot.player {
+                Player::P1 => next_state.p1_has_mega = false,
+                Player::P2 => next_state.p2_has_mega = false,
+            }
+            
+            vec![(MatchState::BattleState(next_state), 1.0)]
+        }
+        Action::TeraAction(t) => {
+            let slot_idx = t.user_slot.slot_index as usize;
+            let mons = match t.user_slot.player {
+                Player::P1 => &mut next_state.p1_active_mons,
+                Player::P2 => &mut next_state.p2_active_mons,
+            };
+            
+            if let Some(mon) = mons.get_mut(slot_idx) {
+                mon.is_tera = true;
+            }
+            
+            match t.user_slot.player {
+                Player::P1 => next_state.p1_has_tera = false,
+                Player::P2 => next_state.p2_has_tera = false,
+            }
+            
+            vec![(MatchState::BattleState(next_state), 1.0)]
+        }
+    }
+}
+
 pub fn get_possible_commands(
     state: &MatchState,
     move_dex: &HashMap<PokemonMove, MoveData>,
@@ -486,8 +647,33 @@ pub fn simulate_turn(
     p1_cmd: &PlayerCommand,
     p2_cmd: &PlayerCommand,
     move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Vec<(MatchState, f64)> {
-    vec![(apply_player_commands(state, p1_cmd, p2_cmd, move_dex), 1.0)]
+    // First, apply the player commands to populate the action queue
+    let mut current_state = apply_player_commands(state, p1_cmd, p2_cmd, move_dex);
+    
+    // Then process the action queue one step at a time
+    loop {
+        match &current_state {
+            MatchState::BattleState(battle) => {
+                if battle.action_queue.is_empty() {
+                    break;
+                }
+                
+                let outcomes = step_action_queue(battle, move_dex, pokemon_dex);
+                
+                // For now, just take the first outcome (deterministic processing)
+                if let Some((next_match_state, _)) = outcomes.first() {
+                    current_state = next_match_state.clone();
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    
+    vec![(current_state, 1.0)]
 }
 
 /// Public validator wrapper used by interactive UI to check legality

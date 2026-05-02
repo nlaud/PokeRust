@@ -8,6 +8,7 @@ cargo run -- --p1 ./teamsheets/{teamsheet path} --p2 ./teamsheets/{teamsheet pat
 ### New features
 - Create a function to take in battle state and battle actions, then apply those to create a vector of tuples possible battle states resulting from that along with their probabilities.
     - Later focus SLOWLY on implementing actual battle functions
+        - Switching
         - Move Damage
         - Status effects + chance effects
         - Flinching

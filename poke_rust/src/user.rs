@@ -6,6 +6,140 @@ use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::dex_data::{MoveData, PokemonData};
 use crate::simulator;
+use crate::pokemon::PokemonState;
+
+fn get_verbosity() -> u8 {
+    crate::VERBOSITY.get().copied().unwrap_or(1)
+}
+
+fn format_pokemon_detailed(mon: &PokemonState) -> String {
+    let stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
+    let stats_str = stat_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| format!("{}: {}", name, mon.stats[i]))
+        .collect::<Vec<_>>()
+        .join(", ");
+    
+    let boosts_str = {
+        let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
+        let active_boosts: Vec<String> = mon.boosts
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| **b != 0)
+            .map(|(i, b)| format!("{}{:+}", boost_names[i], b))
+            .collect();
+        
+        if active_boosts.is_empty() {
+            "none".to_string()
+        } else {
+            active_boosts.join(", ")
+        }
+    };
+    
+    let status_str = mon.status.as_ref().map(|s| format!("{:?}", s)).unwrap_or_else(|| "Healthy".to_string());
+    let item_str = format!("{:?}", mon.item);
+    let ability_str = format!("{:?}", mon.ability);
+    let nature_str = format!("{:?}", mon.nature);
+    
+    let evs_str = mon.evs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("/");
+    let ivs_str = mon.ivs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/");
+    
+    format!(
+        "{} ({}/{} HP), Item: {}, Ability: {}, Nature: {}\n    Stats: {}\n    Boosts: {}\n    Status: {}\n    EVs: {}\n    IVs: {}",
+        species_name(&mon.species),
+        mon.hp,
+        mon.stats[0],
+        item_str,
+        ability_str,
+        nature_str,
+        stats_str,
+        boosts_str,
+        status_str,
+        evs_str,
+        ivs_str
+    )
+}
+
+fn format_pokemon_brief(mon: &PokemonState) -> String {
+    let mut parts = vec![format!("{:?} ({}/{} HP)", mon.species, mon.hp, mon.stats[0])];
+    if let Some(status) = &mon.status {
+        parts.push(format!("{:?}", status));
+    }
+    if !mon.volatiles.is_empty() {
+        let vol_strs: Vec<String> = mon.volatiles.iter().map(|v| format!("{:?}", v)).collect();
+        parts.push(format!("Vols: [{}]", vol_strs.join(", ")));
+    }
+    parts.join(", ")
+}
+
+fn print_battle_state_enhanced(state: &BattleState) {
+    let verbosity = get_verbosity();
+    let use_detailed = verbosity >= 3;
+    let show_items_and_abilities = verbosity >= 2;
+    
+    println!("\nCurrent Battle State:");
+    println!("Turn {} (Started: {}, Ended: {})", state.turn_number, state.turn_started, state.turn_ended);
+    
+    let format_mons = |mons: &[PokemonState], detailed: bool| {
+        if detailed {
+            mons.iter()
+                .map(|m| format_pokemon_detailed(m))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        } else if show_items_and_abilities {
+            mons.iter()
+                .map(|m| format!(
+                    "{:?} ({}/{} HP), Item: {:?}, Ability: {:?}{}",
+                    m.species,
+                    m.hp,
+                    m.stats[0],
+                    m.item,
+                    m.ability,
+                    m.status.as_ref().map(|s| format!(", {}", format!("{:?}", s))).unwrap_or_default()
+                ))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        } else {
+            mons.iter()
+                .map(format_pokemon_brief)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }
+    };
+    
+    println!("P1 Active:");
+    if state.p1_active_mons.is_empty() {
+        println!("  (none)");
+    } else {
+        println!("  {}", format_mons(&state.p1_active_mons, use_detailed));
+    }
+    
+    println!("P1 Back:");
+    if state.p1_back_mons.is_empty() {
+        println!("  (none)");
+    } else {
+        println!("  {}", format_mons(&state.p1_back_mons, use_detailed));
+    }
+    
+    println!("P1 Has Tera: {} | Has Mega: {}", state.p1_has_tera, state.p1_has_mega);
+    
+    println!("P2 Active:");
+    if state.p2_active_mons.is_empty() {
+        println!("  (none)");
+    } else {
+        println!("  {}", format_mons(&state.p2_active_mons, use_detailed));
+    }
+    
+    println!("P2 Back:");
+    if state.p2_back_mons.is_empty() {
+        println!("  (none)");
+    } else {
+        println!("  {}", format_mons(&state.p2_back_mons, use_detailed));
+    }
+    
+    println!("P2 Has Tera: {} | Has Mega: {}", state.p2_has_tera, state.p2_has_mega);
+}
 
 fn humanize_identifier(value: impl AsRef<str>) -> String {
     let value = value.as_ref();
@@ -272,19 +406,18 @@ pub fn simulate_battle(
     mut state: MatchState,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
-    verbosity: u8,
 ) {
     loop {
         match &state {
             MatchState::TeamPreviewState(preview_state) => {
-                if verbosity >= 1 {
+                if get_verbosity() >= 1 {
                     println!("Current Team Preview State: {:#?}", preview_state);
                 }
 
                 let p1_cmd = PlayerCommand::TeamPreview(choose_team_preview_command(preview_state, Player::P1));
                 let p2_cmd = PlayerCommand::TeamPreview(choose_team_preview_command(preview_state, Player::P2));
 
-                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex);
+                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex);
                 state = next_states
                     .into_iter()
                     .next()
@@ -292,14 +425,14 @@ pub fn simulate_battle(
                     .unwrap_or_else(|| state.clone());
             }
             MatchState::BattleState(battle_state) => {
-                if verbosity >= 1 {
-                    println!("\nCurrent Battle State:\n{}", battle_state);
+                if get_verbosity() >= 1 {
+                    print_battle_state_enhanced(battle_state);
                 }
 
                 let p1_cmd = choose_battle_commands_for_player(battle_state, Player::P1, move_dex, pokemon_dex);
                 let p2_cmd = choose_battle_commands_for_player(battle_state, Player::P2, move_dex, pokemon_dex);
 
-                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex);
+                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex);
                 state = next_states
                     .into_iter()
                     .next()

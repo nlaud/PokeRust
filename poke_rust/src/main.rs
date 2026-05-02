@@ -1,5 +1,6 @@
 use clap::Parser;
 use battle::MatchState;
+use std::sync::OnceLock;
 
 mod dex_data;
 mod data;
@@ -7,6 +8,8 @@ mod pokemon;
 mod battle;
 mod simulator;
 mod user;
+
+pub static VERBOSITY: OnceLock<u8> = OnceLock::new();
 
 #[derive(Parser, Debug)]
 #[command(author = "Blazestorm", version = "1.0", about = "Simulates Pokemon Battles")]
@@ -34,6 +37,9 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+
+    // Initialize global verbosity
+    let _ = VERBOSITY.set(args.verbosity);
 
     if args.verbosity >= 2 { println!("Got paths: {}, {}", args.p1, args.p2) }
 
@@ -65,5 +71,5 @@ fn main() {
         println!("P2 team: {:#?}", preview.p2_mons);
     }
 
-    user::simulate_battle(MatchState::TeamPreviewState(preview), &move_dex, &pokemon_dex, args.verbosity);
+    user::simulate_battle(MatchState::TeamPreviewState(preview), &move_dex, &pokemon_dex);
 }
