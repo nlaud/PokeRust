@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
+use colored::Colorize;
 
 use crate::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, TeamPreviewCommand};
 use crate::data::pokemon_move::PokemonMove;
@@ -78,8 +79,8 @@ fn print_battle_state_enhanced(state: &BattleState) {
     let use_detailed = verbosity >= 3;
     let show_items_and_abilities = verbosity >= 2;
     
-    println!("\nCurrent Battle State:");
-    println!("Turn {} (Started: {}, Ended: {})", state.turn_number, state.turn_started, state.turn_ended);
+    println!("\n{}", "Current Battle State:".cyan().bold());
+    println!("{}", format!("Turn {} (Started: {}, Ended: {})", state.turn_number, state.turn_started, state.turn_ended).bright_blue());
     
     let format_mons = |mons: &[PokemonState], detailed: bool| {
         if detailed {
@@ -108,37 +109,37 @@ fn print_battle_state_enhanced(state: &BattleState) {
         }
     };
     
-    println!("P1 Active:");
+    println!("{}", "P1 Active:".green().bold());
     if state.p1_active_mons.is_empty() {
-        println!("  (none)");
+        println!("  {}", "(none)".dimmed());
     } else {
         println!("  {}", format_mons(&state.p1_active_mons, use_detailed));
     }
     
-    println!("P1 Back:");
+    println!("{}", "P1 Back:".green());
     if state.p1_back_mons.is_empty() {
-        println!("  (none)");
+        println!("  {}", "(none)".dimmed());
     } else {
         println!("  {}", format_mons(&state.p1_back_mons, use_detailed));
     }
     
-    println!("P1 Has Tera: {} | Has Mega: {}", state.p1_has_tera, state.p1_has_mega);
+    println!("{}", format!("P1 Has Tera: {} | Has Mega: {}", state.p1_has_tera, state.p1_has_mega).green());
     
-    println!("P2 Active:");
+    println!("{}", "P2 Active:".magenta().bold());
     if state.p2_active_mons.is_empty() {
-        println!("  (none)");
+        println!("  {}", "(none)".dimmed());
     } else {
         println!("  {}", format_mons(&state.p2_active_mons, use_detailed));
     }
     
-    println!("P2 Back:");
+    println!("{}", "P2 Back:".magenta());
     if state.p2_back_mons.is_empty() {
-        println!("  (none)");
+        println!("  {}", "(none)".dimmed());
     } else {
         println!("  {}", format_mons(&state.p2_back_mons, use_detailed));
     }
     
-    println!("P2 Has Tera: {} | Has Mega: {}", state.p2_has_tera, state.p2_has_mega);
+    println!("{}", format!("P2 Has Tera: {} | Has Mega: {}", state.p2_has_tera, state.p2_has_mega).magenta());
 }
 
 fn humanize_identifier(value: impl AsRef<str>) -> String {
@@ -256,12 +257,12 @@ fn battle_command_description(state: &BattleState, player: Player, slot_idx: usi
 
 fn prompt_choice(prompt: &str, options: &[String]) -> usize {
     loop {
-        println!("{}", prompt);
+        println!("{}", prompt.yellow().bold());
         for (index, option) in options.iter().enumerate() {
-            println!("{}: {}", index + 1, option);
+            println!("  {}: {}", format!("{}", index + 1).cyan(), option);
         }
 
-        print!("Choice: ");
+        print!("{}", "Choice: ".yellow());
         io::stdout().flush().unwrap();
 
         let mut input = String::new();
@@ -290,7 +291,7 @@ fn prompt_choice(prompt: &str, options: &[String]) -> usize {
             return matching_indices[0];
         }
 
-        println!("Invalid choice, try again.");
+        println!("{}", "Invalid choice, try again.".red());
     }
 }
 
@@ -304,7 +305,7 @@ pub fn choose_team_preview_command(preview: &crate::battle::TeamPreviewState, pl
     let brought = (preview.brought_per_side as usize).min(total_mons);
     let active_n = (preview.active_per_side as usize).min(brought);
 
-    println!("Choose {} active (front) Pokémon for {}:", active_n, player_name(player));
+    println!("{}", format!("Choose {} active (front) Pokémon for {}:", active_n, player_name(player)).bright_cyan());
     let mut chosen_active: Vec<usize> = Vec::new();
     while chosen_active.len() < active_n {
         let options: Vec<String> = (0..total_mons)
@@ -319,14 +320,14 @@ pub fn choose_team_preview_command(preview: &crate::battle::TeamPreviewState, pl
         let mut available_indices: Vec<usize> = (0..total_mons).filter(|i| !chosen_active.contains(i)).collect();
         let chosen_index = available_indices[pick];
         chosen_active.push(chosen_index);
-        println!("Chosen: {}", species_name(&mons[chosen_index].species));
+        println!("{}", format!("Chosen: {}", species_name(&mons[chosen_index].species)).green());
     }
 
     // Choose remaining brought (back) slots from the remaining team members
     let mut chosen_brought: Vec<usize> = chosen_active.clone();
     let need_back = brought.saturating_sub(chosen_brought.len());
     if need_back > 0 {
-        println!("Choose {} bench (back) Pokémon for {}:", need_back, player_name(player));
+        println!("{}", format!("Choose {} bench (back) Pokémon for {}:", need_back, player_name(player)).bright_cyan());
         while chosen_brought.len() < brought {
             let options: Vec<String> = (0..total_mons)
                 .filter(|i| !chosen_brought.contains(i))
@@ -339,7 +340,7 @@ pub fn choose_team_preview_command(preview: &crate::battle::TeamPreviewState, pl
             let mut available_indices: Vec<usize> = (0..total_mons).filter(|i| !chosen_brought.contains(i)).collect();
             let chosen_index = available_indices[pick];
             chosen_brought.push(chosen_index);
-            println!("Chosen bench: {}", species_name(&mons[chosen_index].species));
+            println!("{}", format!("Chosen bench: {}", species_name(&mons[chosen_index].species)).green());
         }
     }
 
@@ -388,6 +389,80 @@ pub fn choose_battle_commands_for_player(
         Player::P2 => state.p2_active_mons.len(),
     };
 
+    let active_mons = match player {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    };
+
+    // Check if we're in replacement phase (both turn_started and turn_ended are true)
+    let in_replacement_phase = state.turn_started && state.turn_ended;
+
+    if in_replacement_phase {
+        // In replacement phase: only allow switches for fainted slots, skip healthy slots
+        let mut commands = Vec::new();
+        for slot_idx in 0..active_len {
+            if let Some(mon) = active_mons.get(slot_idx) {
+                if mon.fainted {
+                    // Fainted slot: prompt for a switch
+                    let back_mons = match player {
+                        Player::P1 => &state.p1_back_mons,
+                        Player::P2 => &state.p2_back_mons,
+                    };
+
+                    let healthy_bench: Vec<usize> = back_mons
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| !m.fainted)
+                        .map(|(i, _)| i)
+                        .collect();
+
+                    if healthy_bench.is_empty() {
+                        println!("{}", format!("No healthy Pokémon available to send out for {} slot {}", player_name(player), slot_idx + 1).red());
+                        // Can't continue; return Pass
+                        return PlayerCommand::Pass;
+                    }
+
+                    let options: Vec<String> = healthy_bench
+                        .iter()
+                        .map(|&idx| back_mon_name(state, player, idx))
+                        .collect();
+
+                    let mon_label = species_name(&mon.species);
+                    let choice = prompt_choice(
+                        &format!("{} {}'s {} {}. Choose a replacement for slot {}:", "[REPLACEMENT]".bright_magenta(), player_name(player), mon_label.bright_red(), "fainted".bright_red(), slot_idx + 1),
+                        &options,
+                    );
+
+                    let chosen_bench_idx = healthy_bench[choice];
+                    commands.push(BattleCommand::Switch(crate::battle::SwitchCommand { party_index: chosen_bench_idx }));
+                } else {
+                    // Healthy slot: no choice needed, can use dummy switch (will be ignored by apply_player_commands)
+                    commands.push(BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 }));
+                }
+            }
+        }
+
+        // Check if all required slots have valid replacements
+        let all_have_valid_switches = commands.iter().enumerate().all(|(i, cmd)| {
+            if let BattleCommand::Switch(s) = cmd {
+                let back_mons = match player {
+                    Player::P1 => &state.p1_back_mons,
+                    Player::P2 => &state.p2_back_mons,
+                };
+                i >= active_len || !active_mons.get(i).map_or(false, |m| m.fainted) || s.party_index < back_mons.len()
+            } else {
+                false
+            }
+        });
+
+        if all_have_valid_switches {
+            return PlayerCommand::Battle(commands);
+        } else {
+            return PlayerCommand::Pass;
+        }
+    }
+
+    // Normal battle phase: prompt for each active slot as before
     loop {
         let mut commands = Vec::new();
         for slot_idx in 0..active_len {
@@ -398,7 +473,7 @@ pub fn choose_battle_commands_for_player(
             return PlayerCommand::Battle(commands);
         }
 
-        println!("The combination of choices is not legal; please choose again.");
+        println!("{}", "The combination of choices is not legal; please choose again.".red().bold());
     }
 }
 
@@ -411,7 +486,8 @@ pub fn simulate_battle(
         match &state {
             MatchState::TeamPreviewState(preview_state) => {
                 if get_verbosity() >= 1 {
-                    println!("Current Team Preview State: {:#?}", preview_state);
+                    println!("{}", "Current Team Preview State:".bright_cyan());
+                    println!("{:#?}", preview_state);
                 }
 
                 let p1_cmd = PlayerCommand::TeamPreview(choose_team_preview_command(preview_state, Player::P1));
@@ -440,7 +516,7 @@ pub fn simulate_battle(
                     .unwrap_or_else(|| state.clone());
             }
             MatchState::GameOverState { winner } => {
-                println!("Game over. Winner: {:?}", winner);
+                println!("{}", format!("Game over. Winner: {:?}", winner).bright_green().bold());
                 break;
             }
         }

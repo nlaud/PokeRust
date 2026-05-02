@@ -1,4 +1,5 @@
 use clap::Parser;
+use colored::Colorize;
 use battle::MatchState;
 use std::sync::OnceLock;
 
@@ -41,7 +42,7 @@ fn main() {
     // Initialize global verbosity
     let _ = VERBOSITY.set(args.verbosity);
 
-    if args.verbosity >= 2 { println!("Got paths: {}, {}", args.p1, args.p2) }
+    if args.verbosity >= 2 { println!("{}", format!("Got paths: {}, {}", args.p1, args.p2).cyan()) }
 
     //Put dex data into a hashmap
     let pokemon_dex = dex_data::parse_pokemon_dex(&args.poke_dex);
@@ -50,7 +51,7 @@ fn main() {
     let move_dex = dex_data::parse_move_dex(&args.move_dex);
 
     if args.verbosity >= 1 {
-        println!("Loaded {} Pokemon and {} moves", pokemon_dex.len(), move_dex.len());
+        println!("{}", format!("Loaded {} Pokemon and {} moves", pokemon_dex.len(), move_dex.len()).bright_green());
     }
 
     if args.verbosity >= 4 {
@@ -62,8 +63,7 @@ fn main() {
     let preview = simulator::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, &move_dex, 2, 4);
 
     if args.verbosity >= 1 {
-        println!("P1 team: {} Pokemon | P2 team: {} Pokemon",
-            preview.p1_mons.len(), preview.p2_mons.len());
+        println!("{}", format!("P1 team: {} Pokemon | P2 team: {} Pokemon", preview.p1_mons.len(), preview.p2_mons.len()).bright_cyan());
     }
 
     if args.verbosity >= 3 {

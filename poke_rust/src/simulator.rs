@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use colored::Colorize;
 use crate::battle::{
     MatchState, BattleState, TeamPreviewState, PlayerCommand, BattleCommand,
     AttackCommand, SwitchCommand, TeamPreviewCommand, Player, FieldSlot,
@@ -13,6 +14,33 @@ use crate::data::pokemon_move::PokemonMove;
 
 fn get_verbosity() -> u8 {
     crate::VERBOSITY.get().copied().unwrap_or(1)
+}
+
+fn humanize_identifier(value: &str) -> String {
+    let mut result = String::new();
+    let mut previous: Option<char> = None;
+    for current in value.chars() {
+        let insert_space = match previous {
+            Some(prev) => (prev.is_ascii_lowercase() && current.is_ascii_uppercase())
+                || (prev.is_ascii_digit() && current.is_ascii_alphabetic())
+                || (prev.is_ascii_alphabetic() && current.is_ascii_digit()),
+            None => false,
+        };
+        if insert_space && !result.ends_with(' ') {
+            result.push(' ');
+        }
+        result.push(current);
+        previous = Some(current);
+    }
+    result
+}
+
+fn species_name_sim(species: &crate::data::species::Species) -> String {
+    humanize_identifier(&format!("{:?}", species))
+}
+
+fn move_name_sim(mov: &crate::data::pokemon_move::PokemonMove) -> String {
+    humanize_identifier(&format!("{:?}", mov))
 }
 
 pub fn team_preview_state_from_teamsheets(
@@ -528,16 +556,64 @@ fn step_action_queue(
     let action = next_state.action_queue.remove(next_action_idx);
     
     if get_verbosity() >= 2 {
-        println!("Processing action: {:?}", action);
+        // Print a more user-friendly description including Pokémon names
+        match &action {
+            Action::MoveAction(m) => {
+                let attacker = get_pokemon_at_slot(&next_state, m.user_slot)
+                    .map(|p| species_name_sim(&p.species))
+                    .unwrap_or_else(|| format!("{} slot {}", match m.user_slot.player { Player::P1 => "P1", Player::P2 => "P2" }, m.user_slot.slot_index + 1));
+                let target = match m.target_slot {
+                    Some(slot) => get_pokemon_at_slot(&next_state, slot)
+                        .map(|p| species_name_sim(&p.species))
+                        .unwrap_or_else(|| format!("{} slot {}", match slot.player { Player::P1 => "P1", Player::P2 => "P2" }, slot.slot_index + 1)),
+                    None => "(no specific target)".to_string(),
+                };
+                println!("{}", format!("Processing Move: {} -> {} uses {}", attacker, target, move_name_sim(&m.move_name)).cyan());
+            }
+            Action::SwitchAction(s) => {
+                let user = get_pokemon_at_slot(&next_state, s.user_slot)
+                    .map(|p| species_name_sim(&p.species))
+                    .unwrap_or_else(|| format!("{} slot {}", match s.user_slot.player { Player::P1 => "P1", Player::P2 => "P2" }, s.user_slot.slot_index + 1));
+                println!("{}", format!("Processing Switch: {} (slot {} )", user, s.switch_index + 1).blue());
+            }
+            Action::MegaAction(m) => {
+                let mon_name = get_pokemon_at_slot(&next_state, m.user_slot)
+                    .map(|p| species_name_sim(&p.species))
+                    .unwrap_or_else(|| format!("{} slot {}", match m.user_slot.player { Player::P1 => "P1", Player::P2 => "P2" }, m.user_slot.slot_index + 1));
+                println!("{}", format!("Processing Mega Evolution: {}", mon_name).yellow());
+            }
+            Action::TeraAction(t) => {
+                let mon_name = get_pokemon_at_slot(&next_state, t.user_slot)
+                    .map(|p| species_name_sim(&p.species))
+                    .unwrap_or_else(|| format!("{} slot {}", match t.user_slot.player { Player::P1 => "P1", Player::P2 => "P2" }, t.user_slot.slot_index + 1));
+                println!("{}", format!("Processing Terastallize: {}", mon_name).bright_magenta());
+            }
+        }
     }
     
     match action {
         Action::MoveAction(m) => {
-            println!("Unhandled action: {:?}", m);
+            let attacker = get_pokemon_at_slot(&next_state, m.user_slot)
+                .map(|p| species_name_sim(&p.species))
+                .unwrap_or_else(|| format!("{} slot {}", match m.user_slot.player { Player::P1 => "P1", Player::P2 => "P2" }, m.user_slot.slot_index + 1));
+            let target = match m.target_slot {
+                Some(slot) => get_pokemon_at_slot(&next_state, slot)
+                    .map(|p| species_name_sim(&p.species))
+                    .unwrap_or_else(|| format!("{} slot {}", match slot.player { Player::P1 => "P1", Player::P2 => "P2" }, slot.slot_index + 1)),
+                None => "(no specific target)".to_string(),
+            };
+            println!("{}", format!("[UNHANDLED] Move action: {} uses {} -> {}", attacker, move_name_sim(&m.move_name), target).bright_red());
             vec![(MatchState::BattleState(next_state), 1.0)]
         }
         Action::SwitchAction(s) => {
-            println!("Unhandled action: {:?}", s);
+            // perform the switch now
+            perform_switch_out_in(&mut next_state, s.user_slot, s.switch_index);
+            if get_verbosity() >= 2 {
+                let user = get_pokemon_at_slot(&next_state, s.user_slot)
+                    .map(|p| species_name_sim(&p.species))
+                    .unwrap_or_else(|| format!("{} slot {}", match s.user_slot.player { Player::P1 => "P1", Player::P2 => "P2" }, s.user_slot.slot_index + 1));
+                println!("{}", format!("Executed Switch: new active at slot {} is {}", s.user_slot.slot_index + 1, user).bright_green());
+            }
             vec![(MatchState::BattleState(next_state), 1.0)]
         }
         Action::MegaAction(m) => {
@@ -592,6 +668,83 @@ pub fn get_possible_commands(
             )
         }
         MatchState::BattleState(battle) => {
+            // If both flags are set, we're in replacement phase: players may need to send replacements
+            if battle.turn_started && battle.turn_ended {
+                let mut p1_options: Vec<PlayerCommand> = Vec::new();
+                let mut p2_options: Vec<PlayerCommand> = Vec::new();
+
+                // Helper to build replacement PlayerCommands for a player
+                let build_replacement_commands = |player: Player, battle: &BattleState| -> Vec<PlayerCommand> {
+                    let (active, back) = match player {
+                        Player::P1 => (&battle.p1_active_mons, &battle.p1_back_mons),
+                        Player::P2 => (&battle.p2_active_mons, &battle.p2_back_mons),
+                    };
+
+                    // collect indices of fainted active slots and healthy bench indices
+                    let fainted_slots: Vec<usize> = active.iter().enumerate().filter(|(_, m)| m.fainted).map(|(i, _)| i).collect();
+                    let healthy_bench: Vec<usize> = back.iter().enumerate().filter(|(_, m)| !m.fainted).map(|(i, _)| i).collect();
+
+                    let mut results: Vec<PlayerCommand> = Vec::new();
+                    // Player can always pass
+                    results.push(PlayerCommand::Pass);
+
+                    if fainted_slots.is_empty() || healthy_bench.is_empty() {
+                        return results;
+                    }
+
+                    // generate injective mappings from fainted_slots -> healthy_bench
+                    fn assign_recursive(slots: &[usize], benches: &Vec<usize>, used: &mut Vec<bool>, idx: usize, current: &mut Vec<Option<usize>>, out: &mut Vec<Vec<Option<usize>>>) {
+                        if idx == slots.len() {
+                            out.push(current.clone());
+                            return;
+                        }
+                        for (bi, &bench_idx) in benches.iter().enumerate() {
+                            if used[bi] { continue; }
+                            used[bi] = true;
+                            current[idx] = Some(bench_idx);
+                            assign_recursive(slots, benches, used, idx + 1, current, out);
+                            current[idx] = None;
+                            used[bi] = false;
+                        }
+                    }
+
+                    let mut used = vec![false; healthy_bench.len()];
+                    let mut current: Vec<Option<usize>> = vec![None; fainted_slots.len()];
+                    let mut mappings: Vec<Vec<Option<usize>>> = Vec::new();
+                    assign_recursive(&fainted_slots, &healthy_bench, &mut used, 0, &mut current, &mut mappings);
+
+                    for mapping in mappings {
+                        // build a BattleCommand vector per active slot
+                        let active_len = active.len();
+                        let mut cmds: Vec<BattleCommand> = Vec::new();
+                        for i in 0..active_len {
+                            if let Some(pos) = fainted_slots.iter().position(|&s| s == i) {
+                                // this slot is fainted -> pick mapped bench index
+                                if let Some(Some(bench_choice)) = mapping.get(pos) {
+                                    // need to convert bench_choice (index in healthy_bench vec) to actual bench index
+                                    let bench_idx = healthy_bench[*bench_choice];
+                                    cmds.push(BattleCommand::Switch(SwitchCommand { party_index: bench_idx }));
+                                } else {
+                                    // shouldn't happen
+                                    cmds.push(BattleCommand::Switch(SwitchCommand { party_index: 0 }));
+                                }
+                            } else {
+                                // healthy slot: push a dummy switch that will be ignored by apply_player_commands
+                                cmds.push(BattleCommand::Switch(SwitchCommand { party_index: 0 }));
+                            }
+                        }
+                        results.push(PlayerCommand::Battle(cmds));
+                    }
+
+                    results
+                };
+
+                p1_options = build_replacement_commands(Player::P1, battle);
+                p2_options = build_replacement_commands(Player::P2, battle);
+
+                return (p1_options, p2_options);
+            }
+
             (
                 battle_commands(battle, Player::P1, move_dex, pokemon_dex),
                 battle_commands(battle, Player::P2, move_dex, pokemon_dex)
@@ -624,17 +777,65 @@ pub fn apply_player_commands(
         MatchState::BattleState(battle) => {
             let mut next_state = battle.clone();
 
-            let p1_battle = match p1_cmd {
-                PlayerCommand::Battle(cmds) => cmds,
-                _ => panic!("Expected Battle command for P1"),
-            };
-            let p2_battle = match p2_cmd {
-                PlayerCommand::Battle(cmds) => cmds,
-                _ => panic!("Expected Battle command for P2"),
-            };
+            // Beginning of turn: set turn_started
+            if !battle.turn_started && !battle.turn_ended {
+                next_state.turn_started = true;
+                // queue normal battle commands
+                if let PlayerCommand::Battle(p1_battle) = p1_cmd {
+                    queue_battle_commands_for_player(battle, Player::P1, p1_battle, move_dex, &mut next_state.action_queue);
+                }
+                if let PlayerCommand::Battle(p2_battle) = p2_cmd {
+                    queue_battle_commands_for_player(battle, Player::P2, p2_battle, move_dex, &mut next_state.action_queue);
+                }
+                return MatchState::BattleState(next_state);
+            }
 
-            queue_battle_commands_for_player(battle, Player::P1, p1_battle, move_dex, &mut next_state.action_queue);
-            queue_battle_commands_for_player(battle, Player::P2, p2_battle, move_dex, &mut next_state.action_queue);
+            // Replacement phase: both flags are true -> players may send replacements
+            if battle.turn_started && battle.turn_ended {
+                // process p1
+                if let PlayerCommand::Battle(cmds) = p1_cmd {
+                    for (slot_idx, cmd) in cmds.iter().enumerate() {
+                        match cmd {
+                            BattleCommand::Switch(s) => {
+                                let user_slot = FieldSlot { player: Player::P1, slot_index: slot_idx as u8 };
+                                perform_switch_out_in(&mut next_state, user_slot, s.party_index);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // process p2
+                if let PlayerCommand::Battle(cmds) = p2_cmd {
+                    for (slot_idx, cmd) in cmds.iter().enumerate() {
+                        match cmd {
+                            BattleCommand::Switch(s) => {
+                                let user_slot = FieldSlot { player: Player::P2, slot_index: slot_idx as u8 };
+                                perform_switch_out_in(&mut next_state, user_slot, s.party_index);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // After replacements, reset turn flags (new turn will begin)
+                next_state.turn_started = false;
+                next_state.turn_ended = false;
+                return MatchState::BattleState(next_state);
+            }
+
+            // Default: if turn_started true and turn_ended false, we're mid-turn and just queue commands
+            if !battle.turn_started && battle.turn_ended {
+                // shouldn't happen normally; treat as beginning
+                next_state.turn_started = true;
+            }
+
+            // Mid-turn command queuing
+            if let PlayerCommand::Battle(p1_battle) = p1_cmd {
+                queue_battle_commands_for_player(battle, Player::P1, p1_battle, move_dex, &mut next_state.action_queue);
+            }
+            if let PlayerCommand::Battle(p2_battle) = p2_cmd {
+                queue_battle_commands_for_player(battle, Player::P2, p2_battle, move_dex, &mut next_state.action_queue);
+            }
 
             MatchState::BattleState(next_state)
         }
@@ -679,4 +880,35 @@ pub fn simulate_turn(
 /// Public validator wrapper used by interactive UI to check legality
 pub fn validate_battle_command_combination(cmds: &[BattleCommand]) -> bool {
     is_valid_command_combination(cmds)
+}
+
+fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, bench_index: usize) {
+    // swap the active mon at user_slot.slot_index with the bench mon at bench_index
+    let slot_idx = user_slot.slot_index as usize;
+    match user_slot.player {
+        Player::P1 => {
+            if slot_idx >= next_state.p1_active_mons.len() || bench_index >= next_state.p1_back_mons.len() {
+                return;
+            }
+            // clear volatiles on the switching-out mon
+            let mut leaving = next_state.p1_active_mons[slot_idx].clone();
+            leaving.volatiles.clear();
+            // swap
+            let mut incoming = next_state.p1_back_mons[bench_index].clone();
+            std::mem::swap(&mut next_state.p1_active_mons[slot_idx], &mut next_state.p1_back_mons[bench_index]);
+            // ensure the benched slot gets the leaving mon with cleared volatiles
+            next_state.p1_back_mons[bench_index] = leaving;
+            // active slot already now holds incoming
+        }
+        Player::P2 => {
+            if slot_idx >= next_state.p2_active_mons.len() || bench_index >= next_state.p2_back_mons.len() {
+                return;
+            }
+            let mut leaving = next_state.p2_active_mons[slot_idx].clone();
+            leaving.volatiles.clear();
+            let mut incoming = next_state.p2_back_mons[bench_index].clone();
+            std::mem::swap(&mut next_state.p2_active_mons[slot_idx], &mut next_state.p2_back_mons[bench_index]);
+            next_state.p2_back_mons[bench_index] = leaving;
+        }
+    }
 }

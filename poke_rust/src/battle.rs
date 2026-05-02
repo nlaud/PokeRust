@@ -206,6 +206,7 @@ impl std::fmt::Debug for TeamPreviewCommand {
 #[derive(Clone)]
 pub enum PlayerCommand {
     Battle(Vec<BattleCommand>),
+    Pass,
     TeamPreview(TeamPreviewCommand),
     Forfeit,
 }
@@ -223,6 +224,7 @@ impl std::fmt::Debug for PlayerCommand {
             },
             PlayerCommand::TeamPreview(cmd) => write!(f, "{:?}", cmd),
             PlayerCommand::Forfeit => write!(f, "Forfeit"),
+                PlayerCommand::Pass => write!(f, "Pass"),
         }
     }
 }
