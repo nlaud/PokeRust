@@ -568,7 +568,7 @@ fn step_action_queue(
                         .unwrap_or_else(|| format!("{} slot {}", match slot.player { Player::P1 => "P1", Player::P2 => "P2" }, slot.slot_index + 1)),
                     None => "(no specific target)".to_string(),
                 };
-                println!("{}", format!("Processing Move: {} -> {} uses {}", attacker, target, move_name_sim(&m.move_name)).cyan());
+                println!("{}", format!("Processing Move: {} uses {} -> {}", attacker, move_name_sim(&m.move_name), target).cyan());
             }
             Action::SwitchAction(s) => {
                 let user = get_pokemon_at_slot(&next_state, s.user_slot)
@@ -893,6 +893,7 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
             // clear volatiles on the switching-out mon
             let mut leaving = next_state.p1_active_mons[slot_idx].clone();
             leaving.volatiles.clear();
+            leaving.boosts.iter_mut().for_each(|boost| *boost = 0);
             // swap
             let mut incoming = next_state.p1_back_mons[bench_index].clone();
             std::mem::swap(&mut next_state.p1_active_mons[slot_idx], &mut next_state.p1_back_mons[bench_index]);
@@ -906,6 +907,7 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
             }
             let mut leaving = next_state.p2_active_mons[slot_idx].clone();
             leaving.volatiles.clear();
+            leaving.boosts.iter_mut().for_each(|boost| *boost = 0);
             let mut incoming = next_state.p2_back_mons[bench_index].clone();
             std::mem::swap(&mut next_state.p2_active_mons[slot_idx], &mut next_state.p2_back_mons[bench_index]);
             next_state.p2_back_mons[bench_index] = leaving;
