@@ -34,6 +34,14 @@ struct Args {
     /// How verbose debug output is (0 = Nothing, 1 = Minimal, 2 = Debug Trace, 3 = High Debug, 4 = Max Debug)
     #[arg(short, long, default_value_t = 1)]
     verbosity: u8,
+
+    /// Disable critical hits while simulating damage
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    no_consider_crit: bool,
+
+    /// How many damage rolls to consider per hit, from 1 to 16
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u8).range(1..=16))]
+    damage_rolls: u8,
 }
 
 fn main() {
@@ -71,5 +79,11 @@ fn main() {
         println!("P2 team: {:#?}", preview.p2_mons);
     }
 
-    user::simulate_battle(MatchState::TeamPreviewState(preview), &move_dex, &pokemon_dex);
+    user::simulate_battle(
+        MatchState::TeamPreviewState(preview),
+        &move_dex,
+        &pokemon_dex,
+        !args.no_consider_crit,
+        args.damage_rolls,
+    );
 }

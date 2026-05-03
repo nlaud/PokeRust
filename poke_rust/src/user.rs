@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use colored::Colorize;
+use rand::distributions::{Distribution, WeightedIndex};
+use rand::thread_rng;
 
 use crate::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, TeamPreviewCommand};
 use crate::data::pokemon_move::PokemonMove;
@@ -74,12 +76,13 @@ fn format_pokemon_brief(mon: &PokemonState) -> String {
     parts.join(", ")
 }
 
-fn print_battle_state_enhanced(state: &BattleState) {
+fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
     let verbosity = get_verbosity();
     let use_detailed = verbosity >= 3;
     let show_items_and_abilities = verbosity >= 2;
     
     println!("\n{}", "Current Battle State:".cyan().bold());
+    println!("{}", format!("Selected outcome chance: {:.4}%", chance * 100.0).bright_blue());
     println!("{}", format!("Turn {} (Started: {}, Ended: {})", state.turn_number, state.turn_started, state.turn_ended).bright_blue());
     
     let format_mons = |mons: &[PokemonState], detailed: bool| {
@@ -251,6 +254,9 @@ fn battle_command_description(state: &BattleState, player: Player, slot_idx: usi
                 label.push_str(" [Mega]");
             }
             label
+        }
+        BattleCommand::Pass => {
+            "Pass".to_string()
         }
     }
 }
@@ -436,26 +442,39 @@ pub fn choose_battle_commands_for_player(
                     let chosen_bench_idx = healthy_bench[choice];
                     commands.push(BattleCommand::Switch(crate::battle::SwitchCommand { party_index: chosen_bench_idx }));
                 } else {
-                    // Healthy slot: no choice needed, can use dummy switch (will be ignored by apply_player_commands)
-                    commands.push(BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 }));
+                    // Healthy slot: prompt for Pass
+                    let mon_label = species_name(&mon.species);
+                    let pass_option = vec!["Pass".to_string()];
+                    let _ = prompt_choice(
+                        &format!("{} {}'s {} has no action needed. Select Pass:", "[REPLACEMENT]".bright_magenta(), player_name(player), mon_label.cyan()),
+                        &pass_option,
+                    );
+                    commands.push(BattleCommand::Pass);
                 }
             }
         }
 
         // Check if all required slots have valid replacements
-        let all_have_valid_switches = commands.iter().enumerate().all(|(i, cmd)| {
-            if let BattleCommand::Switch(s) = cmd {
-                let back_mons = match player {
-                    Player::P1 => &state.p1_back_mons,
-                    Player::P2 => &state.p2_back_mons,
-                };
-                i >= active_len || !active_mons.get(i).map_or(false, |m| m.fainted) || s.party_index < back_mons.len()
+        let all_have_valid_replacements = commands.iter().enumerate().all(|(i, cmd)| {
+            if let Some(mon) = active_mons.get(i) {
+                if mon.fainted {
+                    if let BattleCommand::Switch(s) = cmd {
+                        let back_mons = match player {
+                            Player::P1 => &state.p1_back_mons,
+                            Player::P2 => &state.p2_back_mons,
+                        };
+                        s.party_index < back_mons.len()
+                    } else {
+                        false
+                    }
+                } else {
+                    matches!(cmd, BattleCommand::Pass)
+                }
             } else {
                 false
             }
         });
-
-        if all_have_valid_switches {
+        if all_have_valid_replacements {
             return PlayerCommand::Battle(commands);
         } else {
             return PlayerCommand::Pass;
@@ -481,39 +500,71 @@ pub fn simulate_battle(
     mut state: MatchState,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
+    consider_crit: bool,
+    damage_rolls: u8,
 ) {
+    let mut state_chance = 1.0;
+
     loop {
         match &state {
             MatchState::TeamPreviewState(preview_state) => {
                 if get_verbosity() >= 1 {
                     println!("{}", "Current Team Preview State:".bright_cyan());
+                    println!("{}", format!("Selected outcome chance: {:.2}%", state_chance * 100.0).bright_blue());
                     println!("{:#?}", preview_state);
                 }
 
                 let p1_cmd = PlayerCommand::TeamPreview(choose_team_preview_command(preview_state, Player::P1));
                 let p2_cmd = PlayerCommand::TeamPreview(choose_team_preview_command(preview_state, Player::P2));
 
-                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex);
-                state = next_states
-                    .into_iter()
-                    .next()
-                    .map(|(next_state, _prob)| next_state)
-                    .unwrap_or_else(|| state.clone());
+                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls);
+                if next_states.is_empty() {
+                    state = state.clone();
+                    state_chance = 1.0;
+                    continue;
+                }
+
+                let weights = next_states.iter().map(|(_, probability)| *probability).collect::<Vec<_>>();
+                let distribution = WeightedIndex::new(&weights).expect("At least one positive probability is required");
+                let mut rng = thread_rng();
+                let selected_index = distribution.sample(&mut rng);
+                let (next_state, probability) = next_states[selected_index].clone();
+                state = next_state;
+                state_chance = probability;
             }
             MatchState::BattleState(battle_state) => {
                 if get_verbosity() >= 1 {
-                    print_battle_state_enhanced(battle_state);
+                    print_battle_state_enhanced(battle_state, state_chance);
                 }
 
                 let p1_cmd = choose_battle_commands_for_player(battle_state, Player::P1, move_dex, pokemon_dex);
                 let p2_cmd = choose_battle_commands_for_player(battle_state, Player::P2, move_dex, pokemon_dex);
 
-                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex);
-                state = next_states
-                    .into_iter()
-                    .next()
-                    .map(|(next_state, _prob)| next_state)
-                    .unwrap_or_else(|| state.clone());
+                // At verbosity 4, print all possible outcomes before sampling
+                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls);
+                if next_states.is_empty() {
+                    state = state.clone();
+                    state_chance = 1.0;
+                    continue;
+                }
+
+                // For verbosity 3, suppress damage logs temporarily, then show only the selected outcome
+                let prev_verbosity = crate::VERBOSITY.get().copied().unwrap_or(1);
+                
+                // Sample from outcomes
+                let weights = next_states.iter().map(|(_, probability)| *probability).collect::<Vec<_>>();
+                let distribution = WeightedIndex::new(&weights).expect("At least one positive probability is required");
+                let mut rng = thread_rng();
+                let selected_index = distribution.sample(&mut rng);
+                let (next_state, probability) = next_states[selected_index].clone();
+                
+                // At verbosity 3, print selected outcome info; at 4+, info is already printed during simulation
+                if prev_verbosity >= 3 {
+                    println!("{}", format!("(Selected outcome with {:.2}% probability)", probability * 100.0).bright_blue());
+                }
+                
+                state = next_state;
+                state_chance = probability;
             }
             MatchState::GameOverState { winner } => {
                 println!("{}", format!("Game over. Winner: {:?}", winner).bright_green().bold());

@@ -52,7 +52,8 @@ pub enum Action{
     MoveAction(MoveAction),
     SwitchAction(SwitchAction),
     MegaAction(MegaAction),
-    TeraAction(TeraAction)
+    TeraAction(TeraAction),
+    Pass
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +181,7 @@ impl std::fmt::Debug for SwitchCommand {
 pub enum BattleCommand {
     Attack(AttackCommand),
     Switch(SwitchCommand),
+    Pass,
 }
 
 impl std::fmt::Debug for BattleCommand {
@@ -187,6 +189,7 @@ impl std::fmt::Debug for BattleCommand {
         match self {
             BattleCommand::Attack(a) => write!(f, "{:?}", a),
             BattleCommand::Switch(s) => write!(f, "{:?}", s),
+            BattleCommand::Pass => write!(f, "Pass"),
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::data::pokemon_move::PokemonMove;
 
 pub type PokemonBoostTable = [i8; 7]; // atk, def, spa, spd, spe, accuracy, evasion
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PokemonType {
     Normal,
     Fire,
@@ -43,21 +43,21 @@ pub enum MoveCategory {
 
 #[derive(Debug)]
 pub enum MoveTarget {
-    AdjacentAlly,
-    AdjacentAllyOrSelf,
-    AdjacentFoe,
-    All,
-    AllAdjacent,
-    AllAdjacentFoes,
-    Allies,
-    AllySide,
-    AllyTeam,
-    Any,
-    FoeSide,
-    Normal,
-    RandomNormal,
-    Scripted,
-    SelfTarget,
+    AdjacentAlly, //Targets Teammates 
+    AdjacentAllyOrSelf, //Targets teammates or self
+    AdjacentFoe, //Targets enemies
+    All, //Targets the whole field at once
+    AllAdjacent, //Targets all pokemon except self (teammates and foes)
+    AllAdjacentFoes, //Targets all pokemon on enemy side
+    Allies, //Targets all pokemon on your side
+    AllySide, //Targets all pokemon on your side 
+    AllyTeam, //Targets all pokemon on your side (same as above)
+    Any, //Can target any individual mon on the field
+    FoeSide, //Targets all opposing pokemon at once
+    Normal, // Can target any individual mon, excluding self
+    RandomNormal, //Chooses a target at random
+    Scripted, //Ignore this for now, moves that reflect damage that the user takes
+    SelfTarget, //Must target itself
 }
 
 #[derive(Debug, Clone)]

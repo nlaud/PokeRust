@@ -9,8 +9,17 @@ use crate::pokemon::{
     PokemonState, parse_team_sheet
 };
 use crate::dex_data::{MoveData, MoveTarget, PokemonData};
+use crate::dex_data::{MoveCategory, PokemonStat, Status, VolatileStatus};
+use crate::data::ability::Ability;
 use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
+use crate::dex_data::PokemonType;
+
+#[derive(Clone, Copy)]
+struct DamageConfig {
+    consider_crit: bool,
+    damage_rolls: u8,
+}
 
 fn get_verbosity() -> u8 {
     crate::VERBOSITY.get().copied().unwrap_or(1)
@@ -41,6 +50,649 @@ fn species_name_sim(species: &crate::data::species::Species) -> String {
 
 fn move_name_sim(mov: &crate::data::pokemon_move::PokemonMove) -> String {
     humanize_identifier(&format!("{:?}", mov))
+}
+
+fn pokemon_type_name(pokemon_type: &PokemonType) -> &'static str {
+    match pokemon_type {
+        PokemonType::Normal => "Normal",
+        PokemonType::Fire => "Fire",
+        PokemonType::Water => "Water",
+        PokemonType::Electric => "Electric",
+        PokemonType::Grass => "Grass",
+        PokemonType::Ice => "Ice",
+        PokemonType::Fighting => "Fighting",
+        PokemonType::Poison => "Poison",
+        PokemonType::Ground => "Ground",
+        PokemonType::Flying => "Flying",
+        PokemonType::Psychic => "Psychic",
+        PokemonType::Bug => "Bug",
+        PokemonType::Rock => "Rock",
+        PokemonType::Ghost => "Ghost",
+        PokemonType::Dragon => "Dragon",
+        PokemonType::Dark => "Dark",
+        PokemonType::Steel => "Steel",
+        PokemonType::Fairy => "Fairy",
+    }
+}
+
+fn move_target_is_multitarget(target: &MoveTarget) -> bool {
+    matches!(
+        target,
+        MoveTarget::All
+            | MoveTarget::AllAdjacent
+            | MoveTarget::AllAdjacentFoes
+            | MoveTarget::Allies
+            | MoveTarget::AllySide
+            | MoveTarget::AllyTeam
+            | MoveTarget::FoeSide
+    )
+}
+
+fn stage_multiplier(stage: i8) -> f64 {
+    let stage = stage.clamp(-6, 6);
+    if stage >= 0 {
+        (2.0 + stage as f64) / 2.0
+    } else {
+        2.0 / (2.0 - stage as f64)
+    }
+}
+
+fn effective_stat(mon: &PokemonState, stat: PokemonStat, ignore_negative: bool, ignore_positive: bool) -> f64 {
+    let (stat_index, boost_index) = match stat {
+        PokemonStat::Atk => (1, 0),
+        PokemonStat::Def => (2, 1),
+        PokemonStat::SpA => (3, 2),
+        PokemonStat::SpD => (4, 3),
+        PokemonStat::Spe => (5, 4),
+    };
+
+    let base_stat = mon.stats[stat_index] as f64;
+    let boost = mon.boosts[boost_index];
+    let applied_stage = if boost > 0 && ignore_positive {
+        0
+    } else if boost < 0 && ignore_negative {
+        0
+    } else {
+        boost
+    };
+
+    base_stat * stage_multiplier(applied_stage)
+}
+
+fn pokemon_has_type(mon: &PokemonState, pokemon_type: &PokemonType) -> bool {
+    mon.types.iter().any(|current_type| std::mem::discriminant(current_type) == std::mem::discriminant(pokemon_type))
+}
+
+fn single_type_effectiveness(move_type: &PokemonType, target_type: &PokemonType) -> f64 {
+    use PokemonType::*;
+
+    match (move_type, target_type) {
+        (Normal, Fighting) => 0.0,
+        (Normal, Ghost) => 0.0,
+        (Normal, Rock) => 0.5,
+
+        (Fire, Fire) | (Fire, Water) | (Fire, Rock) | (Fire, Dragon) => 0.5,
+        (Fire, Grass) | (Fire, Ice) | (Fire, Bug) | (Fire, Steel) => 2.0,
+
+        (Water, Fire) | (Water, Ground) | (Water, Rock) => 2.0,
+        (Water, Water) | (Water, Grass) | (Water, Dragon) => 0.5,
+
+        (Electric, Water) | (Electric, Flying) => 2.0,
+        (Electric, Electric) | (Electric, Grass) | (Electric, Dragon) => 0.5,
+        (Electric, Ground) => 0.0,
+
+        (Grass, Water) | (Grass, Ground) | (Grass, Rock) => 2.0,
+        (Grass, Fire) | (Grass, Grass) | (Grass, Poison) | (Grass, Flying) | (Grass, Bug) | (Grass, Dragon) | (Grass, Steel) => 0.5,
+
+        (Ice, Grass) | (Ice, Ground) | (Ice, Flying) | (Ice, Dragon) => 2.0,
+        (Ice, Fire) | (Ice, Water) | (Ice, Ice) | (Ice, Steel) => 0.5,
+
+        (Fighting, Normal) | (Fighting, Ice) | (Fighting, Rock) | (Fighting, Dark) | (Fighting, Steel) => 2.0,
+        (Fighting, Poison) | (Fighting, Flying) | (Fighting, Psychic) | (Fighting, Bug) | (Fighting, Fairy) => 0.5,
+        (Fighting, Ghost) => 0.0,
+
+        (Poison, Grass) | (Poison, Fairy) => 2.0,
+        (Poison, Poison) | (Poison, Ground) | (Poison, Rock) | (Poison, Ghost) => 0.5,
+        (Poison, Steel) => 0.0,
+
+        (Ground, Fire) | (Ground, Electric) | (Ground, Poison) | (Ground, Rock) | (Ground, Steel) => 2.0,
+        (Ground, Grass) | (Ground, Bug) => 0.5,
+        (Ground, Flying) => 0.0,
+
+        (Flying, Grass) | (Flying, Fighting) | (Flying, Bug) => 2.0,
+        (Flying, Electric) | (Flying, Rock) | (Flying, Steel) => 0.5,
+
+        (Psychic, Fighting) | (Psychic, Poison) => 2.0,
+        (Psychic, Psychic) | (Psychic, Steel) => 0.5,
+        (Psychic, Dark) => 0.0,
+
+        (Bug, Grass) | (Bug, Psychic) | (Bug, Dark) => 2.0,
+        (Bug, Fire) | (Bug, Fighting) | (Bug, Poison) | (Bug, Flying) | (Bug, Ghost) | (Bug, Steel) | (Bug, Fairy) => 0.5,
+
+        (Rock, Fire) | (Rock, Ice) | (Rock, Flying) | (Rock, Bug) => 2.0,
+        (Rock, Fighting) | (Rock, Ground) | (Rock, Steel) => 0.5,
+
+        (Ghost, Psychic) | (Ghost, Ghost) => 2.0,
+        (Ghost, Dark) => 0.5,
+        (Ghost, Normal) => 0.0,
+
+        (Dragon, Dragon) => 2.0,
+        (Dragon, Steel) => 0.5,
+        (Dragon, Fairy) => 0.0,
+
+        (Dark, Psychic) | (Dark, Ghost) => 2.0,
+        (Dark, Fighting) | (Dark, Dark) | (Dark, Fairy) => 0.5,
+
+        (Steel, Ice) | (Steel, Rock) | (Steel, Fairy) => 2.0,
+        (Steel, Fire) | (Steel, Water) | (Steel, Electric) | (Steel, Steel) => 0.5,
+
+        (Fairy, Fighting) | (Fairy, Dragon) | (Fairy, Dark) => 2.0,
+        (Fairy, Fire) | (Fairy, Poison) | (Fairy, Steel) => 0.5,
+
+        _ => 1.0,
+    }
+}
+
+fn move_type_effectiveness(move_type: &PokemonType, target: &PokemonState) -> f64 {
+    if target.types.is_empty() {
+        return 1.0;
+    }
+
+    target
+        .types
+        .iter()
+        .fold(1.0, |effectiveness, target_type| effectiveness * single_type_effectiveness(move_type, target_type))
+}
+
+fn stab_multiplier(attacker: &PokemonState, move_type: &PokemonType) -> f64 {
+    if !pokemon_has_type(attacker, move_type) && (!attacker.is_tera || attacker.tera_type != *move_type) {
+        return 1.0;
+    }
+
+    let has_adaptability = attacker.ability == Ability::Adaptability;
+    let matches_original_type = pokemon_has_type(attacker, move_type);
+    let matches_tera_type = attacker.is_tera && attacker.tera_type == *move_type;
+    let tera_type_matches_original = attacker.is_tera && pokemon_has_type(attacker, &attacker.tera_type);
+
+    if matches_tera_type {
+        if tera_type_matches_original {
+            if has_adaptability { 2.25 } else { 2.0 }
+        } else if has_adaptability {
+            2.0
+        } else {
+            1.5
+        }
+    } else if matches_original_type {
+        1.5
+    } else {
+        1.0
+    }
+}
+
+fn type_effectiveness_label(effectiveness: f64) -> &'static str {
+    if effectiveness == 0.0 {
+        "no effect"
+    } else if effectiveness < 1.0 {
+        "mostly ineffective"
+    } else if (effectiveness - 1.0).abs() < f64::EPSILON {
+        "normal effectiveness"
+    } else if effectiveness < 4.0 {
+        "super effective"
+    } else {
+        "extremely effective"
+    }
+}
+
+fn crit_is_prevented(attacker: &PokemonState, target: &PokemonState, move_name: &PokemonMove) -> bool {
+    if target.ability == Ability::BattleArmor || target.ability == Ability::ShellArmor {
+        return true;
+    }
+
+    let target_is_poisoned = matches!(target.status, Some(Status::Poison | Status::ToxicPoison));
+    let merciless_crit = attacker.ability == Ability::Merciless && target_is_poisoned;
+    let laser_focus = attacker.volatiles.iter().any(|volatile| matches!(volatile, crate::pokemon::VolatileStatusState::Status(VolatileStatus::LaserFocus, _)));
+    let always_crit_move = matches!(
+        move_name,
+        PokemonMove::StormThrow
+            | PokemonMove::FrostBreath
+            | PokemonMove::ZippyZap
+            | PokemonMove::SurgingStrikes
+            | PokemonMove::WickedBlow
+            | PokemonMove::FlowerTrick
+    );
+
+    merciless_crit || laser_focus || always_crit_move
+}
+
+fn critical_hit_probability(attacker: &PokemonState, target: &PokemonState, move_name: &PokemonMove, consider_crit: bool) -> Vec<(bool, f64)> {
+    if !consider_crit {
+        return vec![(false, 1.0)];
+    }
+
+    if target.ability == Ability::BattleArmor || target.ability == Ability::ShellArmor {
+        return vec![(false, 1.0)];
+    }
+
+    if crit_is_prevented(attacker, target, move_name) {
+        return vec![(true, 1.0)];
+    }
+
+    vec![(false, 23.0 / 24.0), (true, 1.0 / 24.0)]
+}
+
+fn selected_damage_rolls(count: u8) -> Vec<u8> {
+    let count = count.clamp(1, 16);
+    if count == 1 {
+        return vec![92];
+    }
+
+    (0..count)
+        .map(|index| {
+            let fraction = index as f64 / (count - 1) as f64;
+            let offset = (fraction * 15.0).round() as u8;
+            85 + offset
+        })
+        .collect()
+}
+
+fn move_offensive_stat(move_data: &MoveData) -> Option<PokemonStat> {
+    if let Some(stat) = move_data.override_offensive_stat {
+        return Some(stat);
+    }
+
+    match move_data.category {
+        MoveCategory::Physical => Some(PokemonStat::Atk),
+        MoveCategory::Special => Some(PokemonStat::SpA),
+        MoveCategory::Status => None,
+    }
+}
+
+fn move_defensive_stat(move_data: &MoveData) -> Option<PokemonStat> {
+    if let Some(stat) = move_data.override_defensive_stat {
+        return Some(stat);
+    }
+
+    match move_data.category {
+        MoveCategory::Physical => Some(PokemonStat::Def),
+        MoveCategory::Special => Some(PokemonStat::SpD),
+        MoveCategory::Status => None,
+    }
+}
+
+fn move_target_includes_allies(target: &MoveTarget) -> bool {
+    matches!(
+        target,
+        MoveTarget::All
+            | MoveTarget::AllAdjacent
+            | MoveTarget::Allies
+            | MoveTarget::AllySide
+            | MoveTarget::AllyTeam
+            | MoveTarget::AdjacentAlly
+            | MoveTarget::AdjacentAllyOrSelf
+    )
+}
+
+fn resolve_move_targets(
+    state: &BattleState,
+    user_slot: FieldSlot,
+    target: &MoveTarget,
+) -> Vec<FieldSlot> {
+    let mut targets = Vec::new();
+    
+    match target {
+        // Single target moves - these should be handled via action.target_slot, but fallback to first available
+        MoveTarget::AdjacentFoe | MoveTarget::Normal | MoveTarget::Any => {
+            // These require explicit targeting, should use action.target_slot
+            // Fallback: first healthy opposing mon
+            let opposing_mons = match user_slot.player {
+                Player::P1 => &state.p2_active_mons,
+                Player::P2 => &state.p1_active_mons,
+            };
+            for (idx, mon) in opposing_mons.iter().enumerate() {
+                if !mon.fainted {
+                    targets.push(FieldSlot {
+                        player: match user_slot.player {
+                            Player::P1 => Player::P2,
+                            Player::P2 => Player::P1,
+                        },
+                        slot_index: idx as u8,
+                    });
+                    break;
+                }
+            }
+        }
+        // All adjacent foes
+        MoveTarget::AllAdjacentFoes | MoveTarget::FoeSide => {
+            let opposing_mons = match user_slot.player {
+                Player::P1 => &state.p2_active_mons,
+                Player::P2 => &state.p1_active_mons,
+            };
+            for (idx, mon) in opposing_mons.iter().enumerate() {
+                if !mon.fainted {
+                    targets.push(FieldSlot {
+                        player: match user_slot.player {
+                            Player::P1 => Player::P2,
+                            Player::P2 => Player::P1,
+                        },
+                        slot_index: idx as u8,
+                    });
+                }
+            }
+        }
+        // All allies (not including self)
+        MoveTarget::Allies | MoveTarget::AllySide | MoveTarget::AllyTeam | MoveTarget::AdjacentAlly => {
+            let ally_mons = match user_slot.player {
+                Player::P1 => &state.p1_active_mons,
+                Player::P2 => &state.p2_active_mons,
+            };
+            for (idx, mon) in ally_mons.iter().enumerate() {
+                if idx as u8 != user_slot.slot_index && !mon.fainted {
+                    targets.push(FieldSlot {
+                        player: user_slot.player,
+                        slot_index: idx as u8,
+                    });
+                }
+            }
+        }
+        // All pokemon on field (including self)
+        MoveTarget::All | MoveTarget::AllAdjacent => {
+            // All allies
+            let ally_mons = match user_slot.player {
+                Player::P1 => &state.p1_active_mons,
+                Player::P2 => &state.p2_active_mons,
+            };
+            for (idx, mon) in ally_mons.iter().enumerate() {
+                if !mon.fainted {
+                    targets.push(FieldSlot {
+                        player: user_slot.player,
+                        slot_index: idx as u8,
+                    });
+                }
+            }
+            // All opponents
+            let opposing_mons = match user_slot.player {
+                Player::P1 => &state.p2_active_mons,
+                Player::P2 => &state.p1_active_mons,
+            };
+            for (idx, mon) in opposing_mons.iter().enumerate() {
+                if !mon.fainted {
+                    targets.push(FieldSlot {
+                        player: match user_slot.player {
+                            Player::P1 => Player::P2,
+                            Player::P2 => Player::P1,
+                        },
+                        slot_index: idx as u8,
+                    });
+                }
+            }
+        }
+        // Self-target
+        MoveTarget::SelfTarget | MoveTarget::AdjacentAllyOrSelf => {
+            targets.push(user_slot);
+        }
+        _ => {
+            // Fallback for unknown or scripted targets
+            let opposing_mons = match user_slot.player {
+                Player::P1 => &state.p2_active_mons,
+                Player::P2 => &state.p1_active_mons,
+            };
+            for (idx, mon) in opposing_mons.iter().enumerate() {
+                if !mon.fainted {
+                    targets.push(FieldSlot {
+                        player: match user_slot.player {
+                            Player::P1 => Player::P2,
+                            Player::P2 => Player::P1,
+                        },
+                        slot_index: idx as u8,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+    
+    targets
+}
+
+fn damage_targets_multiplier(target_count: usize) -> f64 {
+    if target_count > 1 { 0.75 } else { 1.0 }
+}
+
+/// Calculate damage outcomes for a single target. Returns Vec of (damage, is_crit, probability).
+fn calculate_damage_outcomes_for_target(
+    _state: &BattleState,
+    attacker: &PokemonState,
+    target: &PokemonState,
+    _user_slot: FieldSlot,
+    _target_slot: FieldSlot,
+    move_data: &MoveData,
+    config: DamageConfig,
+    targets_multiplier: f64,
+) -> Vec<(u16, bool, f64)> {
+    let attacking_stat = match move_offensive_stat(move_data) {
+        Some(stat) => stat,
+        None => return vec![(0, false, 1.0)],
+    };
+
+    let defending_stat = match move_defensive_stat(move_data) {
+        Some(stat) => stat,
+        None => return vec![(0, false, 1.0)],
+    };
+
+    let attacker_stat = effective_stat(attacker, attacking_stat, false, false);
+    let target_effective_defense = effective_stat(target, defending_stat, false, false);
+    let effectiveness = move_type_effectiveness(&move_data.pokemon_type, target);
+    let stab = stab_multiplier(attacker, &move_data.pokemon_type);
+
+    let damage_roll_values = selected_damage_rolls(config.damage_rolls);
+    let critical_states = critical_hit_probability(attacker, target, &move_data.name, config.consider_crit);
+
+    let mut outcomes = Vec::new();
+
+    for (crit, crit_probability) in critical_states {
+        let critical_multiplier = if crit { 1.5 } else { 1.0 };
+        let attack_stat = if crit {
+            effective_stat(attacker, attacking_stat, true, false)
+        } else {
+            attacker_stat
+        };
+        let defense_stat = if crit {
+            effective_stat(target, defending_stat, false, true)
+        } else {
+            target_effective_defense
+        };
+
+        let base_damage = (((((2.0 * attacker.level as f64 / 5.0 + 2.0) * attack_stat * move_data.base_power as f64 / defense_stat) / 50.0) + 2.0)
+            * stab
+            * effectiveness
+            * critical_multiplier
+            * targets_multiplier)
+            .floor()
+            .max(0.0);
+
+        for roll in &damage_roll_values {
+            let random_multiplier = *roll as f64 / 100.0;
+            let damage = (base_damage * random_multiplier).floor().max(0.0) as u16;
+            let probability = crit_probability / damage_roll_values.len() as f64;
+            outcomes.push((damage, crit, probability));
+        }
+    }
+
+    outcomes
+}
+
+fn damage_effectiveness_for_action(state: &BattleState, action: &MoveAction, move_data: &MoveData) -> f64 {
+    let Some(target_slot) = action.target_slot else {
+        return 1.0;
+    };
+
+    let Some(target) = get_pokemon_at_slot(state, target_slot) else {
+        return 1.0;
+    };
+
+    move_type_effectiveness(&move_data.pokemon_type, target)
+}
+
+fn apply_damage(mon: &mut PokemonState, damage: u16) {
+    mon.hp = mon.hp.saturating_sub(damage);
+    mon.fainted = mon.hp == 0;
+}
+
+fn possible_damage_outcomes_for_move(
+    state: &BattleState,
+    action: &MoveAction,
+    move_data: &MoveData,
+    config: DamageConfig,
+) -> Vec<(MatchState, f64)> {
+    let next_state = state.clone();
+
+    let Some(attacker) = get_pokemon_at_slot(&next_state, action.user_slot).cloned() else {
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    };
+
+    let pp_slot = attacker
+        .moves
+        .iter()
+        .position(|move_entry| move_entry.as_ref() == Some(&action.move_name));
+
+    let Some(pp_index) = pp_slot else {
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    };
+
+    let current_pp = match action.user_slot.player {
+        Player::P1 => next_state.p1_active_mons.get(action.user_slot.slot_index as usize).map(|mon| mon.move_pp[pp_index]).unwrap_or(0),
+        Player::P2 => next_state.p2_active_mons.get(action.user_slot.slot_index as usize).map(|mon| mon.move_pp[pp_index]).unwrap_or(0),
+    };
+
+    if current_pp == 0 {
+        println!("{}", "Struggle is unimplemented.".bright_red());
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
+    // Resolve target list based on move's targeting type
+    let target_slots = if move_target_is_multitarget(&move_data.target) {
+        resolve_move_targets(&next_state, action.user_slot, &move_data.target)
+    } else {
+        // Single-target move: use action.target_slot if available
+        match action.target_slot {
+            Some(slot) => vec![slot],
+            None => {
+                // Fallback: use resolve_move_targets
+                let targets = resolve_move_targets(&next_state, action.user_slot, &move_data.target);
+                if targets.is_empty() {
+                    return vec![(MatchState::BattleState(next_state), 1.0)];
+                }
+                targets
+            }
+        }
+    };
+
+    if target_slots.is_empty() {
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
+    // Calculate targets multiplier (0.75x for 2+ targets, 1.0x for 1 target)
+    let targets_mult = damage_targets_multiplier(target_slots.len());
+
+    // Calculate damage outcomes for each target independently
+    let mut per_target_outcomes: Vec<Vec<(u16, bool, f64)>> = Vec::new();
+
+    for target_slot in &target_slots {
+        let Some(target) = get_pokemon_at_slot(&next_state, *target_slot).cloned() else {
+            // Target is fainted or doesn't exist, skip
+            continue;
+        };
+
+        let outcomes = calculate_damage_outcomes_for_target(
+            &next_state,
+            &attacker,
+            &target,
+            action.user_slot,
+            *target_slot,
+            move_data,
+            config,
+            targets_mult,
+        );
+        per_target_outcomes.push(outcomes);
+    }
+
+    // If no valid targets remain, return no damage
+    if per_target_outcomes.is_empty() {
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
+    // Log move info if verbosity >= 4
+    if get_verbosity() >= 4 {
+        let target_names: Vec<String> = target_slots.iter().filter_map(|slot| {
+            get_pokemon_at_slot(&next_state, *slot).map(|m| species_name_sim(&m.species))
+        }).collect();
+        println!(
+            "{}",
+            format!(
+                "{} uses {} | targets: {} | move type: {} | PP: {}",
+                species_name_sim(&attacker.species),
+                move_name_sim(&action.move_name),
+                target_names.join(", "),
+                pokemon_type_name(&move_data.pokemon_type),
+                current_pp,
+            )
+            .bright_cyan()
+        );
+    }
+
+    // Combine per-target outcomes via cartesian product
+    let mut all_outcomes: Vec<(MatchState, f64)> = vec![(MatchState::BattleState(next_state.clone()), 1.0)];
+
+    for (target_idx, target_outcomes) in per_target_outcomes.iter().enumerate() {
+        let target_slot = target_slots[target_idx];
+        let mut new_all_outcomes = Vec::new();
+
+        for (existing_state, existing_prob) in all_outcomes {
+            for (damage, _is_crit, outcome_prob) in target_outcomes {
+                let mut branch_state = match existing_state.clone() {
+                    MatchState::BattleState(bs) => bs,
+                    _ => continue,
+                };
+
+                // Apply damage to this target
+                if let Some(target_mon) = match target_slot.player {
+                    Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
+                    Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+                } {
+                    apply_damage(target_mon, *damage);
+                }
+
+                let combined_prob = existing_prob * outcome_prob;
+                new_all_outcomes.push((MatchState::BattleState(branch_state), combined_prob));
+            }
+        }
+
+        all_outcomes = new_all_outcomes;
+    }
+
+    // Decrement PP once at the end
+    for (state, _) in &mut all_outcomes {
+        if let MatchState::BattleState(bs) = state {
+            if let Some(mon) = match action.user_slot.player {
+                Player::P1 => bs.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => bs.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+            } {
+                if let Some(pp) = mon.move_pp.get_mut(pp_index) {
+                    *pp = pp.saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    // Log all outcomes at verbosity 4
+    if get_verbosity() >= 4 {
+        println!("{}", format!("  [Verbosity 4] {} total damage outcome combinations:", all_outcomes.len()).bright_yellow());
+        for (idx, (_, prob)) in all_outcomes.iter().enumerate() {
+            println!("    Branch {}: {:.6} probability", idx + 1, prob);
+        }
+    }
+
+    all_outcomes
 }
 
 pub fn team_preview_state_from_teamsheets(
@@ -353,6 +1005,8 @@ fn queue_battle_commands_for_player(
                     target_slot: a.target,
                 }));
             }
+            BattleCommand::Pass => {}
+            BattleCommand::Pass => {}
         }
     }
 }
@@ -411,6 +1065,7 @@ fn is_valid_command_combination(cmds: &[BattleCommand]) -> bool {
                     mega_count += 1;
                 }
             }
+            _ => {}
         }
     }
 
@@ -497,6 +1152,7 @@ fn get_action_type_priority(action: &Action) -> u8 {
         Action::MegaAction(_) => 1,
         Action::TeraAction(_) => 2,
         Action::MoveAction(_) => 3,
+        Action::Pass => 4,
     }
 }
 
@@ -538,10 +1194,40 @@ fn step_action_queue(
     state: &BattleState,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
+    config: DamageConfig,
 ) -> Vec<(MatchState, f64)> {
     let mut next_state = state.clone();
     
     if next_state.action_queue.is_empty() {
+        let mut replacement_needed = false;
+
+        for mon in &next_state.p1_active_mons {
+            if mon.fainted {
+                if next_state.p1_back_mons.iter().any(|m| !m.fainted) {
+                    replacement_needed = true;
+                    break;
+                }
+            }
+        }
+
+        if !replacement_needed {
+            for mon in &next_state.p2_active_mons {
+                if mon.fainted {
+                    if next_state.p2_back_mons.iter().any(|m| !m.fainted) {
+                        replacement_needed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if replacement_needed {
+            next_state.turn_started = true;
+            next_state.turn_ended = true;
+        } else {
+            next_state.turn_started = false;
+            next_state.turn_ended = false;
+        }
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
     
@@ -555,7 +1241,7 @@ fn step_action_queue(
     
     let action = next_state.action_queue.remove(next_action_idx);
     
-    if get_verbosity() >= 2 {
+    if get_verbosity() >= 4 {
         // Print a more user-friendly description including Pokémon names
         match &action {
             Action::MoveAction(m) => {
@@ -588,22 +1274,27 @@ fn step_action_queue(
                     .unwrap_or_else(|| format!("{} slot {}", match t.user_slot.player { Player::P1 => "P1", Player::P2 => "P2" }, t.user_slot.slot_index + 1));
                 println!("{}", format!("Processing Terastallize: {}", mon_name).bright_magenta());
             }
+            Action::Pass => {
+                // Pass action: do nothing, no log needed
+            }
         }
     }
     
     match action {
         Action::MoveAction(m) => {
-            let attacker = get_pokemon_at_slot(&next_state, m.user_slot)
-                .map(|p| species_name_sim(&p.species))
-                .unwrap_or_else(|| format!("{} slot {}", match m.user_slot.player { Player::P1 => "P1", Player::P2 => "P2" }, m.user_slot.slot_index + 1));
-            let target = match m.target_slot {
-                Some(slot) => get_pokemon_at_slot(&next_state, slot)
-                    .map(|p| species_name_sim(&p.species))
-                    .unwrap_or_else(|| format!("{} slot {}", match slot.player { Player::P1 => "P1", Player::P2 => "P2" }, slot.slot_index + 1)),
-                None => "(no specific target)".to_string(),
+            // Check if the attacker is fainted - if so, skip this move
+            let attacker = get_pokemon_at_slot(&next_state, m.user_slot);
+            if let Some(mon) = attacker {
+                if mon.fainted {
+                    return vec![(MatchState::BattleState(next_state), 1.0)];
+                }
+            }
+
+            let Some(move_data) = move_dex.get(&m.move_name) else {
+                return vec![(MatchState::BattleState(next_state), 1.0)];
             };
-            println!("{}", format!("[UNHANDLED] Move action: {} uses {} -> {}", attacker, move_name_sim(&m.move_name), target).bright_red());
-            vec![(MatchState::BattleState(next_state), 1.0)]
+
+            possible_damage_outcomes_for_move(&next_state, &m, move_data, config)
         }
         Action::SwitchAction(s) => {
             // perform the switch now
@@ -650,6 +1341,10 @@ fn step_action_queue(
                 Player::P2 => next_state.p2_has_tera = false,
             }
             
+            vec![(MatchState::BattleState(next_state), 1.0)]
+        }
+        Action::Pass => {
+            // Pass action: do nothing
             vec![(MatchState::BattleState(next_state), 1.0)]
         }
     }
@@ -849,32 +1544,85 @@ pub fn simulate_turn(
     p2_cmd: &PlayerCommand,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
+    consider_crit: bool,
+    damage_rolls: u8,
 ) -> Vec<(MatchState, f64)> {
     // First, apply the player commands to populate the action queue
     let mut current_state = apply_player_commands(state, p1_cmd, p2_cmd, move_dex);
-    
-    // Then process the action queue one step at a time
-    loop {
-        match &current_state {
-            MatchState::BattleState(battle) => {
-                if battle.action_queue.is_empty() {
-                    break;
+
+    // If the resulting BattleState has an empty action queue, set turn flags
+    // appropriately: if any active slot is fainted and a healthy bench exists
+    // then a replacement phase is needed -> mark turn_ended = true. Otherwise
+    // start the turn with turn_started = true and turn_ended = false.
+    match &mut current_state {
+        MatchState::BattleState(bs) => {
+            if bs.action_queue.is_empty() {
+                let mut replacement_needed = false;
+
+                for mon in &bs.p1_active_mons {
+                    if mon.fainted {
+                        if bs.p1_back_mons.iter().any(|m| !m.fainted) {
+                            replacement_needed = true;
+                            break;
+                        }
+                    }
                 }
-                
-                let outcomes = step_action_queue(battle, move_dex, pokemon_dex);
-                
-                // For now, just take the first outcome (deterministic processing)
-                if let Some((next_match_state, _)) = outcomes.first() {
-                    current_state = next_match_state.clone();
+
+                if !replacement_needed {
+                    for mon in &bs.p2_active_mons {
+                        if mon.fainted {
+                            if bs.p2_back_mons.iter().any(|m| !m.fainted) {
+                                replacement_needed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if replacement_needed {
+                    bs.turn_started = true;
+                    bs.turn_ended = true;
                 } else {
-                    break;
+                    bs.turn_started = false;
+                    bs.turn_ended = false;
                 }
             }
-            _ => break,
+        }
+        _ => {}
+    }
+    let config = DamageConfig {
+        consider_crit,
+        damage_rolls,
+    };
+
+    fn expand_branch(
+        state: &MatchState,
+        move_dex: &HashMap<PokemonMove, MoveData>,
+        pokemon_dex: &HashMap<Species, PokemonData>,
+        config: DamageConfig,
+    ) -> Vec<(MatchState, f64)> {
+        match state {
+            MatchState::BattleState(battle) => {
+                if battle.action_queue.is_empty() {
+                    return step_action_queue(battle, move_dex, pokemon_dex, config);//Handles replacement phase
+                }
+
+                let outcomes = step_action_queue(battle, move_dex, pokemon_dex, config);
+                let mut aggregated = Vec::new();
+
+                for (next_state, probability) in outcomes {
+                    for (final_state, final_probability) in expand_branch(&next_state, move_dex, pokemon_dex, config) {
+                        aggregated.push((final_state, probability * final_probability));
+                    }
+                }
+
+                aggregated
+            }
+            _ => vec![(state.clone(), 1.0)],
         }
     }
     
-    vec![(current_state, 1.0)]
+    expand_branch(&current_state, move_dex, pokemon_dex, config)
 }
 
 /// Public validator wrapper used by interactive UI to check legality
@@ -894,8 +1642,6 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
             let mut leaving = next_state.p1_active_mons[slot_idx].clone();
             leaving.volatiles.clear();
             leaving.boosts.iter_mut().for_each(|boost| *boost = 0);
-            // swap
-            let mut incoming = next_state.p1_back_mons[bench_index].clone();
             std::mem::swap(&mut next_state.p1_active_mons[slot_idx], &mut next_state.p1_back_mons[bench_index]);
             // ensure the benched slot gets the leaving mon with cleared volatiles
             next_state.p1_back_mons[bench_index] = leaving;
@@ -908,7 +1654,6 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
             let mut leaving = next_state.p2_active_mons[slot_idx].clone();
             leaving.volatiles.clear();
             leaving.boosts.iter_mut().for_each(|boost| *boost = 0);
-            let mut incoming = next_state.p2_back_mons[bench_index].clone();
             std::mem::swap(&mut next_state.p2_active_mons[slot_idx], &mut next_state.p2_back_mons[bench_index]);
             next_state.p2_back_mons[bench_index] = leaving;
         }
