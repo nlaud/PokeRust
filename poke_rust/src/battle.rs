@@ -1,7 +1,7 @@
 use crate::pokemon::PokemonState;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::PokemonData;
+use crate::dex_data::{PokemonData, PseudoWeather, SideCondition, SlotCondition, Terrain, Weather};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,6 +80,19 @@ pub struct BattleState{
 
     pub p1_has_mega: bool,
     pub p2_has_mega: bool,
+
+    pub weathers: Vec<Weather>,
+    pub weather_turns: Vec<u8>,
+    pub pseudo_weathers: Vec<PseudoWeather>,
+    pub pseudo_weather_turns: Vec<u8>,
+    pub terrains: Vec<Terrain>,
+    pub terrain_turns: Vec<u8>,
+    pub p1_side_conditions: Vec<SideCondition>,
+    pub p1_side_condition_turns: Vec<u8>,
+    pub p2_side_conditions: Vec<SideCondition>,
+    pub p2_side_condition_turns: Vec<u8>,
+    pub p1_slot_conditions: Vec<Vec<SlotCondition>>,
+    pub p2_slot_conditions: Vec<Vec<SlotCondition>>,
 }
 
 impl std::fmt::Display for BattleState {
@@ -121,6 +134,76 @@ impl std::fmt::Display for BattleState {
         writeln!(f, "P2 Active: [{}]", p2_active_names.join(" | "))?;
         writeln!(f, "P2 Back:  [{}]", p2_back_names.join(" | "))?;
         writeln!(f, "P2 Has Tera: {} | Has Mega: {}", self.p2_has_tera, self.p2_has_mega)?;
+
+        if !self.weathers.is_empty() {
+            let weather_strs: Vec<String> = self
+                .weathers
+                .iter()
+                .zip(self.weather_turns.iter())
+                .map(|(w, turns)| format!("{:?} ({}t)", w, turns))
+                .collect();
+            writeln!(f, "Weather: {}", weather_strs.join(", "))?;
+        }
+
+        if !self.pseudo_weathers.is_empty() {
+            let pseudo_strs: Vec<String> = self
+                .pseudo_weathers
+                .iter()
+                .zip(self.pseudo_weather_turns.iter())
+                .map(|(pw, turns)| format!("{:?} ({}t)", pw, turns))
+                .collect();
+            writeln!(f, "Pseudo-Weather: {}", pseudo_strs.join(", "))?;
+        }
+
+        if !self.terrains.is_empty() {
+            let terrain_strs: Vec<String> = if !self.terrain_turns.is_empty() {
+                self.terrains.iter().zip(self.terrain_turns.iter()).map(|(t, turns)| format!("{:?} ({}t)", t, turns)).collect()
+            } else {
+                self.terrains.iter().map(|t| format!("{:?}", t)).collect()
+            };
+            writeln!(f, "Terrain: {}", terrain_strs.join(", "))?;
+        }
+
+        if !self.p1_side_conditions.is_empty() {
+            let p1_side_strs: Vec<String> = self
+                .p1_side_conditions
+                .iter()
+                .zip(self.p1_side_condition_turns.iter())
+                .map(|(sc, turns)| format!("{:?} ({}t)", sc, turns))
+                .collect();
+            writeln!(f, "P1 Side Conditions: {}", p1_side_strs.join(", "))?;
+        }
+
+        if !self.p2_side_conditions.is_empty() {
+            let p2_side_strs: Vec<String> = self
+                .p2_side_conditions
+                .iter()
+                .zip(self.p2_side_condition_turns.iter())
+                .map(|(sc, turns)| format!("{:?} ({}t)", sc, turns))
+                .collect();
+            writeln!(f, "P2 Side Conditions: {}", p2_side_strs.join(", "))?;
+        }
+
+        let p1_has_slot_conds = self.p1_slot_conditions.iter().any(|slot_conds| !slot_conds.is_empty());
+        if p1_has_slot_conds {
+            for (slot_idx, slot_conds) in self.p1_slot_conditions.iter().enumerate() {
+                if !slot_conds.is_empty() {
+                    let slot_strs: Vec<String> = slot_conds.iter().map(|sc| format!("{:?}", sc)).collect();
+                    writeln!(f, "  P1 Slot {}: {}", slot_idx, slot_strs.join(", "))?;
+                }
+            }
+        }
+
+        let p2_has_slot_conds = self.p2_slot_conditions.iter().any(|slot_conds| !slot_conds.is_empty());
+        if p2_has_slot_conds {
+            for (slot_idx, slot_conds) in self.p2_slot_conditions.iter().enumerate() {
+                if !slot_conds.is_empty() {
+                    let slot_strs: Vec<String> = slot_conds.iter().map(|sc| format!("{:?}", sc)).collect();
+                    writeln!(f, "  P2 Slot {}: {}", slot_idx, slot_strs.join(", "))?;
+                }
+            }
+        }
+
         if !self.action_queue.is_empty() {
             writeln!(f, "Action Queue:")?;
             for (i, action) in self.action_queue.iter().enumerate() {

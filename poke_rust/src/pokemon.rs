@@ -11,6 +11,7 @@ pub type PokemonStatsTable = [u16; 6]; // hp, atk, def, spa, spd, spe
 #[derive(Debug, Clone)]
 pub enum VolatileStatusState{
     Status(VolatileStatus, u8),//Make this hold more information about each status, like turns remaining, etc.
+    Charging(PokemonMove, Vec<crate::battle::FieldSlot>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -320,6 +321,7 @@ pub fn parse_team_sheet(
     path: &str,
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
+    use_stat_points: bool,
 ) -> Vec<PokemonState> {
     let content = fs::read_to_string(path).expect("Failed to read team sheet file");
     // Normalize line endings so blank-line splitting works on Windows files too
@@ -421,13 +423,22 @@ pub fn parse_team_sheet(
                     let mut iter = part.splitn(2, ' ');
                     if let (Some(num_str), Some(stat_name)) = (iter.next(), iter.next()) {
                         if let Ok(val) = num_str.trim().parse::<u8>() {
+                            // Convert from stat points to EVs if needed
+                            let ev_value = if use_stat_points {
+                                // Apply formula: EV(n) = ((n-4)/8)+1 to convert stat points to EVs
+                                ((val as i16 * 8) - 4).max(0) as u8
+                            } else {
+                                // Normal EV format, use as-is
+                                val
+                            };
+                            
                             match stat_name.trim() {
-                                "HP"  => evs[0] = val,
-                                "Atk" => evs[1] = val,
-                                "Def" => evs[2] = val,
-                                "SpA" => evs[3] = val,
-                                "SpD" => evs[4] = val,
-                                "Spe" => evs[5] = val,
+                                "HP"  => evs[0] = ev_value,
+                                "Atk" => evs[1] = ev_value,
+                                "Def" => evs[2] = ev_value,
+                                "SpA" => evs[3] = ev_value,
+                                "SpD" => evs[4] = ev_value,
+                                "Spe" => evs[5] = ev_value,
                                 _ => {}
                             }
                         }

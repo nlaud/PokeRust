@@ -2,12 +2,14 @@ use clap::Parser;
 use colored::Colorize;
 use battle::MatchState;
 use std::sync::OnceLock;
+use crate::data::pokemon_move::PokemonMove;
 
 mod dex_data;
 mod data;
 mod pokemon;
 mod battle;
 mod simulator;
+mod simulator_helpers;
 mod user;
 
 pub static VERBOSITY: OnceLock<u8> = OnceLock::new();
@@ -42,6 +44,10 @@ struct Args {
     /// How many damage rolls to consider per hit, from 1 to 16
     #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u8).range(1..=16))]
     damage_rolls: u8,
+
+    /// Use stat points format instead of EVs (applies formula: EV' = ((n-4)/8)+1)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::SetFalse)]
+    stat_points: bool,
 }
 
 fn main() {
@@ -58,6 +64,14 @@ fn main() {
     //Put move data into a hashmap
     let move_dex = dex_data::parse_move_dex(&args.move_dex);
 
+    // Print info about a sample move (before printing teamsheets)
+    
+    let sample_move = PokemonMove::ElectroShot;
+    if let Some(m) = move_dex.get(&sample_move) {
+        println!("Data:{:#?}", m)
+    }
+    
+
     if args.verbosity >= 1 {
         println!("{}", format!("Loaded {} Pokemon and {} moves", pokemon_dex.len(), move_dex.len()).bright_green());
     }
@@ -68,7 +82,7 @@ fn main() {
     }
 
     //Parse teamsheets
-    let preview = simulator::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, &move_dex, 2, 4);
+    let preview = simulator::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, &move_dex, 2, 4, args.stat_points);
 
     if args.verbosity >= 1 {
         println!("{}", format!("P1 team: {} Pokemon | P2 team: {} Pokemon", preview.p1_mons.len(), preview.p2_mons.len()).bright_cyan());

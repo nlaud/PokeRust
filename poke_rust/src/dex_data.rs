@@ -56,7 +56,7 @@ pub enum MoveTarget {
     FoeSide, //Targets all opposing pokemon at once
     Normal, // Can target any individual mon, excluding self
     RandomNormal, //Chooses a target at random
-    Scripted, //Ignore this for now, moves that reflect damage that the user takes
+    Scripted, //Ignore this for now, moves that reflect damage that the user takes (mirror armor etc.)
     SelfTarget, //Must target itself
 }
 
@@ -209,7 +209,7 @@ pub enum VolatileStatus {
     Yawn,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SideCondition {
     AuroraVeil,
     Reflect,
@@ -654,6 +654,21 @@ fn parse_effect_from_text(text: &str) -> HitEffect {
     if let Some(s) = extract_quoted(text, "volatileStatus") {
         effect.volatile_status = parse_volatile(&s);
     }
+    if let Some(s) = extract_quoted(text, "sideCondition") {
+        effect.side_condition = parse_side_condition(&s);
+    }
+    if let Some(s) = extract_quoted(text, "terrain") {
+        effect.terrain = parse_terrain(&s);
+    }
+    if let Some(s) = extract_quoted(text, "weather") {
+        effect.weather = parse_weather_val(&s);
+    }
+    if let Some(s) = extract_quoted(text, "pseudoWeather") {
+        effect.pseudo_weather = parse_pseudo_weather(&s);
+    }
+    if let Some(s) = extract_quoted(text, "slotCondition") {
+        effect.slot_condition = parse_slot_condition(&s);
+    }
     if let Some(bp) = text.find("boosts:") {
         let rest = &text[bp..];
         if let Some(ob) = rest.find('{') {
@@ -762,10 +777,26 @@ fn parse_boosts_from_text(text: &str) -> PokemonBoostTable {
 /// Parse flags from text like `{ contact: 1, protect: 1, mirror: 1 }`
 fn parse_flags_from_text(text: &str) -> Vec<MoveFlag> {
     let mut flags = Vec::new();
-    let inner = text.trim().trim_start_matches('{').trim_end_matches('}');
+    let mut inner = text.trim();
+
+    if let Some(rest) = inner.strip_prefix("flags:") {
+        inner = rest.trim();
+    }
+
+    inner = inner
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim_end_matches(',')
+        .trim();
+
     for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
         if let Some((key, _)) = part.split_once(':') {
-            if let Some(flag) = parse_flag(key.trim()) {
+            if let Some(flag) = parse_flag(key.trim().trim_matches(|c: char| c == '{' || c == '}' || c == '\'' || c == '"')) {
                 flags.push(flag);
             }
         }
@@ -919,6 +950,11 @@ fn parse_secondary_block(lines: &[String], start_idx: usize)
     let has_target = chance > 0
         || target_effect.status.is_some()
         || target_effect.volatile_status.is_some()
+        || target_effect.side_condition.is_some()
+        || target_effect.terrain.is_some()
+        || target_effect.weather.is_some()
+        || target_effect.pseudo_weather.is_some()
+        || target_effect.slot_condition.is_some()
         || target_effect.boosts.iter().any(|&b| b != 0);
     let target_sec = if has_target {
         Some(PokemonSecondaryEffect { chance, effect: target_effect })
@@ -931,6 +967,11 @@ fn parse_secondary_block(lines: &[String], start_idx: usize)
         let self_effect = parse_effect_from_text(&st);
         let has_self = self_effect.status.is_some()
             || self_effect.volatile_status.is_some()
+            || self_effect.side_condition.is_some()
+            || self_effect.terrain.is_some()
+            || self_effect.weather.is_some()
+            || self_effect.pseudo_weather.is_some()
+            || self_effect.slot_condition.is_some()
             || self_effect.boosts.iter().any(|&b| b != 0);
         if has_self {
             Some(PokemonSecondaryEffect { chance, effect: self_effect })

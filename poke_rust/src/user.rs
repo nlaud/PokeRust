@@ -32,7 +32,6 @@ fn format_pokemon_detailed(mon: &PokemonState) -> String {
             .filter(|(_, b)| **b != 0)
             .map(|(i, b)| format!("{}{:+}", boost_names[i], b))
             .collect();
-        
         if active_boosts.is_empty() {
             "none".to_string()
         } else {
@@ -47,9 +46,35 @@ fn format_pokemon_detailed(mon: &PokemonState) -> String {
     
     let evs_str = mon.evs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("/");
     let ivs_str = mon.ivs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/");
-    
+
+    // Volatiles
+    let vol_str = if mon.volatiles.is_empty() {
+        "none".to_string()
+    } else {
+        mon.volatiles.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ")
+    };
+
+    // Tera / Mega info
+    let tera_info = if mon.is_tera {
+        format!("Tera({:?})", mon.tera_type)
+    } else {
+        "No Tera".to_string()
+    };
+    let mega_info = if mon.has_mega_form {
+        mon.mega_species.as_ref().map(|s| format!("Mega({:?})", s)).unwrap_or_else(|| "Has Mega (unknown species)".to_string())
+    } else {
+        "No Mega".to_string()
+    };
+
+    // Moves and PP
+    let moves_str = mon.moves.iter().enumerate().map(|(i, m)| {
+        let name = m.as_ref().map(|mv| move_name(mv)).unwrap_or_else(|| format!("Move {}", i+1));
+        let pp = mon.move_pp.get(i).copied().unwrap_or(0);
+        format!("{} (PP {})", name, pp)
+    }).collect::<Vec<_>>().join(", ");
+
     format!(
-        "{} ({}/{} HP), Item: {}, Ability: {}, Nature: {}\n    Stats: {}\n    Boosts: {}\n    Status: {}\n    EVs: {}\n    IVs: {}",
+        "{} ({}/{} HP), Item: {}, Ability: {}, Nature: {}\n    Stats: {}\n    Boosts: {}\n    Status: {}\n    Volatiles: {}\n    {} | {}\n    Moves: {}\n    EVs: {}\n    IVs: {}",
         species_name(&mon.species),
         mon.hp,
         mon.stats[0],
@@ -59,6 +84,10 @@ fn format_pokemon_detailed(mon: &PokemonState) -> String {
         stats_str,
         boosts_str,
         status_str,
+        vol_str,
+        tera_info,
+        mega_info,
+        moves_str,
         evs_str,
         ivs_str
     )
@@ -67,11 +96,23 @@ fn format_pokemon_detailed(mon: &PokemonState) -> String {
 fn format_pokemon_brief(mon: &PokemonState) -> String {
     let mut parts = vec![format!("{:?} ({}/{} HP)", mon.species, mon.hp, mon.stats[0])];
     if let Some(status) = &mon.status {
-        parts.push(format!("{:?}", status));
+        parts.push(format!("Status: {:?}", status));
     }
     if !mon.volatiles.is_empty() {
         let vol_strs: Vec<String> = mon.volatiles.iter().map(|v| format!("{:?}", v)).collect();
         parts.push(format!("Vols: [{}]", vol_strs.join(", ")));
+    }
+    // Small boost summary
+    let active_boosts: Vec<String> = mon.boosts.iter().enumerate().filter(|(_, b)| **b != 0).map(|(i,b)| format!("{}{:+}", ["A","D","Sa","Sd","Sp","Acc","Eva"][i], b)).collect();
+    if !active_boosts.is_empty() {
+        parts.push(format!("Boosts: [{}]", active_boosts.join(", ")));
+    }
+    // Tera/Mega marker
+    if mon.is_tera {
+        parts.push(format!("Tera({:?})", mon.tera_type));
+    }
+    if mon.has_mega_form {
+        if let Some(ms) = &mon.mega_species { parts.push(format!("Mega({:?})", ms)); }
     }
     parts.join(", ")
 }
@@ -143,6 +184,72 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
     }
     
     println!("{}", format!("P2 Has Tera: {} | Has Mega: {}", state.p2_has_tera, state.p2_has_mega).magenta());
+
+    // Field / global effects
+    let mut printed_field = false;
+    if !state.weathers.is_empty() || !state.terrains.is_empty() || !state.pseudo_weathers.is_empty() {
+        println!("\n{}", "Field / Global Effects:".yellow().bold());
+        printed_field = true;
+    }
+    if !state.weathers.is_empty() {
+        println!("  Weathers: {:?}", state.weathers);
+    }
+    if !state.terrains.is_empty() {
+        if !state.terrain_turns.is_empty() {
+            let terrain_strs: Vec<String> = state.terrains.iter().zip(state.terrain_turns.iter()).map(|(t, turns)| format!("{:?} ({}t)", t, turns)).collect();
+            println!("  Terrains: {}", terrain_strs.join(", "));
+        } else {
+            println!("  Terrains: {:?}", state.terrains);
+        }
+    }
+    if !state.pseudo_weathers.is_empty() {
+        println!("  Pseudo-weathers: {:?}", state.pseudo_weathers);
+    }
+
+    // Side conditions (only print if present)
+    if !state.p1_side_conditions.is_empty() || !state.p2_side_conditions.is_empty() {
+        if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
+        if !state.p1_side_conditions.is_empty() {
+            println!("  P1 side conditions: {:?}", state.p1_side_conditions);
+            if !state.p1_side_condition_turns.is_empty() { println!("  P1 side condition turns: {:?}", state.p1_side_condition_turns); }
+        }
+        if !state.p2_side_conditions.is_empty() {
+            println!("  P2 side conditions: {:?}", state.p2_side_conditions);
+            if !state.p2_side_condition_turns.is_empty() { println!("  P2 side condition turns: {:?}", state.p2_side_condition_turns); }
+        }
+    }
+
+    // Slot-specific conditions (only print slots that have conditions)
+    let mut any_slot_conds = false;
+    for conds in state.p1_slot_conditions.iter().chain(state.p2_slot_conditions.iter()) { if !conds.is_empty() { any_slot_conds = true; break; } }
+    if any_slot_conds {
+        if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
+        println!("  P1 slot conditions:");
+        for (i, conds) in state.p1_slot_conditions.iter().enumerate() {
+            if !conds.is_empty() { println!("    Slot {}: {:?}", i+1, conds); }
+        }
+        println!("  P2 slot conditions:");
+        for (i, conds) in state.p2_slot_conditions.iter().enumerate() {
+            if !conds.is_empty() { println!("    Slot {}: {:?}", i+1, conds); }
+        }
+    }
+
+    // Weathers/turns small (only if non-empty)
+    if !state.weather_turns.is_empty() {
+        if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
+        println!("  Weather turns: {:?}", state.weather_turns);
+    }
+    if !state.pseudo_weather_turns.is_empty() {
+        if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
+        println!("  Pseudo-weather turns: {:?}\n", state.pseudo_weather_turns);
+    }
+
+    // Action queue and turn flags (only print queue if non-empty)
+    println!("{}", "Turn & Queue:".yellow().bold());
+    println!("  Turn number: {} | Started: {} | Ended: {}", state.turn_number, state.turn_started, state.turn_ended);
+    if !state.action_queue.is_empty() {
+        println!("  Action queue (len={}): {:?}\n", state.action_queue.len(), state.action_queue);
+    }
 }
 
 fn humanize_identifier(value: impl AsRef<str>) -> String {
