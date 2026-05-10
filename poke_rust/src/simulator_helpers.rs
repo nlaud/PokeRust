@@ -412,6 +412,7 @@ pub fn calculate_damage_outcomes_for_target(
     move_data: &MoveData,
     config: crate::simulator::DamageConfig,
     targets_multiplier: f64,
+    invulnerability_multiplier: f64,
 ) -> Vec<(u16, bool, f64)> {
     let attacking_stat = match move_offensive_stat(move_data) {
         Some(stat) => stat,
@@ -449,6 +450,7 @@ pub fn calculate_damage_outcomes_for_target(
         let base_damage = (((((2.0 * attacker.level as f64 / 5.0 + 2.0) * attack_stat * move_data.base_power as f64 / defense_stat) / 50.0) + 2.0)
             * stab
             * effectiveness
+            * invulnerability_multiplier
             * critical_multiplier
             * targets_multiplier)
             .floor()
@@ -474,7 +476,115 @@ pub fn damage_effectiveness_for_action(state: &BattleState, action: &MoveAction,
         return 1.0;
     };
 
-    move_type_effectiveness(&move_data.pokemon_type, target)
+    match invulnerability_resolution(target, &move_data.name) {
+        InvulnerabilityResolution::Blocked => 0.0,
+        InvulnerabilityResolution::Normal => move_type_effectiveness(&move_data.pokemon_type, target),
+        InvulnerabilityResolution::DoubleDamage => move_type_effectiveness(&move_data.pokemon_type, target) * 2.0,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvulnerabilityResolution {
+    Blocked,
+    Normal,
+    DoubleDamage,
+}
+
+pub fn move_causes_invulnerability(move_name: &PokemonMove) -> bool {
+    matches!(
+        move_name,
+        PokemonMove::Bounce
+            | PokemonMove::Dig
+            | PokemonMove::Dive
+            | PokemonMove::Fly
+            | PokemonMove::PhantomForce
+            | PokemonMove::ShadowForce
+            | PokemonMove::SkyDrop
+    )
+}
+
+fn invulnerability_resolution_for_source_move(
+    source_move: &PokemonMove,
+    attack_move: &PokemonMove,
+) -> InvulnerabilityResolution {
+    match source_move {
+        PokemonMove::Dig => match attack_move {
+            PokemonMove::Earthquake | PokemonMove::Magnitude => InvulnerabilityResolution::DoubleDamage,
+            PokemonMove::Fissure => InvulnerabilityResolution::Normal,
+            _ => InvulnerabilityResolution::Blocked,
+        },
+        PokemonMove::Dive => match attack_move {
+            PokemonMove::Surf | PokemonMove::Whirlpool => InvulnerabilityResolution::DoubleDamage,
+            _ => InvulnerabilityResolution::Blocked,
+        },
+        PokemonMove::Fly | PokemonMove::Bounce => match attack_move {
+            PokemonMove::Gust | PokemonMove::Twister => InvulnerabilityResolution::DoubleDamage,
+            PokemonMove::Thunder
+            | PokemonMove::SkyUppercut
+            | PokemonMove::SmackDown
+            | PokemonMove::Hurricane => InvulnerabilityResolution::Normal,
+            _ => InvulnerabilityResolution::Blocked,
+        },
+        PokemonMove::PhantomForce | PokemonMove::ShadowForce | PokemonMove::SkyDrop => {
+            InvulnerabilityResolution::Blocked
+        }
+        _ => InvulnerabilityResolution::Normal,
+    }
+}
+
+pub fn invulnerability_resolution(target: &PokemonState, attack_move: &PokemonMove) -> InvulnerabilityResolution {
+    let Some((source_move, _targets)) = target.volatiles.iter().find_map(|volatile| {
+        if let VolatileStatusState::Invulnerable(source_move, targets) = volatile {
+            Some((source_move, targets))
+        } else {
+            None
+        }
+    }) else {
+        return InvulnerabilityResolution::Normal;
+    };
+
+    invulnerability_resolution_for_source_move(source_move, attack_move)
+}
+
+pub fn add_invulnerable_volatile(mon: &mut PokemonState, move_name: PokemonMove, targets: Vec<FieldSlot>) {
+    let already_has = mon.volatiles.iter().any(|volatile| {
+        matches!(
+            volatile,
+            VolatileStatusState::Invulnerable(existing_move, existing_targets)
+                if std::mem::discriminant(existing_move) == std::mem::discriminant(&move_name)
+                    && *existing_targets == targets
+        )
+    });
+
+    if !already_has {
+        mon.volatiles.push(VolatileStatusState::Invulnerable(move_name, targets));
+    }
+}
+
+pub fn remove_invulnerable_volatile(mon: &mut PokemonState, move_name: &PokemonMove) {
+    if let Some(pos) = mon.volatiles.iter().position(|volatile| {
+        matches!(
+            volatile,
+            VolatileStatusState::Invulnerable(existing_move, _)
+                if std::mem::discriminant(existing_move) == std::mem::discriminant(move_name)
+        )
+    }) {
+        mon.volatiles.remove(pos);
+    }
+}
+
+pub fn has_status_volatile(mon: &PokemonState, volatile: &VolatileStatus) -> bool {
+    mon.volatiles.iter().any(|v| {
+        matches!(v, VolatileStatusState::Status(vst, _) if std::mem::discriminant(vst) == std::mem::discriminant(volatile))
+    })
+}
+
+pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus) {
+    if let Some(pos) = mon.volatiles.iter().position(|v| {
+        matches!(v, VolatileStatusState::Status(vst, _) if std::mem::discriminant(vst) == std::mem::discriminant(volatile))
+    }) {
+        mon.volatiles.remove(pos);
+    }
 }
 
 pub fn apply_damage(mon: &mut PokemonState, damage: u16) {

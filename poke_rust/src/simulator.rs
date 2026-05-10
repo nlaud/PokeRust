@@ -73,6 +73,113 @@ fn possible_damage_outcomes_for_move(
     // Check if the move has the Recharge flag
     let move_has_recharge = simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Recharge);
 
+    let move_causes_invulnerability = simulator_helpers::move_causes_invulnerability(&action.move_name);
+
+    let invulnerable_data = attacker.volatiles.iter().find_map(|v| {
+        if let crate::pokemon::VolatileStatusState::Invulnerable(mov, targets) = v {
+            if mov == &action.move_name {
+                Some(targets.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
+    // Semi-invulnerable moves spend a turn in the air/underground/in transit.
+    // On the first turn, we store the target list and return without dealing damage.
+    if move_causes_invulnerability && invulnerable_data.is_none() {
+        let invulnerability_targets = if move_target_is_multitarget(&move_data.target) {
+            simulator_helpers::resolve_move_targets(&next_state, action.user_slot, &move_data.target)
+        } else {
+            match action.target_slot {
+                Some(slot) => vec![slot],
+                None => {
+                    let targets = simulator_helpers::resolve_move_targets(&next_state, action.user_slot, &move_data.target);
+                    if targets.is_empty() {
+                        return vec![(MatchState::BattleState(next_state), 1.0)];
+                    }
+                    targets
+                }
+            }
+        };
+
+        if invulnerability_targets.is_empty() {
+            return vec![(MatchState::BattleState(next_state), 1.0)];
+        }
+
+        simulator_helpers::add_invulnerable_volatile(&mut attacker, action.move_name.clone(), invulnerability_targets.clone());
+
+        match action.user_slot.player {
+            Player::P1 => {
+                if let Some(mon) = next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize) {
+                    mon.volatiles = attacker.volatiles.clone();
+                }
+            }
+            Player::P2 => {
+                if let Some(mon) = next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) {
+                    mon.volatiles = attacker.volatiles.clone();
+                }
+            }
+        }
+
+        if action.move_name == PokemonMove::SkyDrop {
+            for target_slot in &invulnerability_targets {
+                if let Some(target_mon) = match target_slot.player {
+                    Player::P1 => next_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
+                    Player::P2 => next_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+                } {
+                    if !simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::SkyDrop) {
+                        target_mon.volatiles.push(crate::pokemon::VolatileStatusState::Status(VolatileStatus::SkyDrop, 0));
+                    }
+                }
+            }
+        }
+
+        // Semi-invulnerable moves still consume PP on the first turn.
+        let pp_slot = attacker
+            .moves
+            .iter()
+            .position(|move_entry| move_entry.as_ref() == Some(&action.move_name));
+
+        if let Some(pp_index) = pp_slot {
+            if let Some(mon) = match action.user_slot.player {
+                Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+            } {
+                if let Some(pp) = mon.move_pp.get_mut(pp_index) {
+                    *pp = pp.saturating_sub(1);
+                }
+            }
+        }
+
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
+    if let Some(stored_targets) = invulnerable_data {
+        if let Some(target_slot) = action.target_slot {
+            if !stored_targets.contains(&target_slot) {
+                return vec![(MatchState::BattleState(next_state), 1.0)];
+            }
+        }
+
+        simulator_helpers::remove_invulnerable_volatile(&mut attacker, &action.move_name);
+
+        match action.user_slot.player {
+            Player::P1 => {
+                if let Some(mon) = next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize) {
+                    mon.volatiles = attacker.volatiles.clone();
+                }
+            }
+            Player::P2 => {
+                if let Some(mon) = next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) {
+                    mon.volatiles = attacker.volatiles.clone();
+                }
+            }
+        }
+    }
+
     // If this move has the Charge flag and we're not already charged for it, apply charging volatile with targets
     if move_has_charge && charging_data.is_none() {
         // Determine what targets would be used for this move
@@ -206,9 +313,22 @@ fn possible_damage_outcomes_for_move(
     let mut per_target_outcomes: Vec<(FieldSlot, Vec<(u16, bool, bool, f64)>)> = Vec::new();
 
     for target_slot in &target_slots {
+        let mut outcomes_for_target: Vec<(u16, bool, bool, f64)> = Vec::new();
+
         let Some(target) = get_pokemon_at_slot(&next_state, *target_slot).cloned() else {
             // Target is fainted or doesn't exist, skip
             continue;
+        };
+
+        let invulnerability_resolution = simulator_helpers::invulnerability_resolution(&target, &action.move_name);
+        let invulnerability_multiplier = match invulnerability_resolution {
+            simulator_helpers::InvulnerabilityResolution::Blocked => {
+                outcomes_for_target.push((0, false, false, 1.0));
+                per_target_outcomes.push((*target_slot, outcomes_for_target));
+                continue;
+            }
+            simulator_helpers::InvulnerabilityResolution::Normal => 1.0,
+            simulator_helpers::InvulnerabilityResolution::DoubleDamage => 2.0,
         };
 
         let hit_probability = simulator_helpers::accuracy_hit_probability(
@@ -220,8 +340,6 @@ fn possible_damage_outcomes_for_move(
             move_data,
         )
         .clamp(0.0, 1.0);
-
-        let mut outcomes_for_target: Vec<(u16, bool, bool, f64)> = Vec::new();
 
         // Miss branch.
         if hit_probability < 1.0 {
@@ -237,6 +355,7 @@ fn possible_damage_outcomes_for_move(
             move_data,
             config,
             targets_mult,
+            invulnerability_multiplier,
         );
 
         // Hit branches.
@@ -293,6 +412,10 @@ fn possible_damage_outcomes_for_move(
                         Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
                     } {
                         simulator_helpers::apply_damage(target_mon, *damage);
+
+                        if move_data.name == PokemonMove::SkyDrop {
+                            simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::SkyDrop);
+                        }
                     }
 
                     // Apply secondary effects, which now returns branched states with probabilities
@@ -549,17 +672,19 @@ fn generate_commands_for_active(
         return cmds;
     }
     
-    // Check for charging volatile
-    let charging_move = mon.volatiles.iter().find_map(|v| {
-        if let crate::pokemon::VolatileStatusState::Charging(mov, targets) = v {
-            Some((mov.clone(), targets.clone()))
-        } else {
-            None
+    // Check for charging or semi-invulnerable volatile
+    let locked_move = mon.volatiles.iter().find_map(|v| {
+        match v {
+            crate::pokemon::VolatileStatusState::Charging(mov, targets)
+            | crate::pokemon::VolatileStatusState::Invulnerable(mov, targets) => {
+                Some((mov.clone(), targets.clone()))
+            }
+            _ => None,
         }
     });
     
     // If charging, can only Pass or use the charged move with same targets
-    if let Some((charged_move, charged_targets)) = charging_move {
+    if let Some((charged_move, charged_targets)) = locked_move {
         for (i, move_name_opt) in mon.moves.iter().enumerate() {
             if let Some(m) = move_name_opt {
                 if m == &charged_move {

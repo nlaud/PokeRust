@@ -12,6 +12,7 @@ pub type PokemonStatsTable = [u16; 6]; // hp, atk, def, spa, spd, spe
 pub enum VolatileStatusState{
     Status(VolatileStatus, u8),//Make this hold more information about each status, like turns remaining, etc.
     Charging(PokemonMove, Vec<crate::battle::FieldSlot>),
+    Invulnerable(PokemonMove, Vec<crate::battle::FieldSlot>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
