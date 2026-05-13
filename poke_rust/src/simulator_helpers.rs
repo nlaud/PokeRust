@@ -172,14 +172,17 @@ pub fn type_effectiveness_label(effectiveness: f64) -> &'static str {
     }
 }
 
-pub fn crit_is_prevented(attacker: &PokemonState, target: &PokemonState, move_name: &PokemonMove) -> bool {
+pub fn crit_is_prevented(target: &PokemonState) -> bool {
     if target.ability == Ability::BattleArmor || target.ability == Ability::ShellArmor {
         return true;
     }
+    false
+}
 
+pub fn crit_is_guaranteed(attacker: &PokemonState, target: &PokemonState, move_name: &PokemonMove) -> bool {
     let target_is_poisoned = matches!(target.status, Some(Status::Poison | Status::ToxicPoison));
     let merciless_crit = attacker.ability == Ability::Merciless && target_is_poisoned;
-    let laser_focus = attacker.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::Status(VolatileStatus::LaserFocus, _)));
+    let laser_focus = attacker.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::LaserFocus, _)) || matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::LaserFocus, _)));
     let always_crit_move = matches!(
         move_name,
         PokemonMove::StormThrow
@@ -208,7 +211,10 @@ pub fn critical_hit_probability(
         return vec![(false, 1.0)];
     }
 
-    if crit_is_prevented(attacker, target, move_name) {
+    if crit_is_prevented(target) {
+        return vec![(false, 1.0)];
+    }
+    if crit_is_guaranteed(attacker, target, move_name) {
         return vec![(true, 1.0)];
     }
 
@@ -533,13 +539,15 @@ fn invulnerability_resolution_for_source_move(
 }
 
 pub fn invulnerability_resolution(target: &PokemonState, attack_move: &PokemonMove) -> InvulnerabilityResolution {
-    let Some((source_move, _targets)) = target.volatiles.iter().find_map(|volatile| {
-        if let VolatileStatusState::Invulnerable(source_move, targets) = volatile {
-            Some((source_move, targets))
+    let source_move_opt = target.volatiles.iter().find_map(|volatile| {
+        if let VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(mov), _) = volatile {
+            Some(mov)
         } else {
             None
         }
-    }) else {
+    });
+
+    let Some(source_move) = source_move_opt else {
         return InvulnerabilityResolution::Normal;
     };
 
@@ -550,14 +558,12 @@ pub fn add_invulnerable_volatile(mon: &mut PokemonState, move_name: PokemonMove,
     let already_has = mon.volatiles.iter().any(|volatile| {
         matches!(
             volatile,
-            VolatileStatusState::Invulnerable(existing_move, existing_targets)
-                if std::mem::discriminant(existing_move) == std::mem::discriminant(&move_name)
-                    && *existing_targets == targets
+            VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _)
         )
     });
 
     if !already_has {
-        mon.volatiles.push(VolatileStatusState::Invulnerable(move_name, targets));
+        mon.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(move_name), 1));
     }
 }
 
@@ -565,8 +571,7 @@ pub fn remove_invulnerable_volatile(mon: &mut PokemonState, move_name: &PokemonM
     if let Some(pos) = mon.volatiles.iter().position(|volatile| {
         matches!(
             volatile,
-            VolatileStatusState::Invulnerable(existing_move, _)
-                if std::mem::discriminant(existing_move) == std::mem::discriminant(move_name)
+            VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(mov), _) if mov == move_name
         )
     }) {
         mon.volatiles.remove(pos);
@@ -575,13 +580,23 @@ pub fn remove_invulnerable_volatile(mon: &mut PokemonState, move_name: &PokemonM
 
 pub fn has_status_volatile(mon: &PokemonState, volatile: &VolatileStatus) -> bool {
     mon.volatiles.iter().any(|v| {
-        matches!(v, VolatileStatusState::Status(vst, _) if std::mem::discriminant(vst) == std::mem::discriminant(volatile))
+        match (v, volatile) {
+            (VolatileStatusState::TurnStatus(vst, _) | VolatileStatusState::MoveStatus(vst, _), vol) => {
+                std::mem::discriminant(vst) == std::mem::discriminant(vol)
+            }
+            _ => false
+        }
     })
 }
 
 pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus) {
     if let Some(pos) = mon.volatiles.iter().position(|v| {
-        matches!(v, VolatileStatusState::Status(vst, _) if std::mem::discriminant(vst) == std::mem::discriminant(volatile))
+        match (v, volatile) {
+            (VolatileStatusState::TurnStatus(vst, _) | VolatileStatusState::MoveStatus(vst, _), vol) => {
+                std::mem::discriminant(vst) == std::mem::discriminant(vol)
+            }
+            _ => false
+        }
     }) {
         mon.volatiles.remove(pos);
     }
@@ -681,7 +696,7 @@ fn weather_is_snow(state: &BattleState) -> bool {
 fn is_confused(mon: &PokemonState) -> bool {
     mon.volatiles
         .iter()
-        .any(|volatile_status| matches!(volatile_status, VolatileStatusState::Status(VolatileStatus::Confusion, _)))
+        .any(|volatile_status| matches!(volatile_status, VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _)))
 }
 
 fn round_div_half_up(numerator: i32, denominator: i32) -> i32 {
@@ -1064,11 +1079,11 @@ fn decrement_volatile_statuses(mons: &mut [PokemonState]) {
 
         for volatile in mon.volatiles.drain(..) {
             match volatile {
-                VolatileStatusState::Status(effect, turns) => {
+                VolatileStatusState::TurnStatus(effect, turns) => {
                     if turns == 0 {
-                        kept.push(VolatileStatusState::Status(effect, 0));
+                        kept.push(VolatileStatusState::TurnStatus(effect, 0));
                     } else if turns > 1 {
-                        kept.push(VolatileStatusState::Status(effect, turns - 1));
+                        kept.push(VolatileStatusState::TurnStatus(effect, turns - 1));
                     }
                 }
                 otherVolatile => {kept.push(otherVolatile)}
@@ -1077,6 +1092,25 @@ fn decrement_volatile_statuses(mons: &mut [PokemonState]) {
 
         mon.volatiles = kept;
     }
+}
+
+pub fn decrement_move_statuses(mon: &mut PokemonState) {
+    let mut kept = Vec::with_capacity(mon.volatiles.len());
+
+    for volatile in mon.volatiles.drain(..) {
+        match volatile {
+            VolatileStatusState::MoveStatus(effect, turns) => {
+                if turns == 0 {
+                    kept.push(VolatileStatusState::MoveStatus(effect, 0));
+                } else if turns > 1 {
+                    kept.push(VolatileStatusState::MoveStatus(effect, turns - 1));
+                }
+            }
+            otherVolatile => {kept.push(otherVolatile)}
+        }
+    }
+
+    mon.volatiles = kept;
 }
 
 /// Decrement effect timers at end of turn.
@@ -1159,13 +1193,28 @@ fn apply_status_to_pokemon(mon: &mut PokemonState, status: &crate::dex_data::Sta
 /// Apply a volatile status to a pokemon (prevents duplicate volatiles of the same type).
 fn apply_volatile_to_pokemon(mon: &mut PokemonState, volatile: &VolatileStatus) {
     // Check if pokemon already has this volatile status
-    let already_has = mon.volatiles.iter().any(|v| {
-        matches!(v, VolatileStatusState::Status(vst, _) if std::mem::discriminant(vst) == std::mem::discriminant(volatile))
-    });
+    let already_has = has_status_volatile(mon, volatile);
 
     if !already_has {
-        let duration = get_volatile_duration(volatile);
-        mon.volatiles.push(VolatileStatusState::Status(volatile.clone(), duration));
+        let is_move_status = matches!(
+            volatile,
+            VolatileStatus::Disable | VolatileStatus::Encore | VolatileStatus::GlaiveRush | VolatileStatus::Taunt | VolatileStatus::SemiInvulnerable(_)
+        );
+
+        let duration = match volatile {
+            VolatileStatus::Disable => 4,
+            VolatileStatus::Encore => 3,
+            VolatileStatus::Taunt => 3,
+            VolatileStatus::GlaiveRush => 1,
+            VolatileStatus::SemiInvulnerable(_) => 1,
+            _ => get_volatile_duration(volatile),
+        };
+
+        if is_move_status {
+            mon.volatiles.push(VolatileStatusState::MoveStatus(volatile.clone(), duration));
+        } else {
+            mon.volatiles.push(VolatileStatusState::TurnStatus(volatile.clone(), duration));
+        }
     }
 }
 

@@ -185,6 +185,7 @@ pub enum VolatileStatus {
     Obstruct,
     OctoLock,
     LockedMove,
+    SemiInvulnerable(PokemonMove),
     Powder,
     PowerShift,
     PowerTrick,
