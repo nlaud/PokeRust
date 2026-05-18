@@ -106,7 +106,7 @@ pub enum DamageOverride {
     None,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PokemonStat {
     Atk,
     Def,
@@ -134,10 +134,13 @@ pub enum SelfDestructType {
 pub enum Status {
     Burn,
     Poison,
-    ToxicPoison,
+    // ToxicPoison stores the number of turns it has been active (starts at 0)
+    ToxicPoison(u8),
     Paralysis,
-    Sleep,
-    Frozen,
+    // Sleep stores number of turns asleep (starts at 0)
+    Sleep(u8),
+    // Frozen stores number of turns frozen (starts at 0)
+    Frozen(u8),
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +249,7 @@ pub enum PseudoWeather {
     IonDeluge,
     MagicDeluge,
     MudSport,
+    TrickRoom,
     WaterSport,
     WonderRoom,
 }
@@ -454,10 +458,10 @@ fn parse_nvstatus(s: &str) -> Option<Status> {
     match s {
         "brn" => Some(Status::Burn),
         "psn" => Some(Status::Poison),
-        "tox" => Some(Status::ToxicPoison),
+        "tox" => Some(Status::ToxicPoison(0)),
         "par" => Some(Status::Paralysis),
-        "slp" => Some(Status::Sleep),
-        "frz" => Some(Status::Frozen),
+        "slp" => Some(Status::Sleep(0)),
+        "frz" => Some(Status::Frozen(0)),
         _ => None,
     }
 }
@@ -582,6 +586,7 @@ fn parse_pseudo_weather(s: &str) -> Option<PseudoWeather> {
         "iondeluge" => Some(PseudoWeather::IonDeluge),
         "magicroom" => Some(PseudoWeather::MagicDeluge),
         "mudsport" => Some(PseudoWeather::MudSport),
+        "trickroom" => Some(PseudoWeather::TrickRoom),
         "watersport" => Some(PseudoWeather::WaterSport),
         "wonderroom" => Some(PseudoWeather::WonderRoom),
         _ => None,

@@ -271,12 +271,16 @@ fn possible_damage_outcomes_for_move(
     action: &MoveAction,
     move_data: &MoveData,
     config: DamageConfig,
+    move_dex: &HashMap<PokemonMove, MoveData>,
 ) -> Vec<(MatchState, f64)> {
     let mut next_state = state.clone();
 
     let Some(mut attacker) = get_pokemon_at_slot(&next_state, action.user_slot).cloned() else {
         return vec![(MatchState::BattleState(next_state), 1.0)];
     };
+
+    // Save pre-move state for potential failure branches (paralysis, sleep, freeze)
+    let pre_move_state = next_state.clone();
 
     simulator_helpers::decrement_move_statuses(&mut attacker);
     match action.user_slot.player {
@@ -340,8 +344,134 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
+    // Handle Sleep Talk: picks a random known move while asleep and uses it instead
+    if action.move_name == PokemonMove::SleepTalk {
+        // Must be asleep to use SleepTalk
+        if !matches!(attacker.status, Some(Status::Sleep(_))) {
+            return vec![(MatchState::BattleState(next_state), 1.0)];
+        }
+
+        // Collect candidate moves (exclude SleepTalk itself)
+        let mut candidates: Vec<PokemonMove> = Vec::new();
+        for mov_opt in attacker.moves.iter() {
+            if let Some(mv) = mov_opt {
+                if *mv == PokemonMove::SleepTalk { continue; }
+                // Skip charge moves or moves flagged NoSleepTalk if we can inspect them
+                if let Some(md) = move_dex.get(mv) {
+                    let is_charge = md.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(&crate::dex_data::MoveFlag::Charge));
+                    let no_sleep_talk = md.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(&crate::dex_data::MoveFlag::NoSleepTalk));
+                    if is_charge || no_sleep_talk { continue; }
+                }
+                candidates.push(mv.clone());
+            }
+        }
+
+        if candidates.is_empty() {
+            // Consume SleepTalk PP and do nothing
+            let mut fail_state = next_state.clone();
+            if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                if let Some(idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
+                    mon.move_pp[idx] = mon.move_pp[idx].saturating_sub(1);
+                }
+            }
+            return vec![(MatchState::BattleState(fail_state), 1.0)];
+        }
+
+        // Branch on each candidate move, selected uniformly
+        let mut combined: Vec<(MatchState, f64)> = Vec::new();
+        let choice_prob = 1.0 / candidates.len() as f64;
+        for cand in &candidates {
+            if let Some(cand_data) = move_dex.get(cand) {
+                let mut new_action = action.clone();
+                new_action.move_name = cand.clone();
+                // Recursively simulate chosen move
+                let branches = possible_damage_outcomes_for_move(state, &new_action, cand_data, config, move_dex);
+                for (mut bs, p) in branches {
+                    // For each returned state, revert PP consumption of the chosen move and consume SleepTalk PP instead
+                    if let MatchState::BattleState(ref mut bstate) = bs {
+                        if let Some(mon) = match action.user_slot.player { Player::P1 => bstate.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => bstate.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                            // Find candidate move index and increment PP back
+                            if let Some(cand_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(cand)) {
+                                mon.move_pp[cand_idx] = mon.move_pp[cand_idx].saturating_add(1);
+                            }
+                            // Decrement SleepTalk PP
+                            if let Some(sleep_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
+                                mon.move_pp[sleep_idx] = mon.move_pp[sleep_idx].saturating_sub(1);
+                            }
+                        }
+                    }
+                    combined.push((bs, p * choice_prob));
+                }
+            }
+        }
+
+        return combined;
+    }
+
+    // --- Status pre-move handling: Sleep, Frozen, Paralysis ---
+    // Handle moves that thaw the user on use: thaw before attempt
+    if let Some(Status::Frozen(_)) = attacker.status {
+        if simulator_helpers::move_thaws_user_on_use(&action.move_name) || attacker.ability == Ability::MagmaArmor {
+            // thaw user
+            if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                mon.status = None;
+            }
+            attacker.status = None;
+        }
+    }
+
+    // Sleep/Frozen branching: determine chance to fail due to being frozen/asleep
+    let mut status_fail_prob: f64 = 0.0;
+    if let Some(status) = &attacker.status {
+        match status {
+            Status::Frozen(n) => {
+                // If already handled (thawed), skip
+                if *n >= 2 {
+                    // guaranteed thaw
+                    if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                        mon.status = None;
+                    }
+                    attacker.status = None;
+                } else {
+                    // 25% chance to thaw and execute
+                    status_fail_prob = 0.75;
+                    // increment counter in pre_move_state for failure branch
+                    if let Some(mon) = match action.user_slot.player { Player::P1 => pre_move_state.p1_active_mons.get(action.user_slot.slot_index as usize), Player::P2 => pre_move_state.p2_active_mons.get(action.user_slot.slot_index as usize) } {
+                        // we'll adjust failure branch later
+                    }
+                    // For success branch, remove status in next_state
+                    if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                        mon.status = None;
+                    }
+                    attacker.status = None;
+                }
+            }
+            Status::Sleep(n) => {
+                if *n >= 2 {
+                    if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                        mon.status = None;
+                    }
+                    attacker.status = None;
+                } else {
+                    // If the move is usable while asleep (Snore), allow it to execute regardless of wake roll
+                    if move_data.sleep_usable {
+                        // do not set a fail probability; status remains unchanged
+                    } else {
+                        // 1/3 chance to wake
+                        status_fail_prob = 2.0 / 3.0;
+                        if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                            mon.status = None; // success branch
+                        }
+                        attacker.status = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     // Resolve target list based on move's targeting type
-    let target_slots = if move_target_is_multitarget(&move_data.target) {
+    let mut target_slots = if move_target_is_multitarget(&move_data.target) {
         simulator_helpers::resolve_move_targets(&next_state, action.user_slot, &move_data.target)
     } else {
         // Single-target move: use action.target_slot if available
@@ -358,12 +488,23 @@ fn possible_damage_outcomes_for_move(
         }
     };
 
+    // Apply Follow Me / Rage Powder redirection for single-target moves
+    if !move_target_is_multitarget(&move_data.target) {
+        target_slots = simulator_helpers::check_and_apply_redirection(&next_state, action.user_slot, target_slots);
+    }
+
     if target_slots.is_empty() {
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
     // Calculate targets multiplier (0.75x for 2+ targets, 1.0x for 1 target)
     let targets_mult = simulator_helpers::damage_targets_multiplier(target_slots.len());
+
+    // Determine paralysis failure probability
+    let mut par_fail_prob: f64 = 0.0;
+    if matches!(attacker.status, Some(Status::Paralysis)) && attacker.ability != Ability::Limber {
+        par_fail_prob = 0.125;
+    }
 
     // Calculate hit/miss and damage outcomes for each target independently.
     // For spread moves this creates independent miss branches per target.
@@ -462,11 +603,26 @@ fn possible_damage_outcomes_for_move(
 
                 // Apply damage and then branch on secondary effects (if hit)
                 if *hit {
-                    if let Some(target_mon) = match target_slot.player {
+                        if let Some(target_mon) = match target_slot.player {
                         Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
                         Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
                     } {
                         simulator_helpers::apply_damage(target_mon, *damage);
+
+                        // Clear volatiles and statuses if the target faints
+                        if target_mon.fainted {
+                            simulator_helpers::clear_pokemon_on_faint(target_mon);
+                        }
+
+                        // If this damage should unfreeze the target, handle it
+                        simulator_helpers::handle_unfreeze_on_damage(target_mon, &move_data.name, &move_data.pokemon_type, *damage);
+
+                            // Uproar wakes sleeping Pokemon
+                            if move_data.name == PokemonMove::Uproar {
+                                if let Some(crate::dex_data::Status::Sleep(_)) = target_mon.status {
+                                    target_mon.status = None;
+                                }
+                            }
 
                         if move_data.name == PokemonMove::SkyDrop {
                             simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::SkyDrop);
@@ -518,15 +674,65 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
+    // Handle failure branches for paralysis / sleep / freeze (these consume PP but do nothing)
+    let mut final_outcomes: Vec<(MatchState, f64)> = Vec::new();
+    // paralysis fail branch
+    if par_fail_prob > 0.0 {
+        let mut fail_state = pre_move_state.clone();
+        if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+            if let Some(pp) = mon.move_pp.get_mut(pp_index) {
+                *pp = pp.saturating_sub(1);
+            }
+        }
+        final_outcomes.push((MatchState::BattleState(fail_state), par_fail_prob));
+    }
+
+    // status (sleep/frozen) fail branch: increment counters and consume PP
+    if status_fail_prob > 0.0 {
+        let mut status_fail_state = pre_move_state.clone();
+        if let Some(mon) = match action.user_slot.player { Player::P1 => status_fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => status_fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+            // Decrement PP
+            if let Some(pp) = mon.move_pp.get_mut(pp_index) {
+                *pp = pp.saturating_sub(1);
+            }
+
+            // Increment sleep/frozen counters on failure
+            if let Some(st) = &mon.status {
+                match st {
+                    crate::dex_data::Status::Frozen(n) => {
+                        let new_n = n.saturating_add(1);
+                        mon.status = Some(crate::dex_data::Status::Frozen(new_n));
+                    }
+                    crate::dex_data::Status::Sleep(n) => {
+                        let new_n = n.saturating_add(1);
+                        mon.status = Some(crate::dex_data::Status::Sleep(new_n));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        final_outcomes.push((MatchState::BattleState(status_fail_state), status_fail_prob));
+    }
+
+    // Scale normal outcomes by success probability (1 - combined_fail_prob)
+    let combined_fail_prob = par_fail_prob + status_fail_prob;
+    let success_scale = (1.0 - combined_fail_prob).max(0.0);
+    for (state, prob) in all_outcomes {
+        final_outcomes.push((state, prob * success_scale));
+    }
+
+    if final_outcomes.is_empty() {
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
     // Log all outcomes at verbosity 4
     if get_verbosity() >= 4 {
-        println!("{}", format!("  [Verbosity 4] {} total damage outcome combinations:", all_outcomes.len()).bright_yellow());
-        for (idx, (_, prob)) in all_outcomes.iter().enumerate() {
+        println!("{}", format!("  [Verbosity 4] {} total damage outcome combinations:", final_outcomes.len()).bright_yellow());
+        for (idx, (_, prob)) in final_outcomes.iter().enumerate() {
             println!("    Branch {}: {:.6} probability", idx + 1, prob);
         }
     }
 
-    all_outcomes
+    final_outcomes
 }
 
 pub fn team_preview_state_from_teamsheets(
@@ -1041,6 +1247,32 @@ fn get_effective_speed(mon: &PokemonState) -> f32 {
     base_speed * multiplier
 }
 
+fn side_has_tailwind(state: &BattleState, player: Player) -> bool {
+    let side_conditions = match player {
+        Player::P1 => &state.p1_side_conditions,
+        Player::P2 => &state.p2_side_conditions,
+    };
+
+    side_conditions
+        .iter()
+        .any(|condition| matches!(condition, crate::dex_data::SideCondition::TailWind))
+}
+
+fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonState) -> f32 {
+    let mut speed = get_effective_speed(mon);
+    if side_has_tailwind(state, slot.player) {
+        speed *= 2.0;
+    }
+    speed
+}
+
+fn trick_room_is_active(state: &BattleState) -> bool {
+    state
+        .pseudo_weathers
+        .iter()
+        .any(|pseudo_weather| matches!(pseudo_weather, crate::dex_data::PseudoWeather::TrickRoom))
+}
+
 fn compare_pokemon_speed(p1: &PokemonState, p2: &PokemonState) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let speed1 = get_effective_speed(p1);
@@ -1068,6 +1300,7 @@ fn get_action_type_priority(action: &Action) -> u8 {
 
 fn compare_action_order(action1: &Action, action2: &Action, state: &BattleState, move_dex: &HashMap<PokemonMove, MoveData>) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    let _ = move_dex;
     
     let type_priority1 = get_action_type_priority(action1);
     let type_priority2 = get_action_type_priority(action2);
@@ -1091,7 +1324,23 @@ fn compare_action_order(action1: &Action, action2: &Action, state: &BattleState,
             
             match (user1, user2) {
                 (Some(p1), Some(p2)) => {
-                    compare_pokemon_speed(p1, p2)
+                    let speed1 = effective_speed_for_slot(state, m1.user_slot, p1);
+                    let speed2 = effective_speed_for_slot(state, m2.user_slot, p2);
+                    let trick_room = trick_room_is_active(state);
+
+                    if (speed2 - speed1).abs() < 0.01 {
+                        Ordering::Equal
+                    } else if trick_room {
+                        if speed1 < speed2 {
+                            Ordering::Less
+                        } else {
+                            Ordering::Greater
+                        }
+                    } else if speed2 > speed1 {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
                 }
                 _ => Ordering::Equal,
             }
@@ -1208,7 +1457,7 @@ fn step_action_queue(
                 return vec![(MatchState::BattleState(next_state), 1.0)];
             };
 
-            possible_damage_outcomes_for_move(&next_state, &m, move_data, config)
+            possible_damage_outcomes_for_move(&next_state, &m, move_data, config, move_dex)
         }
         Action::SwitchAction(s) => {
             // perform the switch now

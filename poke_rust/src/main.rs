@@ -66,7 +66,7 @@ fn main() {
 
     // Print info about a sample move (before printing teamsheets)
     
-    let sample_move = PokemonMove::ElectroShot;
+    let sample_move = PokemonMove::TrickRoom;
     if let Some(m) = move_dex.get(&sample_move) {
         println!("Data:{:#?}", m)
     }

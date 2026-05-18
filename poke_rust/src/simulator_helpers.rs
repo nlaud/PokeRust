@@ -45,7 +45,19 @@ pub fn effective_stat(mon: &PokemonState, stat: PokemonStat, ignore_negative: bo
         boost
     };
 
-    base_stat * stage_multiplier(applied_stage)
+    let mut val = base_stat * stage_multiplier(applied_stage);
+
+    // Guts: +50% Attack when affected by a non-volatile status
+    if stat == PokemonStat::Atk && mon.ability == Ability::Guts && mon.status.is_some() {
+        val *= 1.5;
+    }
+
+    // Marvel Scale: +50% Defense when affected by a non-volatile status
+    if stat == PokemonStat::Def && mon.ability == Ability::MarvelScale && mon.status.is_some() {
+        val *= 1.5;
+    }
+
+    val
 }
 
 pub fn pokemon_has_type(mon: &PokemonState, pokemon_type: &PokemonType) -> bool {
@@ -180,7 +192,7 @@ pub fn crit_is_prevented(target: &PokemonState) -> bool {
 }
 
 pub fn crit_is_guaranteed(attacker: &PokemonState, target: &PokemonState, move_name: &PokemonMove) -> bool {
-    let target_is_poisoned = matches!(target.status, Some(Status::Poison | Status::ToxicPoison));
+    let target_is_poisoned = matches!(target.status, Some(Status::Poison) | Some(Status::ToxicPoison(_)));
     let merciless_crit = attacker.ability == Ability::Merciless && target_is_poisoned;
     let laser_focus = attacker.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::LaserFocus, _)) || matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::LaserFocus, _)));
     let always_crit_move = matches!(
@@ -453,7 +465,22 @@ pub fn calculate_damage_outcomes_for_target(
             target_effective_defense
         };
 
-        let base_damage = (((((2.0 * attacker.level as f64 / 5.0 + 2.0) * attack_stat * move_data.base_power as f64 / defense_stat) / 50.0) + 2.0)
+        // Handle Facade doubling when user has any non-volatile status
+        let mut effective_base_power = move_data.base_power as f64;
+        if move_data.name == PokemonMove::Facade && attacker.status.is_some() {
+            effective_base_power = (move_data.base_power as f64) * 2.0;
+        }
+
+        // Helping Hand boosts the user's next move by 50%.
+        if attacker
+            .volatiles
+            .iter()
+            .any(|volatile| matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::HelpingHand, _) | VolatileStatusState::MoveStatus(VolatileStatus::HelpingHand, _)))
+        {
+            effective_base_power *= 1.5;
+        }
+
+        let mut base_damage = (((((2.0 * attacker.level as f64 / 5.0 + 2.0) * attack_stat * effective_base_power / defense_stat) / 50.0) + 2.0)
             * stab
             * effectiveness
             * invulnerability_multiplier
@@ -461,7 +488,12 @@ pub fn calculate_damage_outcomes_for_target(
             * targets_multiplier)
             .floor()
             .max(0.0);
-
+        // Apply burn reduction for physical moves (unless Guts ability present or move is Facade)
+        if matches!(move_data.category, MoveCategory::Physical) {
+            if matches!(attacker.status, Some(Status::Burn)) && attacker.ability != Ability::Guts && move_data.name != PokemonMove::Facade {
+                base_damage = (base_damage * 0.5).floor();
+            }
+        }
         for roll in &damage_roll_values {
             let random_multiplier = *roll as f64 / 100.0;
             let damage = (base_damage * random_multiplier).floor().max(0.0) as u16;
@@ -887,7 +919,45 @@ fn get_effective_speed(mon: &PokemonState) -> f32 {
         1.0
     };
 
-    base_speed * multiplier
+    let mut speed = base_speed * multiplier;
+
+    // Quick Feet: +50% speed if afflicted by any non-volatile status
+    if mon.ability == Ability::QuickFeet && mon.status.is_some() {
+        speed *= 1.5;
+    }
+
+    // Paralysis halves speed unless Quick Feet prevents speed loss
+    if matches!(mon.status, Some(Status::Paralysis)) && mon.ability != Ability::QuickFeet {
+        speed *= 0.5;
+    }
+
+    speed
+}
+
+fn side_has_tailwind(state: &BattleState, player: Player) -> bool {
+    let side_conditions = match player {
+        Player::P1 => &state.p1_side_conditions,
+        Player::P2 => &state.p2_side_conditions,
+    };
+
+    side_conditions
+        .iter()
+        .any(|condition| matches!(condition, SideCondition::TailWind))
+}
+
+fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonState) -> f32 {
+    let mut speed = get_effective_speed(mon);
+    if side_has_tailwind(state, slot.player) {
+        speed *= 2.0;
+    }
+    speed
+}
+
+fn trick_room_is_active(state: &BattleState) -> bool {
+    state
+        .pseudo_weathers
+        .iter()
+        .any(|pseudo_weather| matches!(pseudo_weather, PseudoWeather::TrickRoom))
 }
 
 fn compare_pokemon_speed(p1: &PokemonState, p2: &PokemonState) -> std::cmp::Ordering {
@@ -939,7 +1009,25 @@ pub fn compare_action_order(
             let user2 = get_pokemon_at_slot(state, m2.user_slot);
 
             match (user1, user2) {
-                (Some(p1), Some(p2)) => compare_pokemon_speed(p1, p2),
+                (Some(p1), Some(p2)) => {
+                    let speed1 = effective_speed_for_slot(state, m1.user_slot, p1);
+                    let speed2 = effective_speed_for_slot(state, m2.user_slot, p2);
+                    let trick_room = trick_room_is_active(state);
+
+                    if (speed2 - speed1).abs() < 0.01 {
+                        Ordering::Equal
+                    } else if trick_room {
+                        if speed1 < speed2 {
+                            Ordering::Less
+                        } else {
+                            Ordering::Greater
+                        }
+                    } else if speed2 > speed1 {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
                 _ => Ordering::Equal,
             }
         }
@@ -1086,7 +1174,7 @@ fn decrement_volatile_statuses(mons: &mut [PokemonState]) {
                         kept.push(VolatileStatusState::TurnStatus(effect, turns - 1));
                     }
                 }
-                otherVolatile => {kept.push(otherVolatile)}
+                other_volatile => {kept.push(other_volatile)}
             }
         }
 
@@ -1106,7 +1194,7 @@ pub fn decrement_move_statuses(mon: &mut PokemonState) {
                     kept.push(VolatileStatusState::MoveStatus(effect, turns - 1));
                 }
             }
-            otherVolatile => {kept.push(otherVolatile)}
+            other_volatile => {kept.push(other_volatile)}
         }
     }
 
@@ -1143,13 +1231,10 @@ pub fn end_turn(state: &mut BattleState) {
     // Advance the battle turn after end-of-turn processing is complete.
     state.turn_number = state.turn_number.saturating_add(1);
 
-    // TODO: Apply residual damage effects and other end-of-turn logic:
-    // - Poison damage (1/8 HP per turn)
-    // - Burn damage (1/16 HP per turn)
-    // - Leech Seed damage (1/8 HP, heal attacker)
-    // - Sandstorm damage (1/8 HP if not Rock/Ground/Steel)
-    // - Hail damage (1/8 HP if not Ice type)
-    // - Toxic damage (cumulative 1/8, 2/8, 3/8, etc.)
+    // Apply residual damage effects (burn, poison, toxic)
+    apply_end_of_turn_status_effects(state);
+
+    // TODO: Additional end-of-turn effects: leech seed, sandstorm/hail, etc.
 }
 
 /// Determine the duration for a volatile status condition.
@@ -1161,7 +1246,12 @@ fn get_volatile_duration(volatile: &VolatileStatus) -> u8 {
         | VolatileStatus::KingsShield
         | VolatileStatus::SpikyShield
         | VolatileStatus::BanefulBunker
-        | VolatileStatus::MaxGuard => 1,
+        | VolatileStatus::MaxGuard
+        | VolatileStatus::HelpingHand
+        | VolatileStatus::FollowMe
+        | VolatileStatus::RagePowder => 1,
+        // MustRecharge should last for 2 turns (expires after 1 end-of-turn decrement)
+        VolatileStatus::MustRecharge => 2,
         // Default: permanent until explicitly removed
         _ => 0,
     }
@@ -1185,9 +1275,113 @@ fn get_side_condition_duration(condition: &SideCondition) -> u8 {
 
 /// Apply a status condition to a pokemon (only if it doesn't already have one).
 fn apply_status_to_pokemon(mon: &mut PokemonState, status: &crate::dex_data::Status) {
-    if mon.status.is_none() {
-        mon.status = Some(status.clone());
+    // Prevent statuses if ability blocks all non-volatile statuses
+    if mon.ability == Ability::Comatose || mon.ability == Ability::PurifyingSalt {
+        return;
     }
+
+    if mon.status.is_some() {
+        return;
+    }
+
+    match status {
+        Status::Burn => {
+            // Fire types and certain abilities prevent burn
+            if pokemon_has_type(mon, &PokemonType::Fire) { return; }
+            if mon.ability == Ability::WaterBubble || mon.ability == Ability::WaterVeil || mon.ability == Ability::ThermalExchange { return; }
+            mon.status = Some(Status::Burn);
+        }
+        Status::Poison => {
+            // Poison/Steel types are immune unless attacker has Corrosion
+            if pokemon_has_type(mon, &PokemonType::Poison) || pokemon_has_type(mon, &PokemonType::Steel) {
+                return;
+            }
+            mon.status = Some(Status::Poison);
+        }
+        Status::ToxicPoison(_) => {
+            if pokemon_has_type(mon, &PokemonType::Poison) || pokemon_has_type(mon, &PokemonType::Steel) {
+                return;
+            }
+            mon.status = Some(Status::ToxicPoison(0));
+        }
+        Status::Paralysis => {
+            if mon.ability == Ability::Limber { return; }
+            mon.status = Some(Status::Paralysis);
+        }
+        Status::Sleep(_) => {
+            if mon.ability == Ability::Insomnia || mon.ability == Ability::VitalSpirit { return; }
+            mon.status = Some(Status::Sleep(0));
+        }
+        Status::Frozen(_) => {
+            if pokemon_has_type(mon, &PokemonType::Ice) { return; }
+            if mon.ability == Ability::MagmaArmor { return; }
+            mon.status = Some(Status::Frozen(0));
+        }
+        _ => {
+            mon.status = Some(status.clone());
+        }
+    }
+}
+
+/// Apply end-of-turn effects for non-volatile status conditions (Burn, Poison, ToxicPoison)
+pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
+    let mut process = |mon: &mut PokemonState| {
+        if mon.fainted { return; }
+        match mon.status {
+            Some(Status::Burn) => {
+                let dmg = (mon.stats[0] as u32 / 16) as u16;
+                if dmg > 0 { apply_damage(mon, dmg); }
+            }
+            Some(Status::Poison) => {
+                let dmg = (mon.stats[0] as u32 / 16) as u16;
+                if dmg > 0 { apply_damage(mon, dmg); }
+            }
+            Some(Status::ToxicPoison(n)) => {
+                let new_n = n.saturating_add(1);
+                mon.status = Some(Status::ToxicPoison(new_n));
+                let dmg = ((mon.stats[0] as u32 * new_n as u32) / 16) as u16;
+                if dmg > 0 { apply_damage(mon, dmg); }
+            }
+            _ => {}
+        }
+    };
+
+    for mon in state.p1_active_mons.iter_mut() { process(mon); }
+    for mon in state.p2_active_mons.iter_mut() { process(mon); }
+}
+
+/// If a mon is frozen and takes damage from a fire move or certain moves, unfreeze it.
+pub fn handle_unfreeze_on_damage(mon: &mut PokemonState, move_name: &PokemonMove, move_type: &PokemonType, damage: u16) {
+    if damage == 0 { return; }
+    if let Some(Status::Frozen(_)) = mon.status {
+        // Fire-type moves thaw
+        if std::mem::discriminant(move_type) == std::mem::discriminant(&PokemonType::Fire) {
+            mon.status = None;
+            return;
+        }
+
+        // Specific moves thaw on hit
+        if matches!(move_name, PokemonMove::Scald | PokemonMove::SteamEruption | PokemonMove::ScorchingSands | PokemonMove::MatchaGotcha) {
+            mon.status = None;
+            return;
+        }
+    }
+}
+
+/// Returns true if this move thaws the user when used.
+pub fn move_thaws_user_on_use(move_name: &PokemonMove) -> bool {
+    matches!(move_name,
+        PokemonMove::FlameWheel
+        | PokemonMove::SacredFire
+        | PokemonMove::FlareBlitz
+        | PokemonMove::FusionFlare
+        | PokemonMove::Scald
+        | PokemonMove::SteamEruption
+        | PokemonMove::BurnUp
+        | PokemonMove::PyroBall
+        | PokemonMove::ScorchingSands
+        | PokemonMove::MatchaGotcha
+    )
 }
 
 /// Apply a volatile status to a pokemon (prevents duplicate volatiles of the same type).
@@ -1254,13 +1448,28 @@ fn apply_terrain_effects(state: &mut BattleState, effect: &HitEffect) {
 /// Apply all effects from a HitEffect to the target pokemon.
 fn apply_effect_to_target(
     state: &mut BattleState,
+    attacker_slot: FieldSlot,
     target_slot: FieldSlot,
     effect: &HitEffect,
     side_condition_player: Player,
 ) {
+    // Extract attacker ability before taking a mutable borrow of the target
+    let attacker_ability = get_pokemon_at_slot(state, attacker_slot).map(|a| a.ability.clone());
     if let Some(target_mon) = get_pokemon_at_slot_mut(state, target_slot) {
         if let Some(status) = &effect.status {
-            apply_status_to_pokemon(target_mon, status);
+            // If attacker has Corrosion, allow poisoning of Poison/Steel types,
+            // but do not overwrite an existing non-volatile status on the target.
+            if attacker_ability == Some(Ability::Corrosion) {
+                if target_mon.status.is_none() {
+                    match status {
+                        Status::Poison => { target_mon.status = Some(Status::Poison); }
+                        Status::ToxicPoison(_) => { target_mon.status = Some(Status::ToxicPoison(0)); }
+                        other => { apply_status_to_pokemon(target_mon, other); }
+                    }
+                }
+            } else {
+                apply_status_to_pokemon(target_mon, status);
+            }
         }
 
         if let Some(volatile) = &effect.volatile_status {
@@ -1351,7 +1560,7 @@ pub fn apply_secondary_effects(
             // Branch where effect occurs
             if chance > 0.0 {
                 let mut applied = bs.clone();
-                apply_effect_to_target(&mut applied, target_slot, &secondary.effect, side_condition_target);
+                apply_effect_to_target(&mut applied, attacker_slot, target_slot, &secondary.effect, side_condition_target);
                 new_branches.push((applied, prob * chance));
             }
         }
@@ -1391,6 +1600,110 @@ pub fn apply_secondary_effects(
 
     // Normalize small floating point drift (optional)
     branches.into_iter().filter(|(_, p)| *p > 0.0).collect()
+}
+
+/// Clear all volatile statuses and non-volatile statuses from a Pokémon when it faints.
+pub fn clear_pokemon_on_faint(mon: &mut PokemonState) {
+    mon.volatiles.clear();
+    mon.status = None;
+}
+
+/// Check if a Pokémon is immune to Rage Powder based on type, ability, or item.
+/// Grass-types, Pokémon with Overcoat ability, and those holding Safety Googles are immune.
+pub fn is_immune_to_powder(mon: &PokemonState) -> bool {
+    pokemon_has_type(mon, &PokemonType::Grass)
+        || mon.ability == Ability::Overcoat
+        || matches!(mon.item, Item::SafetyGoggles)
+}
+
+/// Check if a redirect target has both Sky Drop and a Follow Me/Rage Powder effect.
+/// If so, it should not redirect the move to itself.
+fn has_skyrop_and_redirect(mon: &PokemonState) -> bool {
+    let has_skyrop = has_status_volatile(mon, &VolatileStatus::SkyDrop);
+    let has_redirect = has_status_volatile(mon, &VolatileStatus::FollowMe)
+        || has_status_volatile(mon, &VolatileStatus::RagePowder);
+    has_skyrop && has_redirect
+}
+
+/// Check for and apply move redirection based on Follow Me and Rage Powder volatile statuses.
+/// Returns the potentially modified target_slots.
+pub fn check_and_apply_redirection(
+    state: &BattleState,
+    user_slot: FieldSlot,
+    target_slots: Vec<FieldSlot>,
+) -> Vec<FieldSlot> {
+    // Only apply redirection if there's exactly one target
+    if target_slots.len() != 1 {
+        return target_slots;
+    }
+
+    let target_slot = target_slots[0];
+
+    // Get the target's effective speed for tiebreaking
+    let target_mon = match get_pokemon_at_slot(state, target_slot) {
+        Some(m) => m,
+        None => return target_slots,
+    };
+
+    // Get the opposing team
+    let opposing_mons = match user_slot.player {
+        Player::P1 => &state.p2_active_mons,
+        Player::P2 => &state.p1_active_mons,
+    };
+    let opposing_player = match user_slot.player {
+        Player::P1 => Player::P2,
+        Player::P2 => Player::P1,
+    };
+
+    // Find all opposing Pokémon with FollowMe or RagePowder, excluding those with SkyDrop+redirect
+    let mut redirectors: Vec<(FieldSlot, &PokemonState)> = Vec::new();
+
+    for (idx, mon) in opposing_mons.iter().enumerate() {
+        // Skip fainted Pokémon
+        if mon.fainted || has_skyrop_and_redirect(mon) {
+            continue;
+        }
+
+        // Check for FollowMe (not immune to anything)
+        if has_status_volatile(mon, &VolatileStatus::FollowMe) {
+            redirectors.push((
+                FieldSlot {
+                    player: opposing_player,
+                    slot_index: idx as u8,
+                },
+                mon,
+            ));
+            continue;
+        }
+
+        // Check for RagePowder (with immunity checks)
+        if has_status_volatile(mon, &VolatileStatus::RagePowder) {
+            if !is_immune_to_powder(mon) {
+                redirectors.push((
+                    FieldSlot {
+                        player: opposing_player,
+                        slot_index: idx as u8,
+                    },
+                    mon,
+                ));
+            }
+        }
+    }
+
+    // If there are redirectors, pick the one with the highest effective speed
+    if !redirectors.is_empty() {
+        let best_redirector = redirectors.into_iter().max_by(|a, b| {
+            let speed_a = get_effective_speed(a.1);
+            let speed_b = get_effective_speed(b.1);
+            speed_a.partial_cmp(&speed_b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if let Some((slot, _)) = best_redirector {
+            return vec![slot];
+        }
+    }
+
+    target_slots
 }
 
 fn get_pokemon_at_slot_mut<'a>(state: &'a mut BattleState, slot: FieldSlot) -> Option<&'a mut PokemonState> {
