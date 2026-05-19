@@ -187,19 +187,22 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
 
     // Field / global effects
     let mut printed_field = false;
-    if !state.weathers.is_empty() || !state.terrains.is_empty() || !state.pseudo_weathers.is_empty() {
+    if state.weather.is_some() || state.terrain.is_some() || !state.pseudo_weathers.is_empty() || state.weather_turns.is_some() || state.terrain_turns.is_some() {
         println!("\n{}", "Field / Global Effects:".yellow().bold());
         printed_field = true;
     }
-    if !state.weathers.is_empty() {
-        println!("  Weathers: {:?}", state.weathers);
-    }
-    if !state.terrains.is_empty() {
-        if !state.terrain_turns.is_empty() {
-            let terrain_strs: Vec<String> = state.terrains.iter().zip(state.terrain_turns.iter()).map(|(t, turns)| format!("{:?} ({}t)", t, turns)).collect();
-            println!("  Terrains: {}", terrain_strs.join(", "));
+    if let Some(weather) = &state.weather {
+        if let Some(turns) = state.weather_turns {
+            println!("  Weather: {:?} ({}t)", weather, turns);
         } else {
-            println!("  Terrains: {:?}", state.terrains);
+            println!("  Weather: {:?}", weather);
+        }
+    }
+    if let Some(terrain) = &state.terrain {
+        if let Some(turns) = state.terrain_turns {
+            println!("  Terrain: {:?} ({}t)", terrain, turns);
+        } else {
+            println!("  Terrain: {:?}", terrain);
         }
     }
     if !state.pseudo_weathers.is_empty() {
@@ -235,7 +238,7 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
     }
 
     // Weathers/turns small (only if non-empty)
-    if !state.weather_turns.is_empty() {
+    if state.weather_turns.is_some() {
         if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
         println!("  Weather turns: {:?}", state.weather_turns);
     }

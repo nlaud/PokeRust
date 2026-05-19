@@ -411,7 +411,7 @@ fn possible_damage_outcomes_for_move(
     // --- Status pre-move handling: Sleep, Frozen, Paralysis ---
     // Handle moves that thaw the user on use: thaw before attempt
     if let Some(Status::Frozen(_)) = attacker.status {
-        if simulator_helpers::move_thaws_user_on_use(&action.move_name) || attacker.ability == Ability::MagmaArmor {
+        if simulator_helpers::move_thaws_user_on_use(&action.move_name) || simulator_helpers::move_unfreezes_target(&action.move_name) || attacker.ability == Ability::MagmaArmor {
             // thaw user
             if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                 mon.status = None;
@@ -527,6 +527,26 @@ fn possible_damage_outcomes_for_move(
             continue;
         }
 
+        let weather_blocks_move = matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special)
+            && ((simulator_helpers::weather_is_heavy_rain(&next_state) && matches!(move_data.pokemon_type, PokemonType::Fire))
+                || (simulator_helpers::weather_is_harsh_sunlight(&next_state) && matches!(move_data.pokemon_type, PokemonType::Water)));
+
+        if weather_blocks_move {
+            if matches!(move_data.name, PokemonMove::Scald | PokemonMove::SteamEruption) {
+                if let Some(target_mon) = match target_slot.player {
+                    Player::P1 => next_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
+                    Player::P2 => next_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+                } {
+                    if matches!(target_mon.status, Some(Status::Frozen(_))) {
+                        target_mon.status = None;
+                    }
+                }
+            }
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
         let hit_probability = simulator_helpers::accuracy_hit_probability(
             &next_state,
             &attacker,
@@ -636,6 +656,19 @@ fn possible_damage_outcomes_for_move(
                         new_all_outcomes.push((MatchState::BattleState(bs), combined_prob));
                     }
                 } else {
+                    if simulator_helpers::weather_is_harsh_sunlight(&branch_state)
+                        && matches!(move_data.name, PokemonMove::Scald | PokemonMove::SteamEruption)
+                    {
+                        if let Some(target_mon) = match target_slot.player {
+                            Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
+                            Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+                        } {
+                            if matches!(target_mon.status, Some(Status::Frozen(_))) {
+                                target_mon.status = None;
+                            }
+                        }
+                    }
+
                     let combined_prob = existing_prob * outcome_prob;
                     new_all_outcomes.push((MatchState::BattleState(branch_state), combined_prob));
                 }
@@ -797,12 +830,12 @@ fn battle_state_from_preview(
         p2_has_tera: true,
         p1_has_mega: true,
         p2_has_mega: true,
-        weathers: vec![],
-        weather_turns: vec![],
+        weather: None,
+        weather_turns: None,
         pseudo_weathers: vec![],
         pseudo_weather_turns: vec![],
-        terrains: vec![],
-        terrain_turns: vec![],
+        terrain: None,
+        terrain_turns: None,
         p1_side_conditions: vec![],
         p1_side_condition_turns: vec![],
         p2_side_conditions: vec![],

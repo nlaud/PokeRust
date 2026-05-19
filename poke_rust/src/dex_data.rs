@@ -262,12 +262,15 @@ pub enum Terrain {
     PsychicTerrain,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Weather {
     Rain,
+    HeavyRain,
     Sandstorm,
     Snow,
     Sun,
+    ExtremeSunlight,
+    StrongWinds,
 }
 
 #[derive(Debug)]
@@ -571,10 +574,13 @@ fn parse_terrain(s: &str) -> Option<Terrain> {
 
 fn parse_weather_val(s: &str) -> Option<Weather> {
     match s {
-        "raindance" | "primordialsea" => Some(Weather::Rain),
-        "sunnyday" | "desolateland" => Some(Weather::Sun),
+        "raindance" => Some(Weather::Rain),
+        "primordialsea" => Some(Weather::HeavyRain),
+        "sunnyday" => Some(Weather::Sun),
+        "desolateland" => Some(Weather::ExtremeSunlight),
         "sandstorm" | "sandsear" => Some(Weather::Sandstorm),
         "hail" | "snowscape" | "snow" => Some(Weather::Snow),
+        "deltastream" => Some(Weather::StrongWinds),
         _ => None,
     }
 }

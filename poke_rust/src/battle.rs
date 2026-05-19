@@ -81,12 +81,12 @@ pub struct BattleState{
     pub p1_has_mega: bool,
     pub p2_has_mega: bool,
 
-    pub weathers: Vec<Weather>,
-    pub weather_turns: Vec<u8>,
+    pub weather: Option<Weather>,
+    pub weather_turns: Option<u8>,
     pub pseudo_weathers: Vec<PseudoWeather>,
     pub pseudo_weather_turns: Vec<u8>,
-    pub terrains: Vec<Terrain>,
-    pub terrain_turns: Vec<u8>,
+    pub terrain: Option<Terrain>,
+    pub terrain_turns: Option<u8>,
     pub p1_side_conditions: Vec<SideCondition>,
     pub p1_side_condition_turns: Vec<u8>,
     pub p2_side_conditions: Vec<SideCondition>,
@@ -135,14 +135,12 @@ impl std::fmt::Display for BattleState {
         writeln!(f, "P2 Back:  [{}]", p2_back_names.join(" | "))?;
         writeln!(f, "P2 Has Tera: {} | Has Mega: {}", self.p2_has_tera, self.p2_has_mega)?;
 
-        if !self.weathers.is_empty() {
-            let weather_strs: Vec<String> = self
-                .weathers
-                .iter()
-                .zip(self.weather_turns.iter())
-                .map(|(w, turns)| format!("{:?} ({}t)", w, turns))
-                .collect();
-            writeln!(f, "Weather: {}", weather_strs.join(", "))?;
+        if let Some(weather) = &self.weather {
+            if let Some(turns) = self.weather_turns {
+                writeln!(f, "Weather: {:?} ({}t)", weather, turns)?;
+            } else {
+                writeln!(f, "Weather: {:?}", weather)?;
+            }
         }
 
         if !self.pseudo_weathers.is_empty() {
@@ -155,13 +153,12 @@ impl std::fmt::Display for BattleState {
             writeln!(f, "Pseudo-Weather: {}", pseudo_strs.join(", "))?;
         }
 
-        if !self.terrains.is_empty() {
-            let terrain_strs: Vec<String> = if !self.terrain_turns.is_empty() {
-                self.terrains.iter().zip(self.terrain_turns.iter()).map(|(t, turns)| format!("{:?} ({}t)", t, turns)).collect()
+        if let Some(terrain) = &self.terrain {
+            if let Some(turns) = self.terrain_turns {
+                writeln!(f, "Terrain: {:?} ({}t)", terrain, turns)?;
             } else {
-                self.terrains.iter().map(|t| format!("{:?}", t)).collect()
-            };
-            writeln!(f, "Terrain: {}", terrain_strs.join(", "))?;
+                writeln!(f, "Terrain: {:?}", terrain)?;
+            }
         }
 
         if !self.p1_side_conditions.is_empty() {
