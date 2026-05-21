@@ -58,6 +58,30 @@ fn check_invulnerability_status(
     }
 }
 
+fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_name: &PokemonMove) {
+    let move_index = match user_slot.player {
+        Player::P1 => next_state
+            .p1_active_mons
+            .get(user_slot.slot_index as usize)
+            .and_then(|mon| mon.moves.iter().position(|move_entry| move_entry.as_ref() == Some(move_name))),
+        Player::P2 => next_state
+            .p2_active_mons
+            .get(user_slot.slot_index as usize)
+            .and_then(|mon| mon.moves.iter().position(|move_entry| move_entry.as_ref() == Some(move_name))),
+    };
+
+    if let Some(move_index) = move_index {
+        if let Some(mon) = match user_slot.player {
+            Player::P1 => next_state.p1_active_mons.get_mut(user_slot.slot_index as usize),
+            Player::P2 => next_state.p2_active_mons.get_mut(user_slot.slot_index as usize),
+        } {
+            if let Some(pp) = mon.move_pp.get_mut(move_index) {
+                *pp = pp.saturating_sub(1);
+            }
+        }
+    }
+}
+
 /// Handles semi-invulnerable and charging move mechanics.
 /// Returns Some(outcomes) if the action is fully handled (charging/invulnerable mechanics),
 /// None if normal damage calculation should proceed.
@@ -340,6 +364,7 @@ fn possible_damage_outcomes_for_move(
                 }
             }
         }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -377,6 +402,8 @@ fn possible_damage_outcomes_for_move(
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
 
+        let original_sleep_status = attacker.status.clone();
+
         // Collect candidate moves (exclude SleepTalk itself)
         let mut candidates: Vec<PokemonMove> = Vec::new();
         for mov_opt in attacker.moves.iter() {
@@ -410,12 +437,20 @@ fn possible_damage_outcomes_for_move(
             if let Some(cand_data) = move_dex.get(cand) {
                 let mut new_action = action.clone();
                 new_action.move_name = cand.clone();
+                let mut sleep_talk_state = next_state.clone();
+                if let Some(mon) = match action.user_slot.player {
+                    Player::P1 => sleep_talk_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+                    Player::P2 => sleep_talk_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+                } {
+                    mon.status = None;
+                }
                 // Recursively simulate chosen move
-                let branches = possible_damage_outcomes_for_move(state, &new_action, cand_data, config, move_dex);
+                let branches = possible_damage_outcomes_for_move(&sleep_talk_state, &new_action, cand_data, config, move_dex);
                 for (mut bs, p) in branches {
                     // For each returned state, revert PP consumption of the chosen move and consume SleepTalk PP instead
                     if let MatchState::BattleState(ref mut bstate) = bs {
                         if let Some(mon) = match action.user_slot.player { Player::P1 => bstate.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => bstate.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                            mon.status = original_sleep_status.clone();
                             // Find candidate move index and increment PP back
                             if let Some(cand_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(cand)) {
                                 mon.move_pp[cand_idx] = mon.move_pp[cand_idx].saturating_add(1);
@@ -548,6 +583,7 @@ fn possible_damage_outcomes_for_move(
         
         if !should_continue {
             // Move is blocked by invulnerability
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -651,6 +687,7 @@ fn possible_damage_outcomes_for_move(
                 if *hit {
                     let mut absorbed_by_dry_skin = false;
                     let mut sand_spit_triggered = false;
+                    let combined_prob = existing_prob * outcome_prob;
 
                     if let Some(target_mon) = match target_slot.player {
                         Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
@@ -665,18 +702,26 @@ fn possible_damage_outcomes_for_move(
                             target_mon.fainted = false;
                             absorbed_by_dry_skin = true;
                         } else {
-                            simulator_helpers::apply_damage(target_mon, *damage);
+                            let _ = target_mon;
+
+                            if let Some(game_over_state) = simulator_helpers::apply_damage_and_check_game_over(&mut branch_state, *target_slot, *damage) {
+                                new_all_outcomes.push((game_over_state, combined_prob));
+                                continue;
+                            }
+
+                            let Some(target_mon) = (match target_slot.player {
+                                Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
+                                Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+                            }) else {
+                                new_all_outcomes.push((MatchState::BattleState(branch_state), combined_prob));
+                                continue;
+                            };
 
                             if *damage > 0
                                 && target_mon.ability == Ability::SandSpit
                                 && !target_mon.fainted
                             {
                                 sand_spit_triggered = true;
-                            }
-
-                            // Clear volatiles and statuses if the target faints
-                            if target_mon.fainted {
-                                simulator_helpers::clear_pokemon_on_faint(target_mon);
                             }
 
                             // If this damage should unfreeze the target, handle it
@@ -700,7 +745,6 @@ fn possible_damage_outcomes_for_move(
                     }
 
                     if absorbed_by_dry_skin {
-                        let combined_prob = existing_prob * outcome_prob;
                         new_all_outcomes.push((MatchState::BattleState(branch_state), combined_prob));
                     } else {
                         // Apply secondary effects, which now returns branched states with probabilities
@@ -751,14 +795,7 @@ fn possible_damage_outcomes_for_move(
     // Decrement PP once at the end
     for (state, _) in &mut all_outcomes {
         if let MatchState::BattleState(bs) = state {
-            if let Some(mon) = match action.user_slot.player {
-                Player::P1 => bs.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-                Player::P2 => bs.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
-            } {
-                if let Some(pp) = mon.move_pp.get_mut(pp_index) {
-                    *pp = pp.saturating_sub(1);
-                }
-            }
+            decrement_move_pp(bs, action.user_slot, &action.move_name);
         }
     }
 
@@ -1339,6 +1376,24 @@ fn get_pokemon_at_slot<'a>(state: &'a BattleState, slot: FieldSlot) -> Option<&'
     mons.get(slot.slot_index as usize)
 }
 
+fn team_has_remaining_pokemon(state: &BattleState, player: Player) -> bool {
+    match player {
+        Player::P1 => state.p1_active_mons.iter().chain(state.p1_back_mons.iter()).any(|mon| !mon.fainted),
+        Player::P2 => state.p2_active_mons.iter().chain(state.p2_back_mons.iter()).any(|mon| !mon.fainted),
+    }
+}
+
+fn game_over_state_if_battle_finished(state: &BattleState) -> Option<MatchState> {
+    let p1_has_remaining = team_has_remaining_pokemon(state, Player::P1);
+    let p2_has_remaining = team_has_remaining_pokemon(state, Player::P2);
+
+    match (p1_has_remaining, p2_has_remaining) {
+        (false, true) => Some(MatchState::GameOverState { winner: Player::P2 }),
+        (true, false) => Some(MatchState::GameOverState { winner: Player::P1 }),
+        _ => None,
+    }
+}
+
 fn get_effective_speed(mon: &PokemonState) -> f32 {
     // Speed stat is at index 5 in the stats array
     // Speed boost is at index 4 in the boosts array
@@ -1547,11 +1602,17 @@ fn step_action_queue(
         if replacement_needed {
             // End-of-turn processing
             simulator_helpers::end_turn(&mut next_state);
+            if let Some(game_over_state) = game_over_state_if_battle_finished(&next_state) {
+                return vec![(game_over_state, 1.0)];
+            }
             next_state.turn_started = true;
             next_state.turn_ended = true;
         } else {
             // Still call end_turn wrapper to keep behavior consistent
             simulator_helpers::end_turn(&mut next_state);
+            if let Some(game_over_state) = game_over_state_if_battle_finished(&next_state) {
+                return vec![(game_over_state, 1.0)];
+            }
             next_state.turn_started = false;
             next_state.turn_ended = false;
         }
@@ -1898,6 +1959,10 @@ pub fn apply_player_commands(
             MatchState::BattleState(battle_state_from_preview(preview, p1_preview, p2_preview))
         }
         MatchState::BattleState(battle) => {
+            if let Some(game_over_state) = game_over_state_if_battle_finished(battle) {
+                return game_over_state;
+            }
+
             let mut next_state = battle.clone();
 
             // Beginning of turn: set turn_started
@@ -2024,6 +2089,7 @@ pub fn simulate_turn(
         adjusted_initial_branches.push((st, prob));
     }
     let initial_branches = adjusted_initial_branches;
+    println!("[simulate_turn] initial_branches.len() = {}", initial_branches.len());
     let config = DamageConfig {
         consider_crit,
         damage_rolls,
@@ -2072,12 +2138,14 @@ pub fn simulate_turn(
         }
     }
 
-    // Coalesce identical MatchStates by Debug string to combine probabilities
+    println!("[simulate_turn] all_results.len() = {}", all_results.len());
+
+    // Coalesce identical MatchStates by formatted string to combine probabilities
     let mut combined_map: HashMap<String, (MatchState, f64)> = HashMap::new();
     for (st, p) in all_results {
         if p <= 0.0 { continue; }
-        let key = format!("{:?}", st);
-        if let Some((existing_st, existing_p)) = combined_map.get_mut(&key) {
+        let key = format!("{:?}", st); // Use Debug string for stable keying
+        if let Some((_, existing_p)) = combined_map.get_mut(&key) {
             *existing_p += p;
         } else {
             combined_map.insert(key, (st.clone(), p));
@@ -2318,6 +2386,10 @@ fn apply_player_commands_branching(
             battle_state_from_preview_branching(preview, p1_preview, p2_preview)
         }
         MatchState::BattleState(battle) => {
+            if let Some(game_over_state) = game_over_state_if_battle_finished(battle) {
+                return vec![(game_over_state, 1.0)];
+            }
+
             let mut next_state = battle.clone();
 
             // Beginning of turn: set turn_started

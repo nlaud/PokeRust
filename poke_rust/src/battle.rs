@@ -4,13 +4,41 @@ use crate::data::species::Species;
 use crate::dex_data::{PokemonData, PseudoWeather, SideCondition, SlotCondition, Terrain, Weather};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+fn humanize_identifier(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    let mut result = String::new();
+    let mut previous: Option<char> = None;
+
+    for current in value.chars() {
+        let insert_space = match previous {
+            Some(prev) => (prev.is_ascii_lowercase() && current.is_ascii_uppercase())
+                || (prev.is_ascii_digit() && current.is_ascii_alphabetic())
+                || (prev.is_ascii_alphabetic() && current.is_ascii_digit()),
+            None => false,
+        };
+
+        if insert_space && !result.ends_with(' ') {
+            result.push(' ');
+        }
+
+        result.push(current);
+        previous = Some(current);
+    }
+
+    result
+}
+
+fn species_name(species: &Species) -> String {
+    humanize_identifier(format!("{:?}", species))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Player{
     P1,
     P2,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct FieldSlot{
     pub player: Player,
     pub slot_index: u8,
@@ -23,7 +51,7 @@ impl std::fmt::Debug for FieldSlot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveAction{
     pub move_name: PokemonMove,
     pub priority: i8,
@@ -31,23 +59,23 @@ pub struct MoveAction{
     pub target_slot: Option<FieldSlot>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwitchAction{
     pub user_slot: FieldSlot,
     pub switch_index: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MegaAction{
     pub user_slot: FieldSlot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeraAction{
     pub user_slot: FieldSlot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action{
     MoveAction(MoveAction),
     SwitchAction(SwitchAction),
@@ -56,7 +84,7 @@ pub enum Action{
     Pass
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BattleState{
     pub active_per_side: u8,
     
@@ -98,41 +126,129 @@ pub struct BattleState{
 impl std::fmt::Display for BattleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Turn {} (Started: {}, Ended: {})", self.turn_number, self.turn_started, self.turn_ended)?;
-        
+
         let format_mon = |m: &PokemonState| -> String {
-            let mut parts = vec![format!("{:?} ({}/{} HP)", m.species, m.hp, m.stats[0])];
-            if let Some(status) = &m.status {
-                parts.push(format!("{:?}", status));
-            }
-            if !m.volatiles.is_empty() {
-                let vol_strs: Vec<String> = m.volatiles.iter().map(|v| format!("{:?}", v)).collect();
-                parts.push(format!("Vols: [{}]", vol_strs.join(", ")));
-            }
-            let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
-            let mut boost_strs = Vec::new();
-            for i in 0..7 {
-                if m.boosts[i] != 0 {
-                    boost_strs.push(format!("{}{:+}", boost_names[i], m.boosts[i]));
+            let stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
+            let stats_str = stat_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| format!("{}: {}", name, m.stats[i]))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let boosts_str = {
+                let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
+                let active_boosts: Vec<String> = m
+                    .boosts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| **b != 0)
+                    .map(|(i, b)| format!("{}{:+}", boost_names[i], b))
+                    .collect();
+                if active_boosts.is_empty() {
+                    "none".to_string()
+                } else {
+                    active_boosts.join(", ")
                 }
-            }
-            if !boost_strs.is_empty() {
-                parts.push(format!("Boosts: {}", boost_strs.join(", ")));
-            }
-            parts.join(", ")
+            };
+
+            let status_str = m
+                .status
+                .as_ref()
+                .map(|s| format!("{:?}", s))
+                .unwrap_or_else(|| "Healthy".to_string());
+
+            let vol_str = if m.volatiles.is_empty() {
+                "none".to_string()
+            } else {
+                m.volatiles.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ")
+            };
+
+            let tera_info = if m.is_tera {
+                format!("Tera({:?})", m.tera_type)
+            } else {
+                "No Tera".to_string()
+            };
+
+            let mega_info = if m.has_mega_form {
+                m.mega_species
+                    .as_ref()
+                    .map(|s| format!("Mega({:?})", s))
+                    .unwrap_or_else(|| "Has Mega (unknown species)".to_string())
+            } else {
+                "No Mega".to_string()
+            };
+
+            let moves_str = m
+                .moves
+                .iter()
+                .enumerate()
+                .map(|(i, mov)| {
+                    let name = mov
+                        .as_ref()
+                        .map(|mv| humanize_identifier(format!("{:?}", mv)))
+                        .unwrap_or_else(|| format!("Move {}", i + 1));
+                    let pp = m.move_pp.get(i).copied().unwrap_or(0);
+                    format!("{} (PP {})", name, pp)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            format!(
+                "{} ({}/{} HP), Status: {}{}\n    Stats: {}\n    Boosts: {}\n    Volatiles: {}\n    {} | {}\n    Moves: {}",
+                species_name(&m.species),
+                m.hp,
+                m.stats[0],
+                status_str,
+                if m.item != crate::data::item::Item::None {
+                    format!(", Item: {:?}, Ability: {:?}", m.item, m.ability)
+                } else {
+                    format!(", Ability: {:?}", m.ability)
+                },
+                stats_str,
+                boosts_str,
+                vol_str,
+                tera_info,
+                mega_info,
+                moves_str,
+            )
         };
 
         let p1_active_names: Vec<String> = self.p1_active_mons.iter().map(format_mon).collect();
         let p1_back_names: Vec<String> = self.p1_back_mons.iter().map(format_mon).collect();
-        
         let p2_active_names: Vec<String> = self.p2_active_mons.iter().map(format_mon).collect();
         let p2_back_names: Vec<String> = self.p2_back_mons.iter().map(format_mon).collect();
 
-        writeln!(f, "P1 Active: [{}]", p1_active_names.join(" | "))?;
-        writeln!(f, "P1 Back:  [{}]", p1_back_names.join(" | "))?;
+        writeln!(f, "P1 Active:")?;
+        if p1_active_names.is_empty() {
+            writeln!(f, "  (none)")?;
+        } else {
+            writeln!(f, "  {}", p1_active_names.join("\n  "))?;
+        }
+
+        writeln!(f, "P1 Back:")?;
+        if p1_back_names.is_empty() {
+            writeln!(f, "  (none)")?;
+        } else {
+            writeln!(f, "  {}", p1_back_names.join("\n  "))?;
+        }
+
         writeln!(f, "P1 Has Tera: {} | Has Mega: {}", self.p1_has_tera, self.p1_has_mega)?;
 
-        writeln!(f, "P2 Active: [{}]", p2_active_names.join(" | "))?;
-        writeln!(f, "P2 Back:  [{}]", p2_back_names.join(" | "))?;
+        writeln!(f, "P2 Active:")?;
+        if p2_active_names.is_empty() {
+            writeln!(f, "  (none)")?;
+        } else {
+            writeln!(f, "  {}", p2_active_names.join("\n  "))?;
+        }
+
+        writeln!(f, "P2 Back:")?;
+        if p2_back_names.is_empty() {
+            writeln!(f, "  (none)")?;
+        } else {
+            writeln!(f, "  {}", p2_back_names.join("\n  "))?;
+        }
+
         writeln!(f, "P2 Has Tera: {} | Has Mega: {}", self.p2_has_tera, self.p2_has_mega)?;
 
         if let Some(weather) = &self.weather {
@@ -207,11 +323,12 @@ impl std::fmt::Display for BattleState {
                 writeln!(f, "  {}: {:?}", i, action)?;
             }
         }
+
         Ok(())
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeamPreviewState{
     pub active_per_side: u8,
     pub brought_per_side: u8,
@@ -219,11 +336,26 @@ pub struct TeamPreviewState{
     pub p2_mons: Vec<PokemonState>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchState{
     BattleState(BattleState),
     TeamPreviewState(TeamPreviewState),
     GameOverState{winner:Player},
+}
+
+impl std::fmt::Display for MatchState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MatchState::BattleState(bs) => write!(f, "{}", bs),
+            MatchState::TeamPreviewState(tp) => {
+                write!(f, "TeamPreview: P1={} mons, P2={} mons", tp.p1_mons.len(), tp.p2_mons.len())
+            }
+            MatchState::GameOverState { winner } => {
+                let w = match winner { Player::P1 => "P1", Player::P2 => "P2" };
+                write!(f, "GameOver: winner={}", w)
+            }
+        }
+    }
 }
 
 #[derive(Clone)]

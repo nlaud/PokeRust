@@ -130,7 +130,7 @@ pub enum SelfDestructType {
     None,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Burn,
     Poison,
@@ -143,7 +143,7 @@ pub enum Status {
     Frozen(u8),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VolatileStatus {
     Flinch,
     AquaRing,
@@ -214,7 +214,7 @@ pub enum VolatileStatus {
     Yawn,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SideCondition {
     AuroraVeil,
     Reflect,
@@ -233,7 +233,7 @@ pub enum SideCondition {
     WideGuard,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotCondition {
     FutureMove,
     HealingWish,
@@ -242,7 +242,7 @@ pub enum SlotCondition {
     Wish,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PseudoWeather {
     FairyLock,
     Gravity,
@@ -254,7 +254,7 @@ pub enum PseudoWeather {
     WonderRoom,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terrain {
     ElectricTerrain,
     GrassyTerrain,

@@ -243,7 +243,7 @@ pub fn critical_hit_probability(
         4 => 1.0 / 3.0,
         3 => 0.25,
         2 => 0.125,
-        _ => 1.0 / 16.0,
+        _ => 1.0 / 24.0,
     };
 
     vec![(false, 1.0 - crit_chance), (true, crit_chance)]
@@ -363,15 +363,18 @@ pub fn resolve_move_targets(
                 }
             }
         }
-        // All pokemon on field (including self)
+        // All pokemon on field. For AllAdjacent, do NOT target self.
         MoveTarget::All | MoveTarget::AllAdjacent => {
-            // All allies
+            // All allies (exclude self for AllAdjacent)
             let ally_mons = match user_slot.player {
                 Player::P1 => &state.p1_active_mons,
                 Player::P2 => &state.p2_active_mons,
             };
             for (idx, mon) in ally_mons.iter().enumerate() {
                 if !mon.fainted {
+                    if matches!(target, MoveTarget::AllAdjacent) && idx as u8 == user_slot.slot_index {
+                        continue;
+                    }
                     targets.push(FieldSlot {
                         player: user_slot.player,
                         slot_index: idx as u8,
@@ -464,7 +467,7 @@ pub fn calculate_damage_outcomes_for_target(
         && attacker.ability == Ability::SolarPower
         && weather_is_sunlight(_state)
     {
-        attacker_stat *= 1.5;
+        attacker_stat = (attacker_stat * 1.5).floor();
     }
 
     if matches!(attacking_stat, PokemonStat::Atk)
@@ -481,7 +484,7 @@ pub fn calculate_damage_outcomes_for_target(
 
     for (crit, crit_probability) in critical_states {
         let critical_multiplier = if crit { 1.5 } else { 1.0 };
-        let attack_stat = if crit {
+        let mut attack_stat = if crit {
             effective_stat(attacker, attacking_stat, true, false)
         } else {
             attacker_stat
@@ -492,10 +495,24 @@ pub fn calculate_damage_outcomes_for_target(
             target_effective_defense
         };
 
+        if matches!(attacking_stat, PokemonStat::SpA)
+            && attacker.ability == Ability::SolarPower
+            && weather_is_sunlight(_state)
+        {
+            attack_stat = (attack_stat * 1.5).floor();
+        }
+
+        if matches!(attacking_stat, PokemonStat::Atk)
+            && attacker.ability == Ability::OrichalcumPulse
+            && weather_is_sunlight(_state)
+        {
+            attack_stat = (attack_stat * 5461.0 / 4096.0).floor();
+        }
+
         // Handle Facade doubling when user has any non-volatile status
         let mut effective_base_power = move_data.base_power as f64;
         if move_data.name == PokemonMove::Facade && attacker.status.is_some() {
-            effective_base_power = (move_data.base_power as f64) * 2.0;
+            effective_base_power = ((move_data.base_power as f64) * 2.0).floor();
         }
 
         if matches!(move_data.name, PokemonMove::SolarBeam | PokemonMove::SolarBlade)
@@ -503,25 +520,25 @@ pub fn calculate_damage_outcomes_for_target(
             && !weather_is_strong_winds(_state)
             && current_weather(_state).is_some()
         {
-            effective_base_power *= 0.5;
+            effective_base_power = (effective_base_power * 0.5).floor();
         }
 
         if let Some(weather) = current_weather(_state) {
             match weather {
                 Weather::Sun | Weather::ExtremeSunlight => {
                     if move_data.name == PokemonMove::HydroSteam {
-                        effective_base_power *= 1.5;
+                        effective_base_power = (effective_base_power * 1.5).floor();
                     } else if matches!(move_data.pokemon_type, PokemonType::Fire) {
-                        effective_base_power *= 1.5;
+                        effective_base_power = (effective_base_power * 1.5).floor();
                     } else if matches!(move_data.pokemon_type, PokemonType::Water) {
-                        effective_base_power *= 0.5;
+                        effective_base_power = (effective_base_power * 0.5).floor();
                     }
                 }
                 Weather::Rain | Weather::HeavyRain => {
                     if matches!(move_data.pokemon_type, PokemonType::Fire) {
-                        effective_base_power *= 0.5;
+                        effective_base_power = (effective_base_power * 0.5).floor();
                     } else if matches!(move_data.pokemon_type, PokemonType::Water) {
-                        effective_base_power *= 1.5;
+                        effective_base_power = (effective_base_power * 1.5).floor();
                     }
                 }
                 _ => {}
@@ -534,31 +551,48 @@ pub fn calculate_damage_outcomes_for_target(
             .iter()
             .any(|volatile| matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::HelpingHand, _) | VolatileStatusState::MoveStatus(VolatileStatus::HelpingHand, _)))
         {
-            effective_base_power *= 1.5;
+            effective_base_power = (effective_base_power * 1.5).floor();
         }
 
-        let mut base_damage = (((((2.0 * attacker.level as f64 / 5.0 + 2.0) * attack_stat * effective_base_power / defense_stat) / 50.0) + 2.0)
-            * stab
-            * effectiveness
-            * invulnerability_multiplier
-            * critical_multiplier
-            * targets_multiplier)
-            .floor()
-            .max(0.0);
+        // Floor every step of base damage construction.
+        let mut base_damage = (2.0 * attacker.level as f64 / 5.0).floor();
+        base_damage = (base_damage + 2.0).floor();
+        base_damage = (base_damage * effective_base_power).floor();
+        base_damage = (base_damage * attack_stat).floor();
+        base_damage = (base_damage / defense_stat).floor();
+        base_damage = (base_damage / 50.0).floor();
+        base_damage = (base_damage + 2.0).floor();
 
-        if target.ability == Ability::DrySkin && matches!(move_data.pokemon_type, PokemonType::Fire) {
-            base_damage = (base_damage * 1.25).floor();
-        }
+        let burn_multiplier = if matches!(move_data.category, MoveCategory::Physical)
+            && matches!(attacker.status, Some(Status::Burn))
+            && attacker.ability != Ability::Guts
+            && move_data.name != PokemonMove::Facade
+        {
+            0.5
+        } else {
+            1.0
+        };
 
-        // Apply burn reduction for physical moves (unless Guts ability present or move is Facade)
-        if matches!(move_data.category, MoveCategory::Physical) {
-            if matches!(attacker.status, Some(Status::Burn)) && attacker.ability != Ability::Guts && move_data.name != PokemonMove::Facade {
-                base_damage = (base_damage * 0.5).floor();
-            }
-        }
+        let dry_skin_fire_multiplier = if target.ability == Ability::DrySkin && matches!(move_data.pokemon_type, PokemonType::Fire) {
+            1.25
+        } else {
+            1.0
+        };
+
         for roll in &damage_roll_values {
             let random_multiplier = *roll as f64 / 100.0;
-            let damage = (base_damage * random_multiplier).floor().max(0.0) as u16;
+            // Apply all modifiers with flooring after each multiplication.
+            let mut damage = base_damage;
+            damage = (damage * targets_multiplier).floor();
+            damage = (damage * critical_multiplier).floor();
+            damage = (damage * random_multiplier).floor();
+            damage = (damage * stab).floor();
+            damage = (damage * effectiveness).floor();
+            damage = (damage * burn_multiplier).floor();
+            damage = (damage * invulnerability_multiplier).floor();
+            damage = (damage * dry_skin_fire_multiplier).floor();
+
+            let damage = damage.max(0.0) as u16;
             let probability = crit_probability / damage_roll_values.len() as f64;
             outcomes.push((damage, crit, probability));
         }
@@ -699,6 +733,39 @@ pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus)
 pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
     mon.hp = mon.hp.saturating_sub(damage);
     mon.fainted = mon.hp == 0;
+}
+
+fn team_has_remaining_pokemon(state: &BattleState, player: Player) -> bool {
+    match player {
+        Player::P1 => state.p1_active_mons.iter().chain(state.p1_back_mons.iter()).any(|mon| !mon.fainted),
+        Player::P2 => state.p2_active_mons.iter().chain(state.p2_back_mons.iter()).any(|mon| !mon.fainted),
+    }
+}
+
+pub fn apply_damage_and_check_game_over(
+    state: &mut BattleState,
+    target_slot: FieldSlot,
+    damage: u16,
+) -> Option<crate::battle::MatchState> {
+    let target_mon = match target_slot.player {
+        Player::P1 => state.p1_active_mons.get_mut(target_slot.slot_index as usize),
+        Player::P2 => state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+    }?;
+
+    apply_damage(target_mon, damage);
+
+    if target_mon.fainted {
+        clear_pokemon_on_faint(target_mon);
+        if !team_has_remaining_pokemon(state, target_slot.player) {
+            let winner = match target_slot.player {
+                Player::P1 => Player::P2,
+                Player::P2 => Player::P1,
+            };
+            return Some(crate::battle::MatchState::GameOverState { winner });
+        }
+    }
+
+    None
 }
 
 fn humanize_identifier(value: &str) -> String {

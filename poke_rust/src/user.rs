@@ -16,155 +16,26 @@ fn get_verbosity() -> u8 {
 }
 
 fn format_pokemon_detailed(mon: &PokemonState) -> String {
-    let stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
-    let stats_str = stat_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| format!("{}: {}", name, mon.stats[i]))
-        .collect::<Vec<_>>()
-        .join(", ");
-    
-    let boosts_str = {
-        let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
-        let active_boosts: Vec<String> = mon.boosts
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| **b != 0)
-            .map(|(i, b)| format!("{}{:+}", boost_names[i], b))
-            .collect();
-        if active_boosts.is_empty() {
-            "none".to_string()
-        } else {
-            active_boosts.join(", ")
-        }
-    };
-    
-    let status_str = mon.status.as_ref().map(|s| format!("{:?}", s)).unwrap_or_else(|| "Healthy".to_string());
-    let item_str = format!("{:?}", mon.item);
-    let ability_str = format!("{:?}", mon.ability);
-    let nature_str = format!("{:?}", mon.nature);
-    
-    let evs_str = mon.evs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("/");
-    let ivs_str = mon.ivs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/");
-
-    // Volatiles
-    let vol_str = if mon.volatiles.is_empty() {
-        "none".to_string()
-    } else {
-        mon.volatiles.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ")
-    };
-
-    // Tera / Mega info
-    let tera_info = if mon.is_tera {
-        format!("Tera({:?})", mon.tera_type)
-    } else {
-        "No Tera".to_string()
-    };
-    let mega_info = if mon.has_mega_form {
-        mon.mega_species.as_ref().map(|s| format!("Mega({:?})", s)).unwrap_or_else(|| "Has Mega (unknown species)".to_string())
-    } else {
-        "No Mega".to_string()
-    };
-
-    // Moves and PP
-    let moves_str = mon.moves.iter().enumerate().map(|(i, m)| {
-        let name = m.as_ref().map(|mv| move_name(mv)).unwrap_or_else(|| format!("Move {}", i+1));
-        let pp = mon.move_pp.get(i).copied().unwrap_or(0);
-        format!("{} (PP {})", name, pp)
-    }).collect::<Vec<_>>().join(", ");
-
-    format!(
-        "{} ({}/{} HP), Item: {}, Ability: {}, Nature: {}\n    Stats: {}\n    Boosts: {}\n    Status: {}\n    Volatiles: {}\n    {} | {}\n    Moves: {}\n    EVs: {}\n    IVs: {}",
-        species_name(&mon.species),
-        mon.hp,
-        mon.stats[0],
-        item_str,
-        ability_str,
-        nature_str,
-        stats_str,
-        boosts_str,
-        status_str,
-        vol_str,
-        tera_info,
-        mega_info,
-        moves_str,
-        evs_str,
-        ivs_str
-    )
-}
-
-fn format_pokemon_brief(mon: &PokemonState) -> String {
-    let mut parts = vec![format!("{:?} ({}/{} HP)", mon.species, mon.hp, mon.stats[0])];
-    if let Some(status) = &mon.status {
-        parts.push(format!("Status: {:?}", status));
-    }
-    if !mon.volatiles.is_empty() {
-        let vol_strs: Vec<String> = mon.volatiles.iter().map(|v| format!("{:?}", v)).collect();
-        parts.push(format!("Vols: [{}]", vol_strs.join(", ")));
-    }
-    // Small boost summary
-    let active_boosts: Vec<String> = mon.boosts.iter().enumerate().filter(|(_, b)| **b != 0).map(|(i,b)| format!("{}{:+}", ["A","D","Sa","Sd","Sp","Acc","Eva"][i], b)).collect();
-    if !active_boosts.is_empty() {
-        parts.push(format!("Boosts: [{}]", active_boosts.join(", ")));
-    }
-    // Tera/Mega marker
-    if mon.is_tera {
-        parts.push(format!("Tera({:?})", mon.tera_type));
-    }
-    if mon.has_mega_form {
-        if let Some(ms) = &mon.mega_species { parts.push(format!("Mega({:?})", ms)); }
-    }
-    parts.join(", ")
+    format!("{}", mon)
 }
 
 fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
-    let verbosity = get_verbosity();
-    let use_detailed = verbosity >= 3;
-    let show_items_and_abilities = verbosity >= 2;
-    
     println!("\n{}", "Current Battle State:".cyan().bold());
     println!("{}", format!("Selected outcome chance: {:.4}%", chance * 100.0).bright_blue());
-    println!("{}", format!("Turn {} (Started: {}, Ended: {})", state.turn_number, state.turn_started, state.turn_ended).bright_blue());
-    
-    let format_mons = |mons: &[PokemonState], detailed: bool| {
-        if detailed {
-            mons.iter()
-                .map(|m| format_pokemon_detailed(m))
-                .collect::<Vec<_>>()
-                .join("\n  ")
-        } else if show_items_and_abilities {
-            mons.iter()
-                .map(|m| format!(
-                    "{:?} ({}/{} HP), Item: {:?}, Ability: {:?}{}",
-                    m.species,
-                    m.hp,
-                    m.stats[0],
-                    m.item,
-                    m.ability,
-                    m.status.as_ref().map(|s| format!(", {}", format!("{:?}", s))).unwrap_or_default()
-                ))
-                .collect::<Vec<_>>()
-                .join("\n  ")
-        } else {
-            mons.iter()
-                .map(format_pokemon_brief)
-                .collect::<Vec<_>>()
-                .join(" | ")
-        }
-    };
+    println!("{}", format!("{}", state).bright_blue());
     
     println!("{}", "P1 Active:".green().bold());
     if state.p1_active_mons.is_empty() {
         println!("  {}", "(none)".dimmed());
     } else {
-        println!("  {}", format_mons(&state.p1_active_mons, use_detailed));
+        println!("  {}", state.p1_active_mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
     }
     
     println!("{}", "P1 Back:".green());
     if state.p1_back_mons.is_empty() {
         println!("  {}", "(none)".dimmed());
     } else {
-        println!("  {}", format_mons(&state.p1_back_mons, use_detailed));
+        println!("  {}", state.p1_back_mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
     }
     
     println!("{}", format!("P1 Has Tera: {} | Has Mega: {}", state.p1_has_tera, state.p1_has_mega).green());
@@ -173,23 +44,28 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
     if state.p2_active_mons.is_empty() {
         println!("  {}", "(none)".dimmed());
     } else {
-        println!("  {}", format_mons(&state.p2_active_mons, use_detailed));
+        println!("  {}", state.p2_active_mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
     }
     
     println!("{}", "P2 Back:".magenta());
     if state.p2_back_mons.is_empty() {
         println!("  {}", "(none)".dimmed());
     } else {
-        println!("  {}", format_mons(&state.p2_back_mons, use_detailed));
+        println!("  {}", state.p2_back_mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
     }
     
     println!("{}", format!("P2 Has Tera: {} | Has Mega: {}", state.p2_has_tera, state.p2_has_mega).magenta());
 
     // Field / global effects
     let mut printed_field = false;
+    let mut print_field_header = || {
+        if !printed_field {
+            println!("\n{}", "Field / Global Effects:".yellow().bold());
+            printed_field = true;
+        }
+    };
     if state.weather.is_some() || state.terrain.is_some() || !state.pseudo_weathers.is_empty() || state.weather_turns.is_some() || state.terrain_turns.is_some() {
-        println!("\n{}", "Field / Global Effects:".yellow().bold());
-        printed_field = true;
+        print_field_header();
     }
     if let Some(weather) = &state.weather {
         if let Some(turns) = state.weather_turns {
@@ -211,7 +87,7 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
 
     // Side conditions (only print if present)
     if !state.p1_side_conditions.is_empty() || !state.p2_side_conditions.is_empty() {
-        if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
+        print_field_header();
         if !state.p1_side_conditions.is_empty() {
             println!("  P1 side conditions: {:?}", state.p1_side_conditions);
             if !state.p1_side_condition_turns.is_empty() { println!("  P1 side condition turns: {:?}", state.p1_side_condition_turns); }
@@ -226,7 +102,7 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
     let mut any_slot_conds = false;
     for conds in state.p1_slot_conditions.iter().chain(state.p2_slot_conditions.iter()) { if !conds.is_empty() { any_slot_conds = true; break; } }
     if any_slot_conds {
-        if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
+        print_field_header();
         println!("  P1 slot conditions:");
         for (i, conds) in state.p1_slot_conditions.iter().enumerate() {
             if !conds.is_empty() { println!("    Slot {}: {:?}", i+1, conds); }
@@ -239,11 +115,11 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
 
     // Weathers/turns small (only if non-empty)
     if state.weather_turns.is_some() {
-        if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
+        print_field_header();
         println!("  Weather turns: {:?}", state.weather_turns);
     }
     if !state.pseudo_weather_turns.is_empty() {
-        if !printed_field { println!("\n{}", "Field / Global Effects:".yellow().bold()); printed_field = true; }
+        print_field_header();
         println!("  Pseudo-weather turns: {:?}\n", state.pseudo_weather_turns);
     }
 
@@ -310,29 +186,6 @@ fn back_mon_name(state: &BattleState, player: Player, party_index: usize) -> Str
     };
 
     mon.map(|mon| species_name(&mon.species)).unwrap_or_else(|| format!("Bench {}", party_index + 1))
-}
-
-fn preview_command_description(preview: &crate::battle::TeamPreviewState, player: Player, command: &TeamPreviewCommand) -> String {
-    let mons = match player {
-        Player::P1 => &preview.p1_mons,
-        Player::P2 => &preview.p2_mons,
-    };
-
-    let active = command
-        .active_indices
-        .iter()
-        .map(|index| species_name(&mons[*index].species))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let back = command
-        .back_indices
-        .iter()
-        .map(|index| species_name(&mons[*index].species))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    format!("Active: [{}] | Back: [{}]", active, back)
 }
 
 fn battle_command_description(state: &BattleState, player: Player, slot_idx: usize, command: &BattleCommand) -> String {
@@ -433,7 +286,7 @@ pub fn choose_team_preview_command(preview: &crate::battle::TeamPreviewState, pl
         let pick = prompt_choice(&prompt, &options);
 
         // Map pick back to global index (skipping already-chosen indices)
-        let mut available_indices: Vec<usize> = (0..total_mons).filter(|i| !chosen_active.contains(i)).collect();
+        let available_indices: Vec<usize> = (0..total_mons).filter(|i| !chosen_active.contains(i)).collect();
         let chosen_index = available_indices[pick];
         chosen_active.push(chosen_index);
         println!("{}", format!("Chosen: {}", species_name(&mons[chosen_index].species)).green());
@@ -453,7 +306,7 @@ pub fn choose_team_preview_command(preview: &crate::battle::TeamPreviewState, pl
             let prompt = format!("Select bench Pokémon {}/{}:", chosen_brought.len() - active_n + 1, need_back);
             let pick = prompt_choice(&prompt, &options);
 
-            let mut available_indices: Vec<usize> = (0..total_mons).filter(|i| !chosen_brought.contains(i)).collect();
+            let available_indices: Vec<usize> = (0..total_mons).filter(|i| !chosen_brought.contains(i)).collect();
             let chosen_index = available_indices[pick];
             chosen_brought.push(chosen_index);
             println!("{}", format!("Chosen bench: {}", species_name(&mons[chosen_index].species)).green());

@@ -8,21 +8,53 @@ use crate::data::pokemon_move::PokemonMove;
 
 pub type PokemonStatsTable = [u16; 6]; // hp, atk, def, spa, spd, spe
 
-#[derive(Debug, Clone)]
+fn humanize_identifier(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    let mut result = String::new();
+    let mut previous: Option<char> = None;
+
+    for current in value.chars() {
+        let insert_space = match previous {
+            Some(prev) => (prev.is_ascii_lowercase() && current.is_ascii_uppercase())
+                || (prev.is_ascii_digit() && current.is_ascii_alphabetic())
+                || (prev.is_ascii_alphabetic() && current.is_ascii_digit()),
+            None => false,
+        };
+
+        if insert_space && !result.ends_with(' ') {
+            result.push(' ');
+        }
+
+        result.push(current);
+        previous = Some(current);
+    }
+
+    result
+}
+
+fn species_name(species: &Species) -> String {
+    humanize_identifier(format!("{:?}", species))
+}
+
+fn move_name(mov: &PokemonMove) -> String {
+    humanize_identifier(format!("{:?}", mov))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VolatileStatusState{
     TurnStatus(VolatileStatus, u8),
     MoveStatus(VolatileStatus, u8),
     Charging(PokemonMove, Vec<crate::battle::FieldSlot>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PokemonGender{
     Male,
     Female,
     Genderless
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Nature{
     Hardy,
     Lonely,
@@ -51,7 +83,7 @@ pub enum Nature{
     Serious
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PokemonState{
     pub fainted: bool,
     pub species: Species,
@@ -92,68 +124,93 @@ pub struct PokemonState{
 
 impl std::fmt::Display for PokemonState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let gender_str = match self.gender {
-            PokemonGender::Male => " (M)",
-            PokemonGender::Female => " (F)",
-            PokemonGender::Genderless => "",
-        };
-        
-        let item_str = match &self.item {
-            Item::None => String::new(),
-            _ => format!(" @ {:?}", self.item),
-        };
-
-        let species_str_val = self.species.to_string();
-        let mut speciesChars = species_str_val.chars();
-        let species_str = match speciesChars.next() {
-            None => String::new(),
-            Some(f) => f.to_uppercase().collect::<String>() + speciesChars.as_str(),
-        };
-
-
-        writeln!(f, "{}{}{}", species_str, gender_str, item_str)?;
-        writeln!(f, "Ability: {}", self.ability.to_string())?;
-        
-        if self.level != 100 {
-            writeln!(f, "Level: {}", self.level)?;
-        }
-        
-        writeln!(f, "Tera Type: {:?}", self.tera_type)?;
-        
         let stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
-        
-        let mut ev_strs = Vec::new();
-        for i in 0..6 {
-            if self.evs[i] > 0 {
-                ev_strs.push(format!("{} {}", self.evs[i], stat_names[i]));
-            }
-        }
-        if !ev_strs.is_empty() {
-            writeln!(f, "EVs: {}", ev_strs.join(" / "))?;
-        }
-        
-        let mut iv_strs = Vec::new();
-        for i in 0..6 {
-            if self.ivs[i] < 31 {
-                iv_strs.push(format!("{} {}", self.ivs[i], stat_names[i]));
-            }
-        }
-        if !iv_strs.is_empty() {
-            writeln!(f, "IVs: {}", iv_strs.join(" / "))?;
-        }
-        
-        writeln!(f, "{:?} Nature", self.nature)?;
-        
-        for (i, mov) in self.moves.iter().enumerate() {
-            if let Some(m) = mov {
-                writeln!(f, "- {} ({} PP)", m.to_string(), self.move_pp[i])?;
-            }
-        }
-        
-        write!(f, "Stats: {} HP / {} Atk / {} Def / {} SpA / {} SpD / {} Spe\n",
-            self.stats[0], self.stats[1], self.stats[2], self.stats[3], self.stats[4], self.stats[5])?;
+        let stats_str = stat_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("{}: {}", name, self.stats[i]))
+            .collect::<Vec<_>>()
+            .join(", ");
 
-        Ok(())
+        let boosts_str = {
+            let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
+            let active_boosts: Vec<String> = self
+                .boosts
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| **b != 0)
+                .map(|(i, b)| format!("{}{:+}", boost_names[i], b))
+                .collect();
+            if active_boosts.is_empty() {
+                "none".to_string()
+            } else {
+                active_boosts.join(", ")
+            }
+        };
+
+        let status_str = self
+            .status
+            .as_ref()
+            .map(|s| format!("{:?}", s))
+            .unwrap_or_else(|| "Healthy".to_string());
+        let item_str = format!("{:?}", self.item);
+        let ability_str = format!("{:?}", self.ability);
+        let nature_str = format!("{:?}", self.nature);
+
+        let evs_str = self.evs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("/");
+        let ivs_str = self.ivs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/");
+
+        let vol_str = if self.volatiles.is_empty() {
+            "none".to_string()
+        } else {
+            self.volatiles.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ")
+        };
+
+        let tera_info = if self.is_tera {
+            format!("Tera({:?})", self.tera_type)
+        } else {
+            "No Tera".to_string()
+        };
+        let mega_info = if self.has_mega_form {
+            self.mega_species
+                .as_ref()
+                .map(|s| format!("Mega({:?})", s))
+                .unwrap_or_else(|| "Has Mega (unknown species)".to_string())
+        } else {
+            "No Mega".to_string()
+        };
+
+        let moves_str = self
+            .moves
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let name = m.as_ref().map(move_name).unwrap_or_else(|| format!("Move {}", i + 1));
+                let pp = self.move_pp.get(i).copied().unwrap_or(0);
+                format!("{} (PP {})", name, pp)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        write!(
+            f,
+            "{} ({}/{} HP), Item: {}, Ability: {}, Nature: {}\n    Stats: {}\n    Boosts: {}\n    Status: {}\n    Volatiles: {}\n    {} | {}\n    Moves: {}\n    EVs: {}\n    IVs: {}",
+            species_name(&self.species),
+            self.hp,
+            self.stats[0],
+            item_str,
+            ability_str,
+            nature_str,
+            stats_str,
+            boosts_str,
+            status_str,
+            vol_str,
+            tera_info,
+            mega_info,
+            moves_str,
+            evs_str,
+            ivs_str
+        )
     }
 }
 
@@ -248,6 +305,120 @@ fn calc_stat(base: u16, iv: u8, ev: u8, level: u8, nature_mod: f32) -> u16 {
     let ev_contrib = ev as u16 / 4;
     let inner = (2 * base + iv as u16 + ev_contrib) * level as u16 / 100 + 5;
     (inner as f32 * nature_mod).floor() as u16
+}
+
+pub fn build_pokemon_state(
+    species: Species,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    level: Option<u8>,
+    moves: Option<[Option<PokemonMove>; 4]>,
+    gender: Option<PokemonGender>,
+    ability: Option<Ability>,
+    nature: Option<Nature>,
+    item: Option<Item>,
+    tera_type: Option<PokemonType>,
+    evs: Option<[u8; 6]>,
+    ivs: Option<[u8; 6]>,
+    use_stat_points: bool,
+) -> PokemonState {
+    let dex_entry = pokemon_dex.get(&species);
+
+    let level = level.unwrap_or(50);
+    let moves = moves.unwrap_or([None, None, None, None]);
+    let gender = gender.unwrap_or_else(|| {
+        dex_entry
+            .map(|data| data.default_gender)
+            .unwrap_or(PokemonGender::Genderless)
+    });
+    let ability = ability.unwrap_or_else(|| {
+        Ability::Illuminate
+    });
+    let nature = nature.unwrap_or(Nature::Hardy);
+    let item = item.unwrap_or(Item::None);
+    let tera_type = tera_type.unwrap_or(PokemonType::Normal);
+    let mut evs = evs.unwrap_or([0; 6]);
+    let ivs = ivs.unwrap_or([31; 6]);
+
+    if use_stat_points {
+        for ev in &mut evs {
+            *ev = ((i16::from(*ev) * 8) - 4).max(0) as u8;
+        }
+    }
+
+    let mut move_pp = [0u8; 4];
+    for (move_idx, mov) in moves.iter().enumerate() {
+        if let Some(mov) = mov {
+            if let Some(move_data) = move_dex.get(mov) {
+                move_pp[move_idx] = if *mov == PokemonMove::Protect {
+                    8
+                } else {
+                    match move_data.pp {
+                        5 => 8,
+                        10 => 12,
+                        15 => 16,
+                        pp if pp > 15 => 20,
+                        pp => pp,
+                    }
+                };
+            }
+        }
+    }
+
+    let (types, base_stats, weight_hg) = match pokemon_dex.get(&species) {
+        Some(data) => (data.types.clone(), data.base_stats, data.weight),
+        None => (vec![PokemonType::Normal], [100u16; 6], 0u16),
+    };
+
+    let stats = calc_stats_for_level(base_stats, ivs, evs, level, &nature);
+    let hp = stats[0];
+
+    let normalized_item_str = if item == Item::None {
+        String::new()
+    } else {
+        normalize_string(format!("{:?}", item))
+    };
+    let is_mega = dex_entry
+        .map(|data| is_mega_dex_entry(&species, data))
+        .unwrap_or(false);
+    let mega_species = if is_mega {
+        None
+    } else {
+        resolve_mega_species(&species, &normalized_item_str, pokemon_dex)
+    };
+    let mega_ability = mega_species
+        .as_ref()
+        .and_then(|key| pokemon_dex.get(key))
+        .and_then(|data| data.primary_ability.clone());
+
+    PokemonState {
+        fainted: false,
+        species,
+        types,
+        is_tera: false,
+        is_mega,
+        has_mega_form: mega_species.is_some(),
+        level,
+        hp,
+        moves,
+        move_pp,
+        item,
+        nature,
+        boosts: [0; 7],
+        stats,
+        status: None,
+        volatiles: Vec::new(),
+        base_ability: ability.clone(),
+        ability,
+        gender,
+        weight_hg,
+        tera_type,
+        mega_species,
+        mega_ability,
+        last_move_failed: false,
+        evs,
+        ivs,
+    }
 }
 
 pub fn calc_stats_for_level(
@@ -396,29 +567,29 @@ pub fn parse_team_sheet(
 
         let species_key = Species::from_str(&species_key_str);
         let dex_entry = pokemon_dex.get(&species_key);
-        let gender = explicit_gender.unwrap_or_else(|| {
-            dex_entry.map(|data| data.default_gender).unwrap_or(PokemonGender::Genderless)
-        });
+        if dex_entry.is_none() {
+            eprintln!("Warning: '{}' not found in dex (key: '{:?}')", base_name, species_key);
+        }
 
         // --- Parse remaining lines ---
         let mut ability: Option<Ability> = None;
-        let mut level: u8 = 50;
-        let mut tera_type = PokemonType::Normal;
-        let mut evs = [0u8; 6]; // hp, atk, def, spa, spd, spe
-        let mut ivs = [31u8; 6];
-        let mut nature = Nature::Hardy;
+        let mut level: Option<u8> = None;
+        let mut tera_type: Option<PokemonType> = None;
+        let mut evs: Option<[u8; 6]> = None;
+        let mut ivs: Option<[u8; 6]> = None;
+        let mut nature: Option<Nature> = None;
         let mut moves: [Option<PokemonMove>; 4] = [None, None, None, None];
-        let mut move_pp: [u8; 4] = [0, 0, 0, 0];
         let mut move_count = 0;
 
         for &line in &lines[1..] {
             if let Some(rest) = line.strip_prefix("Ability:") {
                 ability = Some(Ability::from_str(rest.trim()));
             } else if let Some(rest) = line.strip_prefix("Level:") {
-                level = rest.trim().parse().unwrap_or(50);
+                level = Some(rest.trim().parse().unwrap_or(50));
             } else if let Some(rest) = line.strip_prefix("Tera Type:") {
-                tera_type = parse_type(rest.trim()).unwrap_or(PokemonType::Normal);
+                tera_type = Some(parse_type(rest.trim()).unwrap_or(PokemonType::Normal));
             } else if let Some(rest) = line.strip_prefix("EVs:") {
+                let mut parsed_evs = evs.unwrap_or([0u8; 6]);
                 for part in rest.split('/') {
                     let part = part.trim();
                     let mut iter = part.splitn(2, ' ');
@@ -434,118 +605,69 @@ pub fn parse_team_sheet(
                             };
                             
                             match stat_name.trim() {
-                                "HP"  => evs[0] = ev_value,
-                                "Atk" => evs[1] = ev_value,
-                                "Def" => evs[2] = ev_value,
-                                "SpA" => evs[3] = ev_value,
-                                "SpD" => evs[4] = ev_value,
-                                "Spe" => evs[5] = ev_value,
+                                "HP"  => parsed_evs[0] = ev_value,
+                                "Atk" => parsed_evs[1] = ev_value,
+                                "Def" => parsed_evs[2] = ev_value,
+                                "SpA" => parsed_evs[3] = ev_value,
+                                "SpD" => parsed_evs[4] = ev_value,
+                                "Spe" => parsed_evs[5] = ev_value,
                                 _ => {}
                             }
                         }
                     }
                 }
+                evs = Some(parsed_evs);
             } else if let Some(rest) = line.strip_prefix("IVs:") {
+                let mut parsed_ivs = ivs.unwrap_or([31u8; 6]);
                 for part in rest.split('/') {
                     let part = part.trim();
                     let mut iter = part.splitn(2, ' ');
                     if let (Some(num_str), Some(stat_name)) = (iter.next(), iter.next()) {
                         if let Ok(val) = num_str.trim().parse::<u8>() {
                             match stat_name.trim() {
-                                "HP"  => ivs[0] = val,
-                                "Atk" => ivs[1] = val,
-                                "Def" => ivs[2] = val,
-                                "SpA" => ivs[3] = val,
-                                "SpD" => ivs[4] = val,
-                                "Spe" => ivs[5] = val,
+                                "HP"  => parsed_ivs[0] = val,
+                                "Atk" => parsed_ivs[1] = val,
+                                "Def" => parsed_ivs[2] = val,
+                                "SpA" => parsed_ivs[3] = val,
+                                "SpD" => parsed_ivs[4] = val,
+                                "Spe" => parsed_ivs[5] = val,
                                 _ => {}
                             }
                         }
                     }
                 }
+                ivs = Some(parsed_ivs);
             } else if let Some(nature_str) = line.strip_suffix(" Nature") {
-                nature = parse_nature_str(nature_str).unwrap_or(Nature::Hardy);
+                nature = parse_nature_str(nature_str);
             } else if let Some(move_str) = line.strip_prefix("- ") {
                 if move_count < 4 {
-                    let parsed_move = PokemonMove::from_str(move_str);
-                    moves[move_count] = Some(parsed_move.clone());
-                    
-                    if let Some(move_data) = move_dex.get(&parsed_move) {
-                        if parsed_move == PokemonMove::Protect {
-                            move_pp[move_count] = 8;
-                        } else {
-                            match move_data.pp {
-                                5 => move_pp[move_count] = 8,
-                                10 => move_pp[move_count] = 12,
-                                15 => move_pp[move_count] = 16,
-                                pp if pp > 15 => move_pp[move_count] = 20,
-                                pp => move_pp[move_count] = pp, // Fallback
-                            }
-                        }
-                    }
-
+                    moves[move_count] = Some(PokemonMove::from_str(move_str));
                     move_count += 1;
                 }
             }
         }
 
-        // --- Look up dex data ---
-        let (types, base_stats, weight_hg) = match pokemon_dex.get(&species_key) {
-            Some(data) => (data.types.clone(), data.base_stats, data.weight),
-            None => {
-                eprintln!("Warning: '{}' not found in dex (key: '{:?}')", base_name, species_key);
-                (vec![PokemonType::Normal], [100u16; 6], 0u16)
-            }
-        };
-
-        // --- Compute actual stats from base stats, EVs, IVs, level, nature ---
-        let stats = calc_stats_for_level(base_stats, ivs, evs, level, &nature);
-        let hp = stats[0];
-
-        let normalized_ability = ability.unwrap_or(Ability::Unknown(String::new()));
-        let normalized_item_str = normalize_string(&item);
-        let item_enum = Item::from_str(&item);
-        let is_mega = dex_entry
-            .map(|data| is_mega_dex_entry(&species_key, data))
-            .unwrap_or(false);
-        let mega_species = if is_mega {
+        let item = if item.is_empty() {
             None
         } else {
-            resolve_mega_species(&species_key, &normalized_item_str, pokemon_dex)
+            Some(Item::from_str(&item))
         };
-        let mega_ability = mega_species
-            .as_ref()
-            .and_then(|key| pokemon_dex.get(key))
-            .and_then(|data| data.primary_ability.clone());
 
-        team.push(PokemonState {
-            fainted: false,
-            species: species_key,
-            types,
+        team.push(build_pokemon_state(
+            species_key,
+            pokemon_dex,
+            move_dex,
+            level,
+            Some(moves),
+            explicit_gender,
+            ability,
+            nature,
+            item,
             tera_type,
-            is_tera: false,
-            is_mega,
-            has_mega_form: mega_species.is_some(),
-            mega_species,
-            mega_ability,
-            stats,
             evs,
             ivs,
-            move_pp,
-            boosts: [0; 7],
-            level,
-            hp,
-            moves,
-            item: item_enum,
-            nature,
-            status: None,
-            volatiles: Vec::new(),
-            base_ability: normalized_ability.clone(),
-            ability: normalized_ability,
-            last_move_failed: false,
-            gender,
-            weight_hg,
-        });
+            use_stat_points,
+        ));
     }
 
     team

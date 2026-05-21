@@ -11,6 +11,7 @@ mod battle;
 mod simulator;
 mod simulator_helpers;
 mod user;
+mod simulator_tests;
 
 pub static VERBOSITY: OnceLock<u8> = OnceLock::new();
 
