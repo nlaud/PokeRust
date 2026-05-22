@@ -629,12 +629,16 @@ pub fn damage_effectiveness_for_action(state: &BattleState, action: &MoveAction,
         return 1.0;
     };
 
+    let Some(attacker) = get_pokemon_at_slot(state, action.user_slot) else {
+        return 1.0;
+    };
     let Some(target) = get_pokemon_at_slot(state, target_slot) else {
         return 1.0;
     };
 
-    match invulnerability_resolution(target, &move_data.name) {
+    match invulnerability_resolution(attacker, target, &move_data.name) {
         InvulnerabilityResolution::Blocked => 0.0,
+        InvulnerabilityResolution::ZeroDamage => 0.0,
         InvulnerabilityResolution::Normal => move_type_effectiveness(state, &move_data.pokemon_type, target),
         InvulnerabilityResolution::DoubleDamage => move_type_effectiveness(state, &move_data.pokemon_type, target) * 2.0,
     }
@@ -643,8 +647,37 @@ pub fn damage_effectiveness_for_action(state: &BattleState, action: &MoveAction,
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvulnerabilityResolution {
     Blocked,
+    ZeroDamage,
     Normal,
     DoubleDamage,
+}
+
+fn target_has_sky_drop_airborne_immunity(target: &PokemonState) -> bool {
+    pokemon_has_type(target, &PokemonType::Flying)
+        || target.ability == Ability::Levitate
+        || has_status_volatile(target, &VolatileStatus::MagnetRise)
+        || has_status_volatile(target, &VolatileStatus::Telekinesis)
+}
+
+fn move_can_hit_sky_drop_target(attacker: &PokemonState, target: &PokemonState, attack_move: &PokemonMove) -> bool {
+    attacker.ability == Ability::NoGuard
+        || has_status_volatile(target, &VolatileStatus::Foresight)
+        || has_status_volatile(target, &VolatileStatus::MiracleEye)
+        || matches!(
+            attack_move,
+            PokemonMove::Gust
+                | PokemonMove::Hurricane
+                | PokemonMove::SkyUppercut
+                | PokemonMove::SmackDown
+                | PokemonMove::Thunder
+                | PokemonMove::Twister
+        )
+}
+
+pub fn sky_drop_first_turn_fails(state: &BattleState, target: &PokemonState) -> bool {
+    is_gravity_active(state)
+        || matches!(target.item, Item::IronBall)
+        || has_status_volatile(target, &VolatileStatus::Substitute)
 }
 
 pub fn move_causes_invulnerability(move_name: &PokemonMove) -> bool {
@@ -682,19 +715,21 @@ fn invulnerability_resolution_for_source_move(
             | PokemonMove::Hurricane => InvulnerabilityResolution::Normal,
             _ => InvulnerabilityResolution::Blocked,
         },
-        PokemonMove::PhantomForce | PokemonMove::ShadowForce | PokemonMove::SkyDrop => {
-            InvulnerabilityResolution::Blocked
-        }
+        PokemonMove::PhantomForce | PokemonMove::ShadowForce => InvulnerabilityResolution::Blocked,
         _ => InvulnerabilityResolution::Normal,
     }
 }
 
-pub fn invulnerability_resolution(target: &PokemonState, attack_move: &PokemonMove) -> InvulnerabilityResolution {
+pub fn invulnerability_resolution(
+    attacker: &PokemonState,
+    target: &PokemonState,
+    attack_move: &PokemonMove,
+) -> InvulnerabilityResolution {
     let source_move_opt = target.volatiles.iter().find_map(|volatile| {
-        if let VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(mov), _) = volatile {
-            Some(mov)
-        } else {
-            None
+        match volatile {
+            VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(mov), _) => Some(mov),
+            VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _) => Some(&PokemonMove::SkyDrop),
+            _ => None,
         }
     });
 
@@ -702,7 +737,31 @@ pub fn invulnerability_resolution(target: &PokemonState, attack_move: &PokemonMo
         return InvulnerabilityResolution::Normal;
     };
 
-    invulnerability_resolution_for_source_move(source_move, attack_move)
+    if *source_move == PokemonMove::SkyDrop {
+        if *attack_move == PokemonMove::SkyDrop {
+            return if target_has_sky_drop_airborne_immunity(target) {
+                InvulnerabilityResolution::ZeroDamage
+            } else {
+                InvulnerabilityResolution::Normal
+            };
+        }
+
+        if move_can_hit_sky_drop_target(attacker, target, attack_move) {
+            return InvulnerabilityResolution::Normal;
+        }
+
+        return InvulnerabilityResolution::Blocked;
+    }
+
+    let resolution = invulnerability_resolution_for_source_move(source_move, attack_move);
+
+    if matches!(resolution, InvulnerabilityResolution::Blocked)
+        && move_can_hit_sky_drop_target(attacker, target, attack_move)
+    {
+        InvulnerabilityResolution::Normal
+    } else {
+        resolution
+    }
 }
 
 pub fn add_invulnerable_volatile(mon: &mut PokemonState, move_name: PokemonMove, _targets: Vec<FieldSlot>) {

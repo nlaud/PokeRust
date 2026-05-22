@@ -71,10 +71,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::OnceLock;
     use crate::battle::{MatchState, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{parse_move_dex, parse_pokemon_dex};
-    use crate::pokemon::{build_pokemon_state, Nature};
+    use crate::dex_data::{parse_move_dex, parse_pokemon_dex, PseudoWeather, VolatileStatus, Weather};
+    use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
     use crate::simulator::simulate_turn;
     use crate::simulator_helpers::coalesce_branches;
     pub fn simple_attack(_player: Player, move_slots: Vec<usize>) -> Vec<BattleCommand> {
@@ -86,6 +88,21 @@ mod tests {
                     target: None,
                     terastallize: false,
                     mega_evolve: false,
+                })
+            })
+            .collect()
+    }
+
+    pub fn simple_attack_mega(_player: Player, move_slots: Vec<usize>) -> Vec<BattleCommand> {
+        move_slots
+            .into_iter()
+            .enumerate()
+            .map(|(index, move_slot)| {
+                BattleCommand::Attack(AttackCommand {
+                    move_slot,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: index == 0,
                 })
             })
             .collect()
@@ -120,6 +137,33 @@ mod tests {
 
     fn move_dex() -> &'static std::collections::HashMap<PokemonMove, crate::dex_data::MoveData> {
         MOVE_DEX.get_or_init(|| parse_move_dex("../pokemon_info/showdownMoves.txt"))
+    }
+
+    fn extract_battle_state(outcomes: Vec<(MatchState, f64)>) -> (BattleState, f64) {
+        assert_eq!(outcomes.len(), 1);
+        let (state, probability) = outcomes.into_iter().next().unwrap();
+        match state {
+            MatchState::BattleState(battle_state) => (battle_state, probability),
+            _ => panic!("expected a battle state outcome"),
+        }
+    }
+
+    fn has_sky_drop_turn_volatile(mon: &PokemonState) -> bool {
+        mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)))
+    }
+
+    fn has_sky_drop_move_volatile(mon: &PokemonState) -> bool {
+        mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(PokemonMove::SkyDrop), _)))
+    }
+
+    fn run_single_turn(
+        state: &MatchState,
+        p1_cmd: &PlayerCommand,
+        p2_cmd: &PlayerCommand,
+        move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+        pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>,
+    ) -> Vec<(MatchState, f64)> {
+        simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1)
     }
     
     #[test]
@@ -2037,9 +2081,480 @@ mod tests {
         assert!(is_permutation(&outcomes, &expected_outcomes));
     }
 
+    #[test]
+    fn skydrop_first_turn_and_second_turn_damage() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Dragonite,
+            pokemon_dex,
+            move_dex,
+            None,
+            Some([Some(PokemonMove::SkyDrop), Some(PokemonMove::Splash), None, None]),
+            None,
+            Some(Ability::Illuminate),
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([0, 252, 0, 0, 0, 252]),
+            None,
+            false,
+        );
+
+        let defender = build_pokemon_state(
+            Species::Snorlax,
+            pokemon_dex,
+            move_dex,
+            None,
+            Some([Some(PokemonMove::Splash), Some(PokemonMove::Splash), None, None]),
+            None,
+            Some(Ability::Illuminate),
+            Some(Nature::Careful),
+            None,
+            None,
+            Some([252, 0, 0, 0, 0, 0]),
+            None,
+            false,
+        );
+
+        let initial_state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+
+        let turn_one = run_single_turn(
+            &MatchState::BattleState(initial_state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex,
+            pokemon_dex,
+        );
+
+        let (state_after_turn_one, _) = extract_battle_state(turn_one);
+        assert!(has_sky_drop_move_volatile(&state_after_turn_one.p1_active_mons[0]));
+        assert!(has_sky_drop_turn_volatile(&state_after_turn_one.p2_active_mons[0]));
+
+        let turn_two = run_single_turn(
+            &MatchState::BattleState(state_after_turn_one.clone()),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex,
+            pokemon_dex,
+        );
+
+        let (state_after_turn_two, _) = extract_battle_state(turn_two);
+        assert!(state_after_turn_two.p2_active_mons[0].hp < state_after_turn_one.p2_active_mons[0].hp);
+        assert!(!has_sky_drop_move_volatile(&state_after_turn_two.p1_active_mons[0]));
+        assert!(!has_sky_drop_turn_volatile(&state_after_turn_two.p2_active_mons[0]));
+    }
+
+    #[test]
+    fn skydrop_airborne_exception_moves_hit() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let cases = vec![
+            (PokemonMove::Gust, None),
+            (PokemonMove::SmackDown, None),
+            (PokemonMove::Twister, None),
+            (PokemonMove::SkyUppercut, None),
+            (PokemonMove::Thunder, Some(Weather::Rain)),
+            (PokemonMove::Hurricane, Some(Weather::Rain)),
+        ];
+
+        for (move_name, weather) in cases {
+            let attacker = build_pokemon_state(
+                Species::Dragonite,
+                pokemon_dex,
+                move_dex,
+                None,
+                Some([Some(move_name), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([0, 252, 0, 0, 0, 252]),
+                None,
+                false,
+            );
+
+            let mut defender = build_pokemon_state(
+                Species::Snorlax,
+                pokemon_dex,
+                move_dex,
+                None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Careful),
+                None,
+                None,
+                Some([252, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+            let defender_hp = defender.hp;
+            defender.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, 0));
+
+            let mut initial_state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+            if let Some(weather) = weather {
+                initial_state.weather = Some(weather);
+                initial_state.weather_turns = Some(5);
+            }
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial_state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex,
+                pokemon_dex,
+            );
+
+            assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < defender_hp)));
+        }
+    }
+
+    #[test]
+    fn skydrop_bypassed_by_noguard_and_identify() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let base_defender = build_pokemon_state(
+            Species::Snorlax,
+            pokemon_dex,
+            move_dex,
+            None,
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::Illuminate),
+            Some(Nature::Careful),
+            None,
+            None,
+            Some([252, 0, 0, 0, 0, 0]),
+            None,
+            false,
+        );
+
+        let control_attacker = build_pokemon_state(
+            Species::Snorlax,
+            pokemon_dex,
+            move_dex,
+            None,
+            Some([Some(PokemonMove::Earthquake), None, None, None]),
+            None,
+            Some(Ability::Illuminate),
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([0, 252, 0, 0, 0, 252]),
+            None,
+            false,
+        );
+
+        let mut control_defender = base_defender.clone();
+        let control_defender_hp = control_defender.hp;
+        control_defender.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, 0));
+        let control_state = battle_state_from_lists(vec![control_attacker], vec![], vec![control_defender], vec![]);
+        let control_outcomes = run_single_turn(
+            &MatchState::BattleState(control_state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex,
+            pokemon_dex,
+        );
+        assert!(control_outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == control_defender_hp)));
+
+        let noguard_attacker = build_pokemon_state(
+            Species::Snorlax,
+            pokemon_dex,
+            move_dex,
+            None,
+            Some([Some(PokemonMove::Earthquake), None, None, None]),
+            None,
+            Some(Ability::NoGuard),
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([0, 252, 0, 0, 0, 252]),
+            None,
+            false,
+        );
+
+        let mut noguard_defender = base_defender.clone();
+        let noguard_defender_hp = noguard_defender.hp;
+        noguard_defender.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, 0));
+        let noguard_state = battle_state_from_lists(vec![noguard_attacker], vec![], vec![noguard_defender], vec![]);
+        let noguard_outcomes = run_single_turn(
+            &MatchState::BattleState(noguard_state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex,
+            pokemon_dex,
+        );
+        assert!(noguard_outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < noguard_defender_hp)));
+
+        for identify_volatile in [VolatileStatus::Foresight, VolatileStatus::MiracleEye] {
+            let identify_attacker = build_pokemon_state(
+                Species::Snorlax,
+                pokemon_dex,
+                move_dex,
+                None,
+                Some([Some(PokemonMove::Earthquake), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([0, 252, 0, 0, 0, 252]),
+                None,
+                false,
+            );
+
+            let mut identify_defender = base_defender.clone();
+            let identify_defender_hp = identify_defender.hp;
+            identify_defender.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, 0));
+            identify_defender.volatiles.push(VolatileStatusState::TurnStatus(identify_volatile, 0));
+            let identify_state = battle_state_from_lists(vec![identify_attacker], vec![], vec![identify_defender], vec![]);
+            let identify_outcomes = run_single_turn(
+                &MatchState::BattleState(identify_state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex,
+                pokemon_dex,
+            );
+            assert!(identify_outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < identify_defender_hp)));
+        }
+    }
+
+    #[test]
+    fn skydrop_fails_on_gravity_iron_ball_and_substitute() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let cases = vec!["gravity", "iron_ball", "substitute"];
+
+        for case in cases {
+            let attacker = build_pokemon_state(
+                Species::Dragonite,
+                pokemon_dex,
+                move_dex,
+                None,
+                Some([Some(PokemonMove::SkyDrop), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([0, 252, 0, 0, 0, 252]),
+                None,
+                true,
+            );
+
+            let mut defender = build_pokemon_state(
+                Species::Snorlax,
+                pokemon_dex,
+                move_dex,
+                None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Careful),
+                None,
+                None,
+                Some([252, 0, 0, 0, 0, 0]),
+                None,
+                true,
+            );
+            let defender_hp = defender.hp;
+
+            let mut state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+            match case {
+                "gravity" => {
+                    state.pseudo_weathers.push(PseudoWeather::Gravity);
+                    state.pseudo_weather_turns.push(5);
+                }
+                "iron_ball" => {
+                    state.p2_active_mons[0].item = Item::IronBall;
+                }
+                "substitute" => {
+                    state.p2_active_mons[0].volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute, 0));
+                }
+                _ => unreachable!(),
+            }
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex,
+                pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == defender_hp)));
+            assert!(outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if !has_sky_drop_move_volatile(&bs.p1_active_mons[0]) && !has_sky_drop_turn_volatile(&bs.p2_active_mons[0]))));
+        }
+    }
+
+    #[test]
+    fn skydrop_flying_levitate_magnet_rise_telekinesis_take_no_damage() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let cases = vec!["flying", "levitate", "magnet_rise", "telekinesis"];
+
+        for case in cases {
+            let attacker = build_pokemon_state(
+                Species::Dragonite,
+                pokemon_dex,
+                move_dex,
+                None,
+                Some([Some(PokemonMove::SkyDrop), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([0, 252, 0, 0, 0, 252]),
+                None,
+                true,
+            );
+
+            let mut defender = match case {
+                "flying" => build_pokemon_state(
+                    Species::Dragonite,
+                    pokemon_dex,
+                    move_dex,
+                    None,
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::Illuminate),
+                    Some(Nature::Careful),
+                    None,
+                    None,
+                    Some([252, 0, 0, 0, 0, 0]),
+                    None,
+                    true,
+                ),
+                _ => build_pokemon_state(
+                    Species::Snorlax,
+                    pokemon_dex,
+                    move_dex,
+                    None,
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::Illuminate),
+                    Some(Nature::Careful),
+                    None,
+                    None,
+                    Some([252, 0, 0, 0, 0, 0]),
+                    None,
+                    true,
+                ),
+            };
+
+            match case {
+                "levitate" => defender.ability = Ability::Levitate,
+                "magnet_rise" => defender.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, 0)),
+                "telekinesis" => defender.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Telekinesis, 0)),
+                _ => {}
+            }
+
+            let defender_hp = defender.hp;
+            let initial_state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+
+            let turn_one = run_single_turn(
+                &MatchState::BattleState(initial_state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex,
+                pokemon_dex,
+            );
+            let (state_after_turn_one, _) = extract_battle_state(turn_one);
+            assert!(has_sky_drop_move_volatile(&state_after_turn_one.p1_active_mons[0]));
+            assert!(has_sky_drop_turn_volatile(&state_after_turn_one.p2_active_mons[0]));
+
+            let turn_two = run_single_turn(
+                &MatchState::BattleState(state_after_turn_one.clone()),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex,
+                pokemon_dex,
+            );
+            let (state_after_turn_two, _) = extract_battle_state(turn_two);
+            assert_eq!(state_after_turn_two.p2_active_mons[0].hp, defender_hp);
+            assert!(!has_sky_drop_move_volatile(&state_after_turn_two.p1_active_mons[0]));
+            assert!(!has_sky_drop_turn_volatile(&state_after_turn_two.p2_active_mons[0]));
+        }
+    }
+
+    #[test]
+    fn skydrop_target_cannot_act_until_drop_resolves() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let dragonite = build_pokemon_state(
+            Species::Dragonite,
+            pokemon_dex,
+            move_dex,
+            None,
+            Some([Some(PokemonMove::SkyDrop), Some(PokemonMove::Splash), None, None]),
+            None,
+            Some(Ability::Illuminate),
+            Some(Nature::Jolly),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 252]),
+            None,
+            false,
+        );
+
+        let mimikyu = build_pokemon_state(
+            Species::Mimikyu,
+            pokemon_dex,
+            move_dex,
+            None,
+            Some([Some(PokemonMove::SwordsDance), None, None, None]),
+            None,
+            Some(Ability::Illuminate),
+            Some(Nature::Brave),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            None,
+            false,
+        );
+
+        let initial_state = battle_state_from_lists(vec![dragonite], vec![], vec![mimikyu], vec![]);
+
+        let turn_one = run_single_turn(
+            &MatchState::BattleState(initial_state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex,
+            pokemon_dex,
+        );
+
+        let (state_after_turn_one, _) = extract_battle_state(turn_one);
+        assert_eq!(state_after_turn_one.p2_active_mons[0].boosts[0], 0);
+        assert!(has_sky_drop_move_volatile(&state_after_turn_one.p1_active_mons[0]));
+        assert!(has_sky_drop_turn_volatile(&state_after_turn_one.p2_active_mons[0]));
+
+        let turn_two = run_single_turn(
+            &MatchState::BattleState(state_after_turn_one.clone()),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex,
+            pokemon_dex,
+        );
+
+        let (state_after_turn_two, _) = extract_battle_state(turn_two);
+        assert_eq!(state_after_turn_two.p2_active_mons[0].boosts[0], 2);
+        assert!(!has_sky_drop_move_volatile(&state_after_turn_two.p1_active_mons[0]));
+        assert!(!has_sky_drop_turn_volatile(&state_after_turn_two.p2_active_mons[0]));
+    }
+
+
     /*Tests to write:
-    Multi-turn moves (especially sky drop interactions)
-    Mega Evolution Damage
+    Mega Evolution Damage Tests
     Adaptability
     Weather causing abilties AND moves
     Weather effects (Fire damage boost in sun, sand spdef boost, sand damage)

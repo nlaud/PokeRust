@@ -49,12 +49,14 @@ fn move_target_is_multitarget(target: &MoveTarget) -> bool {
 /// - multiplier: damage multiplier (1.0 normal, 2.0 double damage, 0.0 blocked)
 /// - should_continue: if false, move is blocked and we should return early with 0 damage
 fn check_invulnerability_status(
+    attacker: &PokemonState,
     target: &PokemonState,
     move_name: &PokemonMove,
 ) -> (f64, bool) {
-    let invulnerability_resolution = simulator_helpers::invulnerability_resolution(target, move_name);
+    let invulnerability_resolution = simulator_helpers::invulnerability_resolution(attacker, target, move_name);
     match invulnerability_resolution {
         simulator_helpers::InvulnerabilityResolution::Blocked => (0.0, false),
+        simulator_helpers::InvulnerabilityResolution::ZeroDamage => (0.0, true),
         simulator_helpers::InvulnerabilityResolution::Normal => (1.0, true),
         simulator_helpers::InvulnerabilityResolution::DoubleDamage => (2.0, true),
     }
@@ -154,6 +156,27 @@ fn handle_charging_and_semi_invulnerability(
 
     // Handle semi-invulnerable moves (first turn)
     if move_causes_invulnerability && invulnerable_data.is_none() {
+        if action.move_name == PokemonMove::SkyDrop {
+            let sky_drop_targets = if move_target_is_multitarget(&move_data.target) {
+                simulator_helpers::resolve_move_targets(next_state, action.user_slot, &move_data.target)
+            } else {
+                match action.target_slot {
+                    Some(slot) => vec![slot],
+                    None => simulator_helpers::resolve_move_targets(next_state, action.user_slot, &move_data.target),
+                }
+            };
+
+            let target_opt = sky_drop_targets
+                .first()
+                .and_then(|slot| get_pokemon_at_slot(&next_state, *slot));
+
+            if let Some(target) = target_opt {
+                if simulator_helpers::sky_drop_first_turn_fails(&next_state, target) {
+                    return Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)]);
+                }
+            }
+        }
+
         let invulnerability_targets = if move_target_is_multitarget(&move_data.target) {
             simulator_helpers::resolve_move_targets(next_state, action.user_slot, &move_data.target)
         } else {
@@ -195,7 +218,7 @@ fn handle_charging_and_semi_invulnerability(
                     Player::P2 => next_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
                 } {
                     if !simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::SkyDrop) {
-                        target_mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, 0));
+                        target_mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, 2));
                     }
                 }
             }
@@ -400,6 +423,19 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
+    if attacker.volatiles.iter().any(|volatile| matches!(volatile, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _))) {
+        let mut fail_state = pre_move_state.clone();
+        if let Some(mon) = match action.user_slot.player {
+            Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+            Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+        } {
+            if let Some(pp) = mon.move_pp.get_mut(pp_index) {
+                *pp = pp.saturating_sub(1);
+            }
+        }
+        return vec![(MatchState::BattleState(fail_state), 1.0)];
+    }
+
     // Handle Sleep Talk: picks a random known move while asleep and uses it instead
     if action.move_name == PokemonMove::SleepTalk {
         // Must be asleep to use SleepTalk
@@ -584,7 +620,7 @@ fn possible_damage_outcomes_for_move(
             continue;
         };
 
-        let (invulnerability_multiplier, should_continue) = check_invulnerability_status(&target, &action.move_name);
+        let (invulnerability_multiplier, should_continue) = check_invulnerability_status(&attacker, &target, &action.move_name);
         
         if !should_continue {
             // Move is blocked by invulnerability
@@ -742,6 +778,7 @@ fn possible_damage_outcomes_for_move(
                             if move_data.name == PokemonMove::SkyDrop {
                                 simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::SkyDrop);
                             }
+
                         }
                     }
 
