@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use colored::Colorize;
 use crate::battle::{
@@ -8,8 +10,8 @@ use crate::battle::{
 use crate::pokemon::{
     PokemonState, parse_team_sheet
 };
-use crate::dex_data::{MoveData, MoveTarget, PokemonData, MoveFlag};
-use crate::dex_data::{MoveCategory, PokemonStat, Status, VolatileStatus};
+use crate::dex_data::{MoveData, MoveTarget, PokemonData};
+use crate::dex_data::{MoveCategory, Status, VolatileStatus};
 use crate::data::ability::Ability;
 use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
@@ -56,6 +58,10 @@ fn check_invulnerability_status(
         simulator_helpers::InvulnerabilityResolution::Normal => (1.0, true),
         simulator_helpers::InvulnerabilityResolution::DoubleDamage => (2.0, true),
     }
+}
+
+fn coalesce_match_state_branches(branches: Vec<(MatchState, f64)>) -> Vec<(MatchState, f64)> {
+    simulator_helpers::coalesce_branches(branches)
 }
 
 fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_name: &PokemonMove) {
@@ -195,8 +201,8 @@ fn handle_charging_and_semi_invulnerability(
             }
         }
 
-        // Decrement PP for semi-invulnerable moves on first turn
-        let pp_slot = attacker
+        // Decrement PP for semi-invulnerable moves on first turn -- Don't AI Bruh
+        /*let pp_slot = attacker
             .moves
             .iter()
             .position(|move_entry| move_entry.as_ref() == Some(&action.move_name));
@@ -210,7 +216,7 @@ fn handle_charging_and_semi_invulnerability(
                     *pp = pp.saturating_sub(1);
                 }
             }
-        }
+        }*/
 
         return Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)]);
     }
@@ -235,7 +241,7 @@ fn handle_charging_and_semi_invulnerability(
     }
 
     // Handle charging moves (first turn)
-    if move_has_charge && charging_data.is_none() {
+    if move_has_charge && charging_data.is_none() && !move_causes_invulnerability{
         let charging_targets = if move_target_is_multitarget(&move_data.target) {
             simulator_helpers::resolve_move_targets(next_state, action.user_slot, &move_data.target)
         } else {
@@ -364,7 +370,6 @@ fn possible_damage_outcomes_for_move(
                 }
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -466,7 +471,7 @@ fn possible_damage_outcomes_for_move(
             }
         }
 
-        return combined;
+        return coalesce_match_state_branches(combined);
     }
 
     // --- Status pre-move handling: Sleep, Frozen, Paralysis ---
@@ -497,7 +502,7 @@ fn possible_damage_outcomes_for_move(
                     // 25% chance to thaw and execute
                     status_fail_prob = 0.75;
                     // increment counter in pre_move_state for failure branch
-                    if let Some(mon) = match action.user_slot.player { Player::P1 => pre_move_state.p1_active_mons.get(action.user_slot.slot_index as usize), Player::P2 => pre_move_state.p2_active_mons.get(action.user_slot.slot_index as usize) } {
+                    if let Some(_mon) = match action.user_slot.player { Player::P1 => pre_move_state.p1_active_mons.get(action.user_slot.slot_index as usize), Player::P2 => pre_move_state.p2_active_mons.get(action.user_slot.slot_index as usize) } {
                         // we'll adjust failure branch later
                     }
                     // For success branch, remove status in next_state
@@ -575,7 +580,7 @@ fn possible_damage_outcomes_for_move(
         let mut outcomes_for_target: Vec<(u16, bool, bool, f64)> = Vec::new();
 
         let Some(target) = get_pokemon_at_slot(&next_state, *target_slot).cloned() else {
-            // Target is fainted or doesn't exist, skip
+            // Target doesn't exist, skip
             continue;
         };
 
@@ -857,7 +862,7 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
-    final_outcomes
+    coalesce_match_state_branches(final_outcomes)
 }
 
 pub fn team_preview_state_from_teamsheets(
@@ -1268,7 +1273,6 @@ fn queue_battle_commands_for_player(
                     target_slot: a.target,
                 }));
             }
-            BattleCommand::Pass => {}
             BattleCommand::Pass => {}
         }
     }
@@ -1724,7 +1728,7 @@ fn step_action_queue(
             }
         }
 
-        return combined_results;
+        return coalesce_match_state_branches(combined_results);
     }
 
     let action = next_state.action_queue.remove(best_indices[0]);
@@ -1854,9 +1858,6 @@ pub fn get_possible_commands(
         MatchState::BattleState(battle) => {
             // If both flags are set, we're in replacement phase: players may need to send replacements
             if battle.turn_started && battle.turn_ended {
-                let mut p1_options: Vec<PlayerCommand> = Vec::new();
-                let mut p2_options: Vec<PlayerCommand> = Vec::new();
-
                 // Helper to build replacement PlayerCommands for a player
                 let build_replacement_commands = |player: Player, battle: &BattleState| -> Vec<PlayerCommand> {
                     let (active, back) = match player {
@@ -1923,10 +1924,10 @@ pub fn get_possible_commands(
                     results
                 };
 
-                p1_options = build_replacement_commands(Player::P1, battle);
-                p2_options = build_replacement_commands(Player::P2, battle);
-
-                return (p1_options, p2_options);
+                return (
+                    build_replacement_commands(Player::P1, battle),
+                    build_replacement_commands(Player::P2, battle),
+                );
             }
 
             (
@@ -2088,7 +2089,7 @@ pub fn simulate_turn(
         }
         adjusted_initial_branches.push((st, prob));
     }
-    let initial_branches = adjusted_initial_branches;
+    let initial_branches = coalesce_match_state_branches(adjusted_initial_branches);
     println!("[simulate_turn] initial_branches.len() = {}", initial_branches.len());
     let config = DamageConfig {
         consider_crit,
@@ -2104,7 +2105,7 @@ pub fn simulate_turn(
         match state {
             MatchState::BattleState(battle) => {
                 if battle.action_queue.is_empty() {
-                    return step_action_queue(battle, move_dex, pokemon_dex, config);//Handles replacement phase
+                    return coalesce_match_state_branches(step_action_queue(battle, move_dex, pokemon_dex, config));//Handles replacement phase
                 }
 
                 let outcomes = step_action_queue(battle, move_dex, pokemon_dex, config);
@@ -2116,7 +2117,7 @@ pub fn simulate_turn(
                     }
                 }
 
-                aggregated
+                coalesce_match_state_branches(aggregated)
             }
             _ => vec![(state.clone(), 1.0)],
         }
@@ -2140,22 +2141,7 @@ pub fn simulate_turn(
 
     println!("[simulate_turn] all_results.len() = {}", all_results.len());
 
-    // Coalesce identical MatchStates by formatted string to combine probabilities
-    let mut combined_map: HashMap<String, (MatchState, f64)> = HashMap::new();
-    for (st, p) in all_results {
-        if p <= 0.0 { continue; }
-        let key = format!("{:?}", st); // Use Debug string for stable keying
-        if let Some((_, existing_p)) = combined_map.get_mut(&key) {
-            *existing_p += p;
-        } else {
-            combined_map.insert(key, (st.clone(), p));
-        }
-    }
-
-    let mut final_vec: Vec<(MatchState, f64)> = combined_map.into_iter().map(|(_, v)| v).collect();
-    // Optionally sort for determinism (largest prob first)
-    final_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    final_vec
+    coalesce_match_state_branches(all_results)
 }
 
 /// Public validator wrapper used by interactive UI to check legality
@@ -2316,7 +2302,7 @@ fn perform_simultaneous_switches_branching(next_state: &BattleState, switches: &
     }
     // collect slots to process send-out effects for (the slots that were switched)
     let slots: Vec<FieldSlot> = switches.iter().map(|(s, _)| *s).collect();
-    process_sendouts_in_speed_order_branching(&base, &slots)
+    simulator_helpers::coalesce_branches(process_sendouts_in_speed_order_branching(&base, &slots))
 }
 
 // Branching version of creating battle state from preview that respects speed-order send-outs and ties
@@ -2331,7 +2317,7 @@ fn battle_state_from_preview_branching(
     let p2_active_mons: Vec<PokemonState> = p2_preview.active_indices.iter().map(|&i| preview.p2_mons[i].clone()).collect();
     let p2_back_mons: Vec<PokemonState> = p2_preview.back_indices.iter().map(|&i| preview.p2_mons[i].clone()).collect();
 
-    let mut state = BattleState {
+    let state = BattleState {
         active_per_side: preview.active_per_side,
         p1_active_mons,
         p2_active_mons,
@@ -2369,7 +2355,7 @@ fn battle_state_from_preview_branching(
     }
 
     let branches = process_sendouts_in_speed_order_branching(&state, &slots);
-    branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect()
+    coalesce_match_state_branches(branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect())
 }
 
 // Branching apply_player_commands: returns possible MatchStates with probabilities
@@ -2383,7 +2369,7 @@ fn apply_player_commands_branching(
         MatchState::TeamPreviewState(preview) => {
             let p1_preview = match p1_cmd { PlayerCommand::TeamPreview(c) => c, _ => panic!("Expected TeamPreview command for P1"), };
             let p2_preview = match p2_cmd { PlayerCommand::TeamPreview(c) => c, _ => panic!("Expected TeamPreview command for P2"), };
-            battle_state_from_preview_branching(preview, p1_preview, p2_preview)
+            coalesce_match_state_branches(battle_state_from_preview_branching(preview, p1_preview, p2_preview))
         }
         MatchState::BattleState(battle) => {
             if let Some(game_over_state) = game_over_state_if_battle_finished(battle) {
@@ -2426,7 +2412,7 @@ fn apply_player_commands_branching(
                 }
 
                 let branches = perform_simultaneous_switches_branching(&next_state, &queued_switches);
-                return branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect();
+                return coalesce_match_state_branches(branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect());
             }
 
             // Default: just queue commands mid-turn

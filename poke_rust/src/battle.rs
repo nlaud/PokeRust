@@ -32,13 +32,13 @@ fn species_name(species: &Species) -> String {
     humanize_identifier(format!("{:?}", species))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Player{
     P1,
     P2,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldSlot{
     pub player: Player,
     pub slot_index: u8,
@@ -51,7 +51,7 @@ impl std::fmt::Debug for FieldSlot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MoveAction{
     pub move_name: PokemonMove,
     pub priority: i8,
@@ -59,23 +59,23 @@ pub struct MoveAction{
     pub target_slot: Option<FieldSlot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SwitchAction{
     pub user_slot: FieldSlot,
     pub switch_index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MegaAction{
     pub user_slot: FieldSlot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TeraAction{
     pub user_slot: FieldSlot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Action{
     MoveAction(MoveAction),
     SwitchAction(SwitchAction),
@@ -84,7 +84,7 @@ pub enum Action{
     Pass
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BattleState{
     pub active_per_side: u8,
     
@@ -328,7 +328,7 @@ impl std::fmt::Display for BattleState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TeamPreviewState{
     pub active_per_side: u8,
     pub brought_per_side: u8,
@@ -336,7 +336,7 @@ pub struct TeamPreviewState{
     pub p2_mons: Vec<PokemonState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MatchState{
     BattleState(BattleState),
     TeamPreviewState(TeamPreviewState),

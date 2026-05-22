@@ -6,7 +6,7 @@ use crate::data::pokemon_move::PokemonMove;
 
 pub type PokemonBoostTable = [i8; 7]; // atk, def, spa, spd, spe, accuracy, evasion
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PokemonType {
     Normal,
     Fire,
@@ -130,7 +130,7 @@ pub enum SelfDestructType {
     None,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Status {
     Burn,
     Poison,
@@ -143,7 +143,7 @@ pub enum Status {
     Frozen(u8),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VolatileStatus {
     Flinch,
     AquaRing,
@@ -214,7 +214,7 @@ pub enum VolatileStatus {
     Yawn,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SideCondition {
     AuroraVeil,
     Reflect,
@@ -233,7 +233,7 @@ pub enum SideCondition {
     WideGuard,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SlotCondition {
     FutureMove,
     HealingWish,
@@ -242,7 +242,7 @@ pub enum SlotCondition {
     Wish,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PseudoWeather {
     FairyLock,
     Gravity,
@@ -254,7 +254,7 @@ pub enum PseudoWeather {
     WonderRoom,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Terrain {
     ElectricTerrain,
     GrassyTerrain,
@@ -262,7 +262,7 @@ pub enum Terrain {
     PsychicTerrain,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Weather {
     Rain,
     HeavyRain,

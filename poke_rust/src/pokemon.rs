@@ -40,21 +40,21 @@ fn move_name(mov: &PokemonMove) -> String {
     humanize_identifier(format!("{:?}", mov))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VolatileStatusState{
     TurnStatus(VolatileStatus, u8),
     MoveStatus(VolatileStatus, u8),
     Charging(PokemonMove, Vec<crate::battle::FieldSlot>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PokemonGender{
     Male,
     Female,
     Genderless
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nature{
     Hardy,
     Lonely,
@@ -83,7 +83,7 @@ pub enum Nature{
     Serious
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PokemonState{
     pub fainted: bool,
     pub species: Species,

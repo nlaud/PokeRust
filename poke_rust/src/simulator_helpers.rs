@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::battle::{Action, BattleState, FieldSlot, Player, MoveAction};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
@@ -5,9 +7,30 @@ use crate::data::pokemon_move::PokemonMove;
 use crate::dex_data::{AccuracyType, MoveCategory, MoveData, MoveTarget, PokemonType, PseudoWeather, SideCondition, Terrain, Weather, HitEffect, MoveFlag, PokemonStat, Status};
 use crate::pokemon::{PokemonState, VolatileStatusState};
 use crate::dex_data::VolatileStatus;
+use std::collections::HashMap;
+use std::hash::Hash;
 
 pub fn get_verbosity() -> u8 {
     crate::VERBOSITY.get().copied().unwrap_or(1)
+}
+
+pub(crate) fn coalesce_branches<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)>
+where
+    T: Eq + Hash + Clone,
+{
+    let mut combined: HashMap<T, f64> = HashMap::new();
+
+    for (state, probability) in branches {
+        if probability <= 0.0 {
+            continue;
+        }
+
+        *combined.entry(state).or_insert(0.0) += probability;
+    }
+
+    let mut merged: Vec<(T, f64)> = combined.into_iter().collect();
+    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged
 }
 
 /// Check if a move has a specific MoveFlag
@@ -682,7 +705,7 @@ pub fn invulnerability_resolution(target: &PokemonState, attack_move: &PokemonMo
     invulnerability_resolution_for_source_move(source_move, attack_move)
 }
 
-pub fn add_invulnerable_volatile(mon: &mut PokemonState, move_name: PokemonMove, targets: Vec<FieldSlot>) {
+pub fn add_invulnerable_volatile(mon: &mut PokemonState, move_name: PokemonMove, _targets: Vec<FieldSlot>) {
     let already_has = mon.volatiles.iter().any(|volatile| {
         matches!(
             volatile,
@@ -691,7 +714,7 @@ pub fn add_invulnerable_volatile(mon: &mut PokemonState, move_name: PokemonMove,
     });
 
     if !already_has {
-        mon.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(move_name), 1));
+        mon.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(move_name), 0));
     }
 }
 
@@ -1566,9 +1589,6 @@ fn apply_status_to_pokemon(sun_blocks_freeze: bool, mon: &mut PokemonState, stat
             if mon.ability == Ability::MagmaArmor { return; }
             mon.status = Some(Status::Frozen(0));
         }
-        _ => {
-            mon.status = Some(status.clone());
-        }
     }
 }
 
@@ -1579,7 +1599,7 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
     let sunlight_active = weather_is_sunlight(state);
     let snow_active = weather_is_snow(state);
 
-    let mut apply_weather_residuals = |mon: &mut PokemonState| {
+    let apply_weather_residuals = |mon: &mut PokemonState| {
         if mon.fainted {
             return;
         }
@@ -1655,7 +1675,7 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
         }
     };
 
-    let mut process = |mon: &mut PokemonState| {
+    let process = |mon: &mut PokemonState| {
         if mon.fainted { return; }
 
         if mon.ability == Ability::Hydration && rain_active {
@@ -1762,7 +1782,7 @@ fn apply_volatile_to_pokemon(mon: &mut PokemonState, volatile: &VolatileStatus) 
             VolatileStatus::Encore => 3,
             VolatileStatus::Taunt => 3,
             VolatileStatus::GlaiveRush => 1,
-            VolatileStatus::SemiInvulnerable(_) => 1,
+            VolatileStatus::SemiInvulnerable(_) => 0,
             _ => get_volatile_duration(volatile),
         };
 
@@ -2055,9 +2075,8 @@ pub fn check_and_apply_redirection(
     let target_slot = target_slots[0];
 
     // Get the target's effective speed for tiebreaking
-    let target_mon = match get_pokemon_at_slot(state, target_slot) {
-        Some(m) => m,
-        None => return target_slots,
+    let Some(_target_mon) = get_pokemon_at_slot(state, target_slot) else {
+        return target_slots;
     };
 
     // Get the opposing team
