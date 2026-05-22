@@ -272,6 +272,32 @@ pub fn critical_hit_probability(
     vec![(false, 1.0 - crit_chance), (true, crit_chance)]
 }
 
+fn screen_damage_multiplier(state: &BattleState, target_slot: FieldSlot, move_data: &MoveData, is_crit: bool) -> f64 {
+    if is_crit {
+        return 1.0;
+    }
+
+    let target_side_conditions = match target_slot.player {
+        Player::P1 => &state.p1_side_conditions,
+        Player::P2 => &state.p2_side_conditions,
+    };
+
+    let is_physical = matches!(move_data.category, MoveCategory::Physical);
+    let is_special = matches!(move_data.category, MoveCategory::Special);
+
+    let has_reflect = target_side_conditions.iter().any(|condition| matches!(condition, SideCondition::Reflect));
+    let has_light_screen = target_side_conditions.iter().any(|condition| matches!(condition, SideCondition::LightScreen));
+    let has_aurora_veil = target_side_conditions.iter().any(|condition| matches!(condition, SideCondition::AuroraVeil));
+
+    if is_physical && (has_reflect || has_aurora_veil) {
+        0.5
+    } else if is_special && (has_light_screen || has_aurora_veil) {
+        0.5
+    } else {
+        1.0
+    }
+}
+
 pub fn selected_damage_rolls(count: u8) -> Vec<u8> {
     let count = count.clamp(1, 16);
     if count == 1 {
@@ -506,7 +532,15 @@ pub fn calculate_damage_outcomes_for_target(
     let mut outcomes = Vec::new();
 
     for (crit, crit_probability) in critical_states {
-        let critical_multiplier = if crit { 1.5 } else { 1.0 };
+        let critical_multiplier = if crit {
+            let mut multiplier = 1.5;
+            if attacker.ability == Ability::Sniper {
+                multiplier *= 1.5;
+            }
+            multiplier
+        } else {
+            1.0
+        };
         let mut attack_stat = if crit {
             effective_stat(attacker, attacking_stat, true, false)
         } else {
@@ -611,6 +645,7 @@ pub fn calculate_damage_outcomes_for_target(
             damage = (damage * random_multiplier).floor();
             damage = (damage * stab).floor();
             damage = (damage * effectiveness).floor();
+            damage = (damage * screen_damage_multiplier(_state, _target_slot, move_data, crit)).floor();
             damage = (damage * burn_multiplier).floor();
             damage = (damage * invulnerability_multiplier).floor();
             damage = (damage * dry_skin_fire_multiplier).floor();

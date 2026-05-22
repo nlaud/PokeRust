@@ -75,7 +75,7 @@ mod tests {
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{parse_move_dex, parse_pokemon_dex, PseudoWeather, VolatileStatus, Weather};
+    use crate::dex_data::{parse_move_dex, parse_pokemon_dex, PseudoWeather, Status, VolatileStatus, Weather};
     use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
     use crate::simulator::simulate_turn;
     use crate::simulator_helpers::coalesce_branches;
@@ -457,6 +457,277 @@ mod tests {
 
         println!("{:?}", outcomes);
         assert!(is_permutation(&outcomes, &expected_outcomes));
+    }
+
+    #[test]
+    fn crit_ignores_negative_attack_stages_but_not_burn() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut p1_mon = build_pokemon_state(
+            Species::Kingambit,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::BrickBreak), Some(PokemonMove::Splash), None, None]),
+            None,
+            None,
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([32, 32, 0, 0, 0, 32]),
+            None,
+            true,
+        );
+        p1_mon.boosts[0] = -2;
+        p1_mon.status = Some(Status::Burn);
+
+        let p2_mon = build_pokemon_state(
+            Species::Kingambit,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([32, 32, 0, 0, 0, 32]),
+            None,
+            true,
+        );
+
+        let initial_state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
+
+        let outcomes = simulate_turn(
+            &MatchState::BattleState(initial_state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+            true,
+            1,
+        );
+
+        assert!(!outcomes.is_empty());
+        let total_probability: f64 = outcomes.iter().map(|(_, p)| *p).sum();
+        assert!((total_probability - 1.0).abs() < 1e-9);
+
+        assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp > 0)));
+        assert!(outcomes.iter().all(|(state, _)| match state {
+            MatchState::BattleState(bs) => bs.p2_active_mons[0].hp > 0,
+            MatchState::GameOverState { winner } => *winner == Player::P1,
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn crit_ignores_positive_defense_stages() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let p1_mon = build_pokemon_state(
+            Species::Kingambit,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::BrickBreak), Some(PokemonMove::Splash), None, None]),
+            None,
+            None,
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([32, 32, 0, 0, 0, 32]),
+            None,
+            true,
+        );
+
+        let mut p2_mon = build_pokemon_state(
+            Species::Kingambit,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([32, 32, 0, 0, 0, 32]),
+            None,
+            true,
+        );
+        p2_mon.boosts[1] = 2;
+
+        let initial_state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
+
+        let outcomes = simulate_turn(
+            &MatchState::BattleState(initial_state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+            true,
+            1,
+        );
+
+        assert!(!outcomes.is_empty());
+        let total_probability: f64 = outcomes.iter().map(|(_, p)| *p).sum();
+        assert!((total_probability - 1.0).abs() < 1e-9);
+
+        assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp > 0)));
+        assert!(outcomes.iter().all(|(state, _)| match state {
+            MatchState::BattleState(bs) => bs.p2_active_mons[0].hp > 0,
+            MatchState::GameOverState { winner } => *winner == Player::P1,
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn guaranteed_crit_sources_still_work() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut p1_mon = build_pokemon_state(
+            Species::Kingambit,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::BrickBreak), Some(PokemonMove::LaserFocus), None, None]),
+            None,
+            None,
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([32, 32, 0, 0, 0, 32]),
+            None,
+            true,
+        );
+        p1_mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::LaserFocus, 0));
+
+        let p2_mon = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([32, 0, 0, 0, 0, 32]),
+            None,
+            true,
+        );
+
+        let initial_state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
+
+        let attacker = simulator_helpers::get_pokemon_at_slot(&initial_state, FieldSlot { player: Player::P1, slot_index: 0 }).unwrap();
+        let target = simulator_helpers::get_pokemon_at_slot(&initial_state, FieldSlot { player: Player::P2, slot_index: 0 }).unwrap();
+        let move_data = move_dex.get(&PokemonMove::KowtowCleave).unwrap();
+
+        let crit_probability = simulator_helpers::critical_hit_probability(
+            attacker,
+            target,
+            &PokemonMove::KowtowCleave,
+            true,
+            move_data.crit_ratio,
+        );
+        assert_eq!(crit_probability, vec![(true, 1.0)]);
+
+        let storm_throw_probability = simulator_helpers::critical_hit_probability(
+            attacker,
+            target,
+            &PokemonMove::StormThrow,
+            true,
+            1,
+        );
+        assert_eq!(storm_throw_probability, vec![(true, 1.0)]);
+    }
+
+    #[test]
+    fn sniper_increases_critical_hit_damage() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let make_state = |ability: Ability| {
+            let p1_mon = build_pokemon_state(
+                Species::Kingambit,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(PokemonMove::BrickBreak), None, None, None]),
+                None,
+                Some(ability),
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([32, 32, 0, 0, 0, 32]),
+                None,
+                true,
+            );
+
+            let p2_mon = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                None,
+                Some(Nature::Hardy),
+                None,
+                None,
+                Some([32, 0, 0, 0, 0, 32]),
+                None,
+                true,
+            );
+
+            battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![])
+        };
+
+        let normal_state = make_state(Ability::Illuminate);
+        let sniper_state = make_state(Ability::Sniper);
+
+        let move_data = move_dex.get(&PokemonMove::KowtowCleave).unwrap();
+        let attacker_slot = FieldSlot { player: Player::P1, slot_index: 0 };
+        let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
+
+        let normal_attacker = simulator_helpers::get_pokemon_at_slot(&normal_state, attacker_slot).unwrap();
+        let normal_target = simulator_helpers::get_pokemon_at_slot(&normal_state, target_slot).unwrap();
+        let sniper_attacker = simulator_helpers::get_pokemon_at_slot(&sniper_state, attacker_slot).unwrap();
+        let sniper_target = simulator_helpers::get_pokemon_at_slot(&sniper_state, target_slot).unwrap();
+
+        let normal_outcomes = simulator_helpers::calculate_damage_outcomes_for_target(
+            &normal_state,
+            normal_attacker,
+            normal_target,
+            attacker_slot,
+            target_slot,
+            move_data,
+            crate::simulator::DamageConfig { consider_crit: true, damage_rolls: 1 },
+            1.0,
+            1.0,
+        );
+
+        let sniper_outcomes = simulator_helpers::calculate_damage_outcomes_for_target(
+            &sniper_state,
+            sniper_attacker,
+            sniper_target,
+            attacker_slot,
+            target_slot,
+            move_data,
+            crate::simulator::DamageConfig { consider_crit: true, damage_rolls: 1 },
+            1.0,
+            1.0,
+        );
+
+        let normal_crit_damage = normal_outcomes.iter().find(|(_, is_crit, _)| *is_crit).map(|(damage, _, _)| *damage).expect("expected crit outcome");
+        let sniper_crit_damage = sniper_outcomes.iter().find(|(_, is_crit, _)| *is_crit).map(|(damage, _, _)| *damage).expect("expected crit outcome");
+
+        assert!(sniper_crit_damage > normal_crit_damage);
     }
 
     #[test]
@@ -2552,14 +2823,113 @@ mod tests {
         assert!(!has_sky_drop_turn_volatile(&state_after_turn_two.p2_active_mons[0]));
     }
 
+    #[test]
+    fn mega_tyranitar() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let make_state = |item: Option<Item>| {
+            let tyranitar = build_pokemon_state(
+                Species::Tyranitar,
+                pokemon_dex,
+                move_dex,
+                Some(50),
+                Some([Some(PokemonMove::IcePunch), None, None, None]),
+                None,
+                Some(Ability::SandStream),
+                Some(Nature::Adamant),
+                item,
+                None,
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let garchomp = build_pokemon_state(
+                Species::Garchomp,
+                pokemon_dex,
+                move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Hardy),
+                None,
+                None,
+                Some([252, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let back_mon = build_pokemon_state(
+                Species::Magikarp,
+                pokemon_dex,
+                move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Hardy),
+                None,
+                None,
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            battle_state_from_lists(vec![tyranitar], vec![], vec![garchomp], vec![back_mon])
+        };
+
+        let normal_outcomes = simulate_turn(
+            &MatchState::BattleState(make_state(None)),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+            false,
+            1,
+        );
+
+        assert!(!normal_outcomes.is_empty());
+        let normal_total_probability: f64 = normal_outcomes.iter().map(|(_, p)| *p).sum();
+        assert!((normal_total_probability - 1.0).abs() < 1e-9);
+        assert!(normal_outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs)
+            if bs.p1_active_mons[0].species == Species::Tyranitar
+                && !bs.p1_active_mons[0].is_mega
+                && bs.p2_active_mons[0].species == Species::Garchomp
+                && bs.p2_active_mons[0].hp > 0
+        )));
+
+        let mega_outcomes = simulate_turn(
+            &MatchState::BattleState(make_state(Some(Item::Tyranitarite))),
+            &PlayerCommand::Battle(simple_attack_mega(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+            false,
+            1,
+        );
+
+        assert!(!mega_outcomes.is_empty());
+        let mega_total_probability: f64 = mega_outcomes.iter().map(|(_, p)| *p).sum();
+        assert!((mega_total_probability - 1.0).abs() < 1e-9);
+        assert!(mega_outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs)
+            if bs.p1_active_mons[0].species == Species::TyranitarMega
+                && bs.p1_active_mons[0].is_mega
+                && bs.p2_active_mons[0].species == Species::Garchomp
+                && bs.p2_active_mons[0].fainted
+                && bs.weather == Some(Weather::Sandstorm)
+                && bs.weather_turns == Some(4)
+        )));
+    }
+
 
     /*Tests to write:
-    Mega Evolution Damage Tests
-    Adaptability
+    Adaptability Damage?
     Weather causing abilties AND moves
     Weather effects (Fire damage boost in sun, sand spdef boost, sand damage)
-    Weather-enabled Abilities (Swift swim, dry skin)
-    Mega Evolution Abilities (Mega Tyranitar)
+    Weather-enabled Abilities + Moves (Swift swim, dry skin, solar beam, electro shot)
+    Mega Evolution Abilities (Mega Tyranitar, Mega Charizard, Mega Manetric??)
     Status effects (manually apply the status, then check for its effects)
     Sleep Talk :)
     */
