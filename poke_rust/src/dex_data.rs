@@ -563,7 +563,7 @@ fn parse_side_condition(s: &str) -> Option<SideCondition> {
 }
 
 fn parse_terrain(s: &str) -> Option<Terrain> {
-    match s {
+    match normalize_dex_id(s).as_str() {
         "electricterrain" => Some(Terrain::ElectricTerrain),
         "grassyterrain" => Some(Terrain::GrassyTerrain),
         "mistyterrain" => Some(Terrain::MistyTerrain),
@@ -573,7 +573,7 @@ fn parse_terrain(s: &str) -> Option<Terrain> {
 }
 
 fn parse_weather_val(s: &str) -> Option<Weather> {
-    match s {
+    match normalize_dex_id(s).as_str() {
         "raindance" => Some(Weather::Rain),
         "primordialsea" => Some(Weather::HeavyRain),
         "sunnyday" => Some(Weather::Sun),
@@ -586,7 +586,7 @@ fn parse_weather_val(s: &str) -> Option<Weather> {
 }
 
 fn parse_pseudo_weather(s: &str) -> Option<PseudoWeather> {
-    match s {
+    match normalize_dex_id(s).as_str() {
         "fairylock" => Some(PseudoWeather::FairyLock),
         "gravity" => Some(PseudoWeather::Gravity),
         "iondeluge" => Some(PseudoWeather::IonDeluge),

@@ -91,7 +91,7 @@ pub fn single_type_effectiveness(move_type: &PokemonType, target_type: &PokemonT
     use PokemonType::*;
 
     match (move_type, target_type) {
-        (Normal, Fighting) => 0.0,
+        (Normal, Steel) => 0.5,
         (Normal, Ghost) => 0.0,
         (Normal, Rock) => 0.5,
 
@@ -479,6 +479,20 @@ pub fn damage_targets_multiplier(target_count: usize) -> f64 {
     if target_count > 1 { 0.75 } else { 1.0 }
 }
 
+fn effective_move_type(state: &BattleState, move_data: &MoveData) -> PokemonType {
+    if move_data.name != PokemonMove::WeatherBall {
+        return move_data.pokemon_type.clone();
+    }
+
+    match current_weather(state) {
+        Some(Weather::Sun | Weather::ExtremeSunlight) => PokemonType::Fire,
+        Some(Weather::Rain | Weather::HeavyRain) => PokemonType::Water,
+        Some(Weather::Sandstorm) => PokemonType::Rock,
+        Some(Weather::Snow) => PokemonType::Ice,
+        _ => PokemonType::Normal,
+    }
+}
+
 /// Calculate damage outcomes for a single target. Returns Vec of (damage, is_crit, probability).
 pub fn calculate_damage_outcomes_for_target(
     _state: &BattleState,
@@ -509,8 +523,9 @@ pub fn calculate_damage_outcomes_for_target(
     if matches!(defending_stat, PokemonStat::Def) && weather_is_snow(_state) && pokemon_has_type(target, &PokemonType::Ice) {
         target_effective_defense *= 1.5;
     }
-    let effectiveness = move_type_effectiveness(_state, &move_data.pokemon_type, target);
-    let stab = stab_multiplier(attacker, &move_data.pokemon_type);
+    let attack_type = effective_move_type(_state, move_data);
+    let effectiveness = move_type_effectiveness(_state, &attack_type, target);
+    let stab = stab_multiplier(attacker, &attack_type);
 
     if matches!(attacking_stat, PokemonStat::SpA)
         && attacker.ability == Ability::SolarPower
@@ -566,8 +581,18 @@ pub fn calculate_damage_outcomes_for_target(
             attack_stat = (attack_stat * 5461.0 / 4096.0).floor();
         }
 
+        // Handle Weather Ball's weather-dependent type and base power, then standard base-power modifiers.
+        let mut effective_base_power = if move_data.name == PokemonMove::WeatherBall {
+            if current_weather(_state).is_some() {
+                100.0
+            } else {
+                50.0
+            }
+        } else {
+            move_data.base_power as f64
+        };
+
         // Handle Facade doubling when user has any non-volatile status
-        let mut effective_base_power = move_data.base_power as f64;
         if move_data.name == PokemonMove::Facade && attacker.status.is_some() {
             effective_base_power = ((move_data.base_power as f64) * 2.0).floor();
         }
@@ -580,22 +605,24 @@ pub fn calculate_damage_outcomes_for_target(
             effective_base_power = (effective_base_power * 0.5).floor();
         }
 
+        let mut weather_damage_multiplier = 1.0;
+
         if let Some(weather) = current_weather(_state) {
             match weather {
                 Weather::Sun | Weather::ExtremeSunlight => {
                     if move_data.name == PokemonMove::HydroSteam {
                         effective_base_power = (effective_base_power * 1.5).floor();
                     } else if matches!(move_data.pokemon_type, PokemonType::Fire) {
-                        effective_base_power = (effective_base_power * 1.5).floor();
+                        weather_damage_multiplier = 1.5;
                     } else if matches!(move_data.pokemon_type, PokemonType::Water) {
-                        effective_base_power = (effective_base_power * 0.5).floor();
+                        weather_damage_multiplier = 0.5;
                     }
                 }
                 Weather::Rain | Weather::HeavyRain => {
                     if matches!(move_data.pokemon_type, PokemonType::Fire) {
-                        effective_base_power = (effective_base_power * 0.5).floor();
+                        weather_damage_multiplier = 0.5;
                     } else if matches!(move_data.pokemon_type, PokemonType::Water) {
-                        effective_base_power = (effective_base_power * 1.5).floor();
+                        weather_damage_multiplier = 1.5;
                     }
                 }
                 _ => {}
@@ -630,7 +657,7 @@ pub fn calculate_damage_outcomes_for_target(
             1.0
         };
 
-        let dry_skin_fire_multiplier = if target.ability == Ability::DrySkin && matches!(move_data.pokemon_type, PokemonType::Fire) {
+        let dry_skin_fire_multiplier = if target.ability == Ability::DrySkin && matches!(attack_type, PokemonType::Fire) {
             1.25
         } else {
             1.0
@@ -648,6 +675,7 @@ pub fn calculate_damage_outcomes_for_target(
             damage = (damage * screen_damage_multiplier(_state, _target_slot, move_data, crit)).floor();
             damage = (damage * burn_multiplier).floor();
             damage = (damage * invulnerability_multiplier).floor();
+            damage = (damage * weather_damage_multiplier).floor();
             damage = (damage * dry_skin_fire_multiplier).floor();
 
             let damage = damage.max(0.0) as u16;
@@ -674,8 +702,8 @@ pub fn damage_effectiveness_for_action(state: &BattleState, action: &MoveAction,
     match invulnerability_resolution(attacker, target, &move_data.name) {
         InvulnerabilityResolution::Blocked => 0.0,
         InvulnerabilityResolution::ZeroDamage => 0.0,
-        InvulnerabilityResolution::Normal => move_type_effectiveness(state, &move_data.pokemon_type, target),
-        InvulnerabilityResolution::DoubleDamage => move_type_effectiveness(state, &move_data.pokemon_type, target) * 2.0,
+        InvulnerabilityResolution::Normal => move_type_effectiveness(state, &effective_move_type(state, move_data), target),
+        InvulnerabilityResolution::DoubleDamage => move_type_effectiveness(state, &effective_move_type(state, move_data), target) * 2.0,
     }
 }
 
