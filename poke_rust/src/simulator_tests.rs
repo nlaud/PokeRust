@@ -149,12 +149,29 @@ mod tests {
         }
     }
 
+    fn hit_probability(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes
+            .iter()
+            .map(|(state, probability)| match state {
+                MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < initial_hp => *probability,
+                MatchState::GameOverState { .. } => *probability,
+                _ => 0.0,
+            })
+            .sum()
+    }
+
     fn has_sky_drop_turn_volatile(mon: &PokemonState) -> bool {
         mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)))
     }
 
     fn has_sky_drop_move_volatile(mon: &PokemonState) -> bool {
         mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(PokemonMove::SkyDrop), _)))
+    }
+
+    fn has_charging_volatile(mon: &PokemonState, move_name: PokemonMove) -> bool {
+        mon.volatiles
+            .iter()
+            .any(|volatile| matches!(volatile, VolatileStatusState::Charging(charged_move, _) if *charged_move == move_name))
     }
 
     fn run_single_turn(
@@ -3609,7 +3626,7 @@ mod tests {
 
 
     #[test]
-    fn sleep_talk_does_nothing_when_awake() {
+    fn sleep_talk_fails() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -3668,7 +3685,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_talk_chooses_among_weather_moves_evenly() {
+    fn sleep_talk_moves() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -3768,7 +3785,7 @@ mod tests {
         }
     }
     #[test]
-    fn dry_skin_heals_from_water_moves_and_boosts_fire_damage() {
+    fn dry_skin_moves() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -3913,7 +3930,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_skin_rain_heals_and_sun_damages() {
+    fn dry_skin_passives() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -3989,10 +4006,486 @@ mod tests {
         assert!(rain_outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == rain_expected_hp)));
         assert!(sun_outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == sun_expected_hp)));
     }
+
+    #[test]
+    fn weather_speed_abilities() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let cases = vec![
+            (
+                Species::Basculegion,
+                PokemonMove::WaveCrash,
+                Ability::SwiftSwim,
+                Nature::Jolly,
+                Weather::Rain,
+            ),
+            (
+                Species::Venusaur,
+                PokemonMove::SludgeBomb,
+                Ability::Chlorophyll,
+                Nature::Timid,
+                Weather::Sun,
+            ),
+            (
+                Species::Excadrill,
+                PokemonMove::Earthquake,
+                Ability::SandRush,
+                Nature::Jolly,
+                Weather::Sandstorm,
+            ),
+        ];
+
+        for (species, move_name, weather_ability, speed_nature, weather) in cases {
+            let make_state = |weather: Option<Weather>| {
+                let p1_mon = build_pokemon_state(
+                    species.clone(),
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(move_name.clone()), None, None, None]),
+                    None,
+                    Some(weather_ability.clone()),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    Some([0, 0, 0, 0, 0, 0]),
+                    None,
+                    false,
+                );
+
+                let p2_mon = build_pokemon_state(
+                    species.clone(),
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(move_name.clone()), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    Some(speed_nature),
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    Some([0, 0, 0, 0, 0, 0]),
+                    None,
+                    false,
+                );
+
+                let weather_turns = weather.as_ref().map(|_| 5);
+                let mut state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
+                state.weather = weather;
+                state.weather_turns = weather_turns;
+                state.p1_active_mons[0].hp = 1;
+                state.p2_active_mons[0].hp = 1;
+                state
+            };
+
+            let weather_outcomes = run_single_turn(
+                &MatchState::BattleState(make_state(Some(weather))),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert_eq!(weather_outcomes.len(), 1);
+            assert!(matches!(weather_outcomes[0].0, MatchState::GameOverState { winner: Player::P1 }));
+
+            let clear_outcomes = run_single_turn(
+                &MatchState::BattleState(make_state(None)),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert_eq!(clear_outcomes.len(), 1);
+            assert!(matches!(clear_outcomes[0].0, MatchState::GameOverState { winner: Player::P2 }));
+        }
+    }
+
+    #[test]
+    fn solar_beam_sun() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let venusaur = build_pokemon_state(
+            Species::Venusaur,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::SolarBeam), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            Some([0, 0, 0, 0, 0, 0]),
+            None,
+            false,
+        );
+
+        let basculegion = build_pokemon_state(
+            Species::Basculegion,
+            &pokemon_dex,
+            &move_dex,
+            Some(1),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            Some([0, 0, 0, 0, 0, 0]),
+            None,
+            false,
+        );
+
+        let mut state = battle_state_from_lists(vec![venusaur], vec![], vec![basculegion], vec![]);
+        state.weather = Some(Weather::Sun);
+        state.weather_turns = Some(5);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(outcomes[0].0, MatchState::GameOverState { winner: Player::P1 }));
+        assert!((outcomes[0].1 - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn electro_shot() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let make_state = |weather: Option<Weather>| {
+            let archaludon = build_pokemon_state(
+                Species::Archaludon,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(PokemonMove::ElectroShot), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let basculegion = build_pokemon_state(
+                Species::Basculegion,
+                &pokemon_dex,
+                &move_dex,
+                Some(1),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let dummy_back_mon = build_pokemon_state(
+                Species::Magikarp,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let weather_turns = weather.as_ref().map(|_| 5);
+            let mut state = battle_state_from_lists(vec![archaludon], vec![], vec![basculegion], vec![dummy_back_mon]);
+            state.weather = weather;
+            state.weather_turns = weather_turns;
+            state
+        };
+
+        let rain_outcomes = run_single_turn(
+            &MatchState::BattleState(make_state(Some(Weather::Rain))),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert_eq!(rain_outcomes.len(), 1);
+        let (MatchState::BattleState(rain_state), rain_probability) = rain_outcomes.into_iter().next().unwrap() else {
+            panic!("expected a battle state outcome in rain");
+        };
+        assert!((rain_probability - 1.0).abs() < 1e-9);
+        assert_eq!(rain_state.p1_active_mons[0].boosts[2], 1);
+        assert_eq!(rain_state.p1_active_mons[0].species, Species::Archaludon);
+        assert_eq!(rain_state.p2_active_mons[0].hp, 0);
+        assert_eq!(rain_state.p2_back_mons[0].species, Species::Magikarp);
+        assert!(!has_charging_volatile(&rain_state.p1_active_mons[0], PokemonMove::ElectroShot));
+
+        let no_weather_outcomes = run_single_turn(
+            &MatchState::BattleState(make_state(None)),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert_eq!(no_weather_outcomes.len(), 1);
+        let (MatchState::BattleState(no_weather_state), no_weather_probability) = no_weather_outcomes.into_iter().next().unwrap() else {
+            panic!("expected a battle state outcome without rain");
+        };
+        assert!((no_weather_probability - 1.0).abs() < 1e-9);
+        assert_eq!(no_weather_state.p1_active_mons[0].boosts[2], 1);
+        assert_eq!(no_weather_state.p1_active_mons[0].species, Species::Archaludon);
+        assert_eq!(no_weather_state.p2_active_mons[0].species, Species::Basculegion);
+        assert!(has_charging_volatile(&no_weather_state.p1_active_mons[0], PokemonMove::ElectroShot));
+    }
+
+    #[test]
+    fn rain_weather_accuracy() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let cases = vec![
+            (PokemonMove::Thunder, None, 0.7),
+            (PokemonMove::Thunder, Some(Weather::Rain), 1.0),
+            (PokemonMove::Thunder, Some(Weather::Sun), 0.5),
+            (PokemonMove::Hurricane, None, 0.7),
+            (PokemonMove::Hurricane, Some(Weather::Rain), 1.0),
+            (PokemonMove::Hurricane, Some(Weather::Sun), 0.5),
+        ];
+
+        for (move_name, weather, expected_hit_probability) in cases {
+            let attacker = build_pokemon_state(
+                Species::DragoniteMega,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(move_name), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let defender = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let defender_initial_hp = defender.hp;
+            let weather_turns = weather.as_ref().map(|_| 5);
+            let mut state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+            state.weather = weather;
+            state.weather_turns = weather_turns;
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!((outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
+            assert!((hit_probability(&outcomes, defender_initial_hp) - expected_hit_probability).abs() < 1e-9);
+        }
+
+        for move_name in [PokemonMove::Thunder, PokemonMove::Hurricane] {
+            let attacker = build_pokemon_state(
+                Species::DragoniteMega,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(move_name), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let mut defender = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+            defender.boosts[6] = 6;
+
+            let defender_initial_hp = defender.hp;
+            let weather_turns = Some(5);
+            let mut state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+            state.weather = Some(Weather::Rain);
+            state.weather_turns = weather_turns;
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!((outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
+            assert!((hit_probability(&outcomes, defender_initial_hp) - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn blizzard_snow() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let cases = vec![
+            (None, 0.7),
+            (Some(Weather::Snow), 1.0),
+        ];
+
+        for (weather, expected_hit_probability) in cases {
+            let attacker = build_pokemon_state(
+                Species::Ninetales,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(PokemonMove::Blizzard), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let defender = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let defender_initial_hp = defender.hp;
+            let weather_turns = weather.as_ref().map(|_| 5);
+            let mut state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+            state.weather = weather;
+            state.weather_turns = weather_turns;
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!((outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
+            assert!((hit_probability(&outcomes, defender_initial_hp) - expected_hit_probability).abs() < 1e-9);
+        }
+
+        let attacker = build_pokemon_state(
+            Species::Ninetales,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::Blizzard), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            Some([0, 0, 0, 0, 0, 0]),
+            None,
+            false,
+        );
+
+        let mut defender = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            Some([0, 0, 0, 0, 0, 0]),
+            None,
+            false,
+        );
+        defender.boosts[6] = 6;
+
+        let defender_initial_hp = defender.hp;
+        let mut state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+        state.weather = Some(Weather::Snow);
+        state.weather_turns = Some(5);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!((outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!((hit_probability(&outcomes, defender_initial_hp) - 1.0).abs() < 1e-9);
+    }
+
     /*Tests to write:
-    Weather-enabled Abilities + Moves (Swift swim, dry skin, solar beam, electro shot)
-    Mega Evolution Abilities (Mega Tyranitar, Mega Charizard, Mega Manetric??)
     Status effects (manually apply the status, then check for its effects)
-    Dry Skin
     */
 }
