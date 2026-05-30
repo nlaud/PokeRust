@@ -423,6 +423,22 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
+    let mut move_name = action.move_name.clone();
+    let mut move_data = move_data;
+    if move_name == PokemonMove::NaturePower {
+        if let Some(replacement_move) = simulator_helpers::terrain_replacement_move(&next_state) {
+            if let Some(replacement_data) = move_dex.get(&replacement_move) {
+                move_name = replacement_move;
+                move_data = replacement_data;
+            }
+        }
+    }
+
+    if move_name == PokemonMove::Splash {
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
     if attacker.volatiles.iter().any(|volatile| matches!(volatile, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _))) {
         let mut fail_state = pre_move_state.clone();
         if let Some(mon) = match action.user_slot.player {
@@ -513,7 +529,11 @@ fn possible_damage_outcomes_for_move(
     // --- Status pre-move handling: Sleep, Frozen, Paralysis ---
     // Handle moves that thaw the user on use: thaw before attempt
     if let Some(Status::Frozen(_)) = attacker.status {
-        if simulator_helpers::move_thaws_user_on_use(&action.move_name) || simulator_helpers::move_unfreezes_target(&action.move_name) || attacker.ability == Ability::MagmaArmor {
+        if simulator_helpers::weather_is_sunlight(&next_state)
+            || simulator_helpers::move_thaws_user_on_use(&action.move_name)
+            || simulator_helpers::move_unfreezes_target(&action.move_name)
+            || attacker.ability == Ability::MagmaArmor
+        {
             // thaw user
             if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                 mon.status = None;
@@ -559,12 +579,14 @@ fn possible_damage_outcomes_for_move(
                     if move_data.sleep_usable {
                         // do not set a fail probability; status remains unchanged
                     } else {
-                        // 1/3 chance to wake
-                        status_fail_prob = 2.0 / 3.0;
-                        if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
-                            mon.status = None; // success branch
+                        // First action after sleep always fails; second action has a 1/3 wake chance.
+                        status_fail_prob = if *n == 0 { 1.0 } else { 2.0 / 3.0 };
+                        if *n > 0 {
+                            if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                                mon.status = None; // success branch
+                            }
+                            attacker.status = None;
                         }
-                        attacker.status = None;
                     }
                 }
             }
@@ -572,8 +594,31 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
+    if move_name == PokemonMove::SteelRoller && simulator_helpers::current_terrain(&next_state).is_none() {
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
     // Resolve target list based on move's targeting type
-    let mut target_slots = if move_target_is_multitarget(&move_data.target) {
+    let mut target_slots = if move_name == PokemonMove::ExpandingForce
+        && simulator_helpers::pokemon_is_on_terrain(&next_state, &attacker, &crate::dex_data::Terrain::PsychicTerrain)
+    {
+        match action.user_slot.player {
+            Player::P1 => next_state
+                .p2_active_mons
+                .iter()
+                .enumerate()
+                .filter(|(_, mon)| !mon.fainted)
+                .map(|(idx, _)| FieldSlot { player: Player::P2, slot_index: idx as u8 })
+                .collect(),
+            Player::P2 => next_state
+                .p1_active_mons
+                .iter()
+                .enumerate()
+                .filter(|(_, mon)| !mon.fainted)
+                .map(|(idx, _)| FieldSlot { player: Player::P1, slot_index: idx as u8 })
+                .collect(),
+        }
+    } else if move_target_is_multitarget(&move_data.target) {
         simulator_helpers::resolve_move_targets(&next_state, action.user_slot, &move_data.target)
     } else {
         // Single-target move: use action.target_slot if available
@@ -591,7 +636,9 @@ fn possible_damage_outcomes_for_move(
     };
 
     // Apply Follow Me / Rage Powder redirection for single-target moves
-    if !move_target_is_multitarget(&move_data.target) {
+    if !move_target_is_multitarget(&move_data.target)
+        && !(move_name == PokemonMove::ExpandingForce && simulator_helpers::pokemon_is_on_terrain(&next_state, &attacker, &crate::dex_data::Terrain::PsychicTerrain))
+    {
         target_slots = simulator_helpers::check_and_apply_redirection(&next_state, action.user_slot, target_slots);
     }
 
@@ -620,7 +667,33 @@ fn possible_damage_outcomes_for_move(
             continue;
         };
 
-        let (invulnerability_multiplier, should_continue) = check_invulnerability_status(&attacker, &target, &action.move_name);
+        let (invulnerability_multiplier, should_continue) = check_invulnerability_status(&attacker, &target, &move_name);
+
+        if move_data.priority > 0
+            && simulator_helpers::pokemon_is_on_terrain(&next_state, &target, &crate::dex_data::Terrain::PsychicTerrain)
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
+        let target_is_semi_invulnerable = target.volatiles.iter().any(|volatile| {
+            matches!(
+                volatile,
+                crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _)
+                    | crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)
+            )
+        });
+
+        if matches!(move_data.pokemon_type, PokemonType::Ground)
+            && !simulator_helpers::pokemon_is_grounded(&next_state, &target)
+            && !target_is_semi_invulnerable
+            && !matches!(move_name, PokemonMove::ThousandArrows | PokemonMove::ThousandWaves)
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
         
         if !should_continue {
             // Move is blocked by invulnerability
@@ -702,7 +775,7 @@ fn possible_damage_outcomes_for_move(
             format!(
                 "{} uses {} | targets: {} | move type: {} | PP: {}",
                 species_name_sim(&attacker.species),
-                move_name_sim(&action.move_name),
+                move_name_sim(&move_name),
                 target_names.join(", "),
                 pokemon_type_name(&move_data.pokemon_type),
                 current_pp,
@@ -728,6 +801,7 @@ fn possible_damage_outcomes_for_move(
                 if *hit {
                     let mut absorbed_by_dry_skin = false;
                     let mut sand_spit_triggered = false;
+                    let mut seed_sower_triggered = false;
                     let combined_prob = existing_prob * outcome_prob;
 
                     if let Some(target_mon) = match target_slot.player {
@@ -745,11 +819,6 @@ fn possible_damage_outcomes_for_move(
                         } else {
                             let _ = target_mon;
 
-                            if let Some(game_over_state) = simulator_helpers::apply_damage_and_check_game_over(&mut branch_state, *target_slot, *damage) {
-                                new_all_outcomes.push((game_over_state, combined_prob));
-                                continue;
-                            }
-
                             let Some(target_mon) = (match target_slot.player {
                                 Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
                                 Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
@@ -758,11 +827,18 @@ fn possible_damage_outcomes_for_move(
                                 continue;
                             };
 
-                            if *damage > 0
-                                && target_mon.ability == Ability::SandSpit
-                                && !target_mon.fainted
-                            {
+                            simulator_helpers::apply_damage(target_mon, *damage);
+
+                            if *damage > 0 && matches!(target_mon.item, crate::data::item::Item::AirBalloon) {
+                                target_mon.item = crate::data::item::Item::None;
+                            }
+
+                            if target_mon.ability == Ability::SandSpit && !target_mon.fainted {
                                 sand_spit_triggered = true;
+                            }
+
+                            if target_mon.ability == Ability::SeedSower && !target_mon.fainted {
+                                seed_sower_triggered = true;
                             }
 
                             // If this damage should unfreeze the target, handle it
@@ -779,11 +855,23 @@ fn possible_damage_outcomes_for_move(
                                 simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::SkyDrop);
                             }
 
+                            if target_mon.fainted {
+                                simulator_helpers::clear_pokemon_on_faint(target_mon);
+                            }
+
                         }
                     }
 
                     if sand_spit_triggered {
                         simulator_helpers::set_weather(&mut branch_state, crate::dex_data::Weather::Sandstorm, 5);
+                    }
+
+                    if seed_sower_triggered {
+                        simulator_helpers::set_terrain(&mut branch_state, crate::dex_data::Terrain::GrassyTerrain, 5);
+                    }
+
+                    if matches!(move_name, PokemonMove::IceSpinner | PokemonMove::SteelRoller) {
+                        simulator_helpers::clear_terrain(&mut branch_state);
                     }
 
                     if absorbed_by_dry_skin {
@@ -818,6 +906,108 @@ fn possible_damage_outcomes_for_move(
 
         all_outcomes = new_all_outcomes;
     }
+
+    // Apply post-damage move effects that depend on total HP damage dealt.
+    let mut post_processed_outcomes: Vec<(MatchState, f64)> = Vec::new();
+    let opposing_player = match action.user_slot.player {
+        Player::P1 => Player::P2,
+        Player::P2 => Player::P1,
+    };
+
+    for (state, prob) in all_outcomes {
+        let mut bs = match state {
+            MatchState::BattleState(bs) => bs,
+            other => {
+                post_processed_outcomes.push((other, prob));
+                continue;
+            }
+        };
+
+        let (before_active, before_back) = match opposing_player {
+            Player::P1 => (&next_state.p1_active_mons, &next_state.p1_back_mons),
+            Player::P2 => (&next_state.p2_active_mons, &next_state.p2_back_mons),
+        };
+        let (after_active, after_back) = match opposing_player {
+            Player::P1 => (&bs.p1_active_mons, &bs.p1_back_mons),
+            Player::P2 => (&bs.p2_active_mons, &bs.p2_back_mons),
+        };
+
+        let dealt_active: u32 = before_active
+            .iter()
+            .zip(after_active.iter())
+            .map(|(before, after)| before.hp.saturating_sub(after.hp) as u32)
+            .sum();
+        let dealt_back: u32 = before_back
+            .iter()
+            .zip(after_back.iter())
+            .map(|(before, after)| before.hp.saturating_sub(after.hp) as u32)
+            .sum();
+        let total_damage_dealt = dealt_active + dealt_back;
+
+        let mut forced_winner: Option<Player> = None;
+        let opponent_wiped_from_move = !team_has_remaining_pokemon(&bs, opposing_player) && total_damage_dealt > 0;
+
+        if let Some(attacker_mon) = match action.user_slot.player {
+            Player::P1 => bs.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+            Player::P2 => bs.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+        } {
+            let max_hp = attacker_mon.stats[0].max(1);
+
+            if move_data.heal_fraction[0] > 0 && move_data.heal_fraction[1] > 0 {
+                let heal = ((max_hp as u32 * move_data.heal_fraction[0] as u32)
+                    / move_data.heal_fraction[1] as u32) as u16;
+                if heal > 0 {
+                    attacker_mon.hp = attacker_mon.hp.saturating_add(heal).min(max_hp);
+                    attacker_mon.fainted = false;
+                }
+            }
+
+            if move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
+                let heal = ((total_damage_dealt * move_data.drain_fraction[0] as u32)
+                    / move_data.drain_fraction[1] as u32) as u16;
+                if heal > 0 {
+                    attacker_mon.hp = attacker_mon.hp.saturating_add(heal).min(max_hp);
+                    attacker_mon.fainted = false;
+                }
+            }
+
+            let is_recoil_move =
+                (move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0)
+                    || move_data.struggle_recoil;
+            if is_recoil_move
+                && attacker_mon.ability != Ability::RockHead
+                && attacker_mon.ability != Ability::MagicGuard
+            {
+                let recoil = if move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0 {
+                    ((total_damage_dealt * move_data.recoil_fraction[0] as u32)
+                        / move_data.recoil_fraction[1] as u32) as u16
+                } else if move_data.struggle_recoil {
+                    (max_hp as u32 / 4) as u16
+                } else {
+                    0
+                };
+
+                if recoil > 0 {
+                    simulator_helpers::apply_damage(attacker_mon, recoil);
+                    if attacker_mon.fainted {
+                        simulator_helpers::clear_pokemon_on_faint(attacker_mon);
+                        if opponent_wiped_from_move {
+                            forced_winner = Some(action.user_slot.player);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(winner) = forced_winner {
+            post_processed_outcomes.push((MatchState::GameOverState { winner }, prob));
+        } else if let Some(game_over_state) = game_over_state_if_battle_finished(&bs) {
+            post_processed_outcomes.push((game_over_state, prob));
+        } else {
+            post_processed_outcomes.push((MatchState::BattleState(bs), prob));
+        }
+    }
+    let mut all_outcomes = post_processed_outcomes;
 
     // Apply recharge volatile if move has recharge flag
     if move_has_recharge {
@@ -1218,7 +1408,13 @@ fn generate_commands_for_active(
             &MoveTarget::Normal // Default
         };
         
-        let valid_targets = get_valid_targets(target_type, player, state, slot_idx);
+        let valid_targets = if *move_name == PokemonMove::ExpandingForce
+            && simulator_helpers::pokemon_is_on_terrain(state, mon, &crate::dex_data::Terrain::PsychicTerrain)
+        {
+            vec![None]
+        } else {
+            get_valid_targets(target_type, player, state, slot_idx)
+        };
         
         for target in valid_targets {
             cmds.push(BattleCommand::Attack(AttackCommand {
@@ -1289,7 +1485,12 @@ fn queue_battle_commands_for_player(
                     continue;
                 };
 
-                let priority = move_dex.get(&move_name).map(|move_data| move_data.priority).unwrap_or(0);
+                let mut priority = move_dex.get(&move_name).map(|move_data| move_data.priority).unwrap_or(0);
+                if move_name == PokemonMove::GrassyGlide
+                    && simulator_helpers::pokemon_is_on_terrain(state, active_mon, &crate::dex_data::Terrain::GrassyTerrain)
+                {
+                    priority += 1;
+                }
 
                 if a.terastallize {
                     action_queue.push(Action::TeraAction(TeraAction {
@@ -1435,7 +1636,7 @@ fn game_over_state_if_battle_finished(state: &BattleState) -> Option<MatchState>
     }
 }
 
-fn get_effective_speed(mon: &PokemonState) -> f32 {
+fn get_effective_speed(state: &BattleState, mon: &PokemonState) -> f32 {
     // Speed stat is at index 5 in the stats array
     // Speed boost is at index 4 in the boosts array
     let base_speed = mon.stats[5] as f32;
@@ -1450,7 +1651,13 @@ fn get_effective_speed(mon: &PokemonState) -> f32 {
         1.0
     };
     
-    base_speed * multiplier
+    let mut speed = base_speed * multiplier;
+
+    if mon.ability == Ability::SurgeSurfer && matches!(simulator_helpers::current_terrain(state), Some(crate::dex_data::Terrain::ElectricTerrain)) {
+        speed *= 2.0;
+    }
+
+    speed
 }
 
 fn side_has_tailwind(state: &BattleState, player: Player) -> bool {
@@ -1465,7 +1672,7 @@ fn side_has_tailwind(state: &BattleState, player: Player) -> bool {
 }
 
 fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonState) -> f32 {
-    let mut speed = get_effective_speed(mon);
+    let mut speed = get_effective_speed(state, mon);
 
     if mon.ability == Ability::Chlorophyll && simulator_helpers::weather_is_sunlight(state) {
         speed *= 2.0;
@@ -1497,10 +1704,10 @@ fn trick_room_is_active(state: &BattleState) -> bool {
         .any(|pseudo_weather| matches!(pseudo_weather, crate::dex_data::PseudoWeather::TrickRoom))
 }
 
-fn compare_pokemon_speed(p1: &PokemonState, p2: &PokemonState) -> std::cmp::Ordering {
+fn compare_pokemon_speed(state: &BattleState, p1: &PokemonState, p2: &PokemonState) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let speed1 = get_effective_speed(p1);
-    let speed2 = get_effective_speed(p2);
+    let speed1 = get_effective_speed(state, p1);
+    let speed2 = get_effective_speed(state, p2);
     
     // Compare with a small epsilon for floating point comparison
     if (speed2 - speed1).abs() < 0.01 {
@@ -2198,6 +2405,9 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
             let mut leaving = next_state.p1_active_mons[slot_idx].clone();
             leaving.volatiles.clear();
             leaving.boosts.iter_mut().for_each(|boost| *boost = 0);
+            if matches!(leaving.status, Some(Status::ToxicPoison(_))) {
+                leaving.status = Some(Status::ToxicPoison(0));
+            }
             std::mem::swap(&mut next_state.p1_active_mons[slot_idx], &mut next_state.p1_back_mons[bench_index]);
             // ensure the benched slot gets the leaving mon with cleared volatiles
             next_state.p1_back_mons[bench_index] = leaving;
@@ -2210,6 +2420,9 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
             let mut leaving = next_state.p2_active_mons[slot_idx].clone();
             leaving.volatiles.clear();
             leaving.boosts.iter_mut().for_each(|boost| *boost = 0);
+            if matches!(leaving.status, Some(Status::ToxicPoison(_))) {
+                leaving.status = Some(Status::ToxicPoison(0));
+            }
             std::mem::swap(&mut next_state.p2_active_mons[slot_idx], &mut next_state.p2_back_mons[bench_index]);
             next_state.p2_back_mons[bench_index] = leaving;
         }

@@ -70,14 +70,14 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::OnceLock;
-    use crate::battle::{MatchState, PlayerCommand};
+    use crate::battle::{Action, MatchState, MoveAction, PlayerCommand, SwitchCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{parse_move_dex, parse_pokemon_dex, PseudoWeather, Status, VolatileStatus, Weather};
+    use crate::dex_data::{parse_move_dex, parse_pokemon_dex, PseudoWeather, Status, Terrain, VolatileStatus, Weather};
     use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
-    use crate::simulator::simulate_turn;
+    use crate::simulator::{simulate_turn, DamageConfig};
     use crate::simulator_helpers::coalesce_branches;
     pub fn simple_attack(_player: Player, move_slots: Vec<usize>) -> Vec<BattleCommand> {
         move_slots
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn crit_ignores_negative_attack_stages_but_not_burn() {
+    fn crit_ignores_drops() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -975,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn OHKO_win() {
+    fn ohko_win() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -1314,7 +1314,7 @@ mod tests {
 
         let mut expected_outcomes: Vec<(MatchState,f64)> = Vec::new();
         
-        let mut outcome = expected_final_state.clone();
+        let outcome = expected_final_state.clone();
         expected_outcomes.push((MatchState::BattleState(outcome), 1.0));
 
         println!("{:?}", outcomes);
@@ -2613,7 +2613,7 @@ mod tests {
     }
 
     #[test]
-    fn skydrop_fails_on_gravity_iron_ball_and_substitute() {
+    fn sky_drop_iron_ball_sub() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -2636,7 +2636,7 @@ mod tests {
                 true,
             );
 
-            let mut defender = build_pokemon_state(
+            let defender = build_pokemon_state(
                 Species::Snorlax,
                 pokemon_dex,
                 move_dex,
@@ -2682,7 +2682,7 @@ mod tests {
     }
 
     #[test]
-    fn skydrop_flying_levitate_magnet_rise_telekinesis_take_no_damage() {
+    fn skydrop_immunities() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -2774,7 +2774,7 @@ mod tests {
     }
 
     #[test]
-    fn skydrop_target_cannot_act_until_drop_resolves() {
+    fn skydrop_target_cant_move() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -4485,7 +4485,2494 @@ mod tests {
         assert!((hit_probability(&outcomes, defender_initial_hp) - 1.0).abs() < 1e-9);
     }
 
-    /*Tests to write:
-    Status effects (manually apply the status, then check for its effects)
-    */
+    #[test]
+    fn burn_damage() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut burned_mon = build_pokemon_state(
+            Species::Shuckle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        burned_mon.status = Some(Status::Burn);
+
+        let healthy_mon = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let burned_initial_hp = burned_mon.hp;
+        let state = battle_state_from_lists(vec![burned_mon], vec![], vec![healthy_mon], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (end_state, probability) = extract_battle_state(outcomes);
+        assert!((probability - 1.0).abs() < 1e-9);
+        assert_eq!(burned_initial_hp - end_state.p1_active_mons[0].hp, burned_initial_hp / 16);
+    }
+
+    #[test]
+    fn burn_guts() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let make_state = |ability: Ability, status: Option<Status>, mov: PokemonMove| {
+            let mut attacker = build_pokemon_state(
+                Species::Mimikyu,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(mov), None, None, None]),
+                None,
+                Some(ability),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Ghost),
+                None,
+                None,
+                false,
+            );
+            attacker.status = status;
+
+            let target = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            );
+
+            battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])
+        };
+
+        let damage_for = |state: &BattleState, mov: PokemonMove| -> u16 {
+            let attacker_slot = FieldSlot { player: Player::P1, slot_index: 0 };
+            let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
+            let attacker = simulator_helpers::get_pokemon_at_slot(state, attacker_slot).unwrap();
+            let target = simulator_helpers::get_pokemon_at_slot(state, target_slot).unwrap();
+            let move_data = move_dex.get(&mov).unwrap();
+
+            let outcomes = simulator_helpers::calculate_damage_outcomes_for_target(
+                state,
+                attacker,
+                target,
+                attacker_slot,
+                target_slot,
+                move_data,
+                DamageConfig { consider_crit: false, damage_rolls: 1 },
+                1.0,
+                1.0,
+            );
+
+            outcomes[0].0
+        };
+
+        let healthy_shadow_state = make_state(Ability::None, None, PokemonMove::Earthquake);
+        let burned_shadow_state = make_state(Ability::None, Some(Status::Burn), PokemonMove::Earthquake);
+        let burned_guts_shadow_state = make_state(Ability::Guts, Some(Status::Burn), PokemonMove::Earthquake);
+        let healthy_facade_state = make_state(Ability::None, None, PokemonMove::Facade);
+        let burned_facade_state = make_state(Ability::None, Some(Status::Burn), PokemonMove::Facade);
+
+        let healthy_shadow = damage_for(&healthy_shadow_state, PokemonMove::Earthquake);
+        let burned_shadow = damage_for(&burned_shadow_state, PokemonMove::Earthquake);
+        let burned_guts_shadow = damage_for(&burned_guts_shadow_state, PokemonMove::Earthquake);
+        let healthy_facade = damage_for(&healthy_facade_state, PokemonMove::Facade);
+        let burned_facade = damage_for(&burned_facade_state, PokemonMove::Facade);
+
+        assert!(burned_shadow < healthy_shadow);
+        assert!(burned_guts_shadow > burned_shadow);
+        assert!(burned_facade > healthy_facade);
+    }
+
+    #[test]
+    fn unfreeze_probability() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut frozen_mon = build_pokemon_state(
+            Species::Shuckle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::SwordsDance), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        frozen_mon.status = Some(Status::Frozen(0));
+
+        let p2_mon = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let turn1 = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![frozen_mon], vec![], vec![p2_mon], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let total_probability_t1: f64 = turn1.iter().map(|(_, p)| *p).sum();
+        assert!((total_probability_t1 - 1.0).abs() < 1e-9);
+
+        let mut frozen_state_for_t2: Option<BattleState> = None;
+        let t1_thaw_probability: f64 = turn1
+            .iter()
+            .filter_map(|(state, p)| match state {
+                MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status.is_none() && bs.p1_active_mons[0].boosts[0] == 2 =>
+                {
+                    Some(*p)
+                }
+                _ => None,
+            })
+            .sum();
+
+        let t1_frozen_probability: f64 = turn1
+            .iter()
+            .filter_map(|(state, p)| match state {
+                MatchState::BattleState(bs)
+                    if matches!(bs.p1_active_mons[0].status, Some(Status::Frozen(1)))
+                        && bs.p1_active_mons[0].boosts[0] == 0 =>
+                {
+                    if frozen_state_for_t2.is_none() {
+                        frozen_state_for_t2 = Some(bs.clone());
+                    }
+                    Some(*p)
+                }
+                _ => None,
+            })
+            .sum();
+
+        assert!((t1_thaw_probability - 0.25).abs() < 1e-9);
+        assert!((t1_frozen_probability - 0.75).abs() < 1e-9);
+
+        let turn2 = run_single_turn(
+            &MatchState::BattleState(frozen_state_for_t2.expect("expected frozen branch after turn 1")),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let total_probability: f64 = turn2.iter().map(|(_, p)| *p).sum();
+        assert!((total_probability - 1.0).abs() < 1e-9);
+
+        let thaw_probability: f64 = turn2
+            .iter()
+            .filter_map(|(state, p)| match state {
+                MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status.is_none() && bs.p1_active_mons[0].boosts[0] == 2 =>
+                {
+                    Some(*p)
+                }
+                _ => None,
+            })
+            .sum();
+
+        let mut frozen_state_for_t3: Option<BattleState> = None;
+        let still_frozen_probability: f64 = turn2
+            .iter()
+            .filter_map(|(state, p)| match state {
+                MatchState::BattleState(bs)
+                    if matches!(bs.p1_active_mons[0].status, Some(Status::Frozen(2)))
+                        && bs.p1_active_mons[0].boosts[0] == 0 =>
+                {
+                    if frozen_state_for_t3.is_none() {
+                        frozen_state_for_t3 = Some(bs.clone());
+                    }
+                    Some(*p)
+                }
+                _ => None,
+            })
+            .sum();
+
+        assert!((thaw_probability - 0.25).abs() < 1e-9);
+        assert!((still_frozen_probability - 0.75).abs() < 1e-9);
+
+        let turn3 = run_single_turn(
+            &MatchState::BattleState(frozen_state_for_t3.expect("expected frozen branch after turn 2")),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (state_after_t3, p3) = extract_battle_state(turn3);
+        assert!((p3 - 1.0).abs() < 1e-9);
+        assert!(state_after_t3.p1_active_mons[0].status.is_none());
+        assert_eq!(state_after_t3.p1_active_mons[0].boosts[0], 2);
+    }
+
+    #[test]
+    fn sunlight_thaw() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut frozen_mon = build_pokemon_state(
+            Species::Shuckle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::SwordsDance), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        frozen_mon.status = Some(Status::Frozen(0));
+
+        let p2_mon = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let mut state = battle_state_from_lists(vec![frozen_mon], vec![], vec![p2_mon], vec![]);
+        state.weather = Some(Weather::Sun);
+        state.weather_turns = Some(5);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (end_state, probability) = extract_battle_state(outcomes);
+        assert!((probability - 1.0).abs() < 1e-9);
+        assert!(end_state.p1_active_mons[0].status.is_none());
+        assert_eq!(end_state.p1_active_mons[0].boosts[0], 2);
+    }
+
+    #[test]
+    fn fire_move_unfreeze() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Charizard,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Flamethrower), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let mut defender = build_pokemon_state(
+            Species::Shuckle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        defender.status = Some(Status::Frozen(0));
+        let defender_initial_hp = defender.hp;
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if !matches!(bs.p2_active_mons[0].status, Some(Status::Frozen(_))))
+        }));
+        assert!(outcomes.iter().any(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < defender_initial_hp)
+        }));
+    }
+
+    #[test]
+    fn full_paralysis_probability() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut p1_mon = build_pokemon_state(
+            Species::Shuckle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::SwordsDance), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        p1_mon.status = Some(Status::Paralysis);
+
+        let p2_mon = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let total_probability: f64 = outcomes.iter().map(|(_, p)| *p).sum();
+        assert!((total_probability - 1.0).abs() < 1e-9);
+
+        let success_probability: f64 = outcomes
+            .iter()
+            .filter_map(|(state, p)| match state {
+                MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[0] == 2 => Some(*p),
+                _ => None,
+            })
+            .sum();
+
+        let fail_probability: f64 = outcomes
+            .iter()
+            .filter_map(|(state, p)| match state {
+                MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[0] == 0 => Some(*p),
+                _ => None,
+            })
+            .sum();
+
+        assert!((success_probability - 0.875).abs() < 1e-9);
+        assert!((fail_probability - 0.125).abs() < 1e-9);
+    }
+
+    #[test]
+    fn paralysis_speed() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let p1_mon = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let p2_mon = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let state = battle_state_from_lists(vec![p1_mon.clone()], vec![], vec![p2_mon.clone()], vec![]);
+        let mut par_state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
+        par_state.p1_active_mons[0].status = Some(Status::Paralysis);
+
+        let action_p1 = Action::MoveAction(MoveAction {
+            move_name: PokemonMove::Splash,
+            priority: 0,
+            user_slot: FieldSlot { player: Player::P1, slot_index: 0 },
+            target_slot: None,
+        });
+        let action_p2 = Action::MoveAction(MoveAction {
+            move_name: PokemonMove::Splash,
+            priority: 0,
+            user_slot: FieldSlot { player: Player::P2, slot_index: 0 },
+            target_slot: None,
+        });
+
+        let base_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &state, &move_dex);
+        let par_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &par_state, &move_dex);
+
+        assert_eq!(base_order, std::cmp::Ordering::Equal);
+        assert_eq!(par_order, std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn paralysis_immunity() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Pikachu,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::ThunderWave), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Electric),
+            None,
+            None,
+            false,
+        );
+
+        let control_target = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+
+        let control_outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![control_target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(control_outcomes.iter().any(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Paralysis)))
+        }));
+
+        let immune_cases = vec![
+            (Species::Jolteon, Ability::None),
+            (Species::Lopunny, Ability::Limber),
+        ];
+
+        for (species, ability) in immune_cases {
+            let target = build_pokemon_state(
+                species,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(ability),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if !matches!(bs.p2_active_mons[0].status, Some(Status::Paralysis)))
+            }));
+        }
+    }
+
+    #[test]
+    fn poison_damage() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut poison_mon = build_pokemon_state(
+            Species::Shuckle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        poison_mon.status = Some(Status::Poison);
+
+        let mut toxic_mon = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        toxic_mon.status = Some(Status::ToxicPoison(0));
+
+        let poison_initial_hp = poison_mon.hp;
+        let toxic_initial_hp = toxic_mon.hp;
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![poison_mon], vec![], vec![toxic_mon], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (end_state, probability) = extract_battle_state(outcomes);
+        assert!((probability - 1.0).abs() < 1e-9);
+        assert_eq!(poison_initial_hp - end_state.p1_active_mons[0].hp, poison_initial_hp / 8);
+        assert_eq!(toxic_initial_hp - end_state.p2_active_mons[0].hp, toxic_initial_hp / 16);
+        assert!(matches!(end_state.p2_active_mons[0].status, Some(Status::ToxicPoison(1))));
+    }
+
+    #[test]
+    fn toxic_switch() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut toxic_active = build_pokemon_state(
+            Species::Shuckle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        toxic_active.status = Some(Status::ToxicPoison(4));
+
+        let healthy_bench = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let p2_mon = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let initial_state = battle_state_from_lists(vec![toxic_active], vec![healthy_bench], vec![p2_mon], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(initial_state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (end_state, probability) = extract_battle_state(outcomes);
+        assert!((probability - 1.0).abs() < 1e-9);
+        assert!(matches!(end_state.p1_back_mons[0].status, Some(Status::ToxicPoison(0))));
+    }
+
+    #[test]
+    fn sleep_probablities() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut sleeping_mon = build_pokemon_state(
+            Species::Shuckle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::SwordsDance), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        sleeping_mon.status = Some(Status::Sleep(0));
+
+        let p2_mon = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let turn1 = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![sleeping_mon], vec![], vec![p2_mon], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (state_after_t1, p1) = extract_battle_state(turn1);
+        assert!((p1 - 1.0).abs() < 1e-9);
+        assert!(matches!(state_after_t1.p1_active_mons[0].status, Some(Status::Sleep(1))));
+        assert_eq!(state_after_t1.p1_active_mons[0].boosts[0], 0);
+
+        let turn2 = run_single_turn(
+            &MatchState::BattleState(state_after_t1.clone()),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let total_probability: f64 = turn2.iter().map(|(_, p)| *p).sum();
+        assert!((total_probability - 1.0).abs() < 1e-9);
+
+        let wake_probability: f64 = turn2
+            .iter()
+            .filter_map(|(state, p)| match state {
+                MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status.is_none() && bs.p1_active_mons[0].boosts[0] == 2 =>
+                {
+                    Some(*p)
+                }
+                _ => None,
+            })
+            .sum();
+
+        let mut sleeping_state_for_t3: Option<BattleState> = None;
+        let asleep_probability: f64 = turn2
+            .iter()
+            .filter_map(|(state, p)| match state {
+                MatchState::BattleState(bs)
+                    if matches!(bs.p1_active_mons[0].status, Some(Status::Sleep(2)))
+                        && bs.p1_active_mons[0].boosts[0] == 0 =>
+                {
+                    if sleeping_state_for_t3.is_none() {
+                        sleeping_state_for_t3 = Some(bs.clone());
+                    }
+                    Some(*p)
+                }
+                _ => None,
+            })
+            .sum();
+
+        assert!((wake_probability - (1.0 / 3.0)).abs() < 1e-9);
+        assert!((asleep_probability - (2.0 / 3.0)).abs() < 1e-9);
+
+        let turn3 = run_single_turn(
+            &MatchState::BattleState(sleeping_state_for_t3.expect("expected sleeping branch after turn 2")),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (state_after_t3, p3) = extract_battle_state(turn3);
+        assert!((p3 - 1.0).abs() < 1e-9);
+        assert!(state_after_t3.p1_active_mons[0].status.is_none());
+        assert_eq!(state_after_t3.p1_active_mons[0].boosts[0], 2);
+    }
+
+    #[test]
+    fn sleep_immunities() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Amoonguss,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Spore), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Grass),
+            None,
+            None,
+            false,
+        );
+
+        let control_target = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+
+        let control_outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![control_target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+        assert!(control_outcomes.iter().any(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Sleep(_))))
+        }));
+
+        for ability in [Ability::Insomnia, Ability::VitalSpirit] {
+            let target = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(ability),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            );
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if !matches!(bs.p2_active_mons[0].status, Some(Status::Sleep(_))))
+            }));
+        }
+    }
+
+    #[test]
+    fn burn_immunities() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::RotomHeat,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::WillOWisp), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Fire),
+            None,
+            None,
+            false,
+        );
+
+        let control_target = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+
+        let control_outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![control_target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+        assert!(control_outcomes.iter().any(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Burn)))
+        }));
+
+        let mut already_statused = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+        already_statused.status = Some(Status::Poison);
+
+        let immune_targets = vec![
+            build_pokemon_state(
+                Species::Charizard,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Fire),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Vaporeon,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::WaterVeil),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Water),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Komala,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Comatose),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+            already_statused,
+        ];
+
+        for target in immune_targets {
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if !matches!(bs.p2_active_mons[0].status, Some(Status::Burn)))
+            }));
+        }
+    }
+
+    #[test]
+    fn freeze_immunities() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Lapras,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::IceBeam), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Water),
+            None,
+            None,
+            false,
+        );
+
+        let control_target = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+
+        let control_outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![control_target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+        assert!(control_outcomes.iter().any(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Frozen(_))))
+        }));
+
+        let immune_targets = vec![
+            build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::MagmaArmor),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Komala,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Comatose),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Eiscue,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::IceFace),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Ice),
+                None,
+                None,
+                false,
+            ),
+        ];
+
+        for target in immune_targets {
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if !matches!(bs.p2_active_mons[0].status, Some(Status::Frozen(_))))
+            }));
+        }
+    }
+
+    #[test]
+    fn corrosion() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let control_attacker = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Toxic), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+
+        let control_target = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+
+        let control_outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![control_attacker.clone()], vec![], vec![control_target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+        assert!(control_outcomes.iter().any(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::ToxicPoison(_))))
+        }));
+
+        let immune_targets = vec![
+            build_pokemon_state(
+                Species::Gengar,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Poison),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Corviknight,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Steel),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Immunity),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Komala,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Comatose),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+        ];
+
+        for target in immune_targets {
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![control_attacker.clone()], vec![], vec![target], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if !matches!(bs.p2_active_mons[0].status, Some(Status::Poison) | Some(Status::ToxicPoison(_))))
+            }));
+        }
+
+        let corrosion_attacker = build_pokemon_state(
+            Species::Salazzle,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Toxic), None, None, None]),
+            None,
+            Some(Ability::Corrosion),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Fire),
+            None,
+            None,
+            false,
+        );
+
+        for target in [
+            build_pokemon_state(
+                Species::Gengar,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Poison),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Corviknight,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Steel),
+                None,
+                None,
+                false,
+            ),
+        ] {
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![corrosion_attacker.clone()], vec![], vec![target], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().any(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::ToxicPoison(_))))
+            }));
+        }
+    }
+
+    #[test]
+    fn terrain_seeds() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let cases = [
+            (Terrain::ElectricTerrain, Ability::ElectricSurge, Item::ElectricSeed, Species::Pincurchin, 1usize),
+            (Terrain::GrassyTerrain, Ability::GrassySurge, Item::GrassySeed, Species::Rillaboom, 1usize),
+            (Terrain::MistyTerrain, Ability::MistySurge, Item::MistySeed, Species::TapuFini, 3usize),
+            (Terrain::PsychicTerrain, Ability::PsychicSurge, Item::PsychicSeed, Species::IndeedeeF, 3usize),
+        ];
+
+        for (terrain, ability, seed_item, setter_species, boost_index) in cases {
+            let setter = build_pokemon_state(
+                setter_species,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(ability),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            );
+
+            let seeded = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                Some(seed_item),
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            );
+
+            let state = battle_state_from_lists(vec![setter], vec![], vec![seeded], vec![]);
+            let active = &state.p2_active_mons[0];
+
+            assert_eq!(state.terrain, Some(terrain));
+            assert_eq!(active.item, Item::None);
+            assert_eq!(active.boosts[boost_index], 1);
+        }
+    }
+
+    #[test]
+    fn terrain_passives() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let electric_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Amoonguss,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Spore), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Grass),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+            );
+            state.terrain = Some(Terrain::ElectricTerrain);
+            state.terrain_turns = Some(5);
+            state
+        });
+
+        let electric_outcomes = run_single_turn(
+            &electric_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(electric_outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].status.is_none())
+        }));
+
+        let mut grassy_attacker = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+        grassy_attacker.hp = grassy_attacker.hp.saturating_sub(16);
+        let grassy_initial_hp = grassy_attacker.hp;
+
+        let grassy_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![grassy_attacker],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+            );
+            state.terrain = Some(Terrain::GrassyTerrain);
+            state.terrain_turns = Some(5);
+            state
+        });
+
+        let grassy_outcomes = run_single_turn(
+            &grassy_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(grassy_outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp > grassy_initial_hp)
+        }));
+
+        let misty_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Amoonguss,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::ConfuseRay), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Grass),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+                )],
+                vec![],
+            );
+            state.terrain = Some(Terrain::MistyTerrain);
+            state.terrain_turns = Some(5);
+            state
+        });
+
+        let misty_outcomes = run_single_turn(
+            &misty_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(misty_outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].volatiles.iter().all(|volatile| !matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _))))
+        }));
+    }
+
+    #[test]
+    fn expanding_force() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let priority_block_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Pikachu,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::QuickAttack), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Electric),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+            );
+            state.terrain = Some(Terrain::PsychicTerrain);
+            state.terrain_turns = Some(5);
+            state
+        });
+
+        let priority_outcomes = run_single_turn(
+            &priority_block_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(priority_outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == bs.p2_active_mons[0].stats[0])
+        }));
+
+        let expanding_force_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![
+                    build_pokemon_state(
+                        Species::IndeedeeF,
+                        &pokemon_dex,
+                        &move_dex,
+                        Some(50),
+                        Some([Some(PokemonMove::ExpandingForce), None, None, None]),
+                        None,
+                        Some(Ability::None),
+                        None,
+                        None,
+                        Some(crate::dex_data::PokemonType::Psychic),
+                        None,
+                        None,
+                        false,
+                    ),
+                    build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex,
+                        &move_dex,
+                        Some(50),
+                        Some([Some(PokemonMove::Splash), None, None, None]),
+                        None,
+                        Some(Ability::None),
+                        None,
+                        None,
+                        Some(crate::dex_data::PokemonType::Normal),
+                        None,
+                        None,
+                        false,
+                    ),
+                ],
+                vec![],
+                vec![
+                    build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex,
+                        &move_dex,
+                        Some(50),
+                        Some([Some(PokemonMove::Splash), None, None, None]),
+                        None,
+                        Some(Ability::None),
+                        None,
+                        None,
+                        Some(crate::dex_data::PokemonType::Normal),
+                        None,
+                        None,
+                        false,
+                    ),
+                    build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex,
+                        &move_dex,
+                        Some(50),
+                        Some([Some(PokemonMove::Splash), None, None, None]),
+                        None,
+                        Some(Ability::None),
+                        None,
+                        None,
+                        Some(crate::dex_data::PokemonType::Normal),
+                        None,
+                        None,
+                        false,
+                    ),
+                ],
+                vec![],
+            );
+            state.terrain = Some(Terrain::PsychicTerrain);
+            state.terrain_turns = Some(5);
+            state
+        });
+
+        let expanding_force_outcomes = run_single_turn(
+            &expanding_force_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(expanding_force_outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons.iter().all(|mon| mon.hp < mon.stats[0]))
+        }));
+    }
+
+    #[test]
+    fn terrain_clear_moves() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let nature_power_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Clefable,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::NaturePower), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Fairy),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Golem,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Ground),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+            );
+            state.terrain = Some(Terrain::ElectricTerrain);
+            state.terrain_turns = Some(5);
+            state
+        });
+
+        let nature_power_outcomes = run_single_turn(
+            &nature_power_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(nature_power_outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == bs.p2_active_mons[0].stats[0])
+        }));
+
+        for move_name in [PokemonMove::IceSpinner, PokemonMove::SteelRoller] {
+            let terrain_state = MatchState::BattleState({
+                let mut state = battle_state_from_lists(
+                    vec![build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex,
+                        &move_dex,
+                        Some(50),
+                        Some([Some(move_name), None, None, None]),
+                        None,
+                        Some(Ability::None),
+                        None,
+                        None,
+                        Some(crate::dex_data::PokemonType::Normal),
+                        None,
+                        None,
+                        false,
+                    )],
+                    vec![],
+                    vec![build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex,
+                        &move_dex,
+                        Some(50),
+                        Some([Some(PokemonMove::Splash), None, None, None]),
+                        None,
+                        Some(Ability::None),
+                        None,
+                        None,
+                        Some(crate::dex_data::PokemonType::Normal),
+                        None,
+                        None,
+                        false,
+                    )],
+                    vec![],
+                );
+                state.terrain = Some(Terrain::PsychicTerrain);
+                state.terrain_turns = Some(5);
+                state
+            });
+
+            let outcomes = run_single_turn(
+                &terrain_state,
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if bs.terrain.is_none())
+            }));
+        }
+
+        let ground_immunity_cases = vec![
+            build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Levitate),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                Some(Item::AirBalloon),
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+            build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            ),
+        ];
+
+        let mut magnet_rise_target = ground_immunity_cases[2].clone();
+        magnet_rise_target.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, 0));
+        let mut telekinesis_target = ground_immunity_cases[3].clone();
+        telekinesis_target.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Telekinesis, 0));
+
+        for target in [
+            ground_immunity_cases[0].clone(),
+            ground_immunity_cases[1].clone(),
+            magnet_rise_target,
+            telekinesis_target,
+        ] {
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(
+                    vec![build_pokemon_state(
+                        Species::Garchomp,
+                        &pokemon_dex,
+                        &move_dex,
+                        Some(50),
+                        Some([Some(PokemonMove::Earthquake), None, None, None]),
+                        None,
+                        Some(Ability::None),
+                        None,
+                        None,
+                        Some(crate::dex_data::PokemonType::Ground),
+                        None,
+                        None,
+                        false,
+                    )],
+                    vec![],
+                    vec![target],
+                    vec![],
+                )),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == bs.p2_active_mons[0].stats[0])
+            }));
+        }
+    }
+
+    #[test]
+    fn air_balloon() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let balloon_target = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            Some(Item::AirBalloon),
+            Some(crate::dex_data::PokemonType::Normal),
+            None,
+            None,
+            false,
+        );
+
+        let weak_hitter = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            Some(crate::dex_data::PokemonType::Water),
+            None,
+            None,
+            false,
+        );
+
+        let state_after_hit = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![weak_hitter], vec![], vec![balloon_target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        )).0;
+
+        assert_eq!(state_after_hit.p2_active_mons[0].item, Item::None);
+        assert!(state_after_hit.p2_active_mons[0].hp > 0);
+
+        let grounded_hit = run_single_turn(
+            &MatchState::BattleState({
+                let mut state = state_after_hit.clone();
+                state.p1_active_mons[0] = build_pokemon_state(
+                    Species::Garchomp,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Earthquake), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Ground),
+                    None,
+                    None,
+                    false,
+                );
+                state
+            }),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(grounded_hit.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < state_after_hit.p2_active_mons[0].hp)));
+    }
+
+    #[test]
+    fn seed_sower_sand_spit() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let seed_sower_outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Tackle), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::SeedSower),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+            )),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(seed_sower_outcomes.iter().any(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.terrain == Some(Terrain::GrassyTerrain))
+        }));
+
+        let sand_spit_outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Tackle), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::SandSpit),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+            )),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(sand_spit_outcomes.iter().any(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if bs.weather == Some(Weather::Sandstorm))
+        }));
+    }
+
+    #[test]
+    fn minimum_damage_floor_is_one() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(1),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Modest),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([0, 0, 0, 0, 0, 0]),
+            false,
+        );
+        let defender = build_pokemon_state(
+            Species::Aggron,
+            &pokemon_dex,
+            &move_dex,
+            Some(100),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Impish),
+            None,
+            None,
+            Some([0, 252, 252, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let before_hp = defender.stats[0];
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (state, _) = extract_battle_state(outcomes);
+        assert_eq!(before_hp - state.p2_active_mons[0].hp, 1);
+    }
+
+    #[test]
+    fn splash_always_fails_and_does_nothing() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        let defender = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (state, _) = extract_battle_state(outcomes);
+        assert_eq!(state.p1_active_mons[0].hp, state.p1_active_mons[0].stats[0]);
+        assert_eq!(state.p2_active_mons[0].hp, state.p2_active_mons[0].stats[0]);
+    }
+
+    #[test]
+    fn drain_and_recoil_and_healing_amounts_are_correct() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut venusaur = build_pokemon_state(
+            Species::Venusaur,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::GigaDrain), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Modest),
+            None,
+            None,
+            Some([0, 0, 0, 252, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+        venusaur.hp = venusaur.hp.saturating_sub(120);
+        let basculegion = build_pokemon_state(
+            Species::Basculegion,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Jolly),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let before_ven_hp = venusaur.hp;
+        let before_bas_hp = basculegion.hp;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![venusaur], vec![], vec![basculegion], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+        let (state, _) = extract_battle_state(outcomes);
+        assert_eq!(before_bas_hp - state.p2_active_mons[0].hp, 164);
+        assert_eq!(state.p1_active_mons[0].hp - before_ven_hp, 82);
+
+        let snorlax = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::DoubleEdge), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+        let whimsicott = build_pokemon_state(
+            Species::Whimsicott,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Timid),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let before_snorlax_hp = snorlax.hp;
+        let before_whimsicott_hp = whimsicott.hp;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![snorlax], vec![], vec![whimsicott], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+        let (state, _) = extract_battle_state(outcomes);
+        assert_eq!(before_whimsicott_hp - state.p2_active_mons[0].hp, 100);
+        assert_eq!(before_snorlax_hp - state.p1_active_mons[0].hp, 33);
+    }
+
+    #[test]
+    fn recoil_after_ko_still_awards_win_to_attacker() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut attacker = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::DoubleEdge), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+        attacker.hp = 10;
+
+        let mut defender = build_pokemon_state(
+            Species::Whimsicott,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Timid),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+        defender.hp = 1;
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::GameOverState { winner } if *winner == Player::P1)));
+    }
+
+    #[test]
+    fn rock_head_reckless_and_magic_guard_behaviors() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let rock_head_attacker = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::DoubleEdge), None, None, None]),
+            None,
+            Some(Ability::RockHead),
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+        let recoil_target = build_pokemon_state(
+            Species::Whimsicott,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Timid),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let before_hp = rock_head_attacker.hp;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![rock_head_attacker], vec![], vec![recoil_target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+        let (state, _) = extract_battle_state(outcomes);
+        assert_eq!(state.p1_active_mons[0].hp, before_hp);
+
+        let normal_state = battle_state_from_lists(
+            vec![build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::DoubleEdge), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            )],
+            vec![],
+            vec![recoil_target.clone()],
+            vec![],
+        );
+        let reckless_state = battle_state_from_lists(
+            vec![build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::DoubleEdge), None, None, None]),
+                None,
+                Some(Ability::Reckless),
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            )],
+            vec![],
+            vec![recoil_target],
+            vec![],
+        );
+
+        let normal_outcomes = run_single_turn(
+            &MatchState::BattleState(normal_state.clone()),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+        let reckless_outcomes = run_single_turn(
+            &MatchState::BattleState(reckless_state.clone()),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let (normal_after, _) = extract_battle_state(normal_outcomes);
+        let (reckless_after, _) = extract_battle_state(reckless_outcomes);
+        let normal_damage = normal_state.p2_active_mons[0].hp - normal_after.p2_active_mons[0].hp;
+        let reckless_damage = reckless_state.p2_active_mons[0].hp - reckless_after.p2_active_mons[0].hp;
+        assert!(reckless_damage > normal_damage);
+
+        let mut magic_guard_mon = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::MagicGuard),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        magic_guard_mon.status = Some(Status::Burn);
+        let initial_hp = magic_guard_mon.hp;
+
+        let mut residual_state = battle_state_from_lists(
+            vec![magic_guard_mon],
+            vec![],
+            vec![build_pokemon_state(
+                Species::Magikarp,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )],
+            vec![],
+        );
+        residual_state.weather = Some(Weather::Sandstorm);
+        residual_state.weather_turns = Some(5);
+
+        simulator_helpers::apply_end_of_turn_status_effects(&mut residual_state);
+        assert_eq!(residual_state.p1_active_mons[0].hp, initial_hp);
+    }
 }

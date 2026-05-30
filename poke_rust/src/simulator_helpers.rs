@@ -49,7 +49,7 @@ pub fn stage_multiplier(stage: i8) -> f64 {
     }
 }
 
-pub fn effective_stat(mon: &PokemonState, stat: PokemonStat, ignore_negative: bool, ignore_positive: bool) -> f64 {
+pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat, ignore_negative: bool, ignore_positive: bool) -> f64 {
     let (stat_index, boost_index) = match stat {
         PokemonStat::Atk => (1, 0),
         PokemonStat::Def => (2, 1),
@@ -78,6 +78,20 @@ pub fn effective_stat(mon: &PokemonState, stat: PokemonStat, ignore_negative: bo
     // Marvel Scale: +50% Defense when affected by a non-volatile status
     if stat == PokemonStat::Def && mon.ability == Ability::MarvelScale && mon.status.is_some() {
         val *= 1.5;
+    }
+
+    if stat == PokemonStat::Def
+        && mon.ability == Ability::GrassPelt
+        && matches!(current_terrain(state), Some(Terrain::GrassyTerrain))
+    {
+        val *= 1.5;
+    }
+
+    if stat == PokemonStat::SpA
+        && mon.ability == Ability::HadronEngine
+        && matches!(current_terrain(state), Some(Terrain::ElectricTerrain))
+    {
+        val *= 5461.0 / 4096.0;
     }
 
     val
@@ -479,17 +493,23 @@ pub fn damage_targets_multiplier(target_count: usize) -> f64 {
     if target_count > 1 { 0.75 } else { 1.0 }
 }
 
-fn effective_move_type(state: &BattleState, move_data: &MoveData) -> PokemonType {
-    if move_data.name != PokemonMove::WeatherBall {
-        return move_data.pokemon_type.clone();
-    }
-
-    match current_weather(state) {
-        Some(Weather::Sun | Weather::ExtremeSunlight) => PokemonType::Fire,
-        Some(Weather::Rain | Weather::HeavyRain) => PokemonType::Water,
-        Some(Weather::Sandstorm) => PokemonType::Rock,
-        Some(Weather::Snow) => PokemonType::Ice,
-        _ => PokemonType::Normal,
+fn effective_move_type(state: &BattleState, attacker: &PokemonState, move_data: &MoveData) -> PokemonType {
+    match move_data.name {
+        PokemonMove::WeatherBall => match current_weather(state) {
+            Some(Weather::Sun | Weather::ExtremeSunlight) => PokemonType::Fire,
+            Some(Weather::Rain | Weather::HeavyRain) => PokemonType::Water,
+            Some(Weather::Sandstorm) => PokemonType::Rock,
+            Some(Weather::Snow) => PokemonType::Ice,
+            _ => PokemonType::Normal,
+        },
+        PokemonMove::TerrainPulse if pokemon_is_grounded(state, attacker) => match current_terrain(state) {
+            Some(Terrain::ElectricTerrain) => PokemonType::Electric,
+            Some(Terrain::GrassyTerrain) => PokemonType::Grass,
+            Some(Terrain::MistyTerrain) => PokemonType::Fairy,
+            Some(Terrain::PsychicTerrain) => PokemonType::Psychic,
+            _ => move_data.pokemon_type.clone(),
+        },
+        _ => move_data.pokemon_type.clone(),
     }
 }
 
@@ -515,15 +535,15 @@ pub fn calculate_damage_outcomes_for_target(
         None => return vec![(0, false, 1.0)],
     };
 
-    let mut attacker_stat = effective_stat(attacker, attacking_stat, false, false);
-    let mut target_effective_defense = effective_stat(target, defending_stat, false, false);
+    let mut attacker_stat = effective_stat(_state, attacker, attacking_stat, false, false);
+    let mut target_effective_defense = effective_stat(_state, target, defending_stat, false, false);
     if matches!(defending_stat, PokemonStat::SpD) && weather_is_sandstorm(_state) && pokemon_has_type(target, &PokemonType::Rock) {
         target_effective_defense *= 1.5;
     }
     if matches!(defending_stat, PokemonStat::Def) && weather_is_snow(_state) && pokemon_has_type(target, &PokemonType::Ice) {
         target_effective_defense *= 1.5;
     }
-    let attack_type = effective_move_type(_state, move_data);
+    let attack_type = effective_move_type(_state, attacker, move_data);
     let effectiveness = move_type_effectiveness(_state, &attack_type, target);
     let stab = stab_multiplier(attacker, &attack_type);
 
@@ -557,12 +577,12 @@ pub fn calculate_damage_outcomes_for_target(
             1.0
         };
         let mut attack_stat = if crit {
-            effective_stat(attacker, attacking_stat, true, false)
+            effective_stat(_state, attacker, attacking_stat, true, false)
         } else {
             attacker_stat
         };
         let defense_stat = if crit {
-            effective_stat(target, defending_stat, false, true)
+            effective_stat(_state, target, defending_stat, false, true)
         } else {
             target_effective_defense
         };
@@ -603,6 +623,70 @@ pub fn calculate_damage_outcomes_for_target(
             && current_weather(_state).is_some()
         {
             effective_base_power = (effective_base_power * 0.5).floor();
+        }
+
+        if pokemon_is_on_terrain(_state, attacker, &Terrain::ElectricTerrain)
+            && matches!(move_data.pokemon_type, PokemonType::Electric)
+        {
+            effective_base_power = (effective_base_power * 1.3).floor();
+        }
+
+        if pokemon_is_on_terrain(_state, attacker, &Terrain::GrassyTerrain)
+            && matches!(move_data.pokemon_type, PokemonType::Grass)
+        {
+            effective_base_power = (effective_base_power * 1.3).floor();
+        }
+
+        if pokemon_is_on_terrain(_state, attacker, &Terrain::PsychicTerrain)
+            && matches!(move_data.pokemon_type, PokemonType::Psychic)
+        {
+            effective_base_power = (effective_base_power * 1.3).floor();
+        }
+
+        if matches!(move_data.name, PokemonMove::ExpandingForce)
+            && pokemon_is_on_terrain(_state, attacker, &Terrain::PsychicTerrain)
+        {
+            effective_base_power = (effective_base_power * 1.5).floor();
+        }
+
+        if matches!(move_data.name, PokemonMove::MistyExplosion)
+            && pokemon_is_on_terrain(_state, attacker, &Terrain::MistyTerrain)
+        {
+            effective_base_power = (effective_base_power * 1.5).floor();
+        }
+
+        if matches!(move_data.name, PokemonMove::Psyblade)
+            && pokemon_is_on_terrain(_state, attacker, &Terrain::ElectricTerrain)
+        {
+            effective_base_power = (effective_base_power * 1.5).floor();
+        }
+
+        if matches!(move_data.name, PokemonMove::TerrainPulse)
+            && pokemon_is_grounded(_state, attacker)
+            && current_terrain(_state).is_some()
+        {
+            effective_base_power = (effective_base_power * 2.0).floor();
+        }
+
+        if matches!(move_data.name, PokemonMove::RisingVoltage)
+            && pokemon_is_on_terrain(_state, target, &Terrain::ElectricTerrain)
+        {
+            effective_base_power = (effective_base_power * 2.0).floor();
+        }
+
+        if matches!(move_data.name, PokemonMove::Bulldoze | PokemonMove::Earthquake | PokemonMove::Magnitude)
+            && matches!(current_terrain(_state), Some(Terrain::GrassyTerrain))
+        {
+            effective_base_power = (effective_base_power * 0.5).floor();
+        }
+
+        // Reckless boosts recoil moves by 20%.
+        if attacker.ability == Ability::Reckless
+            && (move_data.recoil_fraction[0] > 0
+                && move_data.recoil_fraction[1] > 0
+                || move_data.struggle_recoil)
+        {
+            effective_base_power = (effective_base_power * 1.2).floor();
         }
 
         let mut weather_damage_multiplier = 1.0;
@@ -678,7 +762,14 @@ pub fn calculate_damage_outcomes_for_target(
             damage = (damage * weather_damage_multiplier).floor();
             damage = (damage * dry_skin_fire_multiplier).floor();
 
-            let damage = damage.max(0.0) as u16;
+            let mut damage = damage.max(0.0) as u16;
+            if damage == 0
+                && matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special)
+                && effectiveness > 0.0
+                && invulnerability_multiplier > 0.0
+            {
+                damage = 1;
+            }
             let probability = crit_probability / damage_roll_values.len() as f64;
             outcomes.push((damage, crit, probability));
         }
@@ -702,8 +793,8 @@ pub fn damage_effectiveness_for_action(state: &BattleState, action: &MoveAction,
     match invulnerability_resolution(attacker, target, &move_data.name) {
         InvulnerabilityResolution::Blocked => 0.0,
         InvulnerabilityResolution::ZeroDamage => 0.0,
-        InvulnerabilityResolution::Normal => move_type_effectiveness(state, &effective_move_type(state, move_data), target),
-        InvulnerabilityResolution::DoubleDamage => move_type_effectiveness(state, &effective_move_type(state, move_data), target) * 2.0,
+        InvulnerabilityResolution::Normal => move_type_effectiveness(state, &effective_move_type(state, attacker, move_data), target),
+        InvulnerabilityResolution::DoubleDamage => move_type_effectiveness(state, &effective_move_type(state, attacker, move_data), target) * 2.0,
     }
 }
 
@@ -899,6 +990,10 @@ pub fn apply_damage_and_check_game_over(
 
     apply_damage(target_mon, damage);
 
+    if damage > 0 && matches!(target_mon.item, Item::AirBalloon) {
+        target_mon.item = Item::None;
+    }
+
     if target_mon.fainted {
         clear_pokemon_on_faint(target_mon);
         if !team_has_remaining_pokemon(state, target_slot.player) {
@@ -1002,6 +1097,75 @@ pub fn current_weather(state: &BattleState) -> Option<Weather> {
 
 pub fn current_terrain(state: &BattleState) -> Option<Terrain> {
     state.terrain.clone()
+}
+
+fn terrain_matches(state: &BattleState, terrain: &Terrain) -> bool {
+    matches!(current_terrain(state), Some(current) if std::mem::discriminant(&current) == std::mem::discriminant(terrain))
+}
+
+pub fn pokemon_is_grounded(state: &BattleState, mon: &PokemonState) -> bool {
+    if mon.fainted {
+        return false;
+    }
+
+    if is_gravity_active(state) {
+        return true;
+    }
+
+    !pokemon_has_type(mon, &PokemonType::Flying)
+        && mon.ability != Ability::Levitate
+        && !matches!(mon.item, Item::AirBalloon)
+        && !has_status_volatile(mon, &VolatileStatus::MagnetRise)
+        && !has_status_volatile(mon, &VolatileStatus::Telekinesis)
+        && !mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _) | VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)))
+}
+
+pub fn pokemon_is_on_terrain(state: &BattleState, mon: &PokemonState, terrain: &Terrain) -> bool {
+    terrain_matches(state, terrain) && pokemon_is_grounded(state, mon)
+}
+
+pub fn clear_terrain(state: &mut BattleState) {
+    state.terrain = None;
+    state.terrain_turns = None;
+}
+
+pub fn terrain_replacement_move(state: &BattleState) -> Option<PokemonMove> {
+    match current_terrain(state) {
+        Some(Terrain::ElectricTerrain) => Some(PokemonMove::Thunderbolt),
+        Some(Terrain::GrassyTerrain) => Some(PokemonMove::EnergyBall),
+        Some(Terrain::MistyTerrain) => Some(PokemonMove::Moonblast),
+        Some(Terrain::PsychicTerrain) => Some(PokemonMove::Psychic),
+        None => None,
+    }
+}
+
+fn terrain_seed_for_current_terrain(state: &BattleState) -> Option<(Item, PokemonStat)> {
+    match current_terrain(state) {
+        Some(Terrain::ElectricTerrain) => Some((Item::ElectricSeed, PokemonStat::Def)),
+        Some(Terrain::GrassyTerrain) => Some((Item::GrassySeed, PokemonStat::Def)),
+        Some(Terrain::MistyTerrain) => Some((Item::MistySeed, PokemonStat::SpD)),
+        Some(Terrain::PsychicTerrain) => Some((Item::PsychicSeed, PokemonStat::SpD)),
+        None => None,
+    }
+}
+
+fn trigger_terrain_seed_items(state: &mut BattleState) {
+    let Some((seed_item, boost_stat)) = terrain_seed_for_current_terrain(state) else {
+        return;
+    };
+
+    for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+        if mon.item != seed_item {
+            continue;
+        }
+
+        mon.item = Item::None;
+        match boost_stat {
+            PokemonStat::Def => mon.boosts[1] = (mon.boosts[1] + 1).clamp(-6, 6),
+            PokemonStat::SpD => mon.boosts[3] = (mon.boosts[3] + 1).clamp(-6, 6),
+            _ => {}
+        }
+    }
 }
 
 pub fn weather_is_sunlight(state: &BattleState) -> bool {
@@ -1243,7 +1407,7 @@ pub fn accuracy_hit_probability(
     }
 }
 
-fn get_effective_speed(mon: &PokemonState) -> f32 {
+fn get_effective_speed(state: &BattleState, mon: &PokemonState) -> f32 {
     let base_speed = mon.stats[5] as f32;
     let speed_boost = mon.boosts[4];
 
@@ -1256,6 +1420,10 @@ fn get_effective_speed(mon: &PokemonState) -> f32 {
     };
 
     let mut speed = base_speed * multiplier;
+
+    if mon.ability == Ability::SurgeSurfer && matches!(current_terrain(state), Some(Terrain::ElectricTerrain)) {
+        speed *= 2.0;
+    }
 
     // Quick Feet: +50% speed if afflicted by any non-volatile status
     if mon.ability == Ability::QuickFeet && mon.status.is_some() {
@@ -1282,7 +1450,7 @@ fn side_has_tailwind(state: &BattleState, player: Player) -> bool {
 }
 
 fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonState) -> f32 {
-    let mut speed = get_effective_speed(mon);
+    let mut speed = get_effective_speed(state, mon);
 
     if mon.ability == Ability::Chlorophyll && weather_is_sunlight(state) {
         speed *= 2.0;
@@ -1310,10 +1478,10 @@ fn trick_room_is_active(state: &BattleState) -> bool {
         .any(|pseudo_weather| matches!(pseudo_weather, PseudoWeather::TrickRoom))
 }
 
-fn compare_pokemon_speed(p1: &PokemonState, p2: &PokemonState) -> std::cmp::Ordering {
+fn compare_pokemon_speed(state: &BattleState, p1: &PokemonState, p2: &PokemonState) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let speed1 = get_effective_speed(p1);
-    let speed2 = get_effective_speed(p2);
+    let speed1 = get_effective_speed(state, p1);
+    let speed2 = get_effective_speed(state, p2);
 
     if (speed2 - speed1).abs() < 0.01 {
         Ordering::Equal
@@ -1419,6 +1587,10 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     let ability = mon.ability.clone();
 
     match ability {
+        Ability::ElectricSurge | Ability::HadronEngine => set_terrain(state, Terrain::ElectricTerrain, 5),
+        Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
+        Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
+        Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
         Ability::Drought | Ability::OrichalcumPulse => set_weather(state, Weather::Sun, 5),
         Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
         Ability::Drizzle => set_weather(state, Weather::Rain, 5),
@@ -1428,12 +1600,16 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
         Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
         _ => {}
     }
+
+    trigger_terrain_seed_items(state);
 }
 
 /// Set terrain. Only one terrain can be active at a time. Provide a duration in turns (0 = permanent).
 pub fn set_terrain(state: &mut BattleState, terrain: Terrain, duration: u8) {
     state.terrain = Some(terrain);
     state.terrain_turns = Some(duration);
+
+    trigger_terrain_seed_items(state);
 }
 
 /// Add pseudo-weather, avoiding duplicates and handling duration.
@@ -1660,7 +1836,7 @@ fn get_side_condition_duration(condition: &SideCondition) -> u8 {
 }
 
 /// Apply a status condition to a pokemon (only if it doesn't already have one).
-fn apply_status_to_pokemon(sun_blocks_freeze: bool, mon: &mut PokemonState, status: &crate::dex_data::Status) {
+fn apply_status_to_pokemon(state: &BattleState, sun_blocks_freeze: bool, mon: &mut PokemonState, status: &crate::dex_data::Status) {
     // Prevent statuses if ability blocks all non-volatile statuses
     if mon.ability == Ability::Comatose || mon.ability == Ability::PurifyingSalt {
         return;
@@ -1671,6 +1847,16 @@ fn apply_status_to_pokemon(sun_blocks_freeze: bool, mon: &mut PokemonState, stat
     }
 
     if matches!(status, Status::Frozen(_)) && sun_blocks_freeze {
+        return;
+    }
+
+    if matches!(status, Status::Sleep(_)) && pokemon_is_on_terrain(state, mon, &Terrain::ElectricTerrain) {
+        return;
+    }
+
+    if matches!(status, Status::Burn | Status::Poison | Status::ToxicPoison(_) | Status::Paralysis | Status::Sleep(_) | Status::Frozen(_))
+        && pokemon_is_on_terrain(state, mon, &Terrain::MistyTerrain)
+    {
         return;
     }
 
@@ -1690,16 +1876,18 @@ fn apply_status_to_pokemon(sun_blocks_freeze: bool, mon: &mut PokemonState, stat
             if pokemon_has_type(mon, &PokemonType::Poison) || pokemon_has_type(mon, &PokemonType::Steel) {
                 return;
             }
+            if mon.ability == Ability::Immunity { return; }
             mon.status = Some(Status::Poison);
         }
         Status::ToxicPoison(_) => {
             if pokemon_has_type(mon, &PokemonType::Poison) || pokemon_has_type(mon, &PokemonType::Steel) {
                 return;
             }
+            if mon.ability == Ability::Immunity { return; }
             mon.status = Some(Status::ToxicPoison(0));
         }
         Status::Paralysis => {
-            if mon.ability == Ability::Limber { return; }
+            if mon.ability == Ability::Limber || pokemon_has_type(mon, &PokemonType::Electric) { return; }
             mon.status = Some(Status::Paralysis);
         }
         Status::Sleep(_) => {
@@ -1708,7 +1896,7 @@ fn apply_status_to_pokemon(sun_blocks_freeze: bool, mon: &mut PokemonState, stat
         }
         Status::Frozen(_) => {
             if pokemon_has_type(mon, &PokemonType::Ice) { return; }
-            if mon.ability == Ability::MagmaArmor { return; }
+            if mon.ability == Ability::MagmaArmor || mon.ability == Ability::IceFace { return; }
             mon.status = Some(Status::Frozen(0));
         }
     }
@@ -1750,7 +1938,7 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
         if sunlight_active {
             if mon.ability == Ability::DrySkin {
                 let dmg = (max_hp as u32 / 8) as u16;
-                if dmg > 0 {
+                if dmg > 0 && mon.ability != Ability::MagicGuard {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -1761,7 +1949,7 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
 
             if mon.ability == Ability::SolarPower {
                 let dmg = (max_hp as u32 / 8) as u16;
-                if dmg > 0 {
+                if dmg > 0 && mon.ability != Ability::MagicGuard {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -1807,7 +1995,7 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
         match mon.status {
             Some(Status::Burn) => {
                 let dmg = (mon.stats[0] as u32 / 16) as u16;
-                if dmg > 0 {
+                if dmg > 0 && mon.ability != Ability::MagicGuard {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -1815,8 +2003,8 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
                 }
             }
             Some(Status::Poison) => {
-                let dmg = (mon.stats[0] as u32 / 16) as u16;
-                if dmg > 0 {
+                let dmg = (mon.stats[0] as u32 / 8) as u16;
+                if dmg > 0 && mon.ability != Ability::MagicGuard {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -1827,7 +2015,7 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
                 let new_n = n.saturating_add(1);
                 mon.status = Some(Status::ToxicPoison(new_n));
                 let dmg = ((mon.stats[0] as u32 * new_n as u32) / 16) as u16;
-                if dmg > 0 {
+                if dmg > 0 && mon.ability != Ability::MagicGuard {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -1840,6 +2028,19 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
 
     for mon in state.p1_active_mons.iter_mut() { apply_weather_residuals(mon); }
     for mon in state.p2_active_mons.iter_mut() { apply_weather_residuals(mon); }
+    let terrain_snapshot = state.clone();
+    if matches!(current_terrain(&terrain_snapshot), Some(Terrain::GrassyTerrain)) {
+        for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+            if !pokemon_is_grounded(&terrain_snapshot, mon) || mon.fainted {
+                continue;
+            }
+
+            let max_hp = mon.stats[0].max(1);
+            let heal = (max_hp as u32 / 16) as u16;
+            mon.hp = mon.hp.saturating_add(heal).min(max_hp);
+            mon.fainted = false;
+        }
+    }
     for mon in state.p1_active_mons.iter_mut() { process(mon); }
     for mon in state.p2_active_mons.iter_mut() { process(mon); }
 }
@@ -1889,11 +2090,19 @@ pub fn move_unfreezes_target(move_name: &PokemonMove) -> bool {
 }
 
 /// Apply a volatile status to a pokemon (prevents duplicate volatiles of the same type).
-fn apply_volatile_to_pokemon(mon: &mut PokemonState, volatile: &VolatileStatus) {
+fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volatile: &VolatileStatus) {
     // Check if pokemon already has this volatile status
     let already_has = has_status_volatile(mon, volatile);
 
     if !already_has {
+        if matches!(volatile, VolatileStatus::Confusion) && pokemon_is_on_terrain(state, mon, &Terrain::MistyTerrain) {
+            return;
+        }
+
+        if matches!(volatile, VolatileStatus::Yawn) && pokemon_is_on_terrain(state, mon, &Terrain::ElectricTerrain) {
+            return;
+        }
+
         let is_move_status = matches!(
             volatile,
             VolatileStatus::Disable | VolatileStatus::Encore | VolatileStatus::GlaiveRush | VolatileStatus::Taunt | VolatileStatus::SemiInvulnerable(_)
@@ -1960,6 +2169,7 @@ fn apply_effect_to_target(
     // Extract attacker ability before taking a mutable borrow of the target
     let attacker_ability = get_pokemon_at_slot(state, attacker_slot).map(|a| a.ability.clone());
     let sun_blocks_freeze = weather_is_sunlight(state);
+    let terrain_snapshot = state.clone();
     if let Some(target_mon) = get_pokemon_at_slot_mut(state, target_slot) {
         if let Some(status) = &effect.status {
             // If attacker has Corrosion, allow poisoning of Poison/Steel types,
@@ -1969,16 +2179,16 @@ fn apply_effect_to_target(
                     match status {
                         Status::Poison => { target_mon.status = Some(Status::Poison); }
                         Status::ToxicPoison(_) => { target_mon.status = Some(Status::ToxicPoison(0)); }
-                        other => { apply_status_to_pokemon(sun_blocks_freeze, target_mon, other); }
+                        other => { apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, target_mon, other); }
                     }
                 }
             } else {
-                apply_status_to_pokemon(sun_blocks_freeze, target_mon, status);
+                apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, target_mon, status);
             }
         }
 
         if let Some(volatile) = &effect.volatile_status {
-            apply_volatile_to_pokemon(target_mon, volatile);
+            apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile);
         }
 
         if effect.boosts != [0; 7] {
@@ -2004,13 +2214,14 @@ fn apply_effect_to_attacker(
     effect: &HitEffect,
 ) {
     let sun_blocks_freeze = weather_is_sunlight(state);
+    let terrain_snapshot = state.clone();
     if let Some(attacker_mon) = get_pokemon_at_slot_mut(state, attacker_slot) {
         if let Some(status) = &effect.status {
-            apply_status_to_pokemon(sun_blocks_freeze, attacker_mon, status);
+            apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, attacker_mon, status);
         }
 
         if let Some(volatile) = &effect.volatile_status {
-            apply_volatile_to_pokemon(attacker_mon, volatile);
+            apply_volatile_to_pokemon(&terrain_snapshot, attacker_mon, volatile);
         }
 
         if effect.boosts != [0; 7] {
@@ -2118,6 +2329,7 @@ pub fn apply_secondary_effects(
         let branch_weather = current_weather(bs);
         let branch_harsh_sun = matches!(branch_weather, Some(Weather::ExtremeSunlight));
         let branch_sandstorm = matches!(branch_weather, Some(Weather::Sandstorm));
+        let terrain_snapshot = bs.clone();
 
         let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) else {
             continue;
@@ -2125,6 +2337,9 @@ pub fn apply_secondary_effects(
 
         match move_data.name {
             PokemonMove::Rest => {
+                if pokemon_is_on_terrain(&terrain_snapshot, attacker_mon, &Terrain::ElectricTerrain) {
+                    continue;
+                }
                 attacker_mon.volatiles.clear();
                 attacker_mon.status = Some(Status::Sleep(0));
                 let max_hp = attacker_mon.stats[0].max(1);
@@ -2249,8 +2464,8 @@ pub fn check_and_apply_redirection(
     // If there are redirectors, pick the one with the highest effective speed
     if !redirectors.is_empty() {
         let best_redirector = redirectors.into_iter().max_by(|a, b| {
-            let speed_a = get_effective_speed(a.1);
-            let speed_b = get_effective_speed(b.1);
+            let speed_a = get_effective_speed(state, a.1);
+            let speed_b = get_effective_speed(state, b.1);
             speed_a.partial_cmp(&speed_b).unwrap_or(std::cmp::Ordering::Equal)
         });
 
