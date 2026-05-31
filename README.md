@@ -9,7 +9,6 @@ cargo run -- --p1 ./teamsheets/{teamsheet path} --p2 ./teamsheets/{teamsheet pat
 - Create a function to take in battle state and battle actions, then apply those to create a vector of tuples possible battle states resulting from that along with their probabilities.
     - Things to keep in mind: Neutralizing Gas and Magic Room !!!!!!!
     - Later focus SLOWLY on implementing actual battle functions
-        - Confusion Duration Tests
         - Multi-hit moves, switch out moves
         - Struggle
         - Berries, Unnerve?, Other Consumables (sash), Type Boost Items

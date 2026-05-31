@@ -1,6 +1,7 @@
 use clap::Parser;
 use colored::Colorize;
 use battle::MatchState;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use crate::data::pokemon_move::PokemonMove;
 
@@ -14,6 +15,7 @@ mod user;
 mod simulator_tests;
 
 pub static VERBOSITY: OnceLock<u8> = OnceLock::new();
+pub static SHARED_MULTIHIT_DAMAGE_ROLLS: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser, Debug)]
 #[command(author = "Blazestorm", version = "1.0", about = "Simulates Pokemon Battles")]
@@ -46,6 +48,10 @@ struct Args {
     #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u8).range(1..=16))]
     damage_rolls: u8,
 
+    /// Use one shared damage roll for all hits of a multihit move
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    shared_multihit_damage_rolls: bool,
+
     /// Use stat points format instead of EVs (applies formula: EV' = ((n-4)/8)+1)
     #[arg(long, default_value_t = true, action = clap::ArgAction::SetFalse)]
     stat_points: bool,
@@ -56,6 +62,7 @@ fn main() {
 
     // Initialize global verbosity
     let _ = VERBOSITY.set(args.verbosity);
+    SHARED_MULTIHIT_DAMAGE_ROLLS.store(args.shared_multihit_damage_rolls, Ordering::Relaxed);
 
     if args.verbosity >= 2 { println!("{}", format!("Got paths: {}, {}", args.p1, args.p2).cyan()) }
 

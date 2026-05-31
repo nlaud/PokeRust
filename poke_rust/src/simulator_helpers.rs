@@ -8,11 +8,16 @@ use crate::dex_data::{AccuracyType, MoveCategory, MoveData, MoveTarget, PokemonT
 use crate::pokemon::{PokemonState, VolatileStatusState};
 use crate::dex_data::VolatileStatus;
 use rand::{thread_rng, Rng};
+use std::sync::atomic::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
 
 pub fn get_verbosity() -> u8 {
     crate::VERBOSITY.get().copied().unwrap_or(1)
+}
+
+pub fn shared_multihit_damage_rolls_enabled() -> bool {
+    crate::SHARED_MULTIHIT_DAMAGE_ROLLS.load(Ordering::Relaxed)
 }
 
 pub(crate) fn coalesce_branches<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)>
@@ -543,6 +548,34 @@ pub fn calculate_damage_outcomes_for_target(
     targets_multiplier: f64,
     invulnerability_multiplier: f64,
 ) -> Vec<(u16, bool, f64)> {
+    calculate_damage_outcomes_for_target_with_options(
+        _state,
+        attacker,
+        target,
+        _user_slot,
+        _target_slot,
+        move_data,
+        config,
+        targets_multiplier,
+        invulnerability_multiplier,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn calculate_damage_outcomes_for_target_with_options(
+    _state: &BattleState,
+    attacker: &PokemonState,
+    target: &PokemonState,
+    _user_slot: FieldSlot,
+    _target_slot: FieldSlot,
+    move_data: &MoveData,
+    config: crate::simulator::DamageConfig,
+    targets_multiplier: f64,
+    invulnerability_multiplier: f64,
+    base_power_override: Option<u16>,
+    forced_damage_roll: Option<u8>,
+) -> Vec<(u16, bool, f64)> {
     let attacking_stat = match move_offensive_stat(move_data) {
         Some(stat) => stat,
         None => return vec![(0, false, 1.0)],
@@ -579,7 +612,7 @@ pub fn calculate_damage_outcomes_for_target(
         attacker_stat = (attacker_stat * 5461.0 / 4096.0).floor();
     }
 
-    let damage_roll_values = selected_damage_rolls(config.damage_rolls);
+    let damage_roll_values = forced_damage_roll.map(|roll| vec![roll]).unwrap_or_else(|| selected_damage_rolls(config.damage_rolls));
     let critical_states = critical_hit_probability(attacker, target, &move_data.name, config.consider_crit, move_data.crit_ratio);
 
     let mut outcomes = Vec::new();
@@ -620,7 +653,9 @@ pub fn calculate_damage_outcomes_for_target(
         }
 
         // Handle Weather Ball's weather-dependent type and base power, then standard base-power modifiers.
-        let mut effective_base_power = if move_data.name == PokemonMove::WeatherBall {
+        let mut effective_base_power = if let Some(base_power_override) = base_power_override {
+            base_power_override as f64
+        } else if move_data.name == PokemonMove::WeatherBall {
             if current_weather(_state).is_some() {
                 100.0
             } else {
@@ -788,7 +823,11 @@ pub fn calculate_damage_outcomes_for_target(
             {
                 damage = 1;
             }
-            let probability = crit_probability / damage_roll_values.len() as f64;
+            let probability = if forced_damage_roll.is_some() {
+                crit_probability
+            } else {
+                crit_probability / damage_roll_values.len() as f64
+            };
             outcomes.push((damage, crit, probability));
         }
     }

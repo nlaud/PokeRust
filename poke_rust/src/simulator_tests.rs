@@ -1,7 +1,11 @@
+#[cfg(test)]
 use crate::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, Player};
+#[cfg(test)]
 use crate::pokemon::PokemonState;
+#[cfg(test)]
 use crate::simulator_helpers;
 
+#[cfg(test)]
 pub fn battle_state_from_lists(
     p1_active_mons: Vec<PokemonState>,
     p1_back_mons: Vec<PokemonState>,
@@ -66,11 +70,66 @@ pub fn battle_state_from_lists(
 
 
 #[cfg(test)]
+pub fn simple_attack(_player: Player, move_slots: Vec<usize>) -> Vec<BattleCommand> {
+    move_slots
+        .into_iter()
+        .map(|move_slot| {
+            BattleCommand::Attack(AttackCommand {
+                move_slot,
+                target: None,
+                terastallize: false,
+                mega_evolve: false,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub fn simple_attack_mega(_player: Player, move_slots: Vec<usize>) -> Vec<BattleCommand> {
+    move_slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, move_slot)| {
+            BattleCommand::Attack(AttackCommand {
+                move_slot,
+                target: None,
+                terastallize: false,
+                mega_evolve: index == 0,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+/// Checks if two vectors are permutations of each other.
+pub fn is_permutation<T: PartialEq + Clone>(
+    vec1: &Vec<T>,
+    vec2: &Vec<T>,
+) -> bool {
+    if vec1.len() != vec2.len() {
+        return false;
+    }
+
+    let mut vec2_copy = vec2.clone();
+    for item1 in vec1 {
+        if let Some(pos) = vec2_copy.iter().position(|item2| item1 == item2) {
+            vec2_copy.remove(pos);
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
     use std::sync::OnceLock;
     use crate::battle::{Action, MatchState, MoveAction, PlayerCommand, SwitchCommand};
+    #[cfg(test)]
+    use crate::battle::{BattleCommand, BattleState, FieldSlot, Player};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
@@ -79,56 +138,6 @@ mod tests {
     use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
     use crate::simulator::{simulate_turn, DamageConfig};
     use crate::simulator_helpers::coalesce_branches;
-    pub fn simple_attack(_player: Player, move_slots: Vec<usize>) -> Vec<BattleCommand> {
-        move_slots
-            .into_iter()
-            .map(|move_slot| {
-                BattleCommand::Attack(AttackCommand {
-                    move_slot,
-                    target: None,
-                    terastallize: false,
-                    mega_evolve: false,
-                })
-            })
-            .collect()
-    }
-
-    pub fn simple_attack_mega(_player: Player, move_slots: Vec<usize>) -> Vec<BattleCommand> {
-        move_slots
-            .into_iter()
-            .enumerate()
-            .map(|(index, move_slot)| {
-                BattleCommand::Attack(AttackCommand {
-                    move_slot,
-                    target: None,
-                    terastallize: false,
-                    mega_evolve: index == 0,
-                })
-            })
-            .collect()
-    }
-
-
-    /// Checks if two vectors are permutations of each other.
-    pub fn is_permutation<T: PartialEq + Clone>(
-        vec1: &Vec<T>,
-        vec2: &Vec<T>,
-    ) -> bool {
-        if vec1.len() != vec2.len() {
-            return false;
-        }
-
-        let mut vec2_copy = vec2.clone();
-        for item1 in vec1 {
-            if let Some(pos) = vec2_copy.iter().position(|item2| item1 == item2) {
-                vec2_copy.remove(pos);
-            } else {
-                return false;
-            }
-        }
-        true
-    }
-    
     static POKEMON_DEX: OnceLock<std::collections::HashMap<Species, crate::dex_data::PokemonData>> = OnceLock::new();
     static MOVE_DEX: OnceLock<std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>> = OnceLock::new();
 
@@ -190,6 +199,78 @@ mod tests {
         pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>,
     ) -> Vec<(MatchState, f64)> {
         simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1)
+    }
+
+    fn damage_distribution(outcomes: &[(MatchState, f64)], initial_hp: u16) -> HashMap<u16, f64> {
+        let mut distribution = HashMap::new();
+
+        for (state, probability) in outcomes {
+            let damage = match state {
+                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p2_active_mons[0].hp),
+                MatchState::GameOverState { .. } => initial_hp,
+                _ => 0,
+            };
+
+            *distribution.entry(damage).or_insert(0.0) += *probability;
+        }
+
+        distribution
+    }
+
+    fn repeat_hit_distribution(hit_distribution: &[(u16, f64)], hit_count: usize) -> HashMap<u16, f64> {
+        let mut distribution = HashMap::from([(0u16, 1.0)]);
+
+        for _ in 0..hit_count {
+            let mut next = HashMap::new();
+            for (damage, damage_probability) in &distribution {
+                for (hit_damage, hit_probability) in hit_distribution {
+                    *next.entry(damage.saturating_add(*hit_damage)).or_insert(0.0) += damage_probability * hit_probability;
+                }
+            }
+            distribution = next;
+        }
+
+        distribution
+    }
+
+    fn combine_hit_distributions_with_hit_chances(
+        hit_distributions: &[Vec<(u16, f64)>],
+        hit_chances: &[f64],
+    ) -> HashMap<u16, f64> {
+        let mut active = HashMap::from([(0u16, 1.0)]);
+        let mut finished = HashMap::new();
+
+        for (hit_distribution, hit_chance) in hit_distributions.iter().zip(hit_chances.iter()) {
+            let mut next_active = HashMap::new();
+
+            for (damage_so_far, damage_probability) in &active {
+                *next_active.entry(*damage_so_far).or_insert(0.0) += damage_probability * (1.0 - hit_chance);
+
+                for (hit_damage, hit_probability) in hit_distribution {
+                    *next_active.entry(damage_so_far.saturating_add(*hit_damage)).or_insert(0.0) += damage_probability * hit_chance * hit_probability;
+                }
+            }
+
+            active = next_active;
+        }
+
+        for (damage_so_far, damage_probability) in active {
+            *finished.entry(damage_so_far).or_insert(0.0) += damage_probability;
+        }
+
+        finished
+    }
+
+    fn assert_distribution_close(actual: HashMap<u16, f64>, expected: HashMap<u16, f64>) {
+        assert_eq!(actual.len(), expected.len());
+
+        for (damage, expected_probability) in expected {
+            let actual_probability = actual.get(&damage).copied().unwrap_or_default();
+            assert!(
+                (actual_probability - expected_probability).abs() < 1e-9,
+                "damage {damage}: actual={actual_probability}, expected={expected_probability}"
+            );
+        }
     }
     
     #[test]
@@ -268,6 +349,300 @@ mod tests {
             .collect();
 
         assert!(is_permutation(&outcomes, &expected_outcomes));
+    }
+
+    #[test]
+    fn surging_strikes_shared_roll_flag_changes_damage_distribution() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let urshifu = build_pokemon_state(
+            Species::UrshifuRapidStrike,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::SurgingStrikes), Some(PokemonMove::Splash), None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let altaria = build_pokemon_state(
+            Species::Altaria,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let initial_state = battle_state_from_lists(vec![urshifu.clone()], vec![], vec![altaria.clone()], vec![]);
+        let initial_hp = altaria.hp;
+        let attack_slot = FieldSlot { player: Player::P1, slot_index: 0 };
+        let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
+        let attacker = crate::simulator_helpers::get_pokemon_at_slot(&initial_state, attack_slot).unwrap();
+        let target = crate::simulator_helpers::get_pokemon_at_slot(&initial_state, target_slot).unwrap();
+        let single_hit = crate::simulator_helpers::calculate_damage_outcomes_for_target(
+            &initial_state,
+            attacker,
+            target,
+            attack_slot,
+            target_slot,
+            move_dex.get(&PokemonMove::SurgingStrikes).unwrap(),
+            DamageConfig { consider_crit: false, damage_rolls: 16 },
+            1.0,
+            1.0,
+        )
+        .into_iter()
+        .map(|(damage, _, probability)| (damage, probability))
+        .collect::<Vec<_>>();
+
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        crate::SHARED_MULTIHIT_DAMAGE_ROLLS.store(false, Ordering::Relaxed);
+        let independent_outcomes = simulate_turn(&MatchState::BattleState(initial_state.clone()), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 16);
+
+        crate::SHARED_MULTIHIT_DAMAGE_ROLLS.store(true, Ordering::Relaxed);
+        let shared_outcomes = simulate_turn(&MatchState::BattleState(initial_state), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 16);
+        crate::SHARED_MULTIHIT_DAMAGE_ROLLS.store(false, Ordering::Relaxed);
+
+        let expected_independent = repeat_hit_distribution(&single_hit, 3);
+        let mut expected_shared = HashMap::new();
+        for (damage, probability) in &single_hit {
+            *expected_shared.entry(damage.saturating_mul(3)).or_insert(0.0) += probability;
+        }
+
+        assert_distribution_close(damage_distribution(&independent_outcomes, initial_hp), expected_independent);
+        assert_distribution_close(damage_distribution(&shared_outcomes, initial_hp), expected_shared);
+    }
+
+    #[test]
+    fn triple_axel_branches_each_hit_with_progressive_power() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let tsareena = build_pokemon_state(
+            Species::Tsareena,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::TripleAxel), Some(PokemonMove::Splash), None, None]),
+            None,
+            Some(Ability::NoGuard),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let venusaur = build_pokemon_state(
+            Species::Venusaur,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let initial_state = battle_state_from_lists(vec![tsareena], vec![], vec![venusaur.clone()], vec![]);
+        let initial_hp = venusaur.hp;
+        let attack_slot = FieldSlot { player: Player::P1, slot_index: 0 };
+        let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
+        let attacker = crate::simulator_helpers::get_pokemon_at_slot(&initial_state, attack_slot).unwrap();
+        let target = crate::simulator_helpers::get_pokemon_at_slot(&initial_state, target_slot).unwrap();
+        let hit_chance = crate::simulator_helpers::accuracy_hit_probability(
+            &initial_state,
+            attacker,
+            target,
+            attack_slot,
+            target_slot,
+            move_dex.get(&PokemonMove::TripleAxel).unwrap(),
+        );
+        let hit1 = crate::simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+            &initial_state,
+            attacker,
+            target,
+            attack_slot,
+            target_slot,
+            move_dex.get(&PokemonMove::TripleAxel).unwrap(),
+            DamageConfig { consider_crit: false, damage_rolls: 16 },
+            1.0,
+            1.0,
+            Some(20),
+            None,
+        )
+        .into_iter()
+        .map(|(damage, _, probability)| (damage, probability))
+        .collect::<Vec<_>>();
+        let hit2 = crate::simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+            &initial_state,
+            attacker,
+            target,
+            attack_slot,
+            target_slot,
+            move_dex.get(&PokemonMove::TripleAxel).unwrap(),
+            DamageConfig { consider_crit: false, damage_rolls: 16 },
+            1.0,
+            1.0,
+            Some(40),
+            None,
+        )
+        .into_iter()
+        .map(|(damage, _, probability)| (damage, probability))
+        .collect::<Vec<_>>();
+        let hit3 = crate::simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+            &initial_state,
+            attacker,
+            target,
+            attack_slot,
+            target_slot,
+            move_dex.get(&PokemonMove::TripleAxel).unwrap(),
+            DamageConfig { consider_crit: false, damage_rolls: 16 },
+            1.0,
+            1.0,
+            Some(60),
+            None,
+        )
+        .into_iter()
+        .map(|(damage, _, probability)| (damage, probability))
+        .collect::<Vec<_>>();
+
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let outcomes = simulate_turn(&MatchState::BattleState(initial_state), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 16);
+
+        let expected = combine_hit_distributions_with_hit_chances(&[hit1, hit2, hit3], &[hit_chance, hit_chance, hit_chance]);
+
+        assert_distribution_close(damage_distribution(&outcomes, initial_hp), expected);
+    }
+
+    #[test]
+    fn beat_up_uses_user_attack_stat_multihit_regression() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let mut boosted_tyranitar = build_pokemon_state(
+            Species::Tyranitar,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::BeatUp), Some(PokemonMove::Splash), None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+        boosted_tyranitar.boosts[0] = 2;
+
+        let unboosted_tyranitar = {
+            let mut mon = boosted_tyranitar.clone();
+            mon.boosts[0] = 0;
+            mon
+        };
+
+        let magikarp = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let bidoof = build_pokemon_state(
+            Species::Bidoof,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let target = build_pokemon_state(
+            Species::Altaria,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            false,
+        );
+
+        let boosted_state = battle_state_from_lists(vec![boosted_tyranitar], vec![magikarp.clone()], vec![target.clone()], vec![bidoof.clone()]);
+        let unboosted_state = battle_state_from_lists(vec![unboosted_tyranitar], vec![magikarp], vec![target.clone()], vec![bidoof]);
+
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let boosted_outcomes = simulate_turn(&MatchState::BattleState(boosted_state), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1);
+        let unboosted_outcomes = simulate_turn(&MatchState::BattleState(unboosted_state), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1);
+
+        let boosted_damage = boosted_outcomes
+            .iter()
+            .filter_map(|(state, _)| match state {
+                MatchState::BattleState(bs) => Some(target.hp.saturating_sub(bs.p2_active_mons[0].hp)),
+                _ => None,
+            })
+            .max()
+            .unwrap();
+
+        let unboosted_damage = unboosted_outcomes
+            .iter()
+            .filter_map(|(state, _)| match state {
+                MatchState::BattleState(bs) => Some(target.hp.saturating_sub(bs.p2_active_mons[0].hp)),
+                _ => None,
+            })
+            .max()
+            .unwrap();
+
+        assert!(boosted_damage > unboosted_damage);
     }
 
     #[test]
