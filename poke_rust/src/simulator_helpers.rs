@@ -7,6 +7,7 @@ use crate::data::pokemon_move::PokemonMove;
 use crate::dex_data::{AccuracyType, MoveCategory, MoveData, MoveTarget, PokemonType, PseudoWeather, SideCondition, Terrain, Weather, HitEffect, MoveFlag, PokemonStat, Status};
 use crate::pokemon::{PokemonState, VolatileStatusState};
 use crate::dex_data::VolatileStatus;
+use rand::{thread_rng, Rng};
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -50,11 +51,18 @@ pub fn stage_multiplier(stage: i8) -> f64 {
 }
 
 pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat, ignore_negative: bool, ignore_positive: bool) -> f64 {
+    let wonder_room_active = state
+        .pseudo_weathers
+        .iter()
+        .any(|pseudo_weather| matches!(pseudo_weather, PseudoWeather::WonderRoom));
+
     let (stat_index, boost_index) = match stat {
         PokemonStat::Atk => (1, 0),
+        PokemonStat::Def if wonder_room_active => (4, 3),
+        PokemonStat::SpD if wonder_room_active => (2, 1),
         PokemonStat::Def => (2, 1),
-        PokemonStat::SpA => (3, 2),
         PokemonStat::SpD => (4, 3),
+        PokemonStat::SpA => (3, 2),
         PokemonStat::Spe => (5, 4),
     };
 
@@ -71,16 +79,25 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
     let mut val = base_stat * stage_multiplier(applied_stage);
 
     // Guts: +50% Attack when affected by a non-volatile status
-    if stat == PokemonStat::Atk && mon.ability == Ability::Guts && mon.status.is_some() {
+    if stat == PokemonStat::Atk
+        && !pokemon_ability_is_suppressed(state, mon)
+        && mon.ability == Ability::Guts
+        && mon.status.is_some()
+    {
         val *= 1.5;
     }
 
     // Marvel Scale: +50% Defense when affected by a non-volatile status
-    if stat == PokemonStat::Def && mon.ability == Ability::MarvelScale && mon.status.is_some() {
+    if stat == PokemonStat::Def
+        && !pokemon_ability_is_suppressed(state, mon)
+        && mon.ability == Ability::MarvelScale
+        && mon.status.is_some()
+    {
         val *= 1.5;
     }
 
     if stat == PokemonStat::Def
+        && !pokemon_ability_is_suppressed(state, mon)
         && mon.ability == Ability::GrassPelt
         && matches!(current_terrain(state), Some(Terrain::GrassyTerrain))
     {
@@ -88,6 +105,7 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
     }
 
     if stat == PokemonStat::SpA
+        && !pokemon_ability_is_suppressed(state, mon)
         && mon.ability == Ability::HadronEngine
         && matches!(current_terrain(state), Some(Terrain::ElectricTerrain))
     {
@@ -983,6 +1001,7 @@ pub fn apply_damage_and_check_game_over(
     target_slot: FieldSlot,
     damage: u16,
 ) -> Option<crate::battle::MatchState> {
+    let items_suppressed = items_are_suppressed(state);
     let target_mon = match target_slot.player {
         Player::P1 => state.p1_active_mons.get_mut(target_slot.slot_index as usize),
         Player::P2 => state.p2_active_mons.get_mut(target_slot.slot_index as usize),
@@ -990,7 +1009,7 @@ pub fn apply_damage_and_check_game_over(
 
     apply_damage(target_mon, damage);
 
-    if damage > 0 && matches!(target_mon.item, Item::AirBalloon) {
+    if damage > 0 && !items_suppressed && matches!(target_mon.item, Item::AirBalloon) {
         target_mon.item = Item::None;
     }
 
@@ -1081,6 +1100,10 @@ pub fn is_gravity_active(state: &BattleState) -> bool {
 }
 
 fn weather_is_suspended(state: &BattleState) -> bool {
+    if abilities_are_suppressed(state) {
+        return false;
+    }
+
     state
         .p1_active_mons
         .iter()
@@ -1099,6 +1122,29 @@ pub fn current_terrain(state: &BattleState) -> Option<Terrain> {
     state.terrain.clone()
 }
 
+pub fn items_are_suppressed(state: &BattleState) -> bool {
+    state
+        .pseudo_weathers
+        .iter()
+        .any(|pseudo_weather| matches!(pseudo_weather, PseudoWeather::MagicDeluge))
+}
+
+pub fn any_pokemon_has_neutralizing_gas(state: &BattleState) -> bool {
+    state
+        .p1_active_mons
+        .iter()
+        .chain(state.p2_active_mons.iter())
+        .any(|mon| !mon.fainted && mon.ability == Ability::NeutralizingGas)
+}
+
+pub fn abilities_are_suppressed(state: &BattleState) -> bool {
+    any_pokemon_has_neutralizing_gas(state)
+}
+
+fn pokemon_ability_is_suppressed(state: &BattleState, mon: &PokemonState) -> bool {
+    abilities_are_suppressed(state) && mon.ability != Ability::NeutralizingGas
+}
+
 fn terrain_matches(state: &BattleState, terrain: &Terrain) -> bool {
     matches!(current_terrain(state), Some(current) if std::mem::discriminant(&current) == std::mem::discriminant(terrain))
 }
@@ -1114,7 +1160,7 @@ pub fn pokemon_is_grounded(state: &BattleState, mon: &PokemonState) -> bool {
 
     !pokemon_has_type(mon, &PokemonType::Flying)
         && mon.ability != Ability::Levitate
-        && !matches!(mon.item, Item::AirBalloon)
+        && (!matches!(mon.item, Item::AirBalloon) || items_are_suppressed(state))
         && !has_status_volatile(mon, &VolatileStatus::MagnetRise)
         && !has_status_volatile(mon, &VolatileStatus::Telekinesis)
         && !mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _) | VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)))
@@ -1197,9 +1243,60 @@ fn weather_is_strong_winds(state: &BattleState) -> bool {
 }
 
 fn is_confused(mon: &PokemonState) -> bool {
-    mon.volatiles
-        .iter()
-        .any(|volatile_status| matches!(volatile_status, VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _)))
+    mon.volatiles.iter().any(|volatile_status| match volatile_status {
+        VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _) => true,
+        VolatileStatusState::MoveStatus(VolatileStatus::Confusion, _) => true,
+        _ => false,
+    })
+}
+
+pub fn confusion_turns_remaining(mon: &PokemonState) -> Option<u8> {
+    mon.volatiles.iter().find_map(|volatile_status| match volatile_status {
+        VolatileStatusState::MoveStatus(VolatileStatus::Confusion, turns) => Some(*turns),
+        VolatileStatusState::TurnStatus(VolatileStatus::Confusion, turns) => Some(*turns),
+        _ => None,
+    })
+}
+
+pub fn confusion_self_hit_damage_outcomes(
+    state: &BattleState,
+    attacker: &PokemonState,
+    damage_rolls: u8,
+) -> Vec<(u16, f64)> {
+    let attacking_stat = PokemonStat::Atk;
+    let defending_stat = PokemonStat::Def;
+
+    let attacker_stat = effective_stat(state, attacker, attacking_stat, false, false);
+    let target_defense = effective_stat(state, attacker, defending_stat, false, false);
+
+    let mut base_damage = (2.0 * attacker.level as f64 / 5.0).floor();
+    base_damage = (base_damage + 2.0).floor();
+    base_damage = (base_damage * 40.0).floor();
+    base_damage = (base_damage * attacker_stat).floor();
+    base_damage = (base_damage / target_defense).floor();
+    base_damage = (base_damage / 50.0).floor();
+    base_damage = (base_damage + 2.0).floor();
+
+    let burn_multiplier = if matches!(attacker.status, Some(Status::Burn)) && attacker.ability != Ability::Guts {
+        0.5
+    } else {
+        1.0
+    };
+
+    let damage_roll_values = selected_damage_rolls(damage_rolls);
+    let roll_probability = 1.0 / damage_roll_values.len() as f64;
+    let mut outcomes = Vec::new();
+
+    for roll in damage_roll_values {
+        let random_multiplier = roll as f64 / 100.0;
+        let mut damage = base_damage;
+        damage = (damage * random_multiplier).floor();
+        damage = (damage * burn_multiplier).floor();
+
+        outcomes.push((damage.max(0.0) as u16, roll_probability));
+    }
+
+    outcomes
 }
 
 fn round_div_half_up(numerator: i32, denominator: i32) -> i32 {
@@ -1266,19 +1363,19 @@ fn compute_accuracy_modifier_fp(
         modifier = apply_modifier_fp(modifier, 6840);
     }
 
-    if target.ability == Ability::TangledFeet && is_confused(target) {
+    if !pokemon_ability_is_suppressed(state, target) && target.ability == Ability::TangledFeet && is_confused(target) {
         modifier = apply_modifier_fp(modifier, 2048);
     }
 
-    if attacker.ability == Ability::Hustle && matches!(move_data.category, MoveCategory::Physical) {
+    if !pokemon_ability_is_suppressed(state, attacker) && attacker.ability == Ability::Hustle && matches!(move_data.category, MoveCategory::Physical) {
         modifier = apply_modifier_fp(modifier, 3277);
     }
 
-    if target.ability == Ability::SandVeil && weather_is_sandstorm(state) {
+    if !pokemon_ability_is_suppressed(state, target) && target.ability == Ability::SandVeil && weather_is_sandstorm(state) {
         modifier = apply_modifier_fp(modifier, 3277);
     }
 
-    if target.ability == Ability::SnowCloak && weather_is_snow(state) {
+    if !pokemon_ability_is_suppressed(state, target) && target.ability == Ability::SnowCloak && weather_is_snow(state) {
         modifier = apply_modifier_fp(modifier, 3277);
     }
 
@@ -1288,8 +1385,9 @@ fn compute_accuracy_modifier_fp(
         .enumerate()
         .filter(|(idx, mon)| {
             !mon.fainted
+                && !pokemon_ability_is_suppressed(state, mon)
                 && mon.ability == Ability::VictoryStar
-                && (*idx as u8 != user_slot.slot_index || attacker.ability == Ability::VictoryStar)
+                && (*idx as u8 != user_slot.slot_index || (!pokemon_ability_is_suppressed(state, attacker) && attacker.ability == Ability::VictoryStar))
         })
         .count();
 
@@ -1297,23 +1395,23 @@ fn compute_accuracy_modifier_fp(
         modifier = apply_modifier_fp(modifier, 4506);
     }
 
-    if attacker.ability == Ability::CompoundEyes {
+    if !pokemon_ability_is_suppressed(state, attacker) && attacker.ability == Ability::CompoundEyes {
         modifier = apply_modifier_fp(modifier, 5325);
     }
 
-    if matches!(target.item, Item::BrightPowder) {
+    if !items_are_suppressed(state) && matches!(target.item, Item::BrightPowder) {
         modifier = apply_modifier_fp(modifier, 3686);
     }
 
-    if matches!(target.item, Item::LaxIncense) {
+    if !items_are_suppressed(state) && matches!(target.item, Item::LaxIncense) {
         modifier = apply_modifier_fp(modifier, 3686);
     }
 
-    if matches!(attacker.item, Item::WideLens) {
+    if !items_are_suppressed(state) && matches!(attacker.item, Item::WideLens) {
         modifier = apply_modifier_fp(modifier, 4505);
     }
 
-    if matches!(attacker.item, Item::ZoomLens) && target_has_acted_this_turn(state, target_slot) {
+    if !items_are_suppressed(state) && matches!(attacker.item, Item::ZoomLens) && target_has_acted_this_turn(state, target_slot) {
         modifier = apply_modifier_fp(modifier, 4915);
     }
 
@@ -1421,7 +1519,7 @@ fn get_effective_speed(state: &BattleState, mon: &PokemonState) -> f32 {
 
     let mut speed = base_speed * multiplier;
 
-    if mon.ability == Ability::SurgeSurfer && matches!(current_terrain(state), Some(Terrain::ElectricTerrain)) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SurgeSurfer && matches!(current_terrain(state), Some(Terrain::ElectricTerrain)) {
         speed *= 2.0;
     }
 
@@ -1452,16 +1550,16 @@ fn side_has_tailwind(state: &BattleState, player: Player) -> bool {
 fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonState) -> f32 {
     let mut speed = get_effective_speed(state, mon);
 
-    if mon.ability == Ability::Chlorophyll && weather_is_sunlight(state) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::Chlorophyll && weather_is_sunlight(state) {
         speed *= 2.0;
     }
-    if mon.ability == Ability::SwiftSwim && weather_is_rain(state) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SwiftSwim && weather_is_rain(state) {
         speed *= 2.0;
     }
-    if mon.ability == Ability::SandRush && weather_is_sandstorm(state) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SandRush && weather_is_sandstorm(state) {
         speed *= 2.0;
     }
-    if mon.ability == Ability::SlushRush && weather_is_snow(state) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SlushRush && weather_is_snow(state) {
         speed *= 2.0;
     }
 
@@ -1586,19 +1684,21 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
 
     let ability = mon.ability.clone();
 
-    match ability {
-        Ability::ElectricSurge | Ability::HadronEngine => set_terrain(state, Terrain::ElectricTerrain, 5),
-        Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
-        Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
-        Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
-        Ability::Drought | Ability::OrichalcumPulse => set_weather(state, Weather::Sun, 5),
-        Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
-        Ability::Drizzle => set_weather(state, Weather::Rain, 5),
-        Ability::PrimordialSea => set_weather(state, Weather::HeavyRain, 0),
-        Ability::SandStream => set_weather(state, Weather::Sandstorm, 5),
-        Ability::SnowWarning => set_weather(state, Weather::Snow, 5),
-        Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
-        _ => {}
+    if !pokemon_ability_is_suppressed(state, mon) {
+        match ability {
+            Ability::ElectricSurge | Ability::HadronEngine => set_terrain(state, Terrain::ElectricTerrain, 5),
+            Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
+            Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
+            Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
+            Ability::Drought | Ability::OrichalcumPulse => set_weather(state, Weather::Sun, 5),
+            Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
+            Ability::Drizzle => set_weather(state, Weather::Rain, 5),
+            Ability::PrimordialSea => set_weather(state, Weather::HeavyRain, 0),
+            Ability::SandStream => set_weather(state, Weather::Sandstorm, 5),
+            Ability::SnowWarning => set_weather(state, Weather::Snow, 5),
+            Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
+            _ => {}
+        }
     }
 
     trigger_terrain_seed_items(state);
@@ -1714,8 +1814,7 @@ fn decrement_volatile_statuses(mons: &mut [PokemonState]) {
         let mut kept = Vec::with_capacity(mon.volatiles.len());
 
         for volatile in mon.volatiles.drain(..) {
-            match volatile {
-                VolatileStatusState::TurnStatus(effect, turns) => {
+            match volatile {                VolatileStatusState::TurnStatus(effect, turns) => {
                     if turns == 0 {
                         kept.push(VolatileStatusState::TurnStatus(effect, 0));
                     } else if turns > 1 {
@@ -1908,6 +2007,8 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
     let rain_active = weather_is_rain(state);
     let sunlight_active = weather_is_sunlight(state);
     let snow_active = weather_is_snow(state);
+    let abilities_suppressed = abilities_are_suppressed(state);
+    let items_suppressed = items_are_suppressed(state);
 
     let apply_weather_residuals = |mon: &mut PokemonState| {
         if mon.fainted {
@@ -1917,28 +2018,28 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
         let max_hp = mon.stats[0].max(1);
 
         if rain_active {
-            if mon.ability == Ability::RainDish {
+            if !abilities_suppressed && mon.ability == Ability::RainDish {
                 let heal = (max_hp as u32 / 16) as u16;
                 mon.hp = mon.hp.saturating_add(heal).min(max_hp);
                 mon.fainted = false;
             }
-            if mon.ability == Ability::DrySkin {
+            if !abilities_suppressed && mon.ability == Ability::DrySkin {
                 let heal = (max_hp as u32 / 8) as u16;
                 mon.hp = mon.hp.saturating_add(heal).min(max_hp);
                 mon.fainted = false;
             }
         }
 
-        if snow_active && mon.ability == Ability::IceBody {
+        if snow_active && !abilities_suppressed && mon.ability == Ability::IceBody {
             let heal = (max_hp as u32 / 16) as u16;
             mon.hp = mon.hp.saturating_add(heal).min(max_hp);
             mon.fainted = false;
         }
 
         if sunlight_active {
-            if mon.ability == Ability::DrySkin {
+            if !abilities_suppressed && mon.ability == Ability::DrySkin {
                 let dmg = (max_hp as u32 / 8) as u16;
-                if dmg > 0 && mon.ability != Ability::MagicGuard {
+                if dmg > 0 {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -1947,9 +2048,9 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
                 }
             }
 
-            if mon.ability == Ability::SolarPower {
+            if !abilities_suppressed && mon.ability == Ability::SolarPower {
                 let dmg = (max_hp as u32 / 8) as u16;
-                if dmg > 0 && mon.ability != Ability::MagicGuard {
+                if dmg > 0 {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -1966,12 +2067,13 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
         if pokemon_has_type(mon, &PokemonType::Steel)
             || pokemon_has_type(mon, &PokemonType::Rock)
             || pokemon_has_type(mon, &PokemonType::Ground)
-            || mon.ability == Ability::SandForce
-            || mon.ability == Ability::SandRush
-            || mon.ability == Ability::SandVeil
-            || mon.ability == Ability::MagicGuard
-            || mon.ability == Ability::Overcoat
-            || matches!(mon.item, Item::SafetyGoggles)
+            || (!abilities_suppressed
+                && (mon.ability == Ability::SandForce
+                    || mon.ability == Ability::SandRush
+                    || mon.ability == Ability::SandVeil
+                    || mon.ability == Ability::MagicGuard
+                    || mon.ability == Ability::Overcoat))
+            || (!items_suppressed && matches!(mon.item, Item::SafetyGoggles))
         {
             return;
         }
@@ -1988,14 +2090,14 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
     let process = |mon: &mut PokemonState| {
         if mon.fainted { return; }
 
-        if mon.ability == Ability::Hydration && rain_active {
+        if !abilities_suppressed && mon.ability == Ability::Hydration && rain_active {
             mon.status = None;
         }
 
         match mon.status {
             Some(Status::Burn) => {
                 let dmg = (mon.stats[0] as u32 / 16) as u16;
-                if dmg > 0 && mon.ability != Ability::MagicGuard {
+                if dmg > 0 && (abilities_suppressed || mon.ability != Ability::MagicGuard) {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -2004,7 +2106,7 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
             }
             Some(Status::Poison) => {
                 let dmg = (mon.stats[0] as u32 / 8) as u16;
-                if dmg > 0 && mon.ability != Ability::MagicGuard {
+                if dmg > 0 && (abilities_suppressed || mon.ability != Ability::MagicGuard) {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -2015,7 +2117,7 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
                 let new_n = n.saturating_add(1);
                 mon.status = Some(Status::ToxicPoison(new_n));
                 let dmg = ((mon.stats[0] as u32 * new_n as u32) / 16) as u16;
-                if dmg > 0 && mon.ability != Ability::MagicGuard {
+                if dmg > 0 && (abilities_suppressed || mon.ability != Ability::MagicGuard) {
                     apply_damage(mon, dmg);
                     if mon.fainted {
                         clear_pokemon_on_faint(mon);
@@ -2095,6 +2197,13 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
     let already_has = has_status_volatile(mon, volatile);
 
     if !already_has {
+        if matches!(volatile, VolatileStatus::Confusion)
+            && !pokemon_ability_is_suppressed(state, mon)
+            && mon.ability == Ability::OwnTempo
+        {
+            return;
+        }
+
         if matches!(volatile, VolatileStatus::Confusion) && pokemon_is_on_terrain(state, mon, &Terrain::MistyTerrain) {
             return;
         }
@@ -2103,10 +2212,15 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             return;
         }
 
-        let is_move_status = matches!(
-            volatile,
-            VolatileStatus::Disable | VolatileStatus::Encore | VolatileStatus::GlaiveRush | VolatileStatus::Taunt | VolatileStatus::SemiInvulnerable(_)
-        );
+            let is_move_status = matches!(
+                volatile,
+                VolatileStatus::Disable
+                    | VolatileStatus::Encore
+                    | VolatileStatus::GlaiveRush
+                    | VolatileStatus::Taunt
+                    | VolatileStatus::SemiInvulnerable(_)
+                    | VolatileStatus::Confusion
+            );
 
         let duration = match volatile {
             VolatileStatus::Disable => 4,
@@ -2114,6 +2228,7 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             VolatileStatus::Taunt => 3,
             VolatileStatus::GlaiveRush => 1,
             VolatileStatus::SemiInvulnerable(_) => 0,
+            VolatileStatus::Confusion => thread_rng().gen_range(2..=5),
             _ => get_volatile_duration(volatile),
         };
 
@@ -2382,10 +2497,10 @@ pub fn clear_pokemon_on_faint(mon: &mut PokemonState) {
 
 /// Check if a Pokémon is immune to Rage Powder based on type, ability, or item.
 /// Grass-types, Pokémon with Overcoat ability, and those holding Safety Googles are immune.
-pub fn is_immune_to_powder(mon: &PokemonState) -> bool {
+pub fn is_immune_to_powder(state: &BattleState, mon: &PokemonState) -> bool {
     pokemon_has_type(mon, &PokemonType::Grass)
-        || mon.ability == Ability::Overcoat
-        || matches!(mon.item, Item::SafetyGoggles)
+    || (!abilities_are_suppressed(state) && mon.ability == Ability::Overcoat)
+    || (!items_are_suppressed(state) && matches!(mon.item, Item::SafetyGoggles))
 }
 
 /// Check if a redirect target has both Sky Drop and a Follow Me/Rage Powder effect.
@@ -2449,7 +2564,7 @@ pub fn check_and_apply_redirection(
 
         // Check for RagePowder (with immunity checks)
         if has_status_volatile(mon, &VolatileStatus::RagePowder) {
-            if !is_immune_to_powder(mon) {
+            if !is_immune_to_powder(state, mon) {
                 redirectors.push((
                     FieldSlot {
                         player: opposing_player,

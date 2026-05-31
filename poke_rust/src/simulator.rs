@@ -90,6 +90,33 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
     }
 }
 
+fn resolve_confusion_self_hit_outcomes(
+    state: &BattleState,
+    user_slot: FieldSlot,
+    move_name: &PokemonMove,
+    config: DamageConfig,
+) -> Vec<(MatchState, f64)> {
+    let Some(attacker) = get_pokemon_at_slot(state, user_slot).cloned() else {
+        return vec![(MatchState::BattleState(state.clone()), 1.0)];
+    };
+
+    let damage_outcomes = simulator_helpers::confusion_self_hit_damage_outcomes(state, &attacker, config.damage_rolls);
+    let mut outcomes = Vec::new();
+
+    for (damage, probability) in damage_outcomes {
+        let mut branch_state = state.clone();
+        decrement_move_pp(&mut branch_state, user_slot, move_name);
+
+        if let Some(game_over_state) = simulator_helpers::apply_damage_and_check_game_over(&mut branch_state, user_slot, damage) {
+            outcomes.push((game_over_state, probability));
+        } else {
+            outcomes.push((MatchState::BattleState(branch_state), probability));
+        }
+    }
+
+    outcomes
+}
+
 /// Handles semi-invulnerable and charging move mechanics.
 /// Returns Some(outcomes) if the action is fully handled (charging/invulnerable mechanics),
 /// None if normal damage calculation should proceed.
@@ -452,80 +479,6 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(fail_state), 1.0)];
     }
 
-    // Handle Sleep Talk: picks a random known move while asleep and uses it instead
-    if action.move_name == PokemonMove::SleepTalk {
-        // Must be asleep to use SleepTalk
-        if !matches!(attacker.status, Some(Status::Sleep(_))) {
-            return vec![(MatchState::BattleState(next_state), 1.0)];
-        }
-
-        let original_sleep_status = attacker.status.clone();
-
-        // Collect candidate moves (exclude SleepTalk itself)
-        let mut candidates: Vec<PokemonMove> = Vec::new();
-        for mov_opt in attacker.moves.iter() {
-            if let Some(mv) = mov_opt {
-                if *mv == PokemonMove::SleepTalk { continue; }
-                // Skip charge moves or moves flagged NoSleepTalk if we can inspect them
-                if let Some(md) = move_dex.get(mv) {
-                    let is_charge = md.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(&crate::dex_data::MoveFlag::Charge));
-                    let no_sleep_talk = md.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(&crate::dex_data::MoveFlag::NoSleepTalk));
-                    if is_charge || no_sleep_talk { continue; }
-                }
-                candidates.push(mv.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            // Consume SleepTalk PP and do nothing
-            let mut fail_state = next_state.clone();
-            if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
-                if let Some(idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
-                    mon.move_pp[idx] = mon.move_pp[idx].saturating_sub(1);
-                }
-            }
-            return vec![(MatchState::BattleState(fail_state), 1.0)];
-        }
-
-        // Branch on each candidate move, selected uniformly
-        let mut combined: Vec<(MatchState, f64)> = Vec::new();
-        let choice_prob = 1.0 / candidates.len() as f64;
-        for cand in &candidates {
-            if let Some(cand_data) = move_dex.get(cand) {
-                let mut new_action = action.clone();
-                new_action.move_name = cand.clone();
-                let mut sleep_talk_state = next_state.clone();
-                if let Some(mon) = match action.user_slot.player {
-                    Player::P1 => sleep_talk_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-                    Player::P2 => sleep_talk_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
-                } {
-                    mon.status = None;
-                }
-                // Recursively simulate chosen move
-                let branches = possible_damage_outcomes_for_move(&sleep_talk_state, &new_action, cand_data, config, move_dex);
-                for (mut bs, p) in branches {
-                    // For each returned state, revert PP consumption of the chosen move and consume SleepTalk PP instead
-                    if let MatchState::BattleState(ref mut bstate) = bs {
-                        if let Some(mon) = match action.user_slot.player { Player::P1 => bstate.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => bstate.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
-                            mon.status = original_sleep_status.clone();
-                            // Find candidate move index and increment PP back
-                            if let Some(cand_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(cand)) {
-                                mon.move_pp[cand_idx] = mon.move_pp[cand_idx].saturating_add(1);
-                            }
-                            // Decrement SleepTalk PP
-                            if let Some(sleep_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
-                                mon.move_pp[sleep_idx] = mon.move_pp[sleep_idx].saturating_sub(1);
-                            }
-                        }
-                    }
-                    combined.push((bs, p * choice_prob));
-                }
-            }
-        }
-
-        return coalesce_match_state_branches(combined);
-    }
-
     // --- Status pre-move handling: Sleep, Frozen, Paralysis ---
     // Handle moves that thaw the user on use: thaw before attempt
     if let Some(Status::Frozen(_)) = attacker.status {
@@ -594,7 +547,166 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
+    if action.move_name == PokemonMove::SleepTalk && !matches!(attacker.status, Some(Status::Sleep(_))) {
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
+    let mut confusion_self_hit_outcomes: Option<Vec<(MatchState, f64)>> = None;
+    if let Some(confusion_turns) = simulator_helpers::confusion_turns_remaining(&attacker) {
+        // `decrement_move_statuses` has already run for this attacker, so
+        // `confusion_turns` is the post-decrement value. If it's >= 1,
+        // confusion can still trigger a self-hit branch.
+        if confusion_turns >= 1 {
+            let mut confusion_state = next_state.clone();
+
+            match action.user_slot.player {
+                Player::P1 => {
+                    if let Some(mon) = confusion_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize) {
+                        mon.volatiles = attacker.volatiles.clone();
+                    }
+                }
+                Player::P2 => {
+                    if let Some(mon) = confusion_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) {
+                        mon.volatiles = attacker.volatiles.clone();
+                    }
+                }
+            }
+
+            confusion_self_hit_outcomes = Some(resolve_confusion_self_hit_outcomes(
+                &confusion_state,
+                action.user_slot,
+                &action.move_name,
+                config,
+            ));
+
+            next_state = confusion_state;
+        } else {
+            // If post-decrement confusion is 0, the mon has snapped out; copy volatiles back.
+            match action.user_slot.player {
+                Player::P1 => {
+                    if let Some(mon) = next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize) {
+                        mon.volatiles = attacker.volatiles.clone();
+                    }
+                }
+                Player::P2 => {
+                    if let Some(mon) = next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) {
+                        mon.volatiles = attacker.volatiles.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    if move_name == PokemonMove::Splash {
+        if let Some(confusion_outcomes) = &confusion_self_hit_outcomes {
+            let mut combined_confused = confusion_outcomes
+                .iter()
+                .cloned()
+                .map(|(state, probability)| (state, probability * 0.5))
+                .collect::<Vec<_>>();
+
+            let mut no_effect_state = next_state.clone();
+            decrement_move_pp(&mut no_effect_state, action.user_slot, &action.move_name);
+            combined_confused.push((MatchState::BattleState(no_effect_state), 0.5));
+            return coalesce_match_state_branches(combined_confused);
+        }
+
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
+    // Handle Sleep Talk: picks a random known move while asleep and uses it instead
+    if action.move_name == PokemonMove::SleepTalk {
+        let original_sleep_status = attacker.status.clone();
+
+        // Collect candidate moves (exclude SleepTalk itself)
+        let mut candidates: Vec<PokemonMove> = Vec::new();
+        for mov_opt in attacker.moves.iter() {
+            if let Some(mv) = mov_opt {
+                if *mv == PokemonMove::SleepTalk { continue; }
+                // Skip charge moves or moves flagged NoSleepTalk if we can inspect them
+                if let Some(md) = move_dex.get(mv) {
+                    let is_charge = md.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(&crate::dex_data::MoveFlag::Charge));
+                    let no_sleep_talk = md.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(&crate::dex_data::MoveFlag::NoSleepTalk));
+                    if is_charge || no_sleep_talk { continue; }
+                }
+                candidates.push(mv.clone());
+            }
+        }
+
+        if candidates.is_empty() {
+            // Consume SleepTalk PP and do nothing
+            let mut fail_state = next_state.clone();
+            if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                if let Some(idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
+                    mon.move_pp[idx] = mon.move_pp[idx].saturating_sub(1);
+                }
+            }
+            return vec![(MatchState::BattleState(fail_state), 1.0)];
+        }
+
+        // Branch on each candidate move, selected uniformly
+        let mut combined: Vec<(MatchState, f64)> = Vec::new();
+        let choice_prob = 1.0 / candidates.len() as f64;
+        for cand in &candidates {
+            if let Some(cand_data) = move_dex.get(cand) {
+                let mut new_action = action.clone();
+                new_action.move_name = cand.clone();
+                let mut sleep_talk_state = next_state.clone();
+                if let Some(mon) = match action.user_slot.player {
+                    Player::P1 => sleep_talk_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+                    Player::P2 => sleep_talk_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+                } {
+                    mon.status = None;
+                }
+                // Recursively simulate chosen move
+                let branches = possible_damage_outcomes_for_move(&sleep_talk_state, &new_action, cand_data, config, move_dex);
+                for (mut bs, p) in branches {
+                    // For each returned state, revert PP consumption of the chosen move and consume SleepTalk PP instead
+                    if let MatchState::BattleState(ref mut bstate) = bs {
+                        if let Some(mon) = match action.user_slot.player { Player::P1 => bstate.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => bstate.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                            mon.status = original_sleep_status.clone();
+                            // Find candidate move index and increment PP back
+                            if let Some(cand_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(cand)) {
+                                mon.move_pp[cand_idx] = mon.move_pp[cand_idx].saturating_add(1);
+                            }
+                            // Decrement SleepTalk PP
+                            if let Some(sleep_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
+                                mon.move_pp[sleep_idx] = mon.move_pp[sleep_idx].saturating_sub(1);
+                            }
+                        }
+                    }
+                    combined.push((bs, p * choice_prob));
+                }
+            }
+        }
+
+        if let Some(confusion_outcomes) = confusion_self_hit_outcomes {
+            let mut combined_confused = confusion_outcomes
+                .into_iter()
+                .map(|(state, probability)| (state, probability * 0.5))
+                .collect::<Vec<_>>();
+            combined_confused.extend(combined.into_iter().map(|(state, probability)| (state, probability * 0.5)));
+            return coalesce_match_state_branches(combined_confused);
+        }
+
+        return coalesce_match_state_branches(combined);
+    }
+
     if move_name == PokemonMove::SteelRoller && simulator_helpers::current_terrain(&next_state).is_none() {
+        if let Some(confusion_outcomes) = &confusion_self_hit_outcomes {
+            let mut combined_confused = confusion_outcomes
+                .iter()
+                .cloned()
+                .map(|(state, probability)| (state, probability * 0.5))
+                .collect::<Vec<_>>();
+
+            let mut no_effect_state = next_state.clone();
+            decrement_move_pp(&mut no_effect_state, action.user_slot, &action.move_name);
+            combined_confused.push((MatchState::BattleState(no_effect_state), 0.5));
+            return coalesce_match_state_branches(combined_confused);
+        }
+
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -643,6 +755,19 @@ fn possible_damage_outcomes_for_move(
     }
 
     if target_slots.is_empty() {
+        if let Some(confusion_outcomes) = &confusion_self_hit_outcomes {
+            let mut combined_confused = confusion_outcomes
+                .iter()
+                .cloned()
+                .map(|(state, probability)| (state, probability * 0.5))
+                .collect::<Vec<_>>();
+
+            let mut no_effect_state = next_state.clone();
+            decrement_move_pp(&mut no_effect_state, action.user_slot, &action.move_name);
+            combined_confused.push((MatchState::BattleState(no_effect_state), 0.5));
+            return coalesce_match_state_branches(combined_confused);
+        }
+
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -762,6 +887,19 @@ fn possible_damage_outcomes_for_move(
 
     // If no valid targets remain, return no damage
     if per_target_outcomes.is_empty() {
+        if let Some(confusion_outcomes) = &confusion_self_hit_outcomes {
+            let mut combined_confused = confusion_outcomes
+                .iter()
+                .cloned()
+                .map(|(state, probability)| (state, probability * 0.5))
+                .collect::<Vec<_>>();
+
+            let mut no_effect_state = next_state.clone();
+            decrement_move_pp(&mut no_effect_state, action.user_slot, &action.move_name);
+            combined_confused.push((MatchState::BattleState(no_effect_state), 0.5));
+            return coalesce_match_state_branches(combined_confused);
+        }
+
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -803,6 +941,7 @@ fn possible_damage_outcomes_for_move(
                     let mut sand_spit_triggered = false;
                     let mut seed_sower_triggered = false;
                     let combined_prob = existing_prob * outcome_prob;
+                    let items_suppressed = simulator_helpers::items_are_suppressed(&branch_state);
 
                     if let Some(target_mon) = match target_slot.player {
                         Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
@@ -829,7 +968,7 @@ fn possible_damage_outcomes_for_move(
 
                             simulator_helpers::apply_damage(target_mon, *damage);
 
-                            if *damage > 0 && matches!(target_mon.item, crate::data::item::Item::AirBalloon) {
+                            if *damage > 0 && !items_suppressed && matches!(target_mon.item, crate::data::item::Item::AirBalloon) {
                                 target_mon.item = crate::data::item::Item::None;
                             }
 
@@ -1073,7 +1212,17 @@ fn possible_damage_outcomes_for_move(
 
     // Scale normal outcomes by success probability (1 - combined_fail_prob)
     let combined_fail_prob = par_fail_prob + status_fail_prob;
-    let success_scale = (1.0 - combined_fail_prob).max(0.0);
+    let mut success_scale = (1.0 - combined_fail_prob).max(0.0);
+    if confusion_self_hit_outcomes.is_some() {
+        success_scale *= 0.5;
+    }
+
+    if let Some(confusion_outcomes) = &confusion_self_hit_outcomes {
+        for (state, prob) in confusion_outcomes {
+            final_outcomes.push((state.clone(), prob * success_scale));
+        }
+    }
+
     for (state, prob) in all_outcomes {
         final_outcomes.push((state, prob * success_scale));
     }

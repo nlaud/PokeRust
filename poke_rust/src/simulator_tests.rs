@@ -174,6 +174,14 @@ mod tests {
             .any(|volatile| matches!(volatile, VolatileStatusState::Charging(charged_move, _) if *charged_move == move_name))
     }
 
+    fn confusion_turns(mon: &PokemonState) -> Option<u8> {
+        mon.volatiles.iter().find_map(|volatile| match volatile {
+            VolatileStatusState::MoveStatus(VolatileStatus::Confusion, turns) => Some(*turns),
+            VolatileStatusState::TurnStatus(VolatileStatus::Confusion, turns) => Some(*turns),
+            _ => None,
+        })
+    }
+
     fn run_single_turn(
         state: &MatchState,
         p1_cmd: &PlayerCommand,
@@ -6040,8 +6048,363 @@ mod tests {
         );
 
         assert!(misty_outcomes.iter().all(|(state, _)| {
-            matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].volatiles.iter().all(|volatile| !matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _))))
+            matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].volatiles.iter().all(|volatile| !matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::Confusion, _) | VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _))))
         }));
+    }
+
+    #[test]
+    fn confuse_ray_duration_and_own_tempo() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let duration_state = MatchState::BattleState(battle_state_from_lists(
+            vec![build_pokemon_state(
+                Species::Amoonguss,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::ConfuseRay), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Grass),
+                None,
+                None,
+                false,
+            )],
+            vec![],
+            vec![build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            )],
+            vec![],
+        ));
+
+        let duration_outcomes = run_single_turn(
+            &duration_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(duration_outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if confusion_turns(&bs.p2_active_mons[0]).map(|turns| (2..=5).contains(&turns)).unwrap_or(false))
+        }));
+
+        let own_tempo_state = MatchState::BattleState(battle_state_from_lists(
+            vec![build_pokemon_state(
+                Species::Amoonguss,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::ConfuseRay), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Grass),
+                None,
+                None,
+                false,
+            )],
+            vec![],
+            vec![build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::OwnTempo),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                None,
+                None,
+                false,
+            )],
+            vec![],
+        ));
+
+        let own_tempo_outcomes = run_single_turn(
+            &own_tempo_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(own_tempo_outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::BattleState(bs) if confusion_turns(&bs.p2_active_mons[0]).is_none())
+        }));
+    }
+
+    #[test]
+    fn tangled_feet_halves_accuracy_against_confused_target() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let initial_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Earthquake), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Normal),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Garchomp,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::TangledFeet),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Dragon),
+                    None,
+                    None,
+                    false,
+                )],
+                vec![],
+            );
+            state.p2_active_mons[0].volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Confusion, 2));
+            state
+        });
+
+        let initial_hp = if let MatchState::BattleState(bs) = &initial_state {
+            bs.p2_active_mons[0].hp
+        } else {
+            0
+        };
+
+        let outcomes = simulate_turn(
+            &initial_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+            false,
+            1,
+        );
+
+        let hit_prob = hit_probability(&outcomes, initial_hp);
+        assert!((hit_prob - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn confusion_branches_and_damage_rolls() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let initial_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::DoubleEdge), Some(PokemonMove::Splash), None, None]),
+                    None,
+                    Some(Ability::None),
+                    Some(Nature::Adamant),
+                    None,
+                    None,
+                    Some([0, 0, 0, 0, 0, 0]),
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Garchomp,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    Some(Nature::Hardy),
+                    None,
+                    None,
+                    Some([0, 0, 0, 0, 0, 0]),
+                    None,
+                    false,
+                )],
+                vec![],
+            );
+            state.p1_active_mons[0].volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Confusion, 2));
+            state
+        });
+
+        let initial_p1_hp = if let MatchState::BattleState(bs) = &initial_state {
+            bs.p1_active_mons[0].hp
+        } else {
+            0
+        };
+        let initial_p2_hp = if let MatchState::BattleState(bs) = &initial_state {
+            bs.p2_active_mons[0].hp
+        } else {
+            0
+        };
+
+        let outcomes = simulate_turn(
+            &initial_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+            false,
+            16,
+        );
+
+        let total_probability: f64 = outcomes.iter().map(|(_, probability)| *probability).sum();
+        assert!((total_probability - 1.0).abs() < 1e-9);
+
+        let mut target_damages = Vec::new();
+        let mut self_damages = Vec::new();
+
+        for (state, _) in &outcomes {
+            let MatchState::BattleState(bs) = state else {
+                panic!("expected battle state outcome");
+            };
+
+            let p1_loss = initial_p1_hp.saturating_sub(bs.p1_active_mons[0].hp);
+            let p2_loss = initial_p2_hp.saturating_sub(bs.p2_active_mons[0].hp);
+
+            if p2_loss > 0 {
+                target_damages.push(p2_loss);
+            } else if p1_loss > 0 {
+                self_damages.push(p1_loss);
+            } else {
+                panic!("expected confusion to produce either self-damage or target damage");
+            }
+
+            assert_eq!(confusion_turns(&bs.p1_active_mons[0]), Some(1));
+        }
+
+        target_damages.sort_unstable();
+        self_damages.sort_unstable();
+
+        assert_eq!(target_damages, vec![84, 85, 87, 88, 90, 91, 93, 94, 96, 97, 99, 100]);
+        assert_eq!(self_damages, vec![26, 27, 28, 29, 30, 31]);
+    }
+
+    #[test]
+    fn confusion_final_turn_snaps_out() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let initial_state = MatchState::BattleState({
+            let mut state = battle_state_from_lists(
+                vec![build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::DoubleEdge), Some(PokemonMove::Splash), None, None]),
+                    None,
+                    Some(Ability::None),
+                    Some(Nature::Adamant),
+                    None,
+                    None,
+                    Some([0, 0, 0, 0, 0, 0]),
+                    None,
+                    false,
+                )],
+                vec![],
+                vec![build_pokemon_state(
+                    Species::Garchomp,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    Some(Nature::Hardy),
+                    None,
+                    None,
+                    Some([0, 0, 0, 0, 0, 0]),
+                    None,
+                    false,
+                )],
+                vec![],
+            );
+            state.p1_active_mons[0].volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Confusion, 1));
+            state
+        });
+
+        let initial_p1_hp = if let MatchState::BattleState(bs) = &initial_state {
+            bs.p1_active_mons[0].hp
+        } else {
+            0
+        };
+        let initial_p2_hp = if let MatchState::BattleState(bs) = &initial_state {
+            bs.p2_active_mons[0].hp
+        } else {
+            0
+        };
+
+        let outcomes = simulate_turn(
+            &initial_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+            false,
+            16,
+        );
+
+        let mut target_damages = Vec::new();
+        let mut self_damages = Vec::new();
+
+        for (state, _) in &outcomes {
+            let MatchState::BattleState(bs) = state else {
+                panic!("expected battle state outcome");
+            };
+
+            let p1_loss = initial_p1_hp.saturating_sub(bs.p1_active_mons[0].hp);
+            let p2_loss = initial_p2_hp.saturating_sub(bs.p2_active_mons[0].hp);
+
+            if p2_loss > 0 {
+                target_damages.push(p2_loss);
+            } else if p1_loss > 0 {
+                self_damages.push(p1_loss);
+            } else {
+                panic!("expected confusion to produce either self-damage or target damage");
+            }
+
+            assert!(confusion_turns(&bs.p1_active_mons[0]).is_none());
+        }
+
+        target_damages.sort_unstable();
+        self_damages.sort_unstable();
+
+        assert_eq!(target_damages, vec![84, 85, 87, 88, 90, 91, 93, 94, 96, 97, 99, 100]);
+        assert!(self_damages.is_empty());
     }
 
     #[test]
@@ -6974,5 +7337,186 @@ mod tests {
 
         simulator_helpers::apply_end_of_turn_status_effects(&mut residual_state);
         assert_eq!(residual_state.p1_active_mons[0].hp, initial_hp);
+    }
+
+    #[test]
+    fn magic_room_suppresses_safety_goggles_against_sand() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let sand_target = build_pokemon_state(
+            Species::Snorlax,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            None,
+            Some(Item::SafetyGoggles),
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let mut outside_room = battle_state_from_lists(
+            vec![build_pokemon_state(
+                Species::Magikarp,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )],
+            vec![],
+            vec![sand_target.clone()],
+            vec![],
+        );
+        outside_room.weather = Some(Weather::Sandstorm);
+        outside_room.weather_turns = Some(5);
+        let outside_before = outside_room.p2_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut outside_room);
+        assert_eq!(outside_room.p2_active_mons[0].hp, outside_before);
+
+        let mut magic_room = battle_state_from_lists(
+            vec![build_pokemon_state(
+                Species::Magikarp,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )],
+            vec![],
+            vec![sand_target],
+            vec![],
+        );
+        magic_room.weather = Some(Weather::Sandstorm);
+        magic_room.weather_turns = Some(5);
+        magic_room.pseudo_weathers.push(PseudoWeather::MagicDeluge);
+        magic_room.pseudo_weather_turns.push(5);
+        let magic_before = magic_room.p2_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut magic_room);
+        assert!(magic_room.p2_active_mons[0].hp < magic_before);
+    }
+
+    #[test]
+    fn wonder_room_swaps_defenses_and_turns_ohko_into_game_over() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let garchomp = build_pokemon_state(
+            Species::Garchomp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Earthquake), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Jolly),
+            None,
+            None,
+            Some([2, 32, 0, 0, 0, 32]),
+            Some([31, 31, 31, 31, 31, 31]),
+            true,
+        );
+
+        let garchomp_partner = build_pokemon_state(
+            Species::Magikarp,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([32, 0, 0, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            true,
+        );
+
+        let aggron = build_pokemon_state(
+            Species::Aggron,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Impish),
+            None,
+            None,
+            Some([32, 0, 28, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            true,
+        );
+
+        let aggron_partner = build_pokemon_state(
+            Species::Aggron,
+            &pokemon_dex,
+            &move_dex,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([32, 0, 28, 0, 0, 0]),
+            Some([31, 31, 31, 31, 31, 31]),
+            true,
+        );
+
+        let outside_outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![garchomp.clone(), garchomp_partner.clone()], vec![], vec![aggron.clone(), aggron_partner.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let direct_state = battle_state_from_lists(vec![garchomp.clone(), garchomp_partner.clone()], vec![], vec![aggron.clone(), aggron_partner.clone()], vec![]);
+        let direct_outcomes = simulator_helpers::calculate_damage_outcomes_for_target(
+            &direct_state,
+            simulator_helpers::get_pokemon_at_slot(&direct_state, FieldSlot { player: Player::P1, slot_index: 0 }).unwrap(),
+            simulator_helpers::get_pokemon_at_slot(&direct_state, FieldSlot { player: Player::P2, slot_index: 0 }).unwrap(),
+            FieldSlot { player: Player::P1, slot_index: 0 },
+            FieldSlot { player: Player::P2, slot_index: 0 },
+            move_dex.get(&PokemonMove::Earthquake).unwrap(),
+            DamageConfig { consider_crit: false, damage_rolls: 1 },
+            0.75,
+            1.0,
+        );
+
+        let mut wonder_state = battle_state_from_lists(vec![garchomp, garchomp_partner], vec![], vec![aggron, aggron_partner], vec![]);
+        wonder_state.pseudo_weathers.push(PseudoWeather::WonderRoom);
+        wonder_state.pseudo_weather_turns.push(5);
+
+        let wonder_outcomes = run_single_turn(
+            &MatchState::BattleState(wonder_state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        assert!(wonder_outcomes.iter().any(|(state, _)| matches!(state, MatchState::GameOverState { winner } if *winner == Player::P1)));
     }
 }
