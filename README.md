@@ -1,5 +1,5 @@
-# USAGE
-cargo run -- --p1 ./teamsheets/{teamsheet path} --p2 ./teamsheets/{teamsheet path} -v 3
+# USAGE (within /poke_rust)
+cargo run -- --p1 ../teamsheets/{teamsheet path} --p2 ../teamsheets/{teamsheet path} -v 3
 
 # TODO
 

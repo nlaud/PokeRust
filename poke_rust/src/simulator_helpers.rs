@@ -1424,7 +1424,6 @@ fn target_has_acted_this_turn(state: &BattleState, target_slot: FieldSlot) -> bo
             Action::SwitchAction(s) => Some(s.user_slot),
             Action::MegaAction(m) => Some(m.user_slot),
             Action::TeraAction(t) => Some(t.user_slot),
-            Action::Pass => None,
         };
 
         slot.map(|s| s.player == target_slot.player && s.slot_index == target_slot.slot_index)
@@ -1683,7 +1682,6 @@ fn get_action_type_priority(action: &Action) -> u8 {
         Action::MegaAction(_) => 1,
         Action::TeraAction(_) => 2,
         Action::MoveAction(_) => 3,
-        Action::Pass => 4,
     }
 }
 

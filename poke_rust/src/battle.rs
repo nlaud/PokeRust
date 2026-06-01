@@ -81,7 +81,6 @@ pub enum Action{
     SwitchAction(SwitchAction),
     MegaAction(MegaAction),
     TeraAction(TeraAction),
-    Pass
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
