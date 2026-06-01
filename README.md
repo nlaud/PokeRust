@@ -9,13 +9,12 @@ cargo run -- --p1 ./teamsheets/{teamsheet path} --p2 ./teamsheets/{teamsheet pat
 - Create a function to take in battle state and battle actions, then apply those to create a vector of tuples possible battle states resulting from that along with their probabilities.
     - Things to keep in mind: Neutralizing Gas and Magic Room !!!!!!!
     - Later focus SLOWLY on implementing actual battle functions
-        - Multi-hit moves, switch out moves
+        - Switch out moves
         - Struggle
         - Berries, Unnerve?, Other Consumables (sash), Type Boost Items
-        - Test cases for major features
-        - Leftovers, misc. items (bright powder?)
         - Choice Items
-        - Side conditions (Types of spikes)
+        - Leftovers, misc. items (bright powder?)
+        - Side conditions (Types of spikes, are there more?)
         - Other significant abilities (Prankster, sturdy, pixilate + dragonize, spicy spray, shadow tag, clear body, huge power, zero to hero, scrappy, parental bond, intimidate, competetive + defiant, mega sol, mega launcher, levitate, telepathy, cloud nine, multiscale, stamina, mold breaker, disguise, technician, scrappy, compound eyes, friend guard)
         - Other significant items!
         - Moves with unique effects (explosion, encore, disable, skill swap, roost, burn up, body press, foul play, etc..)

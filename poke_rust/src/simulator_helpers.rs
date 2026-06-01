@@ -39,6 +39,54 @@ where
     merged
 }
 
+pub fn get_combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+    let mut result = Vec::new();
+    let mut current = Vec::new();
+    combine_helper(0, n, k, &mut current, &mut result);
+    result
+}
+
+fn combine_helper(start: usize, n: usize, k: usize, current: &mut Vec<usize>, result: &mut Vec<Vec<usize>>) {
+    if current.len() == k {
+        result.push(current.clone());
+        return;
+    }
+
+    for i in start..n {
+        current.push(i);
+        combine_helper(i + 1, n, k, current, result);
+        current.pop();
+    }
+}
+
+pub fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    let mut results: Vec<Vec<T>> = Vec::new();
+
+    fn helper<T: Clone>(items: &[T], current: &mut Vec<T>, used: &mut Vec<bool>, results: &mut Vec<Vec<T>>) {
+        if current.len() == items.len() {
+            results.push(current.clone());
+            return;
+        }
+
+        for i in 0..items.len() {
+            if used[i] {
+                continue;
+            }
+
+            used[i] = true;
+            current.push(items[i].clone());
+            helper(items, current, used, results);
+            current.pop();
+            used[i] = false;
+        }
+    }
+
+    let mut current: Vec<T> = Vec::new();
+    let mut used = vec![false; items.len()];
+    helper(items, &mut current, &mut used, &mut results);
+    results
+}
+
 /// Check if a move has a specific MoveFlag
 pub fn move_has_flag(move_data: &MoveData, flag: &MoveFlag) -> bool {
     move_data.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(flag))
@@ -1028,7 +1076,7 @@ pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
     mon.fainted = mon.hp == 0;
 }
 
-fn team_has_remaining_pokemon(state: &BattleState, player: Player) -> bool {
+pub fn team_has_remaining_pokemon(state: &BattleState, player: Player) -> bool {
     match player {
         Player::P1 => state.p1_active_mons.iter().chain(state.p1_back_mons.iter()).any(|mon| !mon.fainted),
         Player::P2 => state.p2_active_mons.iter().chain(state.p2_back_mons.iter()).any(|mon| !mon.fainted),
@@ -1586,7 +1634,7 @@ fn side_has_tailwind(state: &BattleState, player: Player) -> bool {
         .any(|condition| matches!(condition, SideCondition::TailWind))
 }
 
-fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonState) -> f32 {
+pub fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonState) -> f32 {
     let mut speed = get_effective_speed(state, mon);
 
     if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::Chlorophyll && weather_is_sunlight(state) {
@@ -1608,7 +1656,7 @@ fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonS
     speed
 }
 
-fn trick_room_is_active(state: &BattleState) -> bool {
+pub fn trick_room_is_active(state: &BattleState) -> bool {
     state
         .pseudo_weathers
         .iter()
@@ -2528,14 +2576,14 @@ pub fn apply_secondary_effects(
     branches.into_iter().filter(|(_, p)| *p > 0.0).collect()
 }
 
-/// Clear all volatile statuses and non-volatile statuses from a Pokémon when it faints.
+/// Clear all volatile statuses and non-volatile statuses from a PokÃ©mon when it faints.
 pub fn clear_pokemon_on_faint(mon: &mut PokemonState) {
     mon.volatiles.clear();
     mon.status = None;
 }
 
-/// Check if a Pokémon is immune to Rage Powder based on type, ability, or item.
-/// Grass-types, Pokémon with Overcoat ability, and those holding Safety Googles are immune.
+/// Check if a PokÃ©mon is immune to Rage Powder based on type, ability, or item.
+/// Grass-types, PokÃ©mon with Overcoat ability, and those holding Safety Googles are immune.
 pub fn is_immune_to_powder(state: &BattleState, mon: &PokemonState) -> bool {
     pokemon_has_type(mon, &PokemonType::Grass)
     || (!abilities_are_suppressed(state) && mon.ability == Ability::Overcoat)
@@ -2580,11 +2628,11 @@ pub fn check_and_apply_redirection(
         Player::P2 => Player::P1,
     };
 
-    // Find all opposing Pokémon with FollowMe or RagePowder, excluding those with SkyDrop+redirect
+    // Find all opposing PokÃ©mon with FollowMe or RagePowder, excluding those with SkyDrop+redirect
     let mut redirectors: Vec<(FieldSlot, &PokemonState)> = Vec::new();
 
     for (idx, mon) in opposing_mons.iter().enumerate() {
-        // Skip fainted Pokémon
+        // Skip fainted PokÃ©mon
         if mon.fainted || has_skyrop_and_redirect(mon) {
             continue;
         }

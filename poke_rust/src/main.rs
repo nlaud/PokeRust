@@ -11,8 +11,11 @@ mod pokemon;
 mod battle;
 mod simulator;
 mod simulator_helpers;
-mod user;
+#[cfg(test)]
+mod simuilator_test_helpers;
+#[cfg(test)]
 mod simulator_tests;
+mod user;
 
 pub static VERBOSITY: OnceLock<u8> = OnceLock::new();
 pub static SHARED_MULTIHIT_DAMAGE_ROLLS: AtomicBool = AtomicBool::new(false);
