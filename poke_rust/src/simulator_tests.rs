@@ -6179,7 +6179,7 @@ mod tests {
     }
 
     #[test]
-    fn confuse_ray_duration_and_own_tempo() {
+    fn own_tempo() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -6279,7 +6279,7 @@ mod tests {
     }
 
     #[test]
-    fn tangled_feet_halves_accuracy_against_confused_target() {
+    fn tangled_feet() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -6343,7 +6343,7 @@ mod tests {
     }
 
     #[test]
-    fn confusion_branches_and_damage_rolls() {
+    fn confusion_damage() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -6440,7 +6440,7 @@ mod tests {
     }
 
     #[test]
-    fn confusion_final_turn_snaps_out() {
+    fn confusion_ends() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -7069,7 +7069,7 @@ mod tests {
     }
 
     #[test]
-    fn minimum_damage_floor_is_one() {
+    fn damage_floor_1() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -7118,7 +7118,7 @@ mod tests {
     }
 
     #[test]
-    fn splash_always_fails_and_does_nothing() {
+    fn splash() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -7167,7 +7167,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_and_recoil_and_healing_amounts_are_correct() {
+    fn drain_recoil() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -7262,7 +7262,7 @@ mod tests {
     }
 
     #[test]
-    fn recoil_after_ko_still_awards_win_to_attacker() {
+    fn recoil_simultanoue_death() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -7312,7 +7312,7 @@ mod tests {
     }
 
     #[test]
-    fn rock_head_reckless_and_magic_guard_behaviors() {
+    fn recoil_immunities() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -7466,7 +7466,7 @@ mod tests {
     }
 
     #[test]
-    fn magic_room_suppresses_safety_goggles_against_sand() {
+    fn magic_room_safety_goggles() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 
@@ -7542,7 +7542,7 @@ mod tests {
     }
 
     #[test]
-    fn wonder_room_swaps_defenses_and_turns_ohko_into_game_over() {
+    fn wonder_room() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
 

@@ -10,6 +10,7 @@ cargo run -- --p1 ../teamsheets/{teamsheet path} --p2 ../teamsheets/{teamsheet p
     - Things to keep in mind: Neutralizing Gas and Magic Room !!!!!!!
     - Later focus SLOWLY on implementing actual battle functions
         - Switch out moves
+        - PROTECT!!
         - Struggle
         - Berries, Unnerve?, Other Consumables (sash), Type Boost Items
         - Choice Items
@@ -17,7 +18,7 @@ cargo run -- --p1 ../teamsheets/{teamsheet path} --p2 ../teamsheets/{teamsheet p
         - Side conditions (Types of spikes, are there more?)
         - Other significant abilities (Prankster, sturdy, pixilate + dragonize, spicy spray, shadow tag, clear body, huge power, zero to hero, scrappy, parental bond, intimidate, competetive + defiant, mega sol, mega launcher, levitate, telepathy, cloud nine, multiscale, stamina, mold breaker, disguise, technician, scrappy, compound eyes, friend guard)
         - Other significant items!
-        - Moves with unique effects (explosion, encore, disable, skill swap, roost, burn up, body press, foul play, etc..)
+        - Moves with unique effects (explosion, encore, disable, skill swap, roost, burn up, body press, foul play, OHKO moves, focus blast/punch, etc..)
         - Other Volatiles + Statuses
         - Implement Struggling when no PP
         - Imperfect information handling
