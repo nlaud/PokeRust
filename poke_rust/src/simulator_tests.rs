@@ -7809,6 +7809,64 @@ mod tests {
             let after = switch_p1_out(initial);
             assert_eq!(after.p1_back_mons[0].status, Some(Status::Burn));
         }
+
+        #[test]
+        fn desolate_land_weather_ends_when_holder_switches_out() {
+            let holder = mon(Species::Snorlax, Ability::DesolateLand, None, None);
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(vec![holder], vec![replacement], vec![target], vec![]);
+            assert_eq!(initial.weather, Some(Weather::ExtremeSunlight));
+
+            let after = switch_p1_out(initial);
+            assert_eq!(after.weather, None);
+        }
+
+        #[test]
+        fn delta_stream_weather_ends_when_holder_switches_out() {
+            let holder = mon(Species::Snorlax, Ability::DeltaStream, None, None);
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(vec![holder], vec![replacement], vec![target], vec![]);
+            assert_eq!(initial.weather, Some(Weather::StrongWinds));
+
+            let after = switch_p1_out(initial);
+            assert_eq!(after.weather, None);
+        }
+
+        #[test]
+        fn primordial_sea_persists_while_another_holder_remains() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let holder_a = mon(Species::Snorlax, Ability::PrimordialSea, None, None);
+            let holder_b = mon(Species::Snorlax, Ability::PrimordialSea, None, None);
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let foe1 = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let foe2 = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(
+                vec![holder_a, holder_b],
+                vec![replacement],
+                vec![foe1, foe2],
+                vec![],
+            );
+            assert_eq!(initial.weather, Some(Weather::HeavyRain));
+
+            // Switch the slot-0 holder out; the slot-1 holder keeps Heavy Rain up.
+            let mut p1_cmds = vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })];
+            p1_cmds.extend(simple_attack(Player::P1, vec![0]));
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(p1_cmds),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            assert!(outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if bs.weather == Some(Weather::HeavyRain))
+            }));
+        }
     }
 
     mod items {

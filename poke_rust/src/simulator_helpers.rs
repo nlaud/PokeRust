@@ -1685,6 +1685,43 @@ pub fn handle_neutralizing_gas_lift(state: &mut BattleState) {
     }
 }
 
+/// Return true if any non-fainted active Pokémon has `ability`.
+fn active_mons_have_ability(state: &BattleState, ability: &Ability) -> bool {
+    state
+        .p1_active_mons
+        .iter()
+        .chain(state.p2_active_mons.iter())
+        .any(|mon| !mon.fainted && mon.ability == *ability)
+}
+
+/// When a Pokémon with a primal-weather ability leaves the field, the weather it
+/// maintained ends — unless another active Pokémon still has the same ability.
+///
+/// - Desolate Land  -> Extreme Sunlight
+/// - Primordial Sea -> Heavy Rain
+/// - Delta Stream   -> Strong Winds
+///
+/// Call this after the departing Pokémon has been removed from the active slot.
+pub fn handle_primal_weather_departure(state: &mut BattleState, departed_ability: &Ability) {
+    let weather = match departed_ability {
+        Ability::DesolateLand => Weather::ExtremeSunlight,
+        Ability::PrimordialSea => Weather::HeavyRain,
+        Ability::DeltaStream => Weather::StrongWinds,
+        _ => return,
+    };
+
+    // Another holder of the same ability keeps the weather active.
+    if active_mons_have_ability(state, departed_ability) {
+        return;
+    }
+
+    // Only clear if that primal weather is the one currently in effect.
+    if state.weather.as_ref() == Some(&weather) {
+        state.weather = None;
+        state.weather_turns = None;
+    }
+}
+
 /// Set terrain. Only one terrain can be active at a time. Provide a duration in turns (0 = permanent).
 pub fn set_terrain(state: &mut BattleState, terrain: Terrain, duration: u8) {
     state.terrain = Some(terrain);
