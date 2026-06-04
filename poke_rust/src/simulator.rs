@@ -357,6 +357,7 @@ fn apply_single_hit_branch(
     let mut absorbed_by_dry_skin = false;
     let mut sand_spit_triggered = false;
     let mut seed_sower_triggered = false;
+    let mut target_fainted = false;
     let items_suppressed = simulator_helpers::items_are_suppressed(&branch_state);
 
     if let Some(target_mon) = match target_slot.player {
@@ -398,8 +399,13 @@ fn apply_single_hit_branch(
 
             if target_mon.fainted {
                 simulator_helpers::clear_pokemon_on_faint(target_mon);
+                target_fainted = true;
             }
         }
+    }
+
+    if target_fainted {
+        simulator_helpers::handle_pokemon_faint(&mut branch_state, target_slot.player, target_slot.slot_index);
     }
 
     if sand_spit_triggered {
@@ -1608,6 +1614,7 @@ fn apply_post_damage_move_effects(
     let total_dmg = total_damage_to_opponent(baseline, &bs, opposing_player);
     let opponent_wiped = !simulator_helpers::team_has_remaining_pokemon(&bs, opposing_player) && total_dmg > 0;
     let mut forced_winner: Option<Player> = None;
+    let mut attacker_fainted = false;
 
     if let Some(attacker_mon) = mon_at_slot_mut(&mut bs, attacker_slot) {
         let max_hp = attacker_mon.stats[0].max(1);
@@ -1637,10 +1644,15 @@ fn apply_post_damage_move_effects(
                 simulator_helpers::apply_damage(attacker_mon, recoil);
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
+                    attacker_fainted = true;
                     if opponent_wiped { forced_winner = Some(attacker_slot.player); }
                 }
             }
         }
+    }
+
+    if attacker_fainted {
+        simulator_helpers::handle_pokemon_faint(&mut bs, attacker_slot.player, attacker_slot.slot_index);
     }
 
     if let Some(winner) = forced_winner {
