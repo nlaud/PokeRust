@@ -261,7 +261,6 @@ Darkest Lariat			12	85	100	This move ignores the target's stat changes when deal
 Defog			16	--	101	Lowers the target's evasiveness by 1 stage. Removes statuses such as Reflect Spikes and Safeguard as well as any terrain.
 Destiny Bond			8	--	101	The user gains the Destiny Bound status. This move fails if used in succession.
 Detect			8	--	101	The user protects itself from incoming moves for the turn. With each consecutive use this move's chance of success becomes 1/3 of what it was before.
-Dire Claw			16	80	100	Has a 30% chance of leaving the target poisoned paralyzed or asleep.
 Disable			20	--	100	Gives the target the Move Disabled status for 4 turns.
 Dragon Cheer			16	--	101	Gives allies a Critical-Hit Ratio Boost. Dragon types receive a 2-stage boost. All other types receive a 1-stage boost.
 Dragon Darts			12	50	100	The user attacks twice in a row. If there are 2 opposing Pokémon each of them is attacked once.
@@ -340,7 +339,6 @@ Magnetic Flux			20	--	101	If the user or its allies have the Plus Ability or the
 Mean Look			8	--	101	Gives the target the Can't Escape status.
 Memento			12	--	100	Lowers the target's Attack and Sp. Atk stats by 2 stages. The user faints upon using this move.
 Metal Burst			12	--	100	The user retaliates to deal 150% of the damage it took from an opponent's move during the turn this move is used.
-Meteor Beam			12	120	90	The user gains the Charging status on the turn this move is used then attacks on the following turn. The user's Sp. Atk stat is boosted by 1 stage on the turn this move is used.
 Minimize			12	--	101	Boosts the user's evasiveness by 2 stages. The user gains the Minimized status.
 Mirror Coat			20	--	100	The user retaliates to deal double the damage it took from an opponent's special move during the turn this move is used.
 Misty Explosion			8	100	100	If the user is under the effect of Misty Terrain this move's power is boosted by 50%. The user faints upon using this move.
@@ -433,7 +431,6 @@ Torment			16	--	100	Gives the target the Unable to Repeat status.
 Toxic			12	--	90	Badly poisons the target. If the user is a Poison type this move will never miss.
 Toxic Spikes			20	--	101	Gives the opponent's side the Toxic Spikes status.
 Transform			12	--	101	The user transforms into a copy of the target. It also copies all of the target's stats apart from its HP.
-Tri Attack			12	80	100	Has a 20% chance of leaving the target burned frozen or paralyzed.
 Trick			12	--	100	The user and the target swap their held items.
 Trick-or-Treat			20	--	100	Gives the target the Trick-or-Treating status.
 U-turn			20	70	100	After attacking the user switches out of battle to be replaced by another party Pokémon.
