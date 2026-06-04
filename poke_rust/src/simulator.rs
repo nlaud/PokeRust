@@ -27,6 +27,7 @@ fn mon_at_slot_mut(state: &mut BattleState, slot: FieldSlot) -> Option<&mut Poke
     simulator_helpers::get_pokemon_at_slot_mut(state, slot)
 }
 
+/// Copy `volatiles` into the slot in-place (write-back after local mutation).
 fn write_back_volatiles(state: &mut BattleState, slot: FieldSlot, volatiles: Vec<crate::pokemon::VolatileStatusState>) {
     if let Some(mon) = mon_at_slot_mut(state, slot) {
         mon.volatiles = volatiles;
