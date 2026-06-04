@@ -931,6 +931,7 @@ pub fn apply_damage_and_check_game_over(
 
     if target_mon.fainted {
         clear_pokemon_on_faint(target_mon);
+        handle_pokemon_faint(state, target_slot.player, target_slot.slot_index);
         if !team_has_remaining_pokemon(state, target_slot.player) {
             let winner = match target_slot.player {
                 Player::P1 => Player::P2,
@@ -1590,6 +1591,10 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     }
 
     trigger_terrain_seed_items(state);
+
+    // A Pokémon entering may bring Neutralizing Gas, which suppresses primal-weather
+    // abilities and so ends the extreme weather they were maintaining.
+    handle_gas_primal_weather_suppression(state);
 }
 
 /// Apply entry abilities that affect opposing Pokémon (e.g. Intimidate lowering the
@@ -1691,6 +1696,47 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
 
     // Primal weather ends when its source leaves, unless another holder remains.
     handle_primal_weather_departure(state, &departed_ability);
+}
+
+/// Handle field effects when the Pokémon at `slot_index` (for `player`) faints:
+/// Neutralizing Gas suppression lifting and primal weather ending. Unlike switching out,
+/// fainting does not trigger Natural Cure / Regenerator. The fainted Pokémon is expected
+/// to still occupy its active slot (with `fainted == true`); the helpers below ignore
+/// fainted Pokémon, so it is correctly treated as gone from the field.
+pub fn handle_pokemon_faint(state: &mut BattleState, player: Player, slot_index: u8) {
+    let fainted_ability = {
+        let mons = match player {
+            Player::P1 => &state.p1_active_mons,
+            Player::P2 => &state.p2_active_mons,
+        };
+        let Some(mon) = mons.get(slot_index as usize) else {
+            return;
+        };
+        mon.ability.clone()
+    };
+
+    // Neutralizing Gas suppression lifts when its holder faints.
+    if fainted_ability == Ability::NeutralizingGas && !any_pokemon_has_neutralizing_gas(state) {
+        handle_neutralizing_gas_lift(state);
+    }
+
+    // Primal weather ends when its source faints, unless another holder remains.
+    handle_primal_weather_departure(state, &fainted_ability);
+}
+
+/// While Neutralizing Gas is active it suppresses primal-weather abilities, so any
+/// extreme weather they were maintaining ends. Called when a Pokémon enters the field
+/// (which may bring Neutralizing Gas with it).
+fn handle_gas_primal_weather_suppression(state: &mut BattleState) {
+    if abilities_are_suppressed(state)
+        && matches!(
+            state.weather,
+            Some(Weather::ExtremeSunlight | Weather::HeavyRain | Weather::StrongWinds)
+        )
+    {
+        state.weather = None;
+        state.weather_turns = None;
+    }
 }
 
 /// Apply on-switch-out ability effects for `mon` (Natural Cure curing status,

@@ -7867,6 +7867,100 @@ mod tests {
                 matches!(state, MatchState::BattleState(bs) if bs.weather == Some(Weather::HeavyRain))
             }));
         }
+
+        #[test]
+        fn desolate_land_weather_ends_when_holder_faints() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut holder = mon(Species::Snorlax, Ability::DesolateLand, None, None);
+            holder.hp = 1;
+            let backup = mon(Species::Clefable, Ability::Pressure, None, None);
+            let attacker = build_pokemon_state(
+                Species::Garchomp,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Earthquake), None, None, None]),
+                None,
+                Some(Ability::Pressure),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            let initial = battle_state_from_lists(vec![holder], vec![backup], vec![attacker], vec![]);
+            assert_eq!(initial.weather, Some(Weather::ExtremeSunlight));
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            // The holder is KO'd in every branch, so Extreme Sunlight ends in all of them.
+            assert!(!outcomes.is_empty());
+            assert!(outcomes.iter().all(|(state, _)| match state {
+                MatchState::BattleState(bs) => bs.p1_active_mons[0].fainted && bs.weather.is_none(),
+                _ => false,
+            }));
+        }
+
+        #[test]
+        fn neutralizing_gas_ends_primal_weather_on_entry() {
+            let holder = mon(Species::Snorlax, Ability::DesolateLand, None, None);
+            let foe = mon(Species::Clefable, Ability::Pressure, None, None);
+            let gas = mon(Species::WeezingGalar, Ability::NeutralizingGas, None, None);
+            // Gas is on the bench, so Desolate Land sets Extreme Sunlight at the start.
+            let initial = battle_state_from_lists(vec![holder], vec![], vec![foe], vec![gas]);
+            assert_eq!(initial.weather, Some(Weather::ExtremeSunlight));
+
+            let after = {
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(initial),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                    &move_dex,
+                    &pokemon_dex,
+                );
+                extract_battle_state(outcomes).0
+            };
+            // Neutralizing Gas suppresses Desolate Land on entry, ending the weather.
+            assert_eq!(after.p2_active_mons[0].ability, Ability::NeutralizingGas);
+            assert_eq!(after.weather, None);
+        }
+
+        #[test]
+        fn primal_weather_reactivates_when_gas_leaves() {
+            let holder = mon(Species::Snorlax, Ability::DesolateLand, None, None);
+            let gas = mon(Species::WeezingGalar, Ability::NeutralizingGas, None, None);
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            // Gas is active at the start, so Desolate Land is suppressed (no weather).
+            let initial = battle_state_from_lists(vec![holder], vec![], vec![gas], vec![replacement]);
+            assert_eq!(initial.weather, None);
+
+            let after = {
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(initial),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                    &move_dex,
+                    &pokemon_dex,
+                );
+                extract_battle_state(outcomes).0
+            };
+            // Once the gas leaves, Desolate Land re-gains its effect and sets the weather.
+            assert_eq!(after.p2_active_mons[0].ability, Ability::Pressure);
+            assert_eq!(after.weather, Some(Weather::ExtremeSunlight));
+        }
     }
 
     mod items {
