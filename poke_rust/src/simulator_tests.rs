@@ -9,7 +9,7 @@ mod tests {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::dex_data::{PseudoWeather, Status, Terrain, VolatileStatus, Weather};
-    use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::simulator::{simulate_turn, DamageConfig};
     use crate::simulator_helpers;
     use crate::simulator_helpers::coalesce_branches;
@@ -5341,6 +5341,84 @@ mod tests {
                 matches!(state, MatchState::BattleState(bs) if bs.weather == Some(Weather::Sandstorm))
             }));
         }
+
+        // While a Neutralizing Gas Pokémon is active it suppresses other abilities, so
+        // Pelipper's Drizzle never sets rain on send-out. Once the gas Pokémon leaves the
+        // field the suppression lifts and Drizzle reactivates as an on-gain ability.
+        #[test]
+        fn neutralizing_gas_suppresses_then_reactivates_weather() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let pelipper = build_pokemon_state(
+                Species::Pelipper,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Drizzle),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+
+            let weezing = build_pokemon_state(
+                Species::WeezingGalar,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::NeutralizingGas),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+
+            // Plain back-mon with a harmless forced ability so switching it in sets no weather.
+            let back_mon = build_pokemon_state(
+                Species::Torkoal,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Pressure),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+
+            let initial_state =
+                battle_state_from_lists(vec![pelipper], vec![], vec![weezing], vec![back_mon]);
+
+            // Drizzle is suppressed by the active Neutralizing Gas, so no rain on send-out.
+            assert_eq!(initial_state.weather, None);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial_state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &move_dex,
+                &pokemon_dex,
+            );
+
+            let (state_after_turn, probability) = extract_battle_state(outcomes);
+            assert!((probability - 1.0).abs() < 1e-9);
+            assert_eq!(state_after_turn.p2_active_mons[0].species, Species::Torkoal);
+            // Gas has left; Drizzle reactivates and sets rain.
+            assert_eq!(state_after_turn.weather, Some(Weather::Rain));
+        }
     }
 
     mod status {
@@ -5599,6 +5677,60 @@ mod tests {
                 ];
 
                 for target in immune_targets {
+                    let outcomes = run_single_turn(
+                        &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
+                        &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                        &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                        &move_dex,
+                        &pokemon_dex,
+                    );
+
+                    assert!(outcomes.iter().all(|(state, _)| {
+                        matches!(state, MatchState::BattleState(bs) if !matches!(bs.p2_active_mons[0].status, Some(Status::Burn)))
+                    }));
+                }
+            }
+
+            // Burn-immunity abilities not exercised by `burn_immunities`: Thermal Exchange
+            // and Water Bubble block burn, and Purifying Salt blocks all status (here, burn).
+            #[test]
+            fn thermal_exchange_water_bubble_and_purifying_salt_block_burn() {
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+
+                let attacker = build_pokemon_state(
+                    Species::RotomHeat,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::WillOWisp), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    Some(crate::dex_data::PokemonType::Fire),
+                    None,
+                    None,
+                    false,
+                );
+
+                for ability in [Ability::ThermalExchange, Ability::WaterBubble, Ability::PurifyingSalt] {
+                    let target = build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex,
+                        &move_dex,
+                        Some(50),
+                        Some([Some(PokemonMove::Splash), None, None, None]),
+                        None,
+                        Some(ability),
+                        None,
+                        None,
+                        Some(crate::dex_data::PokemonType::Normal),
+                        None,
+                        None,
+                        false,
+                    );
+
                     let outcomes = run_single_turn(
                         &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
@@ -7299,6 +7431,210 @@ mod tests {
                 assert!((dist.get("slp").copied().unwrap_or(0.0) - each).abs() < 1e-9);
                 assert!(dist.get("brn").is_none() && dist.get("frz").is_none());
             }
+        }
+    }
+
+    mod turn_order {
+        use super::*;
+
+        // A slow P1 mon (Torkoal) and a fast P2 mon (Pelipper). We drive the public
+        // action-ordering comparator directly so priority / Trick Room handling is
+        // isolated from damage rolls. `Ordering::Less` means action1 is resolved first.
+        fn ordering_fixture() -> BattleState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let slow = build_pokemon_state(
+                Species::Torkoal,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Pressure),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            let fast = build_pokemon_state(
+                Species::Pelipper,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Pressure),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            battle_state_from_lists(vec![slow], vec![], vec![fast], vec![])
+        }
+
+        fn move_action(player: Player, priority: i8) -> Action {
+            Action::MoveAction(MoveAction {
+                move_name: PokemonMove::Splash,
+                priority,
+                user_slot: FieldSlot { player, slot_index: 0 },
+                target_slot: None,
+            })
+        }
+
+        #[test]
+        fn higher_priority_moves_first() {
+            let move_dex = move_dex();
+            let state = ordering_fixture();
+            // P1 (slow) uses a +1 priority move; P2 (fast) uses a 0-priority move.
+            let slow_priority = move_action(Player::P1, 1);
+            let fast_normal = move_action(Player::P2, 0);
+            assert_eq!(
+                simulator_helpers::compare_action_order(&slow_priority, &fast_normal, &state, &move_dex),
+                std::cmp::Ordering::Less
+            );
+            assert_eq!(
+                simulator_helpers::compare_action_order(&fast_normal, &slow_priority, &state, &move_dex),
+                std::cmp::Ordering::Greater
+            );
+        }
+
+        #[test]
+        fn faster_mon_moves_first_at_equal_priority() {
+            let move_dex = move_dex();
+            let state = ordering_fixture();
+            let slow = move_action(Player::P1, 0);
+            let fast = move_action(Player::P2, 0);
+            // Pelipper (P2) outspeeds Torkoal (P1).
+            assert_eq!(
+                simulator_helpers::compare_action_order(&fast, &slow, &state, &move_dex),
+                std::cmp::Ordering::Less
+            );
+            assert_eq!(
+                simulator_helpers::compare_action_order(&slow, &fast, &state, &move_dex),
+                std::cmp::Ordering::Greater
+            );
+        }
+
+        #[test]
+        fn trick_room_reverses_speed_but_not_priority() {
+            let move_dex = move_dex();
+            let mut state = ordering_fixture();
+            state.pseudo_weathers.push(PseudoWeather::TrickRoom);
+            state.pseudo_weather_turns.push(5);
+
+            // Under Trick Room the slower Torkoal (P1) moves first at equal priority.
+            let slow = move_action(Player::P1, 0);
+            let fast = move_action(Player::P2, 0);
+            assert_eq!(
+                simulator_helpers::compare_action_order(&slow, &fast, &state, &move_dex),
+                std::cmp::Ordering::Less
+            );
+
+            // Priority still wins regardless of Trick Room.
+            let fast_priority = move_action(Player::P2, 1);
+            let slow_normal = move_action(Player::P1, 0);
+            assert_eq!(
+                simulator_helpers::compare_action_order(&fast_priority, &slow_normal, &state, &move_dex),
+                std::cmp::Ordering::Less
+            );
+        }
+    }
+
+    mod redirection {
+        use super::*;
+
+        // Doubles layout: P1 = attacker (slot0) + ally (slot1); P2 = primary target
+        // (slot0) + a redirector (slot1). Redirection is driven directly through the
+        // public `check_and_apply_redirection` helper.
+        fn doubles_state_with_redirector(redirector: PokemonState) -> BattleState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mon = |species: Species| {
+                build_pokemon_state(
+                    species,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::Pressure),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+            };
+            battle_state_from_lists(
+                vec![mon(Species::Garchomp), mon(Species::Clefable)],
+                vec![],
+                vec![mon(Species::Corviknight), redirector],
+                vec![],
+            )
+        }
+
+        fn redirector_with(volatile: VolatileStatus, ability: Ability) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut mon = build_pokemon_state(
+                Species::Clefable,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(ability),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            mon.volatiles.push(VolatileStatusState::TurnStatus(volatile, 1));
+            mon
+        }
+
+        #[test]
+        fn follow_me_redirects_single_target_move() {
+            let state = doubles_state_with_redirector(
+                redirector_with(VolatileStatus::FollowMe, Ability::Pressure),
+            );
+            let user = FieldSlot { player: Player::P1, slot_index: 0 };
+            let original = vec![FieldSlot { player: Player::P2, slot_index: 0 }];
+            let redirected = simulator_helpers::check_and_apply_redirection(&state, user, original);
+            assert_eq!(redirected, vec![FieldSlot { player: Player::P2, slot_index: 1 }]);
+        }
+
+        #[test]
+        fn rage_powder_redirects_single_target_move() {
+            let state = doubles_state_with_redirector(
+                redirector_with(VolatileStatus::RagePowder, Ability::Pressure),
+            );
+            let user = FieldSlot { player: Player::P1, slot_index: 0 };
+            let original = vec![FieldSlot { player: Player::P2, slot_index: 0 }];
+            let redirected = simulator_helpers::check_and_apply_redirection(&state, user, original);
+            assert_eq!(redirected, vec![FieldSlot { player: Player::P2, slot_index: 1 }]);
+        }
+
+        #[test]
+        fn spread_targets_are_not_redirected() {
+            // Redirection only applies to single-target moves.
+            let state = doubles_state_with_redirector(
+                redirector_with(VolatileStatus::FollowMe, Ability::Pressure),
+            );
+            let user = FieldSlot { player: Player::P1, slot_index: 0 };
+            let spread = vec![
+                FieldSlot { player: Player::P2, slot_index: 0 },
+                FieldSlot { player: Player::P2, slot_index: 1 },
+            ];
+            let result = simulator_helpers::check_and_apply_redirection(&state, user, spread.clone());
+            assert_eq!(result, spread);
         }
     }
 

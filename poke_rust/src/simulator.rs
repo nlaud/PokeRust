@@ -1879,9 +1879,18 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
     if slot_idx >= active.len() || bench_index >= back.len() { return; }
 
     let mut leaving = active[slot_idx].clone();
+    let leaving_ability = leaving.ability.clone();
     clear_pokemon_for_switch_out(&mut leaving);
     std::mem::swap(&mut active[slot_idx], &mut back[bench_index]);
     back[bench_index] = leaving;
+
+    // If the departing Pokémon carried Neutralizing Gas and no active Pokémon still has
+    // it, suppressed entry abilities reactivate as the gas stops applying.
+    if leaving_ability == Ability::NeutralizingGas
+        && !simulator_helpers::any_pokemon_has_neutralizing_gas(next_state)
+    {
+        simulator_helpers::handle_neutralizing_gas_lift(next_state);
+    }
 }
 
 // Process a list of send-out slots in effective-speed order, branching on speed ties.
