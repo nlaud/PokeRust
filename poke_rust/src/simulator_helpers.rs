@@ -1585,23 +1585,66 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     let ability = mon.ability.clone();
 
     if !pokemon_ability_is_suppressed(state, mon) {
-        match ability {
-            Ability::ElectricSurge | Ability::HadronEngine => set_terrain(state, Terrain::ElectricTerrain, 5),
-            Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
-            Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
-            Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
-            Ability::Drought | Ability::OrichalcumPulse => set_weather(state, Weather::Sun, 5),
-            Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
-            Ability::Drizzle => set_weather(state, Weather::Rain, 5),
-            Ability::PrimordialSea => set_weather(state, Weather::HeavyRain, 0),
-            Ability::SandStream => set_weather(state, Weather::Sandstorm, 5),
-            Ability::SnowWarning => set_weather(state, Weather::Snow, 5),
-            Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
-            _ => {}
-        }
+        apply_entry_ability_field_effects(state, &ability);
     }
 
     trigger_terrain_seed_items(state);
+}
+
+/// Apply the field-setting effects of an entry ability (weather/terrain setters).
+/// Shared by `process_pokemon_send_out` (a Pokémon switching in) and
+/// `process_pokemon_gain_ability` (a Pokémon gaining an ability mid-battle).
+fn apply_entry_ability_field_effects(state: &mut BattleState, ability: &Ability) {
+    match ability {
+        Ability::ElectricSurge | Ability::HadronEngine => set_terrain(state, Terrain::ElectricTerrain, 5),
+        Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
+        Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
+        Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
+        Ability::Drought | Ability::OrichalcumPulse => set_weather(state, Weather::Sun, 5),
+        Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
+        Ability::Drizzle => set_weather(state, Weather::Rain, 5),
+        Ability::PrimordialSea => set_weather(state, Weather::HeavyRain, 0),
+        Ability::SandStream => set_weather(state, Weather::Sandstorm, 5),
+        Ability::SnowWarning => set_weather(state, Weather::Snow, 5),
+        Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
+        _ => {}
+    }
+}
+
+/// Apply the on-gain effects of the ability of the Pokémon at `slot`.
+///
+/// Used when a Pokémon *gains* an ability mid-battle rather than switching in — most
+/// notably when Neutralizing Gas stops applying and previously-suppressed entry
+/// abilities (weather/terrain setters) reactivate. Mirrors `process_pokemon_send_out`
+/// but deliberately does not run switch-in-only effects such as entry hazards.
+pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
+    let Some(mon) = get_pokemon_at_slot(state, slot) else {
+        return;
+    };
+
+    if mon.fainted {
+        return;
+    }
+
+    let ability = mon.ability.clone();
+
+    if pokemon_ability_is_suppressed(state, mon) {
+        return;
+    }
+
+    apply_entry_ability_field_effects(state, &ability);
+    trigger_terrain_seed_items(state);
+}
+
+/// Re-trigger on-gain abilities for every active Pokémon once Neutralizing Gas is no
+/// longer applying. Each non-fainted active Pokémon effectively re-gains its ability,
+/// so suppressed entry abilities (weather/terrain setters) activate again.
+pub fn handle_neutralizing_gas_lift(state: &mut BattleState) {
+    let mut slots = collect_active_slots(state, Player::P1, None);
+    slots.extend(collect_active_slots(state, Player::P2, None));
+    for slot in slots {
+        process_pokemon_gain_ability(state, slot);
+    }
 }
 
 /// Set terrain. Only one terrain can be active at a time. Provide a duration in turns (0 = permanent).
