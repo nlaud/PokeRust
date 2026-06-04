@@ -1655,10 +1655,48 @@ pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
     trigger_terrain_seed_items(state);
 }
 
+/// Handle every effect triggered when a Pokémon switches out. Call this *after* the
+/// active/bench swap, passing the bench index where the departing Pokémon now rests.
+///
+/// Covers:
+/// - Switch-out abilities on the departing Pokémon (Natural Cure, Regenerator),
+///   skipped while abilities are suppressed.
+/// - Neutralizing Gas suppression lifting once its holder is gone.
+/// - Primal weather (Desolate Land / Primordial Sea / Delta Stream) ending, unless
+///   another active holder of the same ability remains.
+pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_index: usize) {
+    let abilities_suppressed = abilities_are_suppressed(state);
+
+    // Apply the departing Pokémon's own switch-out ability, and note its ability for
+    // the field-effect checks below.
+    let departed_ability = {
+        let back = match player {
+            Player::P1 => &mut state.p1_back_mons,
+            Player::P2 => &mut state.p2_back_mons,
+        };
+        let Some(departed) = back.get_mut(bench_index) else {
+            return;
+        };
+        let ability = departed.ability.clone();
+        if !abilities_suppressed {
+            apply_switch_out_ability_effects(departed);
+        }
+        ability
+    };
+
+    // Neutralizing Gas suppression lifts when its holder leaves the field.
+    if departed_ability == Ability::NeutralizingGas && !any_pokemon_has_neutralizing_gas(state) {
+        handle_neutralizing_gas_lift(state);
+    }
+
+    // Primal weather ends when its source leaves, unless another holder remains.
+    handle_primal_weather_departure(state, &departed_ability);
+}
+
 /// Apply on-switch-out ability effects for `mon` (Natural Cure curing status,
 /// Regenerator restoring up to 1/3 of max HP). Callers must skip this while abilities
 /// are suppressed.
-pub fn apply_switch_out_ability_effects(mon: &mut PokemonState) {
+fn apply_switch_out_ability_effects(mon: &mut PokemonState) {
     if mon.fainted {
         return;
     }
@@ -1677,7 +1715,7 @@ pub fn apply_switch_out_ability_effects(mon: &mut PokemonState) {
 /// Re-trigger on-gain abilities for every active Pokémon once Neutralizing Gas is no
 /// longer applying. Each non-fainted active Pokémon effectively re-gains its ability,
 /// so suppressed entry abilities (weather/terrain setters) activate again.
-pub fn handle_neutralizing_gas_lift(state: &mut BattleState) {
+fn handle_neutralizing_gas_lift(state: &mut BattleState) {
     let mut slots = collect_active_slots(state, Player::P1, None);
     slots.extend(collect_active_slots(state, Player::P2, None));
     for slot in slots {
@@ -1700,9 +1738,7 @@ fn active_mons_have_ability(state: &BattleState, ability: &Ability) -> bool {
 /// - Desolate Land  -> Extreme Sunlight
 /// - Primordial Sea -> Heavy Rain
 /// - Delta Stream   -> Strong Winds
-///
-/// Call this after the departing Pokémon has been removed from the active slot.
-pub fn handle_primal_weather_departure(state: &mut BattleState, departed_ability: &Ability) {
+fn handle_primal_weather_departure(state: &mut BattleState, departed_ability: &Ability) {
     let weather = match departed_ability {
         Ability::DesolateLand => Weather::ExtremeSunlight,
         Ability::PrimordialSea => Weather::HeavyRain,

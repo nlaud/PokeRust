@@ -1871,9 +1871,6 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
 }
 
 fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, bench_index: usize) {
-    // Switch-out abilities (Natural Cure, Regenerator) are suppressed by Neutralizing Gas.
-    let abilities_suppressed = simulator_helpers::abilities_are_suppressed(next_state);
-
     let slot_idx = user_slot.slot_index as usize;
     let (active, back) = match user_slot.player {
         Player::P1 => (&mut next_state.p1_active_mons, &mut next_state.p1_back_mons),
@@ -1882,25 +1879,13 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
     if slot_idx >= active.len() || bench_index >= back.len() { return; }
 
     let mut leaving = active[slot_idx].clone();
-    let leaving_ability = leaving.ability.clone();
-    if !abilities_suppressed {
-        simulator_helpers::apply_switch_out_ability_effects(&mut leaving);
-    }
     clear_pokemon_for_switch_out(&mut leaving);
     std::mem::swap(&mut active[slot_idx], &mut back[bench_index]);
     back[bench_index] = leaving;
 
-    // If the departing Pokémon carried Neutralizing Gas and no active Pokémon still has
-    // it, suppressed entry abilities reactivate as the gas stops applying.
-    if leaving_ability == Ability::NeutralizingGas
-        && !simulator_helpers::any_pokemon_has_neutralizing_gas(next_state)
-    {
-        simulator_helpers::handle_neutralizing_gas_lift(next_state);
-    }
-
-    // A primal-weather ability (Desolate Land / Primordial Sea / Delta Stream) ends its
-    // weather when its holder leaves, unless another active holder keeps it up.
-    simulator_helpers::handle_primal_weather_departure(next_state, &leaving_ability);
+    // All switch-out side effects (switch-out abilities, Neutralizing Gas lift, primal
+    // weather ending) are handled here, after the departing Pokémon has reached the bench.
+    simulator_helpers::handle_pokemon_switch_out(next_state, user_slot.player, bench_index);
 }
 
 // Process a list of send-out slots in effective-speed order, branching on speed ties.
