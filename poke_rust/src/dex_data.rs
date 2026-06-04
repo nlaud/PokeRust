@@ -289,6 +289,18 @@ pub struct HitEffect {
 pub struct PokemonSecondaryEffect {
     pub chance: u8,
     pub effect: HitEffect,
+    /// Mutually-exclusive effects chosen uniformly at random when the secondary
+    /// fires (e.g. Tri Attack's burn/freeze/paralyze, Dire Claw's
+    /// poison/paralyze/sleep). Each entry may carry a status or a volatile.
+    /// When empty, `effect` is applied as usual.
+    pub random_choices: Vec<HitEffect>,
+}
+
+impl PokemonSecondaryEffect {
+    /// A secondary with a single deterministic effect (no random choices).
+    fn simple(chance: u8, effect: HitEffect) -> Self {
+        PokemonSecondaryEffect { chance, effect, random_choices: Vec::new() }
+    }
 }
 
 #[derive(Debug)]
@@ -621,6 +633,36 @@ fn empty_hit_effect() -> HitEffect {
         terrain: None,
         weather: None,
     }
+}
+
+/// Parse a Showdown `this.sample([...])` call (used in `onHit` bodies for moves
+/// that randomly apply one of several effects, e.g. Tri Attack / Dire Claw) into a
+/// list of single-effect `HitEffect`s, one per choice. Each quoted token is mapped
+/// to a non-volatile status first, falling back to a volatile status. Tokens that
+/// match neither are skipped. Returns an empty Vec if there is no `sample([...])`.
+fn parse_sample_effects(text: &str) -> Vec<HitEffect> {
+    let mut choices = Vec::new();
+    let Some(rel) = text.find("sample(") else { return choices; };
+    let after = &text[rel + "sample(".len()..];
+    let Some(open) = after.find('[') else { return choices; };
+    let Some(close) = after[open..].find(']') else { return choices; };
+    let inner = &after[open + 1..open + close];
+    for token in inner.split(',') {
+        let token = token.trim().trim_matches(|c: char| c == '\'' || c == '"').trim();
+        if token.is_empty() {
+            continue;
+        }
+        let mut effect = empty_hit_effect();
+        if let Some(status) = parse_nvstatus(token) {
+            effect.status = Some(status);
+        } else if let Some(volatile) = parse_volatile(token) {
+            effect.volatile_status = Some(volatile);
+        } else {
+            continue;
+        }
+        choices.push(effect);
+    }
+    choices
 }
 
 /// Extracts the `self: { ... }` sub-block from a block of text.
@@ -961,6 +1003,8 @@ fn parse_secondary_block(lines: &[String], start_idx: usize)
 
     // Parse target effects
     let target_effect = parse_effect_from_text(&target_text);
+    // Random `this.sample([...])` choices inside an onHit (e.g. Tri Attack, Dire Claw).
+    let target_random = parse_sample_effects(&target_text);
     let has_target = chance > 0
         || target_effect.status.is_some()
         || target_effect.volatile_status.is_some()
@@ -969,9 +1013,10 @@ fn parse_secondary_block(lines: &[String], start_idx: usize)
         || target_effect.weather.is_some()
         || target_effect.pseudo_weather.is_some()
         || target_effect.slot_condition.is_some()
-        || target_effect.boosts.iter().any(|&b| b != 0);
+        || target_effect.boosts.iter().any(|&b| b != 0)
+        || !target_random.is_empty();
     let target_sec = if has_target {
-        Some(PokemonSecondaryEffect { chance, effect: target_effect })
+        Some(PokemonSecondaryEffect { chance, effect: target_effect, random_choices: target_random })
     } else {
         None
     };
@@ -979,6 +1024,7 @@ fn parse_secondary_block(lines: &[String], start_idx: usize)
     // Parse self effects
     let self_sec = if let Some(st) = self_text {
         let self_effect = parse_effect_from_text(&st);
+        let self_random = parse_sample_effects(&st);
         let has_self = self_effect.status.is_some()
             || self_effect.volatile_status.is_some()
             || self_effect.side_condition.is_some()
@@ -986,9 +1032,10 @@ fn parse_secondary_block(lines: &[String], start_idx: usize)
             || self_effect.weather.is_some()
             || self_effect.pseudo_weather.is_some()
             || self_effect.slot_condition.is_some()
-            || self_effect.boosts.iter().any(|&b| b != 0);
+            || self_effect.boosts.iter().any(|&b| b != 0)
+            || !self_random.is_empty();
         if has_self {
-            Some(PokemonSecondaryEffect { chance, effect: self_effect })
+            Some(PokemonSecondaryEffect { chance, effect: self_effect, random_choices: self_random })
         } else {
             None
         }
@@ -1441,7 +1488,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                     if let Some(nv) = parse_nvstatus(&s) {
                         let mut e = empty_hit_effect();
                         e.status = Some(nv);
-                        secondaries.push(PokemonSecondaryEffect { chance: 100, effect: e });
+                        secondaries.push(PokemonSecondaryEffect::simple(100, e));
                     }
                 }
             } else if trimmed.starts_with("volatileStatus:") && depth <= 1 {
@@ -1450,7 +1497,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                     if let Some(vs) = parse_volatile(&s) {
                         let mut e = empty_hit_effect();
                         e.volatile_status = Some(vs);
-                        secondaries.push(PokemonSecondaryEffect { chance: 100, effect: e });
+                        secondaries.push(PokemonSecondaryEffect::simple(100, e));
                     }
                 }
             } else if trimmed.starts_with("sideCondition:") && depth <= 1 {
@@ -1458,7 +1505,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                     if let Some(sc) = parse_side_condition(&s) {
                         let mut e = empty_hit_effect();
                         e.side_condition = Some(sc);
-                        secondaries.push(PokemonSecondaryEffect { chance: 100, effect: e });
+                        secondaries.push(PokemonSecondaryEffect::simple(100, e));
                     }
                 }
             } else if trimmed.starts_with("terrain:") && depth <= 1 {
@@ -1466,7 +1513,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                     if let Some(t) = parse_terrain(&s) {
                         let mut e = empty_hit_effect();
                         e.terrain = Some(t);
-                        secondaries.push(PokemonSecondaryEffect { chance: 100, effect: e });
+                        secondaries.push(PokemonSecondaryEffect::simple(100, e));
                     }
                 }
             } else if trimmed.starts_with("weather:") && depth <= 1 {
@@ -1474,7 +1521,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                     if let Some(w) = parse_weather_val(&s) {
                         let mut e = empty_hit_effect();
                         e.weather = Some(w);
-                        secondaries.push(PokemonSecondaryEffect { chance: 100, effect: e });
+                        secondaries.push(PokemonSecondaryEffect::simple(100, e));
                     }
                 }
             } else if trimmed.starts_with("pseudoWeather:") && depth <= 1 {
@@ -1482,7 +1529,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                     if let Some(pw) = parse_pseudo_weather(&s) {
                         let mut e = empty_hit_effect();
                         e.pseudo_weather = Some(pw);
-                        secondaries.push(PokemonSecondaryEffect { chance: 100, effect: e });
+                        secondaries.push(PokemonSecondaryEffect::simple(100, e));
                     }
                 }
             } else if trimmed.starts_with("slotCondition:") && depth <= 1 {
@@ -1490,7 +1537,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                     if let Some(slc) = parse_slot_condition(&s) {
                         let mut e = empty_hit_effect();
                         e.slot_condition = Some(slc);
-                        secondaries.push(PokemonSecondaryEffect { chance: 100, effect: e });
+                        secondaries.push(PokemonSecondaryEffect::simple(100, e));
                     }
                 }
             } else if trimmed.starts_with("self:") && !trimmed.starts_with("selfSwitch") && !trimmed.starts_with("selfdestruct") && depth <= 1 {
@@ -1505,10 +1552,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                                 || self_effect.volatile_status.is_some()
                                 || self_effect.boosts.iter().any(|&b| b != 0);
                             if has_self {
-                                self_secondaries.push(PokemonSecondaryEffect {
-                                    chance: 100,
-                                    effect: self_effect,
-                                });
+                                self_secondaries.push(PokemonSecondaryEffect::simple(100, self_effect));
                             }
                         }
                     }
@@ -1568,7 +1612,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             } else {
                 let mut e = empty_hit_effect();
                 e.boosts = boosts;
-                secondaries.push(PokemonSecondaryEffect { chance: 100, effect: e });
+                secondaries.push(PokemonSecondaryEffect::simple(100, e));
             }
         }
 

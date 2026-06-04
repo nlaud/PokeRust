@@ -1,5 +1,13 @@
 # CLAUDE.md
 
+## Game Version
+
+This simulator targets the **newest generation of Pokémon — Pokémon Champions**.
+All mechanics, species, moves, items, and abilities are implemented to match that
+game. The `TODO.md` at the repo root tracks the Pokémon Champions moves, items,
+abilities, and berries that still need work; an entry is removed from `TODO.md`
+once its full effect is implemented in the simulator.
+
 ## Commands
 
 All commands run from `poke_rust/`:
