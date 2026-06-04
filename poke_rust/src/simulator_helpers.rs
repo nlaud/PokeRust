@@ -1586,9 +1586,27 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
 
     if !pokemon_ability_is_suppressed(state, mon) {
         apply_entry_ability_field_effects(state, &ability);
+        apply_entry_ability_target_effects(state, slot, &ability);
     }
 
     trigger_terrain_seed_items(state);
+}
+
+/// Apply entry abilities that affect opposing Pokémon (e.g. Intimidate lowering the
+/// Attack of every opposing active Pokémon). Shared by `process_pokemon_send_out` and
+/// `process_pokemon_gain_ability`.
+fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, ability: &Ability) {
+    if *ability == Ability::Intimidate {
+        let opposing_player = match slot.player {
+            Player::P1 => Player::P2,
+            Player::P2 => Player::P1,
+        };
+        for target in collect_active_slots(state, opposing_player, None) {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, target) {
+                apply_stat_boosts_to_pokemon(mon, &[-1, 0, 0, 0, 0, 0, 0]);
+            }
+        }
+    }
 }
 
 /// Apply the field-setting effects of an entry ability (weather/terrain setters).
@@ -1633,7 +1651,27 @@ pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
     }
 
     apply_entry_ability_field_effects(state, &ability);
+    apply_entry_ability_target_effects(state, slot, &ability);
     trigger_terrain_seed_items(state);
+}
+
+/// Apply on-switch-out ability effects for `mon` (Natural Cure curing status,
+/// Regenerator restoring up to 1/3 of max HP). Callers must skip this while abilities
+/// are suppressed.
+pub fn apply_switch_out_ability_effects(mon: &mut PokemonState) {
+    if mon.fainted {
+        return;
+    }
+    match mon.ability {
+        Ability::NaturalCure => {
+            mon.status = None;
+        }
+        Ability::Regenerator => {
+            let heal = (mon.stats[0] / 3).max(1);
+            mon.hp = mon.hp.saturating_add(heal).min(mon.stats[0].max(1));
+        }
+        _ => {}
+    }
 }
 
 /// Re-trigger on-gain abilities for every active Pokémon once Neutralizing Gas is no
@@ -2459,6 +2497,13 @@ pub fn check_and_apply_redirection(
         Player::P2 => Player::P1,
     };
 
+    // Rage Powder only redirects moves from attackers that are not immune to powder
+    // (Grass types, Overcoat, Safety Goggles). The immunity belongs to the attacker
+    // whose move is being redirected, not to the redirector.
+    let attacker_immune_to_powder = get_pokemon_at_slot(state, user_slot)
+        .map(|attacker| is_immune_to_powder(state, attacker))
+        .unwrap_or(false);
+
     // Find all opposing PokÃ©mon with FollowMe or RagePowder, excluding those with SkyDrop+redirect
     let mut redirectors: Vec<(FieldSlot, &PokemonState)> = Vec::new();
 
@@ -2468,7 +2513,7 @@ pub fn check_and_apply_redirection(
             continue;
         }
 
-        // Check for FollowMe (not immune to anything)
+        // Check for FollowMe (not a powder move, so not affected by powder immunity)
         if has_status_volatile(mon, &VolatileStatus::FollowMe) {
             redirectors.push((
                 FieldSlot {
@@ -2480,9 +2525,9 @@ pub fn check_and_apply_redirection(
             continue;
         }
 
-        // Check for RagePowder (with immunity checks)
+        // Check for RagePowder (skipped if the attacker is immune to powder)
         if has_status_volatile(mon, &VolatileStatus::RagePowder) {
-            if !is_immune_to_powder(state, mon) {
+            if !attacker_immune_to_powder {
                 redirectors.push((
                     FieldSlot {
                         player: opposing_player,

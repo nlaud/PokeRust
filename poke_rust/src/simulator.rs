@@ -1871,6 +1871,9 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
 }
 
 fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, bench_index: usize) {
+    // Switch-out abilities (Natural Cure, Regenerator) are suppressed by Neutralizing Gas.
+    let abilities_suppressed = simulator_helpers::abilities_are_suppressed(next_state);
+
     let slot_idx = user_slot.slot_index as usize;
     let (active, back) = match user_slot.player {
         Player::P1 => (&mut next_state.p1_active_mons, &mut next_state.p1_back_mons),
@@ -1880,6 +1883,9 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
 
     let mut leaving = active[slot_idx].clone();
     let leaving_ability = leaving.ability.clone();
+    if !abilities_suppressed {
+        simulator_helpers::apply_switch_out_ability_effects(&mut leaving);
+    }
     clear_pokemon_for_switch_out(&mut leaving);
     std::mem::swap(&mut active[slot_idx], &mut back[bench_index]);
     back[bench_index] = leaving;

@@ -7547,13 +7547,17 @@ mod tests {
     mod redirection {
         use super::*;
 
+        fn user_slot() -> FieldSlot { FieldSlot { player: Player::P1, slot_index: 0 } }
+        fn primary_slot() -> FieldSlot { FieldSlot { player: Player::P2, slot_index: 0 } }
+        fn redirector_slot() -> FieldSlot { FieldSlot { player: Player::P2, slot_index: 1 } }
+
         // Doubles layout: P1 = attacker (slot0) + ally (slot1); P2 = primary target
         // (slot0) + a redirector (slot1). Redirection is driven directly through the
         // public `check_and_apply_redirection` helper.
-        fn doubles_state_with_redirector(redirector: PokemonState) -> BattleState {
+        fn doubles_state(attacker: PokemonState, redirector: PokemonState) -> BattleState {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mon = |species: Species| {
+            let plain = |species: Species| {
                 build_pokemon_state(
                     species,
                     &pokemon_dex,
@@ -7571,14 +7575,34 @@ mod tests {
                 )
             };
             battle_state_from_lists(
-                vec![mon(Species::Garchomp), mon(Species::Clefable)],
+                vec![attacker, plain(Species::Clefable)],
                 vec![],
-                vec![mon(Species::Corviknight), redirector],
+                vec![plain(Species::Corviknight), redirector],
                 vec![],
             )
         }
 
-        fn redirector_with(volatile: VolatileStatus, ability: Ability) -> PokemonState {
+        fn attacker(species: Species, ability: Ability, item: Option<Item>) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            build_pokemon_state(
+                species,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(ability),
+                None,
+                item,
+                None,
+                None,
+                None,
+                false,
+            )
+        }
+
+        fn redirector(volatile: VolatileStatus) -> PokemonState {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let mut mon = build_pokemon_state(
@@ -7588,7 +7612,7 @@ mod tests {
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
-                Some(ability),
+                Some(Ability::Pressure),
                 None,
                 None,
                 None,
@@ -7600,41 +7624,190 @@ mod tests {
             mon
         }
 
-        #[test]
-        fn follow_me_redirects_single_target_move() {
-            let state = doubles_state_with_redirector(
-                redirector_with(VolatileStatus::FollowMe, Ability::Pressure),
-            );
-            let user = FieldSlot { player: Player::P1, slot_index: 0 };
-            let original = vec![FieldSlot { player: Player::P2, slot_index: 0 }];
-            let redirected = simulator_helpers::check_and_apply_redirection(&state, user, original);
-            assert_eq!(redirected, vec![FieldSlot { player: Player::P2, slot_index: 1 }]);
+        fn redirect(state: &BattleState) -> Vec<FieldSlot> {
+            simulator_helpers::check_and_apply_redirection(state, user_slot(), vec![primary_slot()])
         }
 
         #[test]
-        fn rage_powder_redirects_single_target_move() {
-            let state = doubles_state_with_redirector(
-                redirector_with(VolatileStatus::RagePowder, Ability::Pressure),
+        fn follow_me_redirects_single_target_move() {
+            let state = doubles_state(
+                attacker(Species::Garchomp, Ability::Pressure, None),
+                redirector(VolatileStatus::FollowMe),
             );
-            let user = FieldSlot { player: Player::P1, slot_index: 0 };
-            let original = vec![FieldSlot { player: Player::P2, slot_index: 0 }];
-            let redirected = simulator_helpers::check_and_apply_redirection(&state, user, original);
-            assert_eq!(redirected, vec![FieldSlot { player: Player::P2, slot_index: 1 }]);
+            assert_eq!(redirect(&state), vec![redirector_slot()]);
+        }
+
+        #[test]
+        fn rage_powder_redirects_non_powder_immune_attacker() {
+            let state = doubles_state(
+                attacker(Species::Garchomp, Ability::Pressure, None),
+                redirector(VolatileStatus::RagePowder),
+            );
+            assert_eq!(redirect(&state), vec![redirector_slot()]);
+        }
+
+        #[test]
+        fn follow_me_redirects_even_a_powder_immune_attacker() {
+            // Follow Me is not a powder move, so a Grass-type attacker is still redirected.
+            let state = doubles_state(
+                attacker(Species::Amoonguss, Ability::Pressure, None),
+                redirector(VolatileStatus::FollowMe),
+            );
+            assert_eq!(redirect(&state), vec![redirector_slot()]);
+        }
+
+        #[test]
+        fn rage_powder_does_not_redirect_grass_type_attacker() {
+            // Grass types are immune to powder moves, so Rage Powder fails to redirect.
+            let state = doubles_state(
+                attacker(Species::Amoonguss, Ability::Pressure, None),
+                redirector(VolatileStatus::RagePowder),
+            );
+            assert_eq!(redirect(&state), vec![primary_slot()]);
+        }
+
+        #[test]
+        fn rage_powder_does_not_redirect_overcoat_attacker() {
+            let state = doubles_state(
+                attacker(Species::Garchomp, Ability::Overcoat, None),
+                redirector(VolatileStatus::RagePowder),
+            );
+            assert_eq!(redirect(&state), vec![primary_slot()]);
+        }
+
+        #[test]
+        fn rage_powder_does_not_redirect_safety_goggles_attacker() {
+            let state = doubles_state(
+                attacker(Species::Garchomp, Ability::Pressure, Some(Item::SafetyGoggles)),
+                redirector(VolatileStatus::RagePowder),
+            );
+            assert_eq!(redirect(&state), vec![primary_slot()]);
         }
 
         #[test]
         fn spread_targets_are_not_redirected() {
             // Redirection only applies to single-target moves.
-            let state = doubles_state_with_redirector(
-                redirector_with(VolatileStatus::FollowMe, Ability::Pressure),
+            let state = doubles_state(
+                attacker(Species::Garchomp, Ability::Pressure, None),
+                redirector(VolatileStatus::FollowMe),
             );
-            let user = FieldSlot { player: Player::P1, slot_index: 0 };
-            let spread = vec![
-                FieldSlot { player: Player::P2, slot_index: 0 },
-                FieldSlot { player: Player::P2, slot_index: 1 },
-            ];
-            let result = simulator_helpers::check_and_apply_redirection(&state, user, spread.clone());
+            let spread = vec![primary_slot(), redirector_slot()];
+            let result = simulator_helpers::check_and_apply_redirection(&state, user_slot(), spread.clone());
             assert_eq!(result, spread);
+        }
+    }
+
+    mod switch_abilities {
+        use super::*;
+
+        // Build a level-50 mon with a forced ability (and optional held item / status).
+        fn mon(species: Species, ability: Ability, item: Option<Item>, status: Option<Status>) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p = build_pokemon_state(
+                species,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(ability),
+                None,
+                item,
+                None,
+                None,
+                None,
+                false,
+            );
+            p.status = status;
+            p
+        }
+
+        fn switch_p1_out(initial: BattleState) -> BattleState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+            extract_battle_state(outcomes).0
+        }
+
+        #[test]
+        fn intimidate_lowers_opposing_attack_on_send_out() {
+            let intimidator = mon(Species::Snorlax, Ability::Intimidate, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let state = battle_state_from_lists(vec![intimidator], vec![], vec![target], vec![]);
+            // Intimidate triggers during the opening send-out, dropping the foe's Attack.
+            assert_eq!(state.p2_active_mons[0].boosts[0], -1);
+        }
+
+        #[test]
+        fn intimidate_lowers_opposing_attack_on_switch_in() {
+            let lead = mon(Species::Clefable, Ability::Pressure, None, None);
+            let intimidator = mon(Species::Snorlax, Ability::Intimidate, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(vec![lead], vec![intimidator], vec![target], vec![]);
+            assert_eq!(initial.p2_active_mons[0].boosts[0], 0);
+
+            let after = switch_p1_out(initial);
+            assert_eq!(after.p1_active_mons[0].ability, Ability::Intimidate);
+            assert_eq!(after.p2_active_mons[0].boosts[0], -1);
+        }
+
+        #[test]
+        fn natural_cure_cures_status_on_switch_out() {
+            let leaving = mon(Species::Snorlax, Ability::NaturalCure, None, Some(Status::Burn));
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(vec![leaving], vec![replacement], vec![target], vec![]);
+
+            let after = switch_p1_out(initial);
+            // The Natural Cure mon (now on the bench) is healed of its status.
+            assert_eq!(after.p1_back_mons[0].ability, Ability::NaturalCure);
+            assert_eq!(after.p1_back_mons[0].status, None);
+        }
+
+        #[test]
+        fn status_persists_on_switch_out_without_natural_cure() {
+            let leaving = mon(Species::Snorlax, Ability::Pressure, None, Some(Status::Burn));
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(vec![leaving], vec![replacement], vec![target], vec![]);
+
+            let after = switch_p1_out(initial);
+            assert_eq!(after.p1_back_mons[0].status, Some(Status::Burn));
+        }
+
+        #[test]
+        fn regenerator_heals_a_third_on_switch_out() {
+            let mut leaving = mon(Species::Snorlax, Ability::Regenerator, None, None);
+            leaving.hp = 1;
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(vec![leaving], vec![replacement], vec![target], vec![]);
+
+            let after = switch_p1_out(initial);
+            let bench = &after.p1_back_mons[0];
+            let max_hp = bench.stats[0];
+            let expected = (1 + max_hp / 3).min(max_hp);
+            assert_eq!(bench.ability, Ability::Regenerator);
+            assert_eq!(bench.hp, expected);
+        }
+
+        #[test]
+        fn switch_out_abilities_suppressed_by_neutralizing_gas() {
+            // While Neutralizing Gas is active, Natural Cure does not cure on switch-out.
+            let leaving = mon(Species::Snorlax, Ability::NaturalCure, None, Some(Status::Burn));
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let gas = mon(Species::WeezingGalar, Ability::NeutralizingGas, None, None);
+            let initial = battle_state_from_lists(vec![leaving], vec![replacement], vec![gas], vec![]);
+
+            let after = switch_p1_out(initial);
+            assert_eq!(after.p1_back_mons[0].status, Some(Status::Burn));
         }
     }
 
