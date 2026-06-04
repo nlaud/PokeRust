@@ -1001,14 +1001,9 @@ fn parse_secondary_block(lines: &[String], start_idx: usize)
 
 // --- Public Dex Parsing ---
 
-/// Parse showdownDex.txt into a HashMap of PokemonData keyed by species id.
-pub fn parse_pokemon_dex(file_path: &str) -> HashMap<Species, PokemonData> {
-    let content = fs::read_to_string(file_path).expect("Failed to read Pokemon dex file");
-    let entries = split_entries(&content);
-    let mut result = HashMap::new();
-
-    for (_key, lines) in &entries {
-        let mut species: Option<Species> = None;
+/// Parse one entry from the Pokémon dex lines into a `(species, PokemonData)` pair.
+fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
+    let mut species: Option<Species> = None;
         let mut types: Vec<PokemonType> = Vec::new();
         let mut base_stats = [0u16; 6];
         let mut weight: u16 = 0;
@@ -1133,33 +1128,26 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<Species, PokemonData> {
             }
         }
 
-        if let Some(s) = species.clone() {
-            result.insert(s.clone(), PokemonData {
-                species: s,
-                types,
-                base_stats,
-                weight,
-                primary_ability,
-                base_species,
-                forme,
-                required_item,
-                battle_only,
-                default_gender,
-            });
+    let s = species?;
+    Some((s.clone(), PokemonData { species: s, types, base_stats, weight, primary_ability, base_species, forme, required_item, battle_only, default_gender }))
+}
+
+/// Parse showdownDex.txt into a HashMap of PokemonData keyed by species id.
+pub fn parse_pokemon_dex(file_path: &str) -> HashMap<Species, PokemonData> {
+    let content = fs::read_to_string(file_path).expect("Failed to read Pokemon dex file");
+    let entries = split_entries(&content);
+    let mut result = HashMap::new();
+    for (_key, lines) in &entries {
+        if let Some((species, data)) = parse_pokemon_entry(lines) {
+            result.insert(species, data);
         }
     }
-
     result
 }
 
-/// Parse showdownMoves.txt into a HashMap of MoveData keyed by move id.
-pub fn parse_move_dex(file_path: &str) -> HashMap<PokemonMove, MoveData> {
-    let content = fs::read_to_string(file_path).expect("Failed to read moves file");
-    let entries = split_entries(&content);
-    let mut result = HashMap::new();
-
-    for (_key, lines) in &entries {
-        let mut name: Option<PokemonMove> = None;
+/// Parse a single entry (slice of lines) from the move dex into a `(move, MoveData)` pair.
+fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
+    let mut name: Option<PokemonMove> = None;
         let mut accuracy = AccuracyType::Percent(100);
         let mut pp: u8 = 0;
         let mut category = MoveCategory::Status;
@@ -1584,52 +1572,29 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<PokemonMove, MoveData> {
             }
         }
 
-        if let Some(n) = name.clone() {
-            result.insert(n.clone(), MoveData {
-                name: n,
-                accuracy,
-                pp,
-                category,
-                pokemon_type,
-                priority,
-                target,
-                base_power,
-                flags,
-                ohko,
-                thaws_target,
-                heal_fraction,
-                force_switch,
-                self_switch,
-                self_boost,
-                self_destruct,
-                breaks_protect,
-                recoil_fraction,
-                drain_fraction,
-                mind_blown_recoil,
-                struggle_recoil,
-                steals_boosts,
-                secondaries,
-                self_secondaries,
-                crit_ratio,
-                foul_play,
-                ignore_ability,
-                ignore_defense_boosts,
-                ignore_evasion,
-                ignore_immunity,
-                multihit_range,
-                multihit_accuracy,
-                sleep_usable,
-                smart_target,
-                tracks_target,
-                calls_move,
-                has_crash_damage,
-                damage_override,
-                stalling_move,
-                override_offensive_stat,
-                override_defensive_stat,
-            });
+    let n = name?;
+    Some((n.clone(), MoveData {
+        name: n,
+        accuracy, pp, category, pokemon_type, priority, target, base_power,
+        flags, ohko, thaws_target, heal_fraction, force_switch, self_switch,
+        self_boost, self_destruct, breaks_protect, recoil_fraction, drain_fraction,
+        mind_blown_recoil, struggle_recoil, steals_boosts, secondaries, self_secondaries,
+        crit_ratio, foul_play, ignore_ability, ignore_defense_boosts, ignore_evasion,
+        ignore_immunity, multihit_range, multihit_accuracy, sleep_usable, smart_target,
+        tracks_target, calls_move, has_crash_damage, damage_override, stalling_move,
+        override_offensive_stat, override_defensive_stat,
+    }))
+}
+
+/// Parse showdownMoves.txt into a HashMap of MoveData keyed by move id.
+pub fn parse_move_dex(file_path: &str) -> HashMap<PokemonMove, MoveData> {
+    let content = fs::read_to_string(file_path).expect("Failed to read moves file");
+    let entries = split_entries(&content);
+    let mut result = HashMap::new();
+    for (_key, lines) in &entries {
+        if let Some((name, data)) = parse_move_entry(lines) {
+            result.insert(name, data);
         }
     }
-
     result
 }

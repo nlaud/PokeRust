@@ -19,41 +19,25 @@ fn format_pokemon_detailed(mon: &PokemonState) -> String {
     format!("{}", mon)
 }
 
+fn print_team_section(label: &str, mons: &[crate::pokemon::PokemonState]) {
+    println!("{}", label);
+    if mons.is_empty() {
+        println!("  {}", "(none)".dimmed());
+    } else {
+        println!("  {}", mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
+    }
+}
+
 fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
     println!("\n{}", "Current Battle State:".cyan().bold());
     println!("{}", format!("Selected outcome chance: {:.4}%", chance * 100.0).bright_blue());
     println!("{}", format!("{}", state).bright_blue());
-    
-    println!("{}", "P1 Active:".green().bold());
-    if state.p1_active_mons.is_empty() {
-        println!("  {}", "(none)".dimmed());
-    } else {
-        println!("  {}", state.p1_active_mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
-    }
-    
-    println!("{}", "P1 Back:".green());
-    if state.p1_back_mons.is_empty() {
-        println!("  {}", "(none)".dimmed());
-    } else {
-        println!("  {}", state.p1_back_mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
-    }
-    
+
+    print_team_section(&"P1 Active:".green().bold().to_string(), &state.p1_active_mons);
+    print_team_section(&"P1 Back:".green().to_string(), &state.p1_back_mons);
     println!("{}", format!("P1 Has Tera: {} | Has Mega: {}", state.p1_has_tera, state.p1_has_mega).green());
-    
-    println!("{}", "P2 Active:".magenta().bold());
-    if state.p2_active_mons.is_empty() {
-        println!("  {}", "(none)".dimmed());
-    } else {
-        println!("  {}", state.p2_active_mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
-    }
-    
-    println!("{}", "P2 Back:".magenta());
-    if state.p2_back_mons.is_empty() {
-        println!("  {}", "(none)".dimmed());
-    } else {
-        println!("  {}", state.p2_back_mons.iter().map(format_pokemon_detailed).collect::<Vec<_>>().join("\n  "));
-    }
-    
+    print_team_section(&"P2 Active:".magenta().bold().to_string(), &state.p2_active_mons);
+    print_team_section(&"P2 Back:".magenta().to_string(), &state.p2_back_mons);
     println!("{}", format!("P2 Has Tera: {} | Has Mega: {}", state.p2_has_tera, state.p2_has_mega).magenta());
 
     // Field / global effects
@@ -347,116 +331,96 @@ pub fn choose_battle_command_for_slot(
     commands[choice].clone()
 }
 
+fn choose_replacement_command_for_slot(
+    state: &BattleState,
+    player: Player,
+    slot_idx: usize,
+    mon: &PokemonState,
+) -> Option<BattleCommand> {
+    if mon.fainted {
+        let back_mons = match player {
+            Player::P1 => &state.p1_back_mons,
+            Player::P2 => &state.p2_back_mons,
+        };
+        let healthy_bench: Vec<usize> = back_mons.iter().enumerate().filter(|(_, m)| !m.fainted).map(|(i, _)| i).collect();
+        if healthy_bench.is_empty() {
+            println!("{}", format!("No healthy Pokémon available to send out for {} slot {}", player_name(player), slot_idx + 1).red());
+            return None;
+        }
+        let options: Vec<String> = healthy_bench.iter().map(|&idx| back_mon_name(state, player, idx)).collect();
+        let mon_label = species_name(&mon.species);
+        let choice = prompt_choice(
+            &format!("{} {}'s {} {}. Choose a replacement for slot {}:", "[REPLACEMENT]".bright_magenta(), player_name(player), mon_label.bright_red(), "fainted".bright_red(), slot_idx + 1),
+            &options,
+        );
+        Some(BattleCommand::Switch(crate::battle::SwitchCommand { party_index: healthy_bench[choice] }))
+    } else {
+        let mon_label = species_name(&mon.species);
+        let _ = prompt_choice(
+            &format!("{} {}'s {} has no action needed. Select Pass:", "[REPLACEMENT]".bright_magenta(), player_name(player), mon_label.cyan()),
+            &["Pass".to_string()],
+        );
+        Some(BattleCommand::Pass)
+    }
+}
+
+fn replacement_commands_are_valid(state: &BattleState, player: Player, active_mons: &[PokemonState], commands: &[BattleCommand]) -> bool {
+    commands.iter().enumerate().all(|(i, cmd)| {
+        let Some(mon) = active_mons.get(i) else { return false };
+        if mon.fainted {
+            let BattleCommand::Switch(s) = cmd else { return false };
+            let back_mons = match player { Player::P1 => &state.p1_back_mons, Player::P2 => &state.p2_back_mons };
+            s.party_index < back_mons.len()
+        } else {
+            matches!(cmd, BattleCommand::Pass)
+        }
+    })
+}
+
+fn choose_replacement_phase_commands(state: &BattleState, player: Player) -> PlayerCommand {
+    let active_mons = match player { Player::P1 => &state.p1_active_mons, Player::P2 => &state.p2_active_mons };
+    let mut commands = Vec::new();
+    for (slot_idx, mon) in active_mons.iter().enumerate() {
+        match choose_replacement_command_for_slot(state, player, slot_idx, mon) {
+            Some(cmd) => commands.push(cmd),
+            None => return PlayerCommand::Pass,
+        }
+    }
+    if replacement_commands_are_valid(state, player, active_mons, &commands) {
+        PlayerCommand::Battle(commands)
+    } else {
+        PlayerCommand::Pass
+    }
+}
+
+fn choose_normal_battle_commands(
+    state: &BattleState,
+    player: Player,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> PlayerCommand {
+    let active_len = match player { Player::P1 => state.p1_active_mons.len(), Player::P2 => state.p2_active_mons.len() };
+    loop {
+        let commands: Vec<BattleCommand> = (0..active_len)
+            .map(|slot_idx| choose_battle_command_for_slot(state, player, slot_idx, move_dex, pokemon_dex))
+            .collect();
+        if simulator::validate_battle_command_combination(&commands) {
+            return PlayerCommand::Battle(commands);
+        }
+        println!("{}", "The combination of choices is not legal; please choose again.".red().bold());
+    }
+}
+
 pub fn choose_battle_commands_for_player(
     state: &BattleState,
     player: Player,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> PlayerCommand {
-    let active_len = match player {
-        Player::P1 => state.p1_active_mons.len(),
-        Player::P2 => state.p2_active_mons.len(),
-    };
-
-    let active_mons = match player {
-        Player::P1 => &state.p1_active_mons,
-        Player::P2 => &state.p2_active_mons,
-    };
-
-    // Check if we're in replacement phase (both turn_started and turn_ended are true)
-    let in_replacement_phase = state.turn_started && state.turn_ended;
-
-    if in_replacement_phase {
-        // In replacement phase: only allow switches for fainted slots, skip healthy slots
-        let mut commands = Vec::new();
-        for slot_idx in 0..active_len {
-            if let Some(mon) = active_mons.get(slot_idx) {
-                if mon.fainted {
-                    // Fainted slot: prompt for a switch
-                    let back_mons = match player {
-                        Player::P1 => &state.p1_back_mons,
-                        Player::P2 => &state.p2_back_mons,
-                    };
-
-                    let healthy_bench: Vec<usize> = back_mons
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, m)| !m.fainted)
-                        .map(|(i, _)| i)
-                        .collect();
-
-                    if healthy_bench.is_empty() {
-                        println!("{}", format!("No healthy Pokémon available to send out for {} slot {}", player_name(player), slot_idx + 1).red());
-                        // Can't continue; return Pass
-                        return PlayerCommand::Pass;
-                    }
-
-                    let options: Vec<String> = healthy_bench
-                        .iter()
-                        .map(|&idx| back_mon_name(state, player, idx))
-                        .collect();
-
-                    let mon_label = species_name(&mon.species);
-                    let choice = prompt_choice(
-                        &format!("{} {}'s {} {}. Choose a replacement for slot {}:", "[REPLACEMENT]".bright_magenta(), player_name(player), mon_label.bright_red(), "fainted".bright_red(), slot_idx + 1),
-                        &options,
-                    );
-
-                    let chosen_bench_idx = healthy_bench[choice];
-                    commands.push(BattleCommand::Switch(crate::battle::SwitchCommand { party_index: chosen_bench_idx }));
-                } else {
-                    // Healthy slot: prompt for Pass
-                    let mon_label = species_name(&mon.species);
-                    let pass_option = vec!["Pass".to_string()];
-                    let _ = prompt_choice(
-                        &format!("{} {}'s {} has no action needed. Select Pass:", "[REPLACEMENT]".bright_magenta(), player_name(player), mon_label.cyan()),
-                        &pass_option,
-                    );
-                    commands.push(BattleCommand::Pass);
-                }
-            }
-        }
-
-        // Check if all required slots have valid replacements
-        let all_have_valid_replacements = commands.iter().enumerate().all(|(i, cmd)| {
-            if let Some(mon) = active_mons.get(i) {
-                if mon.fainted {
-                    if let BattleCommand::Switch(s) = cmd {
-                        let back_mons = match player {
-                            Player::P1 => &state.p1_back_mons,
-                            Player::P2 => &state.p2_back_mons,
-                        };
-                        s.party_index < back_mons.len()
-                    } else {
-                        false
-                    }
-                } else {
-                    matches!(cmd, BattleCommand::Pass)
-                }
-            } else {
-                false
-            }
-        });
-        if all_have_valid_replacements {
-            return PlayerCommand::Battle(commands);
-        } else {
-            return PlayerCommand::Pass;
-        }
+    if state.turn_started && state.turn_ended {
+        return choose_replacement_phase_commands(state, player);
     }
-
-    // Normal battle phase: prompt for each active slot as before
-    loop {
-        let mut commands = Vec::new();
-        for slot_idx in 0..active_len {
-            commands.push(choose_battle_command_for_slot(state, player, slot_idx, move_dex, pokemon_dex));
-        }
-
-        if simulator::validate_battle_command_combination(&commands) {
-            return PlayerCommand::Battle(commands);
-        }
-
-        println!("{}", "The combination of choices is not legal; please choose again.".red().bold());
-    }
+    choose_normal_battle_commands(state, player, move_dex, pokemon_dex)
 }
 
 pub fn simulate_battle(

@@ -122,132 +122,65 @@ pub struct BattleState{
     pub p2_slot_conditions: Vec<Vec<SlotCondition>>,
 }
 
+/// Format a single Pokémon's state as a multi-line string for display.
+fn format_mon(m: &PokemonState) -> String {
+    let stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
+    let stats_str = stat_names.iter().enumerate()
+        .map(|(i, name)| format!("{}: {}", name, m.stats[i]))
+        .collect::<Vec<_>>().join(", ");
+
+    let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
+    let active_boosts: Vec<String> = m.boosts.iter().enumerate()
+        .filter(|(_, b)| **b != 0)
+        .map(|(i, b)| format!("{}{:+}", boost_names[i], b))
+        .collect();
+    let boosts_str = if active_boosts.is_empty() { "none".to_string() } else { active_boosts.join(", ") };
+
+    let status_str = m.status.as_ref().map(|s| format!("{:?}", s)).unwrap_or_else(|| "Healthy".to_string());
+    let vol_str = if m.volatiles.is_empty() { "none".to_string() }
+                  else { m.volatiles.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ") };
+    let tera_info = if m.is_tera { format!("Tera({:?})", m.tera_type) } else { "No Tera".to_string() };
+    let mega_info = if m.has_mega_form {
+        m.mega_species.as_ref().map(|s| format!("Mega({:?})", s)).unwrap_or_else(|| "Has Mega (unknown species)".to_string())
+    } else { "No Mega".to_string() };
+    let moves_str = m.moves.iter().enumerate()
+        .map(|(i, mov)| {
+            let name = mov.as_ref().map(|mv| humanize_identifier(format!("{:?}", mv))).unwrap_or_else(|| format!("Move {}", i + 1));
+            format!("{} (PP {})", name, m.move_pp.get(i).copied().unwrap_or(0))
+        })
+        .collect::<Vec<_>>().join(", ");
+
+    format!(
+        "{} ({}/{} HP), Status: {}{}\n    Stats: {}\n    Boosts: {}\n    Volatiles: {}\n    {} | {}\n    Moves: {}",
+        species_name(&m.species), m.hp, m.stats[0], status_str,
+        if m.item != crate::data::item::Item::None {
+            format!(", Item: {:?}, Ability: {:?}", m.item, m.ability)
+        } else {
+            format!(", Ability: {:?}", m.ability)
+        },
+        stats_str, boosts_str, vol_str, tera_info, mega_info, moves_str,
+    )
+}
+
+/// Write a labelled team section (active or back) to `f`.
+fn write_team_section(f: &mut std::fmt::Formatter<'_>, label: &str, mons: &[PokemonState]) -> std::fmt::Result {
+    writeln!(f, "{}:", label)?;
+    if mons.is_empty() {
+        writeln!(f, "  (none)")
+    } else {
+        writeln!(f, "  {}", mons.iter().map(format_mon).collect::<Vec<_>>().join("\n  "))
+    }
+}
+
 impl std::fmt::Display for BattleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Turn {} (Started: {}, Ended: {})", self.turn_number, self.turn_started, self.turn_ended)?;
 
-        let format_mon = |m: &PokemonState| -> String {
-            let stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
-            let stats_str = stat_names
-                .iter()
-                .enumerate()
-                .map(|(i, name)| format!("{}: {}", name, m.stats[i]))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let boosts_str = {
-                let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
-                let active_boosts: Vec<String> = m
-                    .boosts
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, b)| **b != 0)
-                    .map(|(i, b)| format!("{}{:+}", boost_names[i], b))
-                    .collect();
-                if active_boosts.is_empty() {
-                    "none".to_string()
-                } else {
-                    active_boosts.join(", ")
-                }
-            };
-
-            let status_str = m
-                .status
-                .as_ref()
-                .map(|s| format!("{:?}", s))
-                .unwrap_or_else(|| "Healthy".to_string());
-
-            let vol_str = if m.volatiles.is_empty() {
-                "none".to_string()
-            } else {
-                m.volatiles.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ")
-            };
-
-            let tera_info = if m.is_tera {
-                format!("Tera({:?})", m.tera_type)
-            } else {
-                "No Tera".to_string()
-            };
-
-            let mega_info = if m.has_mega_form {
-                m.mega_species
-                    .as_ref()
-                    .map(|s| format!("Mega({:?})", s))
-                    .unwrap_or_else(|| "Has Mega (unknown species)".to_string())
-            } else {
-                "No Mega".to_string()
-            };
-
-            let moves_str = m
-                .moves
-                .iter()
-                .enumerate()
-                .map(|(i, mov)| {
-                    let name = mov
-                        .as_ref()
-                        .map(|mv| humanize_identifier(format!("{:?}", mv)))
-                        .unwrap_or_else(|| format!("Move {}", i + 1));
-                    let pp = m.move_pp.get(i).copied().unwrap_or(0);
-                    format!("{} (PP {})", name, pp)
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            format!(
-                "{} ({}/{} HP), Status: {}{}\n    Stats: {}\n    Boosts: {}\n    Volatiles: {}\n    {} | {}\n    Moves: {}",
-                species_name(&m.species),
-                m.hp,
-                m.stats[0],
-                status_str,
-                if m.item != crate::data::item::Item::None {
-                    format!(", Item: {:?}, Ability: {:?}", m.item, m.ability)
-                } else {
-                    format!(", Ability: {:?}", m.ability)
-                },
-                stats_str,
-                boosts_str,
-                vol_str,
-                tera_info,
-                mega_info,
-                moves_str,
-            )
-        };
-
-        let p1_active_names: Vec<String> = self.p1_active_mons.iter().map(format_mon).collect();
-        let p1_back_names: Vec<String> = self.p1_back_mons.iter().map(format_mon).collect();
-        let p2_active_names: Vec<String> = self.p2_active_mons.iter().map(format_mon).collect();
-        let p2_back_names: Vec<String> = self.p2_back_mons.iter().map(format_mon).collect();
-
-        writeln!(f, "P1 Active:")?;
-        if p1_active_names.is_empty() {
-            writeln!(f, "  (none)")?;
-        } else {
-            writeln!(f, "  {}", p1_active_names.join("\n  "))?;
-        }
-
-        writeln!(f, "P1 Back:")?;
-        if p1_back_names.is_empty() {
-            writeln!(f, "  (none)")?;
-        } else {
-            writeln!(f, "  {}", p1_back_names.join("\n  "))?;
-        }
-
+        write_team_section(f, "P1 Active", &self.p1_active_mons)?;
+        write_team_section(f, "P1 Back", &self.p1_back_mons)?;
         writeln!(f, "P1 Has Tera: {} | Has Mega: {}", self.p1_has_tera, self.p1_has_mega)?;
-
-        writeln!(f, "P2 Active:")?;
-        if p2_active_names.is_empty() {
-            writeln!(f, "  (none)")?;
-        } else {
-            writeln!(f, "  {}", p2_active_names.join("\n  "))?;
-        }
-
-        writeln!(f, "P2 Back:")?;
-        if p2_back_names.is_empty() {
-            writeln!(f, "  (none)")?;
-        } else {
-            writeln!(f, "  {}", p2_back_names.join("\n  "))?;
-        }
-
+        write_team_section(f, "P2 Active", &self.p2_active_mons)?;
+        write_team_section(f, "P2 Back", &self.p2_back_mons)?;
         writeln!(f, "P2 Has Tera: {} | Has Mega: {}", self.p2_has_tera, self.p2_has_mega)?;
 
         if let Some(weather) = &self.weather {
