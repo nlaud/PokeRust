@@ -1897,6 +1897,10 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
     {
         simulator_helpers::handle_neutralizing_gas_lift(next_state);
     }
+
+    // A primal-weather ability (Desolate Land / Primordial Sea / Delta Stream) ends its
+    // weather when its holder leaves, unless another active holder keeps it up.
+    simulator_helpers::handle_primal_weather_departure(next_state, &leaving_ability);
 }
 
 // Process a list of send-out slots in effective-speed order, branching on speed ties.
