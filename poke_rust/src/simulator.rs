@@ -232,8 +232,8 @@ fn handle_charging_and_semi_invulnerability(
         matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(mov), _) if mov == &action.move_name)
     });
 
-    // ElectroShot: +1 SpA on the charge turn
-    if action.move_name == PokemonMove::ElectroShot && charging_data.is_none() {
+    // ElectroShot / MeteorBeam: +1 SpA on the charge turn
+    if matches!(action.move_name, PokemonMove::ElectroShot | PokemonMove::MeteorBeam) && charging_data.is_none() {
         attacker.boosts[2] = (attacker.boosts[2] + 1).clamp(-6, 6);
         if let Some(mon) = mon_at_slot_mut(next_state, action.user_slot) {
             mon.boosts = attacker.boosts;
