@@ -25,7 +25,6 @@ cargo run -- --p1 ../teamsheets/{teamsheet path} --p2 ../teamsheets/{teamsheet p
 - Eventually create nash solver and recursive evaluation
 
 ### Random Stuff
-- Make Pokemon Brought and Active a CLI argument
 - Add a CLI flag for whether simulating user can choose which outcome happens.
 - Unit Tests...
 

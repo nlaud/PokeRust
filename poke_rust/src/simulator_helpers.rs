@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::battle::{Action, BattleState, FieldSlot, Player, MoveAction};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
@@ -37,26 +35,6 @@ where
     let mut merged: Vec<(T, f64)> = combined.into_iter().collect();
     merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     merged
-}
-
-pub fn get_combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
-    let mut result = Vec::new();
-    let mut current = Vec::new();
-    combine_helper(0, n, k, &mut current, &mut result);
-    result
-}
-
-fn combine_helper(start: usize, n: usize, k: usize, current: &mut Vec<usize>, result: &mut Vec<Vec<usize>>) {
-    if current.len() == k {
-        result.push(current.clone());
-        return;
-    }
-
-    for i in start..n {
-        current.push(i);
-        combine_helper(i + 1, n, k, current, result);
-        current.pop();
-    }
 }
 
 pub fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
@@ -272,20 +250,6 @@ pub fn stab_multiplier(attacker: &PokemonState, move_type: &PokemonType) -> f64 
     }
 }
 
-pub fn type_effectiveness_label(effectiveness: f64) -> &'static str {
-    if effectiveness == 0.0 {
-        "no effect"
-    } else if effectiveness < 1.0 {
-        "mostly ineffective"
-    } else if (effectiveness - 1.0).abs() < f64::EPSILON {
-        "normal effectiveness"
-    } else if effectiveness < 4.0 {
-        "super effective"
-    } else {
-        "extremely effective"
-    }
-}
-
 pub fn crit_is_prevented(target: &PokemonState) -> bool {
     if target.ability == Ability::BattleArmor || target.ability == Ability::ShellArmor {
         return true;
@@ -407,19 +371,6 @@ pub fn move_defensive_stat(move_data: &MoveData) -> Option<PokemonStat> {
         MoveCategory::Special => Some(PokemonStat::SpD),
         MoveCategory::Status => None,
     }
-}
-
-pub fn move_target_includes_allies(target: &MoveTarget) -> bool {
-    matches!(
-        target,
-        MoveTarget::All
-            | MoveTarget::AllAdjacent
-            | MoveTarget::Allies
-            | MoveTarget::AllySide
-            | MoveTarget::AllyTeam
-            | MoveTarget::AdjacentAlly
-            | MoveTarget::AdjacentAllyOrSelf
-    )
 }
 
 /// Collect non-fainted active slots for `player`, optionally excluding `exclude`.
@@ -779,26 +730,6 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     }
 
     outcomes
-}
-
-pub fn damage_effectiveness_for_action(state: &BattleState, action: &MoveAction, move_data: &MoveData) -> f64 {
-    let Some(target_slot) = action.target_slot else {
-        return 1.0;
-    };
-
-    let Some(attacker) = get_pokemon_at_slot(state, action.user_slot) else {
-        return 1.0;
-    };
-    let Some(target) = get_pokemon_at_slot(state, target_slot) else {
-        return 1.0;
-    };
-
-    match invulnerability_resolution(attacker, target, &move_data.name) {
-        InvulnerabilityResolution::Blocked => 0.0,
-        InvulnerabilityResolution::ZeroDamage => 0.0,
-        InvulnerabilityResolution::Normal => move_type_effectiveness(state, &effective_move_type(state, attacker, move_data), target),
-        InvulnerabilityResolution::DoubleDamage => move_type_effectiveness(state, &effective_move_type(state, attacker, move_data), target) * 2.0,
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1558,20 +1489,6 @@ pub fn trick_room_is_active(state: &BattleState) -> bool {
         .pseudo_weathers
         .iter()
         .any(|pseudo_weather| matches!(pseudo_weather, PseudoWeather::TrickRoom))
-}
-
-fn compare_pokemon_speed(state: &BattleState, p1: &PokemonState, p2: &PokemonState) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    let speed1 = get_effective_speed(state, p1);
-    let speed2 = get_effective_speed(state, p2);
-
-    if (speed2 - speed1).abs() < 0.01 {
-        Ordering::Equal
-    } else if speed2 > speed1 {
-        Ordering::Greater
-    } else {
-        Ordering::Less
-    }
 }
 
 fn get_action_type_priority(action: &Action) -> u8 {
