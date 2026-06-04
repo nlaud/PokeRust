@@ -2223,25 +2223,37 @@ fn apply_effect_to_attacker(
     apply_terrain_effects(state, effect);
 }
 
-/// Branch every existing `branches` state into "effect fires" / "effect misses" for a
-/// chance-based secondary; calls `apply_fn` on the effect branch.
-fn branch_on_secondary<F>(
+/// Branch every existing `branches` state into a "miss" branch plus one branch per
+/// effect in `choices`, which are chosen uniformly at random when the secondary
+/// fires. `apply_fn` applies a single chosen effect to a state.
+///
+/// With a single choice this is an ordinary chance roll. With several choices it
+/// keeps the chance roll and the random-selection roll as *separate* branches
+/// (e.g. Tri Attack: 80% nothing, ~6.67% each of burn/freeze/paralyze).
+fn branch_on_secondary_effects<F>(
     branches: Vec<(BattleState, f64)>,
     chance: f64,
+    choices: &[HitEffect],
     mut apply_fn: F,
 ) -> Vec<(BattleState, f64)>
 where
-    F: FnMut(&mut BattleState),
+    F: FnMut(&mut BattleState, &HitEffect),
 {
+    if choices.is_empty() {
+        return branches;
+    }
+    let per_choice = chance / choices.len() as f64;
     let mut new_branches = Vec::new();
     for (bs, prob) in branches {
         if 1.0 - chance > 0.0 {
             new_branches.push((bs.clone(), prob * (1.0 - chance)));
         }
-        if chance > 0.0 {
-            let mut applied = bs;
-            apply_fn(&mut applied);
-            new_branches.push((applied, prob * chance));
+        if per_choice > 0.0 {
+            for choice in choices {
+                let mut applied = bs.clone();
+                apply_fn(&mut applied, choice);
+                new_branches.push((applied, prob * per_choice));
+            }
         }
     }
     new_branches
@@ -2305,8 +2317,13 @@ pub fn apply_secondary_effects(
     let mut branches: Vec<(BattleState, f64)> = vec![(state.clone(), 1.0)];
     for secondary in &move_data.secondaries {
         let chance = secondary.chance as f64 / 100.0;
-        branches = branch_on_secondary(branches, chance, |bs| {
-            apply_effect_to_target(bs, attacker_slot, target_slot, &secondary.effect, side_condition_target);
+        let choices = if secondary.random_choices.is_empty() {
+            std::slice::from_ref(&secondary.effect)
+        } else {
+            &secondary.random_choices
+        };
+        branches = branch_on_secondary_effects(branches, chance, choices, |bs, eff| {
+            apply_effect_to_target(bs, attacker_slot, target_slot, eff, side_condition_target);
         });
     }
 
@@ -2328,8 +2345,13 @@ pub fn apply_secondary_effects(
     // Branch self-secondaries
     for secondary in &move_data.self_secondaries {
         let chance = secondary.chance as f64 / 100.0;
-        branches = branch_on_secondary(branches, chance, |bs| {
-            apply_effect_to_attacker(bs, attacker_slot, &secondary.effect);
+        let choices = if secondary.random_choices.is_empty() {
+            std::slice::from_ref(&secondary.effect)
+        } else {
+            &secondary.random_choices
+        };
+        branches = branch_on_secondary_effects(branches, chance, choices, |bs, eff| {
+            apply_effect_to_attacker(bs, attacker_slot, eff);
         });
     }
 

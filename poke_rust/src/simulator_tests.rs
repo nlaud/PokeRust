@@ -4391,6 +4391,169 @@ mod tests {
     }
 
     #[test]
+    fn meteor_beam_charge_boost() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let make_state = |weather: Option<Weather>| {
+            let attacker = build_pokemon_state(
+                Species::Archaludon,
+                &pokemon_dex,
+                &move_dex,
+                Some(100),
+                Some([Some(PokemonMove::MeteorBeam), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let target = build_pokemon_state(
+                Species::Basculegion,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                Some(crate::dex_data::PokemonType::Normal),
+                Some([0, 0, 0, 0, 0, 0]),
+                None,
+                false,
+            );
+
+            let weather_turns = weather.as_ref().map(|_| 5);
+            let mut state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+            state.weather = weather;
+            state.weather_turns = weather_turns;
+            state
+        };
+
+        // Without weather: Meteor Beam charges on turn 1, boosting Sp. Atk by 1 stage.
+        let (no_weather_state, no_weather_probability) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(make_state(None)),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        ));
+        assert!((no_weather_probability - 1.0).abs() < 1e-9);
+        assert_eq!(no_weather_state.p1_active_mons[0].boosts[2], 1);
+        assert!(has_charging_volatile(&no_weather_state.p1_active_mons[0], PokemonMove::MeteorBeam));
+
+        // Unlike Electro Shot, Meteor Beam does NOT skip the charge turn in rain.
+        let (rain_state, rain_probability) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(make_state(Some(Weather::Rain))),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        ));
+        assert!((rain_probability - 1.0).abs() < 1e-9);
+        assert_eq!(rain_state.p1_active_mons[0].boosts[2], 1);
+        assert!(has_charging_volatile(&rain_state.p1_active_mons[0], PokemonMove::MeteorBeam));
+    }
+
+    // Sum outcome probabilities by the resulting non-volatile status on the P2 target.
+    fn status_distribution(outcomes: &[(MatchState, f64)]) -> std::collections::HashMap<&'static str, f64> {
+        let mut dist = std::collections::HashMap::new();
+        for (state, probability) in outcomes {
+            if let MatchState::BattleState(bs) = state {
+                let key = match bs.p2_active_mons[0].status {
+                    None => "none",
+                    Some(Status::Burn) => "brn",
+                    Some(Status::Frozen(_)) => "frz",
+                    Some(Status::Paralysis) => "par",
+                    Some(Status::Poison) => "psn",
+                    Some(Status::Sleep(_)) => "slp",
+                    Some(Status::ToxicPoison(_)) => "tox",
+                };
+                *dist.entry(key).or_insert(0.0) += *probability;
+            }
+        }
+        dist
+    }
+
+    #[test]
+    fn tri_attack_random_status() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        // Weak attacker vs a bulky Normal-type target so the target always survives
+        // (and can legally be burned/frozen/paralyzed), leaving only the status rolls.
+        let attacker = build_pokemon_state(
+            Species::Magikarp, &pokemon_dex, &move_dex, Some(1),
+            Some([Some(PokemonMove::TriAttack), None, None, None]),
+            None, Some(Ability::None), None, None,
+            Some(crate::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
+        );
+        let target = build_pokemon_state(
+            Species::Snorlax, &pokemon_dex, &move_dex, Some(100),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None,
+            Some(crate::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
+        );
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let dist = status_distribution(&outcomes);
+        let each = 0.20 / 3.0;
+        assert!((dist.get("none").copied().unwrap_or(0.0) - 0.80).abs() < 1e-9);
+        assert!((dist.get("brn").copied().unwrap_or(0.0) - each).abs() < 1e-9);
+        assert!((dist.get("frz").copied().unwrap_or(0.0) - each).abs() < 1e-9);
+        assert!((dist.get("par").copied().unwrap_or(0.0) - each).abs() < 1e-9);
+        // No other statuses should appear.
+        assert!(dist.get("psn").is_none() && dist.get("slp").is_none());
+    }
+
+    #[test]
+    fn dire_claw_random_status() {
+        let pokemon_dex = pokemon_dex();
+        let move_dex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Magikarp, &pokemon_dex, &move_dex, Some(1),
+            Some([Some(PokemonMove::DireClaw), None, None, None]),
+            None, Some(Ability::None), None, None,
+            Some(crate::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
+        );
+        let target = build_pokemon_state(
+            Species::Snorlax, &pokemon_dex, &move_dex, Some(100),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None,
+            Some(crate::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
+        );
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex,
+            &pokemon_dex,
+        );
+
+        let dist = status_distribution(&outcomes);
+        let each = 0.50 / 3.0;
+        assert!((dist.get("none").copied().unwrap_or(0.0) - 0.50).abs() < 1e-9);
+        assert!((dist.get("psn").copied().unwrap_or(0.0) - each).abs() < 1e-9);
+        assert!((dist.get("par").copied().unwrap_or(0.0) - each).abs() < 1e-9);
+        assert!((dist.get("slp").copied().unwrap_or(0.0) - each).abs() < 1e-9);
+        assert!(dist.get("brn").is_none() && dist.get("frz").is_none());
+    }
+
+    #[test]
     fn rain_weather_accuracy() {
         let pokemon_dex = pokemon_dex();
         let move_dex = move_dex();
