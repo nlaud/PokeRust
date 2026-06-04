@@ -113,7 +113,6 @@ Imposter	The Pokémon transforms into the Pokémon in front of it. It also copie
 Infiltrator	When using its moves, the Pokémon ignores the effects of targets' Light Screen, Reflect, Aurora Veil, Safeguard, and substitutes.
 Innards Out	When the Pokémon takes damage from a move that knocks it out, it deals the same amount of damage to the attacker.
 Inner Focus	The Pokémon never flinches when attacked and is unaffected by Intimidate.
-Intimidate	When the Pokémon enters a battle, it lowers the Attack stats of opponents by 1 stage.
 Iron Fist	Boosts the power of the Pokémon's punching moves by 20%.
 Justified	When the Pokémon takes damage from a Dark-type move, its Attack stat is boosted by 1 stage.
 Keen Eye	The Pokémon ignores changes to targets' evasiveness and its accuracy cannot be lowered.
@@ -137,7 +136,6 @@ Motor Drive	Electric-type moves do not work on the Pokémon. Instead, they boost
 Moxie	When the Pokémon knocks out a target with an attack, its Attack stat is boosted by 1 stage.
 Multiscale	Halves the damage the Pokémon takes while its HP is full.
 Mummy	When the Pokémon is hit by a contact move, the attacker has its Ability changed to Mummy.
-Natural Cure	The Pokémon's status conditions are cured when it switches out of battle.
 Oblivious	The Pokémon cannot gain the Infatuated or Taunted statuses and is unaffected by Intimidate.
 Opportunist	When an opponent's stats are boosted, the Pokémon boosts its own stats in the exact same way.
 Overcoat	The Pokémon takes no damage from sandstorms and is immune to moves and Abilities involving powder.
@@ -161,7 +159,6 @@ Queenly Majesty	Opponents are unable to use priority moves against the Pokémon 
 Quick Draw	The Pokémon's moves have a 30% chance of going first among moves of the same priority.
 Receiver	The Pokémon changes its Ability to match that of a defeated ally.
 Refrigerate	The Pokémon's Normal-type moves become Ice-type moves and their power is boosted by 20%.
-Regenerator	The Pokémon has 1/3 of its max HP restored when it switches out of battle.
 Ripen	Doubles the effects of Berries eaten by the Pokémon.
 Rivalry	Boosts the power of the Pokémon's moves by 25% against targets of the same gender, and lowers it by 25% against targets of the opposite gender. The power remains the same as usual if either Pokémon's gender is unknown.
 Rough Skin	When the Pokémon is hit by a contact move, the attacker takes damage equal to 1/8 of its max HP.
