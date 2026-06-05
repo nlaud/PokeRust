@@ -360,6 +360,23 @@ fn apply_single_hit_branch(
     let mut target_fainted = false;
     let items_suppressed = simulator_helpers::items_are_suppressed(&branch_state);
 
+    // Evaluate whether the target's resist berry should fire, before any mutation.
+    // The number (0.5×) was already baked into `damage` by the pure damage calc;
+    // here we only need to decide whether to consume the item.
+    let resist_berry_consume = !items_suppressed && damage > 0 && {
+        match (
+            simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot),
+            simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot),
+        ) {
+            (Some(atk), Some(tgt)) => {
+                let at = simulator_helpers::effective_move_type(&branch_state, atk, move_data);
+                let eff = simulator_helpers::move_type_effectiveness(&branch_state, &at, tgt);
+                simulator_helpers::resist_berry_triggers(tgt, &at, eff)
+            }
+            _ => false,
+        }
+    };
+
     if let Some(target_mon) = match target_slot.player {
         Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
         Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
@@ -374,6 +391,10 @@ fn apply_single_hit_branch(
             simulator_helpers::apply_damage(target_mon, damage);
 
             if damage > 0 && !items_suppressed && matches!(target_mon.item, crate::data::item::Item::AirBalloon) {
+                target_mon.item = crate::data::item::Item::None;
+            }
+
+            if resist_berry_consume {
                 target_mon.item = crate::data::item::Item::None;
             }
 

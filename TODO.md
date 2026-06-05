@@ -7,27 +7,6 @@ the same code pattern and can usually be knocked out together.
 
 ## Items
 
-### Type-boosting held items
-All identical: 1.2× multiplier when the holder uses a move of the matching type.
-- Black Belt (Fighting)
-- Black Glasses (Dark)
-- Charcoal (Fire)
-- Dragon Fang (Dragon)
-- Fairy Feather (Fairy)
-- Hard Stone (Rock)
-- Magnet (Electric)
-- Metal Coat (Steel)
-- Miracle Seed (Grass)
-- Mystic Water (Water)
-- Never-Melt Ice (Ice)
-- Poison Barb (Poison)
-- Sharp Beak (Flying)
-- Silk Scarf (Normal)
-- Silver Powder (Bug)
-- Soft Sand (Ground)
-- Spell Tag (Ghost)
-- Twisted Spoon (Psychic)
-
 ### Survival / endure items
 Trigger when a hit would KO; keep holder at 1 HP.
 - Focus Sash — full HP → survive any one hit (one-time)
@@ -56,38 +35,6 @@ Consumed on trigger to undo a negative stat effect.
 ---
 
 ## Berries
-
-### Type-resist berries
-All identical: halve damage of the specified type when hit (super-effective for most,
-any Normal hit for Chilan), then consumed.
-- Babiri (Steel)
-- Charti (Rock)
-- Chilan (Normal — any hit, not just SE)
-- Chople (Fighting)
-- Coba (Flying)
-- Colbur (Dark)
-- Haban (Dragon)
-- Kasib (Ghost)
-- Kebia (Poison)
-- Occa (Fire)
-- Passho (Water)
-- Payapa (Psychic)
-- Rindo (Grass)
-- Roseli (Fairy)
-- Shuca (Ground)
-- Tanga (Bug)
-- Wacan (Electric)
-- Yache (Ice)
-
-### Status-cure berries
-Consumed when the holder has the corresponding status condition.
-- Aspear (frozen)
-- Cheri (paralysis)
-- Chesto (sleep)
-- Pecha (poison / badly poisoned)
-- Persim (confusion)
-- Rawst (burn)
-- Lum — cures any status condition or confusion
 
 ### HP-restoration berries
 Triggered at 50% HP; amount differs.

@@ -430,7 +430,7 @@ pub fn damage_targets_multiplier(target_count: usize) -> f64 {
     if target_count > 1 { 0.75 } else { 1.0 }
 }
 
-fn effective_move_type(state: &BattleState, attacker: &PokemonState, move_data: &MoveData) -> PokemonType {
+pub(crate) fn effective_move_type(state: &BattleState, attacker: &PokemonState, move_data: &MoveData) -> PokemonType {
     match move_data.name {
         PokemonMove::WeatherBall => match current_weather(state) {
             Some(Weather::Sun | Weather::ExtremeSunlight) => PokemonType::Fire,
@@ -601,6 +601,130 @@ fn dry_skin_fire_multiplier(target: &PokemonState, attack_type: &PokemonType) ->
     if target.ability == Ability::DrySkin && matches!(attack_type, PokemonType::Fire) { 1.25 } else { 1.0 }
 }
 
+// ──── Type-boosting held items (1.2×, never consumed) ────────────────────────
+
+/// Maps a type-boosting held item to the move type it boosts.
+fn type_boost_item_type(item: &Item) -> Option<PokemonType> {
+    Some(match item {
+        Item::BlackBelt    => PokemonType::Fighting,
+        Item::BlackGlasses => PokemonType::Dark,
+        Item::Charcoal     => PokemonType::Fire,
+        Item::DragonFang   => PokemonType::Dragon,
+        Item::FairyFeather => PokemonType::Fairy,
+        Item::HardStone    => PokemonType::Rock,
+        Item::Magnet       => PokemonType::Electric,
+        Item::MetalCoat    => PokemonType::Steel,
+        Item::MiracleSeed  => PokemonType::Grass,
+        Item::MysticWater  => PokemonType::Water,
+        Item::NeverMeltIce => PokemonType::Ice,
+        Item::PoisonBarb   => PokemonType::Poison,
+        Item::SharpBeak    => PokemonType::Flying,
+        Item::SilkScarf    => PokemonType::Normal,
+        Item::SilverPowder => PokemonType::Bug,
+        Item::SoftSand     => PokemonType::Ground,
+        Item::SpellTag     => PokemonType::Ghost,
+        Item::TwistedSpoon => PokemonType::Psychic,
+        _ => return None,
+    })
+}
+
+/// 1.2× damage when the attacker holds the type-boosting item matching `attack_type`.
+/// Caller must gate on `!items_are_suppressed`.
+fn type_boost_item_multiplier(attacker: &PokemonState, attack_type: &PokemonType) -> f64 {
+    match type_boost_item_type(&attacker.item) {
+        Some(t) if t == *attack_type => 1.2,
+        _ => 1.0,
+    }
+}
+
+// ──── Type-resist berries (0.5× on super-effective hit, then consumed) ────────
+
+/// Maps a type-resist berry to the attacking type it weakens.
+/// Chilan Berry is handled separately: triggers on any Normal-type hit (not just SE).
+fn resist_berry_type(item: &Item) -> Option<PokemonType> {
+    Some(match item {
+        Item::BabiriBerry => PokemonType::Steel,
+        Item::ChartiBerry => PokemonType::Rock,
+        Item::ChopleBerry => PokemonType::Fighting,
+        Item::CobaBerry   => PokemonType::Flying,
+        Item::ColburBerry => PokemonType::Dark,
+        Item::HabanBerry  => PokemonType::Dragon,
+        Item::KasibBerry  => PokemonType::Ghost,
+        Item::KebiaBerry  => PokemonType::Poison,
+        Item::OccaBerry   => PokemonType::Fire,
+        Item::PasshoBerry => PokemonType::Water,
+        Item::PayapaBerry => PokemonType::Psychic,
+        Item::RindoBerry  => PokemonType::Grass,
+        Item::RoseliBerry => PokemonType::Fairy,
+        Item::ShucaBerry  => PokemonType::Ground,
+        Item::TangaBerry  => PokemonType::Bug,
+        Item::WacanBerry  => PokemonType::Electric,
+        Item::YacheBerry  => PokemonType::Ice,
+        _ => return None,
+    })
+}
+
+/// Whether the target's held berry should halve the incoming hit.
+/// - Chilan Berry: any Normal-type hit (Struggle is unimplemented; when added, exclude it here).
+/// - All other resist berries: only when the move is super-effective (`effectiveness > 1.0`).
+/// Caller must gate on `!items_are_suppressed`.
+pub(crate) fn resist_berry_triggers(
+    target: &PokemonState,
+    attack_type: &PokemonType,
+    effectiveness: f64,
+) -> bool {
+    if matches!(target.item, Item::ChilanBerry) && matches!(attack_type, PokemonType::Normal) {
+        return true;
+    }
+    matches!(resist_berry_type(&target.item), Some(t) if t == *attack_type && effectiveness > 1.0)
+}
+
+fn resist_berry_multiplier(
+    target: &PokemonState,
+    attack_type: &PokemonType,
+    effectiveness: f64,
+) -> f64 {
+    if resist_berry_triggers(target, attack_type, effectiveness) { 0.5 } else { 1.0 }
+}
+
+// ──── Status-cure berries ─────────────────────────────────────────────────────
+
+/// If `mon` holds a status-cure berry matching its current status or confusion,
+/// cure the condition and consume the berry (set item to None).
+/// Must be called with the current item-suppression state.
+pub(crate) fn try_consume_status_cure_berry(mon: &mut PokemonState, items_suppressed: bool) {
+    if items_suppressed {
+        return;
+    }
+    let cures_status = matches!(
+        (&mon.item, &mon.status),
+        (Item::AspearBerry,  Some(Status::Frozen(_)))
+      | (Item::CheriBerry,   Some(Status::Paralysis))
+      | (Item::ChestoBerry,  Some(Status::Sleep(_)))
+      | (Item::PechaBerry,   Some(Status::Poison | Status::ToxicPoison(_)))
+      | (Item::RawstBerry,   Some(Status::Burn))
+      | (Item::LumBerry,     Some(_))
+    );
+    let cures_confusion = is_confused(mon)
+        && matches!(mon.item, Item::PersimBerry | Item::LumBerry);
+    if cures_status {
+        mon.status = None;
+    }
+    if cures_confusion {
+        remove_status_volatile(mon, &VolatileStatus::Confusion);
+    }
+    if cures_status || cures_confusion {
+        mon.item = Item::None;
+    }
+}
+
+/// Call this whenever a Pokémon gains or re-enables a held item (e.g. Trick/Switcheroo,
+/// Magic Room lifting). Triggers any immediate item effects such as status-cure berries.
+/// Future item-gain moves (Recycle, Symbiosis, Pickup) should route through here too.
+pub(crate) fn on_item_obtained_or_enabled(mon: &mut PokemonState, items_suppressed: bool) {
+    try_consume_status_cure_berry(mon, items_suppressed);
+}
+
 /// The canonical `(2L/5+2)*BP*Atk/Def/50+2` formula with floor after each step.
 fn base_damage_formula(level: u8, bp: f64, attack: f64, defense: f64) -> f64 {
     let mut d = (2.0 * level as f64 / 5.0).floor();
@@ -673,6 +797,10 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let weather_mult  = weather_damage_multiplier(_state, move_data);
     let burn_mult     = burn_damage_multiplier(attacker, move_data);
     let dry_skin_mult = dry_skin_fire_multiplier(target, &attack_type);
+    let type_boost_mult = if items_are_suppressed(_state) { 1.0 }
+        else { type_boost_item_multiplier(attacker, &attack_type) };
+    let resist_berry_mult = if items_are_suppressed(_state) { 1.0 }
+        else { resist_berry_multiplier(target, &attack_type, effectiveness) };
     let screen_mult   = screen_damage_multiplier(_state, _target_slot, move_data, false); // overridden per-crit below
 
     let rolls   = forced_damage_roll.map(|r| vec![r]).unwrap_or_else(|| selected_damage_rolls(config.damage_rolls));
@@ -705,11 +833,13 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
             dmg = (dmg * (roll as f64 / 100.0)).floor();
             dmg = (dmg * stab).floor();
             dmg = (dmg * effectiveness).floor();
+            dmg = (dmg * resist_berry_mult).floor();  // type-resist berry halves after type effectiveness
             dmg = (dmg * this_screen_mult).floor();
             dmg = (dmg * burn_mult).floor();
             dmg = (dmg * invulnerability_multiplier).floor();
             dmg = (dmg * weather_mult).floor();
             dmg = (dmg * dry_skin_mult).floor();
+            dmg = (dmg * type_boost_mult).floor();    // type-boosting item in the "other" multiplier bucket
 
             let mut damage = dmg.max(0.0) as u16;
             if damage == 0
@@ -1159,7 +1289,7 @@ fn weather_is_strong_winds(state: &BattleState) -> bool {
     matches!(current_weather(state), Some(Weather::StrongWinds))
 }
 
-fn is_confused(mon: &PokemonState) -> bool {
+pub(crate) fn is_confused(mon: &PokemonState) -> bool {
     mon.volatiles.iter().any(|volatile_status| match volatile_status {
         VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _) => true,
         VolatileStatusState::MoveStatus(VolatileStatus::Confusion, _) => true,
@@ -1969,7 +2099,15 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
         }
     }
 
+    // Detect Magic Room (MagicDeluge) expiry: items go from suppressed to re-enabled.
+    let was_items_suppressed = items_are_suppressed(state);
     prune_timed_effects(&mut state.pseudo_weathers, &mut state.pseudo_weather_turns);
+    if was_items_suppressed && !items_are_suppressed(state) {
+        // Items are now re-enabled — trigger immediate on-enable effects (e.g. status-cure berries).
+        for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+            on_item_obtained_or_enabled(mon, false);
+        }
+    }
 
     prune_timed_effects(&mut state.p1_side_conditions, &mut state.p1_side_condition_turns);
     prune_timed_effects(&mut state.p2_side_conditions, &mut state.p2_side_condition_turns);
@@ -2352,6 +2490,7 @@ fn apply_effect_to_target(
     // Extract attacker ability before taking a mutable borrow of the target
     let attacker_ability = get_pokemon_at_slot(state, attacker_slot).map(|a| a.ability.clone());
     let sun_blocks_freeze = weather_is_sunlight(state);
+    let items_suppressed = items_are_suppressed(state);
     let terrain_snapshot = state.clone();
     if let Some(target_mon) = get_pokemon_at_slot_mut(state, target_slot) {
         if let Some(status) = &effect.status {
@@ -2373,6 +2512,10 @@ fn apply_effect_to_target(
         if let Some(volatile) = &effect.volatile_status {
             apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile);
         }
+
+        // After both status and volatile are applied, check status-cure berries.
+        // A single call handles Aspear/Cheri/etc. (status just set) and Persim/Lum (confusion just pushed).
+        try_consume_status_cure_berry(target_mon, items_suppressed);
 
         if effect.boosts != [0; 7] {
             apply_stat_boosts_to_pokemon(target_mon, &effect.boosts);
@@ -2397,6 +2540,7 @@ fn apply_effect_to_attacker(
     effect: &HitEffect,
 ) {
     let sun_blocks_freeze = weather_is_sunlight(state);
+    let items_suppressed = items_are_suppressed(state);
     let terrain_snapshot = state.clone();
     if let Some(attacker_mon) = get_pokemon_at_slot_mut(state, attacker_slot) {
         if let Some(status) = &effect.status {
@@ -2406,6 +2550,10 @@ fn apply_effect_to_attacker(
         if let Some(volatile) = &effect.volatile_status {
             apply_volatile_to_pokemon(&terrain_snapshot, attacker_mon, volatile);
         }
+
+        // After both status and volatile are applied, check status-cure berries.
+        // Covers self-inflicted confusion (e.g. Outrage rampaging) and self-status moves.
+        try_consume_status_cure_berry(attacker_mon, items_suppressed);
 
         if effect.boosts != [0; 7] {
             apply_stat_boosts_to_pokemon(attacker_mon, &effect.boosts);
