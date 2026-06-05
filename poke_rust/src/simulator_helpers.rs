@@ -2,7 +2,7 @@ use crate::battle::{Action, BattleState, FieldSlot, Player, MoveAction};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
-use crate::dex_data::{AccuracyType, MoveCategory, MoveData, MoveTarget, PokemonType, PseudoWeather, SideCondition, Terrain, Weather, HitEffect, MoveFlag, PokemonStat, Status};
+use crate::dex_data::{AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonType, PseudoWeather, SideCondition, Terrain, Weather, HitEffect, MoveFlag, PokemonStat, Status};
 use crate::pokemon::{PokemonState, VolatileStatusState};
 use crate::dex_data::VolatileStatus;
 use rand::{thread_rng, Rng};
@@ -792,8 +792,28 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
                            effective_stat(_state, target, defending_stat, false, false));
     let attack_type  = effective_move_type(_state, attacker, move_data);
     let effectiveness = move_type_effectiveness(_state, &attack_type, target);
+
+    // Fixed-damage moves: bypass the base-power formula entirely.
+    // Type immunity still applies (e.g. Night Shade/Ghost vs Normal → 0),
+    // as does the invulnerability multiplier. No crit / spread / roll scaling.
+    let fixed_damage = match move_data.damage_override {
+        DamageOverride::Number(n) => Some(n),
+        DamageOverride::Level    => Some(attacker.level as u16),
+        DamageOverride::None     => None,
+    };
+    if let Some(amount) = fixed_damage {
+        let dmg = if effectiveness > 0.0 && invulnerability_multiplier > 0.0 { amount } else { 0 };
+        return vec![(dmg, false, 1.0)];
+    }
+
     let stab          = stab_multiplier(attacker, &attack_type);
     let bp            = effective_base_power(_state, attacker, target, move_data, base_power_override);
+
+    // A genuinely 0-BP hit deals 0 damage — no phantom +2 from the formula,
+    // and no min-1 clamp. This covers moves with basePower: 0 and no override.
+    if bp == 0.0 {
+        return vec![(0, false, 1.0)];
+    }
     let weather_mult  = weather_damage_multiplier(_state, move_data);
     let burn_mult     = burn_damage_multiplier(attacker, move_data);
     let dry_skin_mult = dry_skin_fire_multiplier(target, &attack_type);

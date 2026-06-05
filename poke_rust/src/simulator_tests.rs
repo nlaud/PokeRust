@@ -9316,4 +9316,384 @@ mod tests {
         }
     }
 
+    mod damage_override {
+        use super::*;
+
+        // Helper: run calculate_damage_outcomes_for_target and return all damage values.
+        fn damage_values(
+            attacker: &crate::pokemon::PokemonState,
+            target: &crate::pokemon::PokemonState,
+            state: &BattleState,
+            move_name: PokemonMove,
+            targets_mult: f64,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+        ) -> Vec<u16> {
+            let attack_slot = FieldSlot { player: Player::P1, slot_index: 0 };
+            let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
+            simulator_helpers::calculate_damage_outcomes_for_target(
+                state,
+                attacker,
+                target,
+                attack_slot,
+                target_slot,
+                move_dex.get(&move_name).unwrap(),
+                DamageConfig { consider_crit: false, damage_rolls: 16 },
+                targets_mult,
+                1.0,
+            )
+            .into_iter()
+            .map(|(d, _, _)| d)
+            .collect()
+        }
+
+        // ── Level-damage moves ────────────────────────────────────────────────
+
+        #[test]
+        fn seismic_toss_deals_user_level_to_non_immune_target() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Machamp (Fighting) at level 50 uses Seismic Toss.
+            let attacker = build_pokemon_state(
+                Species::Machamp,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::SeismicToss), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            // Venusaur is not Ghost-type, so it is not immune.
+            let target = build_pokemon_state(
+                Species::Venusaur,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 1.0, &move_dex);
+
+            assert_eq!(damages, vec![50], "Seismic Toss should deal exactly user level (50) damage");
+        }
+
+        #[test]
+        fn night_shade_deals_user_level_to_non_immune_target() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Gengar (Ghost) at level 50 uses Night Shade.
+            let attacker = build_pokemon_state(
+                Species::Gengar,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::NightShade), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            // Machamp is not Normal-type, so Night Shade is not immune.
+            let target = build_pokemon_state(
+                Species::Machamp,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::NightShade, 1.0, &move_dex);
+
+            assert_eq!(damages, vec![50], "Night Shade should deal exactly user level (50) damage");
+        }
+
+        // ── Fixed-number damage moves ─────────────────────────────────────────
+
+        #[test]
+        fn dragon_rage_deals_exactly_40_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let attacker = build_pokemon_state(
+                Species::Dragonite,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::DragonRage), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let target = build_pokemon_state(
+                Species::Venusaur,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::DragonRage, 1.0, &move_dex);
+
+            assert_eq!(damages, vec![40], "Dragon Rage should always deal exactly 40 damage");
+        }
+
+        // ── Type immunity zeroes out fixed damage ─────────────────────────────
+
+        #[test]
+        fn seismic_toss_deals_0_to_ghost_type() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Seismic Toss is Fighting-type; Ghost types are immune.
+            let attacker = build_pokemon_state(
+                Species::Machamp,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::SeismicToss), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let target = build_pokemon_state(
+                Species::Gengar,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 1.0, &move_dex);
+
+            assert_eq!(damages, vec![0], "Seismic Toss should deal 0 damage to Ghost-type targets");
+        }
+
+        #[test]
+        fn night_shade_deals_0_to_normal_type() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Night Shade is Ghost-type; Normal types are immune.
+            let attacker = build_pokemon_state(
+                Species::Gengar,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::NightShade), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let target = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::NightShade, 1.0, &move_dex);
+
+            assert_eq!(damages, vec![0], "Night Shade should deal 0 damage to Normal-type targets");
+        }
+
+        // ── Spread multiplier is ignored for fixed damage ─────────────────────
+
+        #[test]
+        fn fixed_damage_ignores_spread_multiplier() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let attacker = build_pokemon_state(
+                Species::Machamp,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::SeismicToss), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let target = build_pokemon_state(
+                Species::Venusaur,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+
+            // With a 0.75 spread multiplier (doubles penalty) the result must still be 50.
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 0.75, &move_dex);
+            assert_eq!(damages, vec![50],
+                "Fixed-damage moves should deal full damage regardless of spread multiplier");
+        }
+
+        // ── 0 base-power moves deal exactly 0 damage (no min-1 clamp) ─────────
+
+        #[test]
+        fn zero_base_power_move_deals_zero_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Splash has base power 0 and no DamageOverride. Category is Status so
+            // move_offensive_stat returns None → 0. To test the bp==0.0 path we
+            // need a Physical/Special move with bp 0. Use Seismic Toss but swap
+            // its override by verifying the path separately via a manually-constructed
+            // MoveData. Instead, use Dragon Rage's base move but confirm 0-bp
+            // Physical moves through the actual data: SeismicToss has basePower=0
+            // and DamageOverride::Level — the override fires first. We confirm the
+            // intent via a hand-built MoveData that is Physical, bp=0, no override.
+            use crate::dex_data::{DamageOverride, MoveCategory, MoveData, MoveTarget};
+
+            let attacker = build_pokemon_state(
+                Species::Machamp,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::SeismicToss), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let target = build_pokemon_state(
+                Species::Venusaur,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::None),
+                Some(Nature::Hardy),
+                None, None,
+                Some([0, 0, 0, 0, 0, 0]),
+                Some([31, 31, 31, 31, 31, 31]),
+                false,
+            );
+            let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+            let attack_slot = FieldSlot { player: Player::P1, slot_index: 0 };
+            let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
+
+            // Build a minimal Physical MoveData with base_power=0, no override.
+            let zero_bp_move = MoveData {
+                name: PokemonMove::SeismicToss, // name doesn't matter for this path
+                category: MoveCategory::Physical,
+                base_power: 0,
+                damage_override: DamageOverride::None,
+                pokemon_type: crate::dex_data::PokemonType::Normal,
+                accuracy: crate::dex_data::AccuracyType::Percent(100),
+                pp: 10,
+                priority: 0,
+                target: MoveTarget::Normal,
+                flags: vec![],
+                secondaries: vec![],
+                self_secondaries: vec![],
+                multihit_range: [0, 0],
+                multihit_accuracy: false,
+                recoil_fraction: [0, 0],
+                struggle_recoil: false,
+                drain_fraction: [0, 0],
+                self_destruct: crate::dex_data::SelfDestructType::None,
+                self_switch: crate::dex_data::SelfSwitchType::None,
+                force_switch: false,
+                thaws_target: false,
+                ohko: false,
+                heal_fraction: [0, 0],
+                self_boost: [0i8; 7],
+                crit_ratio: 0,
+                foul_play: false,
+                breaks_protect: false,
+                mind_blown_recoil: false,
+                steals_boosts: false,
+                override_offensive_stat: None,
+                override_defensive_stat: None,
+                ignore_ability: false,
+                ignore_defense_boosts: false,
+                ignore_evasion: false,
+                ignore_immunity: vec![],
+                sleep_usable: false,
+                smart_target: false,
+                tracks_target: false,
+                calls_move: false,
+                has_crash_damage: false,
+                stalling_move: false,
+            };
+
+            let damages = simulator_helpers::calculate_damage_outcomes_for_target(
+                &state,
+                &attacker,
+                &target,
+                attack_slot,
+                target_slot,
+                &zero_bp_move,
+                DamageConfig { consider_crit: false, damage_rolls: 16 },
+                1.0,
+                1.0,
+            )
+            .into_iter()
+            .map(|(d, _, _)| d)
+            .collect::<Vec<_>>();
+
+            assert_eq!(damages, vec![0],
+                "A Physical move with base_power 0 and no DamageOverride should deal 0 damage, not 1");
+        }
+    }
+
 }
