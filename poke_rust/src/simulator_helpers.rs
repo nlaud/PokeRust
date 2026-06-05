@@ -931,6 +931,7 @@ pub fn apply_damage_and_check_game_over(
 
     if target_mon.fainted {
         clear_pokemon_on_faint(target_mon);
+        handle_pokemon_faint(state, target_slot.player, target_slot.slot_index);
         if !team_has_remaining_pokemon(state, target_slot.player) {
             let winner = match target_slot.player {
                 Player::P1 => Player::P2,
@@ -1585,23 +1586,222 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     let ability = mon.ability.clone();
 
     if !pokemon_ability_is_suppressed(state, mon) {
-        match ability {
-            Ability::ElectricSurge | Ability::HadronEngine => set_terrain(state, Terrain::ElectricTerrain, 5),
-            Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
-            Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
-            Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
-            Ability::Drought | Ability::OrichalcumPulse => set_weather(state, Weather::Sun, 5),
-            Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
-            Ability::Drizzle => set_weather(state, Weather::Rain, 5),
-            Ability::PrimordialSea => set_weather(state, Weather::HeavyRain, 0),
-            Ability::SandStream => set_weather(state, Weather::Sandstorm, 5),
-            Ability::SnowWarning => set_weather(state, Weather::Snow, 5),
-            Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
-            _ => {}
-        }
+        apply_entry_ability_field_effects(state, &ability);
+        apply_entry_ability_target_effects(state, slot, &ability);
     }
 
     trigger_terrain_seed_items(state);
+
+    // A Pokémon entering may bring Neutralizing Gas, which suppresses primal-weather
+    // abilities and so ends the extreme weather they were maintaining.
+    handle_gas_primal_weather_suppression(state);
+}
+
+/// Apply entry abilities that affect opposing Pokémon (e.g. Intimidate lowering the
+/// Attack of every opposing active Pokémon). Shared by `process_pokemon_send_out` and
+/// `process_pokemon_gain_ability`.
+fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, ability: &Ability) {
+    if *ability == Ability::Intimidate {
+        let opposing_player = match slot.player {
+            Player::P1 => Player::P2,
+            Player::P2 => Player::P1,
+        };
+        for target in collect_active_slots(state, opposing_player, None) {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, target) {
+                apply_stat_boosts_to_pokemon(mon, &[-1, 0, 0, 0, 0, 0, 0]);
+            }
+        }
+    }
+}
+
+/// Apply the field-setting effects of an entry ability (weather/terrain setters).
+/// Shared by `process_pokemon_send_out` (a Pokémon switching in) and
+/// `process_pokemon_gain_ability` (a Pokémon gaining an ability mid-battle).
+fn apply_entry_ability_field_effects(state: &mut BattleState, ability: &Ability) {
+    match ability {
+        Ability::ElectricSurge | Ability::HadronEngine => set_terrain(state, Terrain::ElectricTerrain, 5),
+        Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
+        Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
+        Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
+        Ability::Drought | Ability::OrichalcumPulse => set_weather(state, Weather::Sun, 5),
+        Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
+        Ability::Drizzle => set_weather(state, Weather::Rain, 5),
+        Ability::PrimordialSea => set_weather(state, Weather::HeavyRain, 0),
+        Ability::SandStream => set_weather(state, Weather::Sandstorm, 5),
+        Ability::SnowWarning => set_weather(state, Weather::Snow, 5),
+        Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
+        _ => {}
+    }
+}
+
+/// Apply the on-gain effects of the ability of the Pokémon at `slot`.
+///
+/// Used when a Pokémon *gains* an ability mid-battle rather than switching in — most
+/// notably when Neutralizing Gas stops applying and previously-suppressed entry
+/// abilities (weather/terrain setters) reactivate. Mirrors `process_pokemon_send_out`
+/// but deliberately does not run switch-in-only effects such as entry hazards.
+pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
+    let Some(mon) = get_pokemon_at_slot(state, slot) else {
+        return;
+    };
+
+    if mon.fainted {
+        return;
+    }
+
+    let ability = mon.ability.clone();
+
+    if pokemon_ability_is_suppressed(state, mon) {
+        return;
+    }
+
+    apply_entry_ability_field_effects(state, &ability);
+    apply_entry_ability_target_effects(state, slot, &ability);
+    trigger_terrain_seed_items(state);
+}
+
+/// Handle every effect triggered when a Pokémon switches out. Call this *after* the
+/// active/bench swap, passing the bench index where the departing Pokémon now rests.
+///
+/// Covers:
+/// - Switch-out abilities on the departing Pokémon (Natural Cure, Regenerator),
+///   skipped while abilities are suppressed.
+/// - Neutralizing Gas suppression lifting once its holder is gone.
+/// - Primal weather (Desolate Land / Primordial Sea / Delta Stream) ending, unless
+///   another active holder of the same ability remains.
+pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_index: usize) {
+    let abilities_suppressed = abilities_are_suppressed(state);
+
+    // Apply the departing Pokémon's own switch-out ability, and note its ability for
+    // the field-effect checks below.
+    let departed_ability = {
+        let back = match player {
+            Player::P1 => &mut state.p1_back_mons,
+            Player::P2 => &mut state.p2_back_mons,
+        };
+        let Some(departed) = back.get_mut(bench_index) else {
+            return;
+        };
+        let ability = departed.ability.clone();
+        if !abilities_suppressed {
+            apply_switch_out_ability_effects(departed);
+        }
+        ability
+    };
+
+    // Neutralizing Gas suppression lifts when its holder leaves the field.
+    if departed_ability == Ability::NeutralizingGas && !any_pokemon_has_neutralizing_gas(state) {
+        handle_neutralizing_gas_lift(state);
+    }
+
+    // Primal weather ends when its source leaves, unless another holder remains.
+    handle_primal_weather_departure(state, &departed_ability);
+}
+
+/// Handle field effects when the Pokémon at `slot_index` (for `player`) faints:
+/// Neutralizing Gas suppression lifting and primal weather ending. Unlike switching out,
+/// fainting does not trigger Natural Cure / Regenerator. The fainted Pokémon is expected
+/// to still occupy its active slot (with `fainted == true`); the helpers below ignore
+/// fainted Pokémon, so it is correctly treated as gone from the field.
+pub fn handle_pokemon_faint(state: &mut BattleState, player: Player, slot_index: u8) {
+    let fainted_ability = {
+        let mons = match player {
+            Player::P1 => &state.p1_active_mons,
+            Player::P2 => &state.p2_active_mons,
+        };
+        let Some(mon) = mons.get(slot_index as usize) else {
+            return;
+        };
+        mon.ability.clone()
+    };
+
+    // Neutralizing Gas suppression lifts when its holder faints.
+    if fainted_ability == Ability::NeutralizingGas && !any_pokemon_has_neutralizing_gas(state) {
+        handle_neutralizing_gas_lift(state);
+    }
+
+    // Primal weather ends when its source faints, unless another holder remains.
+    handle_primal_weather_departure(state, &fainted_ability);
+}
+
+/// While Neutralizing Gas is active it suppresses primal-weather abilities, so any
+/// extreme weather they were maintaining ends. Called when a Pokémon enters the field
+/// (which may bring Neutralizing Gas with it).
+fn handle_gas_primal_weather_suppression(state: &mut BattleState) {
+    if abilities_are_suppressed(state)
+        && matches!(
+            state.weather,
+            Some(Weather::ExtremeSunlight | Weather::HeavyRain | Weather::StrongWinds)
+        )
+    {
+        state.weather = None;
+        state.weather_turns = None;
+    }
+}
+
+/// Apply on-switch-out ability effects for `mon` (Natural Cure curing status,
+/// Regenerator restoring up to 1/3 of max HP). Callers must skip this while abilities
+/// are suppressed.
+fn apply_switch_out_ability_effects(mon: &mut PokemonState) {
+    if mon.fainted {
+        return;
+    }
+    match mon.ability {
+        Ability::NaturalCure => {
+            mon.status = None;
+        }
+        Ability::Regenerator => {
+            let heal = (mon.stats[0] / 3).max(1);
+            mon.hp = mon.hp.saturating_add(heal).min(mon.stats[0].max(1));
+        }
+        _ => {}
+    }
+}
+
+/// Re-trigger on-gain abilities for every active Pokémon once Neutralizing Gas is no
+/// longer applying. Each non-fainted active Pokémon effectively re-gains its ability,
+/// so suppressed entry abilities (weather/terrain setters) activate again.
+fn handle_neutralizing_gas_lift(state: &mut BattleState) {
+    let mut slots = collect_active_slots(state, Player::P1, None);
+    slots.extend(collect_active_slots(state, Player::P2, None));
+    for slot in slots {
+        process_pokemon_gain_ability(state, slot);
+    }
+}
+
+/// Return true if any non-fainted active Pokémon has `ability`.
+fn active_mons_have_ability(state: &BattleState, ability: &Ability) -> bool {
+    state
+        .p1_active_mons
+        .iter()
+        .chain(state.p2_active_mons.iter())
+        .any(|mon| !mon.fainted && mon.ability == *ability)
+}
+
+/// When a Pokémon with a primal-weather ability leaves the field, the weather it
+/// maintained ends — unless another active Pokémon still has the same ability.
+///
+/// - Desolate Land  -> Extreme Sunlight
+/// - Primordial Sea -> Heavy Rain
+/// - Delta Stream   -> Strong Winds
+fn handle_primal_weather_departure(state: &mut BattleState, departed_ability: &Ability) {
+    let weather = match departed_ability {
+        Ability::DesolateLand => Weather::ExtremeSunlight,
+        Ability::PrimordialSea => Weather::HeavyRain,
+        Ability::DeltaStream => Weather::StrongWinds,
+        _ => return,
+    };
+
+    // Another holder of the same ability keeps the weather active.
+    if active_mons_have_ability(state, departed_ability) {
+        return;
+    }
+
+    // Only clear if that primal weather is the one currently in effect.
+    if state.weather.as_ref() == Some(&weather) {
+        state.weather = None;
+        state.weather_turns = None;
+    }
 }
 
 /// Set terrain. Only one terrain can be active at a time. Provide a duration in turns (0 = permanent).
@@ -2416,6 +2616,13 @@ pub fn check_and_apply_redirection(
         Player::P2 => Player::P1,
     };
 
+    // Rage Powder only redirects moves from attackers that are not immune to powder
+    // (Grass types, Overcoat, Safety Goggles). The immunity belongs to the attacker
+    // whose move is being redirected, not to the redirector.
+    let attacker_immune_to_powder = get_pokemon_at_slot(state, user_slot)
+        .map(|attacker| is_immune_to_powder(state, attacker))
+        .unwrap_or(false);
+
     // Find all opposing PokÃ©mon with FollowMe or RagePowder, excluding those with SkyDrop+redirect
     let mut redirectors: Vec<(FieldSlot, &PokemonState)> = Vec::new();
 
@@ -2425,7 +2632,7 @@ pub fn check_and_apply_redirection(
             continue;
         }
 
-        // Check for FollowMe (not immune to anything)
+        // Check for FollowMe (not a powder move, so not affected by powder immunity)
         if has_status_volatile(mon, &VolatileStatus::FollowMe) {
             redirectors.push((
                 FieldSlot {
@@ -2437,9 +2644,9 @@ pub fn check_and_apply_redirection(
             continue;
         }
 
-        // Check for RagePowder (with immunity checks)
+        // Check for RagePowder (skipped if the attacker is immune to powder)
         if has_status_volatile(mon, &VolatileStatus::RagePowder) {
-            if !is_immune_to_powder(state, mon) {
+            if !attacker_immune_to_powder {
                 redirectors.push((
                     FieldSlot {
                         player: opposing_player,
