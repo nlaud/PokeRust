@@ -1,7 +1,7 @@
 use crate::pokemon::PokemonState;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::{PokemonData, PseudoWeather, SideCondition, SlotCondition, Terrain, Weather};
+use crate::dex_data::{PokemonData, PseudoWeather, SideCondition, SelfSwitchType, SlotCondition, Terrain, Weather};
 use std::collections::HashMap;
 
 fn humanize_identifier(value: impl AsRef<str>) -> String {
@@ -120,6 +120,12 @@ pub struct BattleState{
     pub p2_side_condition_turns: Vec<u8>,
     pub p1_slot_conditions: Vec<Vec<SlotCondition>>,
     pub p2_slot_conditions: Vec<Vec<SlotCondition>>,
+
+    /// Set mid-turn after a self-switch move (U-turn, Baton Pass, etc.) fully resolves and the
+    /// user is alive with a healthy bench.  While this is `Some`, `simulate_turn` returns to the
+    /// caller so the player can choose a replacement; only the pending slot may switch, every
+    /// other active slot must Pass.  Cleared once the replacement is sent in.
+    pub self_switch_pending: Option<(FieldSlot, SelfSwitchType)>,
 }
 
 /// Format a single Pokémon's state as a multi-line string for display.
@@ -290,7 +296,7 @@ impl std::fmt::Display for MatchState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct AttackCommand {
     pub move_slot: usize,
     pub target: Option<FieldSlot>,
@@ -310,7 +316,7 @@ impl std::fmt::Debug for AttackCommand {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SwitchCommand {
     pub party_index: usize,
 }
@@ -321,7 +327,7 @@ impl std::fmt::Debug for SwitchCommand {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum BattleCommand {
     Attack(AttackCommand),
     Switch(SwitchCommand),

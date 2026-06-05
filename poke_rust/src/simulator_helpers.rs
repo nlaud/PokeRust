@@ -2,7 +2,7 @@ use crate::battle::{Action, BattleState, FieldSlot, Player, MoveAction};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
-use crate::dex_data::{AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonType, PseudoWeather, SideCondition, Terrain, Weather, HitEffect, MoveFlag, PokemonStat, Status};
+use crate::dex_data::{AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonType, PseudoWeather, SideCondition, SelfSwitchType, Terrain, Weather, HitEffect, MoveFlag, PokemonStat, Status};
 use crate::pokemon::{PokemonState, VolatileStatusState};
 use crate::dex_data::VolatileStatus;
 use rand::{thread_rng, Rng};
@@ -1055,6 +1055,31 @@ pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
     mon.fainted = mon.hp == 0;
 }
 
+/// Hook called after any HP change (damage or healing). Add HP-threshold item and ability
+/// triggers here (Sitrus Berry at ≤50%, Oran Berry, pinch berries at ≤25%, etc.) when
+/// they are implemented. Currently a no-op placeholder.
+pub(crate) fn on_hp_change(_mon: &mut PokemonState, _items_suppressed: bool) {
+    // TODO: check HP-threshold berries
+}
+
+/// Apply damage and trigger the HP-change hook. Use this instead of bare `apply_damage`
+/// at any call site where item-triggered effects should fire (direct hits, recoil, residual).
+pub(crate) fn take_damage(mon: &mut PokemonState, damage: u16, items_suppressed: bool) {
+    if damage == 0 { return; }
+    apply_damage(mon, damage);
+    if !mon.fainted {
+        on_hp_change(mon, items_suppressed);
+    }
+}
+
+/// Heal a Pokémon and trigger the HP-change hook. Use this instead of bare `heal_mon`
+/// at any call site where item-triggered effects should fire (drain, weather, moves).
+pub(crate) fn gain_hp(mon: &mut PokemonState, amount: u16, items_suppressed: bool) {
+    if amount == 0 { return; }
+    heal_mon(mon, amount);
+    on_hp_change(mon, items_suppressed);
+}
+
 pub fn team_has_remaining_pokemon(state: &BattleState, player: Player) -> bool {
     match player {
         Player::P1 => state.p1_active_mons.iter().chain(state.p1_back_mons.iter()).any(|mon| !mon.fainted),
@@ -1073,7 +1098,7 @@ pub fn apply_damage_and_check_game_over(
         Player::P2 => state.p2_active_mons.get_mut(target_slot.slot_index as usize),
     }?;
 
-    apply_damage(target_mon, damage);
+    take_damage(target_mon, damage, items_suppressed);
 
     if damage > 0 && !items_suppressed && matches!(target_mon.item, Item::AirBalloon) {
         target_mon.item = Item::None;
@@ -1821,6 +1846,7 @@ pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
 ///   another active holder of the same ability remains.
 pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_index: usize) {
     let abilities_suppressed = abilities_are_suppressed(state);
+    let items_suppressed = items_are_suppressed(state);
 
     // Apply the departing Pokémon's own switch-out ability, and note its ability for
     // the field-effect checks below.
@@ -1834,7 +1860,7 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
         };
         let ability = departed.ability.clone();
         if !abilities_suppressed {
-            apply_switch_out_ability_effects(departed);
+            apply_switch_out_ability_effects(departed, items_suppressed);
         }
         ability
     };
@@ -1892,7 +1918,7 @@ fn handle_gas_primal_weather_suppression(state: &mut BattleState) {
 /// Apply on-switch-out ability effects for `mon` (Natural Cure curing status,
 /// Regenerator restoring up to 1/3 of max HP). Callers must skip this while abilities
 /// are suppressed.
-fn apply_switch_out_ability_effects(mon: &mut PokemonState) {
+fn apply_switch_out_ability_effects(mon: &mut PokemonState, items_suppressed: bool) {
     if mon.fainted {
         return;
     }
@@ -1902,7 +1928,7 @@ fn apply_switch_out_ability_effects(mon: &mut PokemonState) {
         }
         Ability::Regenerator => {
             let heal = (mon.stats[0] / 3).max(1);
-            mon.hp = mon.hp.saturating_add(heal).min(mon.stats[0].max(1));
+            gain_hp(mon, heal, items_suppressed);
         }
         _ => {}
     }
@@ -2267,9 +2293,9 @@ fn heal_mon(mon: &mut PokemonState, amount: u16) {
 }
 
 /// Deal `amount` residual damage, clearing on faint. Returns true if the mon fainted.
-fn deal_residual_damage(mon: &mut PokemonState, amount: u16) -> bool {
+fn deal_residual_damage(mon: &mut PokemonState, amount: u16, items_suppressed: bool) -> bool {
     if amount == 0 { return false; }
-    apply_damage(mon, amount);
+    take_damage(mon, amount, items_suppressed);
     if mon.fainted {
         clear_pokemon_on_faint(mon);
         true
@@ -2292,17 +2318,17 @@ fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx) {
     let max_hp = mon.stats[0].max(1);
 
     if ctx.rain && !ctx.abilities_suppressed {
-        if mon.ability == Ability::RainDish { heal_mon(mon, (max_hp as u32 / 16) as u16); }
-        if mon.ability == Ability::DrySkin  { heal_mon(mon, (max_hp as u32 / 8)  as u16); }
+        if mon.ability == Ability::RainDish { gain_hp(mon, (max_hp as u32 / 16) as u16, ctx.items_suppressed); }
+        if mon.ability == Ability::DrySkin  { gain_hp(mon, (max_hp as u32 / 8)  as u16, ctx.items_suppressed); }
     }
 
     if ctx.snow && !ctx.abilities_suppressed && mon.ability == Ability::IceBody {
-        heal_mon(mon, (max_hp as u32 / 16) as u16);
+        gain_hp(mon, (max_hp as u32 / 16) as u16, ctx.items_suppressed);
     }
 
     if ctx.sun && !ctx.abilities_suppressed {
-        if mon.ability == Ability::DrySkin  && deal_residual_damage(mon, (max_hp as u32 / 8) as u16) { return; }
-        if mon.ability == Ability::SolarPower && deal_residual_damage(mon, (max_hp as u32 / 8) as u16) { return; }
+        if mon.ability == Ability::DrySkin  && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, ctx.items_suppressed) { return; }
+        if mon.ability == Ability::SolarPower && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, ctx.items_suppressed) { return; }
     }
 
     if !ctx.sandstorm { return; }
@@ -2315,11 +2341,11 @@ fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx) {
         || (!ctx.items_suppressed && matches!(mon.item, Item::SafetyGoggles));
 
     if !sandstorm_immune {
-        deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16);
+        deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16, ctx.items_suppressed);
     }
 }
 
-fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, rain_active: bool) {
+fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, items_suppressed: bool, rain_active: bool) {
     if mon.fainted { return; }
 
     if !abilities_suppressed && mon.ability == Ability::Hydration && rain_active {
@@ -2330,15 +2356,15 @@ fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, rai
 
     match mon.status {
         Some(Status::Burn) => {
-            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16); }
+            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16, items_suppressed); }
         }
         Some(Status::Poison) => {
-            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 8) as u16); }
+            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 8) as u16, items_suppressed); }
         }
         Some(Status::ToxicPoison(n)) => {
             let new_n = n.saturating_add(1);
             mon.status = Some(Status::ToxicPoison(new_n));
-            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 * new_n as u32 / 16) as u16); }
+            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 * new_n as u32 / 16) as u16, items_suppressed); }
         }
         _ => {}
     }
@@ -2364,13 +2390,13 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
         for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
             if !mon.fainted && pokemon_is_grounded(&terrain_snapshot, mon) {
                 let max_hp = mon.stats[0].max(1);
-                heal_mon(mon, (max_hp as u32 / 16) as u16);
+                gain_hp(mon, (max_hp as u32 / 16) as u16, ctx.items_suppressed);
             }
         }
     }
 
-    for mon in state.p1_active_mons.iter_mut() { apply_status_residual(mon, ctx.abilities_suppressed, ctx.rain); }
-    for mon in state.p2_active_mons.iter_mut() { apply_status_residual(mon, ctx.abilities_suppressed, ctx.rain); }
+    for mon in state.p1_active_mons.iter_mut() { apply_status_residual(mon, ctx.abilities_suppressed, ctx.items_suppressed, ctx.rain); }
+    for mon in state.p2_active_mons.iter_mut() { apply_status_residual(mon, ctx.abilities_suppressed, ctx.items_suppressed, ctx.rain); }
 }
 
 /// If a mon is frozen and takes damage from a fire move or certain moves, unfreeze it.
@@ -2632,6 +2658,7 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
     let branch_weather = current_weather(bs);
     let branch_harsh_sun = matches!(branch_weather, Some(Weather::ExtremeSunlight));
     let branch_sandstorm = matches!(branch_weather, Some(Weather::Sandstorm));
+    let items_suppressed = items_are_suppressed(bs); // compute before the mutable borrow below
 
     let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) else { return false; };
 
@@ -2643,8 +2670,8 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
             attacker_mon.volatiles.clear();
             attacker_mon.status = Some(Status::Sleep(0));
             let max_hp = attacker_mon.stats[0].max(1);
-            attacker_mon.hp = max_hp;
-            attacker_mon.fainted = false;
+            let heal = max_hp.saturating_sub(attacker_mon.hp);
+            gain_hp(attacker_mon, heal, items_suppressed);
         }
         PokemonMove::Synthesis | PokemonMove::MorningSun | PokemonMove::Moonlight => {
             let (num, den) = if branch_harsh_sun { (2u32, 3u32) }
@@ -2652,13 +2679,13 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
                              else { (1u32, 4u32) };
             let max_hp = attacker_mon.stats[0].max(1);
             let heal = ((max_hp as u32 * num) / den) as u16;
-            heal_mon(attacker_mon, heal);
+            gain_hp(attacker_mon, heal, items_suppressed);
         }
         PokemonMove::ShoreUp => {
             let (num, den) = if branch_sandstorm { (2u32, 3u32) } else { (1u32, 4u32) };
             let max_hp = attacker_mon.stats[0].max(1);
             let heal = ((max_hp as u32 * num) / den) as u16;
-            heal_mon(attacker_mon, heal);
+            gain_hp(attacker_mon, heal, items_suppressed);
         }
         _ => return false,
     }
@@ -2680,10 +2707,57 @@ pub fn apply_secondary_effects(
         MoveTarget::AllySide | MoveTarget::Allies | MoveTarget::AllyTeam => attacker_slot.player,
         _ => target_slot.player,
     };
+    let items_suppressed = items_are_suppressed(state);
+
+    let mut branches: Vec<(BattleState, f64)> = vec![(state.clone(), 1.0)];
+
+    // Shed Tail: Showdown data includes `volatileStatus:'substitute'` as a top-level field,
+    // which the parser turns into a 100% entry in `secondaries`. Without special handling that
+    // secondary would unconditionally apply Substitute before any fail-check runs. Instead we:
+    //   • determine success/failure up front (all three fail conditions checked here),
+    //   • on success: apply the HP cost (ceil(max_hp/2)) so it precedes the Substitute creation,
+    //   • on failure: set `shed_tail_failed` so the secondary is skipped below.
+    // The Substitute itself is then created (or not) by the normal secondaries path.
+    // All three fail conditions must be checked here (not just in apply_post_damage_move_effects)
+    // so that the HP cost and Substitute are never applied when the move fails.
+    let shed_tail_failed = if move_data.self_switch == SelfSwitchType::ShedTail {
+        let failed = branches.first().map_or(true, |(bs, _)| {
+            // No healthy bench → move fails entirely (no HP cost, no sub, no switch).
+            let no_bench = match attacker_slot.player {
+                Player::P1 => bs.p1_back_mons.iter().all(|m| m.fainted),
+                Player::P2 => bs.p2_back_mons.iter().all(|m| m.fainted),
+            };
+            no_bench || get_pokemon_at_slot(bs, attacker_slot).map_or(true, |m| {
+                let max_hp = m.stats[0].max(1);
+                m.volatiles.iter().any(|v|
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+                ) || m.hp <= max_hp / 2
+            })
+        });
+        if !failed {
+            // HP cost: ceil(max_hp / 2)
+            for (bs, _) in branches.iter_mut() {
+                if let Some(m) = get_pokemon_at_slot_mut(bs, attacker_slot) {
+                    let max_hp = m.stats[0].max(1);
+                    let cost = (max_hp + 1) / 2;
+                    take_damage(m, cost, items_suppressed);
+                }
+            }
+        }
+        failed
+    } else {
+        false
+    };
 
     // Branch target secondaries
-    let mut branches: Vec<(BattleState, f64)> = vec![(state.clone(), 1.0)];
     for secondary in &move_data.secondaries {
+        // Shed Tail: skip the auto-added Substitute secondary when the move fails its HP check.
+        if shed_tail_failed
+            && secondary.random_choices.is_empty()
+            && secondary.effect.volatile_status == Some(VolatileStatus::Substitute)
+        {
+            continue;
+        }
         let chance = secondary.chance as f64 / 100.0;
         let choices = if secondary.random_choices.is_empty() {
             std::slice::from_ref(&secondary.effect)

@@ -411,12 +411,62 @@ fn choose_normal_battle_commands(
     }
 }
 
+/// Build the commands for the self-switch replacement prompt.
+/// The player who owns `pending_slot` must choose a healthy bench mon for that slot.
+/// All other slots (including all slots of the opposing player) pass.
+fn choose_self_switch_commands(state: &BattleState, player: Player, pending_slot: FieldSlot) -> PlayerCommand {
+    let active_len = match player {
+        Player::P1 => state.p1_active_mons.len(),
+        Player::P2 => state.p2_active_mons.len(),
+    };
+    let commands: Vec<BattleCommand> = (0..active_len).map(|slot_idx| {
+        let this_slot = FieldSlot { player, slot_index: slot_idx as u8 };
+        if this_slot == pending_slot {
+            // Prompt for a replacement from the healthy bench.
+            let back_mons = match player {
+                Player::P1 => &state.p1_back_mons,
+                Player::P2 => &state.p2_back_mons,
+            };
+            let healthy_bench: Vec<usize> = back_mons.iter().enumerate()
+                .filter(|(_, m)| !m.fainted)
+                .map(|(i, _)| i)
+                .collect();
+            if healthy_bench.is_empty() {
+                // No target — should not happen because self_switch_pending is cleared in this case,
+                // but guard defensively.
+                return BattleCommand::Pass;
+            }
+            let leaving_mon = match player {
+                Player::P1 => &state.p1_active_mons,
+                Player::P2 => &state.p2_active_mons,
+            }.get(slot_idx);
+            let leaving_name = leaving_mon.map(|m| species_name(&m.species)).unwrap_or_default();
+            let options: Vec<String> = healthy_bench.iter().map(|&idx| back_mon_name(state, player, idx)).collect();
+            let choice = prompt_choice(
+                &format!(
+                    "{} {}'s {} used a self-switch move. Choose a replacement for slot {}:",
+                    "[SELF-SWITCH]".bright_magenta(), player_name(player), leaving_name.bright_cyan(), slot_idx + 1
+                ),
+                &options,
+            );
+            BattleCommand::Switch(crate::battle::SwitchCommand { party_index: healthy_bench[choice] })
+        } else {
+            BattleCommand::Pass
+        }
+    }).collect();
+    PlayerCommand::Battle(commands)
+}
+
 pub fn choose_battle_commands_for_player(
     state: &BattleState,
     player: Player,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> PlayerCommand {
+    // Mid-turn self-switch: the pending slot must choose a replacement; all other slots Pass.
+    if let Some((pending_slot, _)) = state.self_switch_pending {
+        return choose_self_switch_commands(state, player, pending_slot);
+    }
     if state.turn_started && state.turn_ended {
         return choose_replacement_phase_commands(state, player);
     }

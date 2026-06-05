@@ -264,11 +264,6 @@ All share the consecutive-use probability decay (×1/3 per use in a row).
 
 ### Pivot / forced-switch moves
 Allow or force a switch during or after the move.
-- Baton Pass — switch out and pass stat changes + volatile statuses
-- Chilly Reception — summon snow, then switch user out
-- Flip Turn / U-turn / Volt Switch — deal damage, then switch user out
-- Parting Shot — −1 Atk/Sp. Atk on target, then switch user out
-- Shed Tail — create a substitute (−1/2 HP), then switch user out
 - Circle Throw / Dragon Tail — deal damage; force target to switch out
 - Roar / Whirlwind — force target to switch out (Roar non-damaging)
 
@@ -431,7 +426,6 @@ Give the target the Can't Escape status.
 - Alluring Voice — confuse the target if its stats were raised this turn
 - Ally Switch — user swaps field position with an ally; success rate degrades
 - Aura Wheel — +1 Speed; type depends on Morpeko's current form
-- Baton Pass — switch out while passing stat changes and volatile statuses to the replacement
 - Beat Up — hit once per healthy, status-free party member (power = each member's base Atk ÷ 10 + 5)
 - Belch — 120-power; fails unless the user has eaten a Berry this battle
 - Body Slam — 30% paralyze; ×2 power and never misses vs. Minimized

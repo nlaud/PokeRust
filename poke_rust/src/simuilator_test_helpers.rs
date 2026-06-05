@@ -56,6 +56,7 @@ pub fn battle_state_from_lists(
         p2_side_condition_turns: vec![],
         p1_slot_conditions: vec![Vec::new(); active_per_side as usize],
         p2_slot_conditions: vec![Vec::new(); active_per_side as usize],
+        self_switch_pending: None,
     };
 
     for slot_idx in 0..state.p1_active_mons.len() {
