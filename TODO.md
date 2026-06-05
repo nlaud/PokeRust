@@ -34,18 +34,6 @@ Consumed on trigger to undo a negative stat effect.
 
 ---
 
-## Berries
-
-### HP-restoration berries
-Triggered at 50% HP; amount differs.
-- Oran — restore 10 HP
-- Sitrus — restore 1/4 max HP
-
-### PP-restoration berries
-- Leppa — restore 10 PP to the first move whose PP hits 0
-
----
-
 ## Abilities
 
 ### Type immunities with stat / HP bonus

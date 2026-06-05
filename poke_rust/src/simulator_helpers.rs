@@ -1055,11 +1055,38 @@ pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
     mon.fainted = mon.hp == 0;
 }
 
-/// Hook called after any HP change (damage or healing). Add HP-threshold item and ability
-/// triggers here (Sitrus Berry at ≤50%, Oran Berry, pinch berries at ≤25%, etc.) when
-/// they are implemented. Currently a no-op placeholder.
-pub(crate) fn on_hp_change(_mon: &mut PokemonState, _items_suppressed: bool) {
-    // TODO: check HP-threshold berries
+/// Consume an HP-threshold berry (Oran, Sitrus) if the holder is at ≤ 50% HP.
+/// Uses bare `heal_mon` (not `gain_hp`) to avoid re-entrancy into `on_hp_change`.
+pub(crate) fn try_consume_hp_berry(mon: &mut PokemonState, items_suppressed: bool) {
+    if items_suppressed || mon.fainted { return; }
+    let max_hp = mon.stats[0].max(1);
+    if mon.hp == 0 || mon.hp > max_hp / 2 { return; }
+    let heal: u16 = match mon.item {
+        Item::SitrusBerry => max_hp / 4,
+        Item::OranBerry   => 10,
+        _ => return,
+    };
+    mon.item = Item::None;
+    heal_mon(mon, heal);
+}
+
+/// Hook called after any HP change (damage or healing).
+/// Future HP-threshold triggers (pinch berries, Berserk ability, etc.) slot in here.
+pub(crate) fn on_hp_change(mon: &mut PokemonState, items_suppressed: bool) {
+    try_consume_hp_berry(mon, items_suppressed);
+}
+
+/// Consume a Leppa Berry if the holder has any move at 0 PP.
+/// Restores 10 PP (capped at the move's max) to the first 0-PP move in slot order.
+/// Only considers slots with an actual move assigned (max_pp > 0 — empty slots have max_pp 0).
+pub(crate) fn try_consume_leppa_berry(mon: &mut PokemonState, items_suppressed: bool) {
+    if items_suppressed || mon.item != Item::LeppaBerry { return; }
+    if let Some(i) = mon.move_pp.iter().zip(mon.max_pp.iter())
+        .position(|(&pp, &max)| pp == 0 && max > 0)
+    {
+        mon.move_pp[i] = mon.max_pp[i].min(10);
+        mon.item = Item::None;
+    }
 }
 
 /// Apply damage and trigger the HP-change hook. Use this instead of bare `apply_damage`

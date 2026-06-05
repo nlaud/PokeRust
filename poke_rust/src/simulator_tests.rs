@@ -10234,6 +10234,357 @@ mod tests {
             assert!(!bs.turn_started, "turn should be fully over");
             assert!(!bs.turn_ended, "turn should be fully over");
         }
+
+        // ── HP-restoration berry tests ────────────────────────────────────────
+        // Use poison residual as the trigger: it flows through take_damage →
+        // on_hp_change, is deterministic (no RNG), and lets us set up exact HP.
+
+        #[test]
+        fn oran_heals_10_at_half_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Snorlax: very bulky, easy to control HP maths.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::OranBerry),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            // Place P1 just above threshold so poison residual drops them to ≤50%.
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            // Poison residual = max_hp/8 (min 1), drops HP below threshold → berry fires.
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_after_poison = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            let expected_hp = (hp_after_poison + 10).min(max_hp);
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Oran Berry should be consumed");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Oran Berry should have healed 10 HP");
+        }
+
+        #[test]
+        fn sitrus_heals_quarter_at_half_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::SitrusBerry),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_after_poison = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            let expected_hp = (hp_after_poison + max_hp / 4).min(max_hp);
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Sitrus Berry should be consumed");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Sitrus Berry should have healed max_hp/4");
+        }
+
+        #[test]
+        fn hp_berry_not_eaten_above_half() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // P1: Snorlax at full HP with poison — poison damage stays well above 50%.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::OranBerry),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            // At full HP, poison damage (max_hp/8) leaves us well above max_hp/2.
+            p1.hp = max_hp;
+            p1.status = Some(Status::Poison);
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            let poison_dmg = (max_hp / 8).max(1);
+            let expected_hp = max_hp.saturating_sub(poison_dmg);
+            assert!(expected_hp > max_hp / 2,
+                "Sanity: test setup should leave holder above threshold");
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::OranBerry,
+                "Oran Berry should NOT be eaten when HP stays above 50%");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp,
+                "HP should only reflect poison damage, not berry healing");
+        }
+
+        #[test]
+        fn hp_berry_suppressed_by_magic_deluge() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::OranBerry),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let mut initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            // Magic Deluge suppresses held items.
+            initial.pseudo_weathers.push(PseudoWeather::MagicDeluge);
+            initial.pseudo_weather_turns.push(5);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            // Berry should not have fired — item still held, HP only reflects poison damage.
+            let poison_dmg = (max_hp / 8).max(1);
+            let expected_hp = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            assert_eq!(bs.p1_active_mons[0].item, Item::OranBerry,
+                "Oran Berry must NOT be consumed while Magic Deluge suppresses items");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp,
+                "HP should only reflect poison damage when items are suppressed");
+        }
+
+        // ── Leppa Berry test ──────────────────────────────────────────────────
+
+        #[test]
+        fn leppa_restores_pp_when_move_hits_zero() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // P1 uses Splash with 1 PP remaining — after the turn it hits 0, triggering Leppa.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::LeppaBerry),
+                None, None, None, false,
+            );
+            p1.move_pp[0] = 1; // will hit 0 after this use
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            // Leppa restores 10 PP (capped at max_pp).
+            let max_pp = bs.p1_active_mons[0].max_pp[0];
+            let expected_pp = max_pp.min(10);
+            assert_eq!(bs.p1_active_mons[0].move_pp[0], expected_pp,
+                "Leppa Berry should restore 10 PP (capped at max) when move hits 0");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Leppa Berry should be consumed");
+        }
+
+        #[test]
+        fn leppa_not_eaten_when_pp_above_zero() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // P1 has 5 PP remaining — Splash use brings it to 4, not 0.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::LeppaBerry),
+                None, None, None, false,
+            );
+            p1.move_pp[0] = 5;
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p1_active_mons[0].move_pp[0], 4, "PP should simply decrement by 1");
+            assert_eq!(bs.p1_active_mons[0].item, Item::LeppaBerry,
+                "Leppa Berry must NOT be consumed when PP does not reach 0");
+        }
+
+        // ── Sitrus × Shed Tail interaction ────────────────────────────────────
+        // These tests verify two invariants together:
+        //   (a) Shed Tail costs ceil(max_hp/2), which always leaves HP ≤ floor(max_hp/2),
+        //       so Sitrus always activates after a successful Shed Tail.
+        //   (b) Even though Sitrus pushes HP back above threshold, the switch still triggers
+        //       (baseline-comparison proxy in apply_post_damage_move_effects).
+
+        #[test]
+        fn sitrus_activates_after_shed_tail_even_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::ShedTail), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::SitrusBerry),
+                None, None, None, false,
+            );
+            // Force an even max HP for determinism.
+            p1.stats[0] = 100;
+            p1.hp = 100;
+
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, None, None, None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1], vec![p1_bench], vec![p2], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            // Switch should still be pending despite Sitrus healing P1 above 50%.
+            assert!(bs.self_switch_pending.is_some(),
+                "Shed Tail switch must still be pending even after Sitrus heals P1 above 50%");
+
+            // Sitrus was consumed.
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Sitrus Berry should have fired after the Shed Tail HP cost");
+
+            // HP: cost = ceil(100/2) = 50 → 50 remaining (≤50% threshold fires Sitrus)
+            // Sitrus heals 100/4 = 25 → final HP = 75.
+            assert_eq!(bs.p1_active_mons[0].hp, 75,
+                "HP should be 75 after Shed Tail cost (50) and Sitrus heal (+25)");
+        }
+
+        #[test]
+        fn sitrus_activates_after_shed_tail_odd_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::ShedTail), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::SitrusBerry),
+                None, None, None, false,
+            );
+            // Odd max HP: cost = ceil(101/2) = 51, leaving exactly 50 = floor(101/2).
+            // This confirms the ceil rounding: with floor rounding the cost would be 50,
+            // leaving 51 > 50 = floor(101/2), so Sitrus would NOT fire.
+            p1.stats[0] = 101;
+            p1.hp = 101;
+
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, None, None, None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1], vec![p1_bench], vec![p2], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert!(bs.self_switch_pending.is_some(),
+                "Shed Tail switch must still be pending after Sitrus fires on odd-HP user");
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Sitrus Berry should fire when HP = 50 ≤ floor(101/2) = 50");
+
+            // cost 51 → HP 50; Sitrus heals 101/4 = 25 → HP 75.
+            assert_eq!(bs.p1_active_mons[0].hp, 75,
+                "HP should be 75 after cost 51 and Sitrus heal +25");
+        }
     }
 
 }
