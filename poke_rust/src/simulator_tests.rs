@@ -8701,4 +8701,619 @@ mod tests {
         }
     }
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // Type-boosting held items, type-resist berries, status-cure berries
+    // ──────────────────────────────────────────────────────────────────────────
+    mod items_and_berries {
+        use super::*;
+
+        // ─── Shared helpers ───────────────────────────────────────────────────
+
+        /// One-roll, no-crit damage from P1 slot 0 against P2 slot 0 using `mov`.
+        fn raw_damage(
+            state: &BattleState,
+            mov: &PokemonMove,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+        ) -> u16 {
+            let atk = FieldSlot { player: Player::P1, slot_index: 0 };
+            let tgt = FieldSlot { player: Player::P2, slot_index: 0 };
+            let md = move_dex.get(mov).unwrap();
+            simulator_helpers::calculate_damage_outcomes_for_target(
+                state,
+                simulator_helpers::get_pokemon_at_slot(state, atk).unwrap(),
+                simulator_helpers::get_pokemon_at_slot(state, tgt).unwrap(),
+                atk, tgt, md,
+                DamageConfig { consider_crit: false, damage_rolls: 1 }, 1.0, 1.0,
+            )[0].0
+        }
+
+        // ─── Type-boosting held items ─────────────────────────────────────────
+
+        #[test]
+        fn charcoal_boosts_fire() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make = |item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Flamethrower), None, None, None]),
+                    None, Some(Ability::None), None, item, None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            let no_item  = raw_damage(&make(None),                 &PokemonMove::Flamethrower, &move_dex);
+            let charcoal = raw_damage(&make(Some(Item::Charcoal)), &PokemonMove::Flamethrower, &move_dex);
+
+            assert!(charcoal > no_item, "Charcoal should boost Fire-move damage");
+            // The boost should be close to 1.2× (integer floor rounding is fine)
+            assert!(charcoal as f64 >= no_item as f64 * 1.15);
+            assert!(charcoal as f64 <= no_item as f64 * 1.25);
+        }
+
+        #[test]
+        fn silk_scarf_boosts_normal() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make = |item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::BodySlam), None, None, None]),
+                    None, Some(Ability::None), None, item, None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Lapras, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            let no_item    = raw_damage(&make(None),                  &PokemonMove::BodySlam, &move_dex);
+            let silk_scarf = raw_damage(&make(Some(Item::SilkScarf)), &PokemonMove::BodySlam, &move_dex);
+
+            assert!(silk_scarf > no_item, "Silk Scarf should boost Normal-move damage");
+            assert!(silk_scarf as f64 >= no_item as f64 * 1.15);
+            assert!(silk_scarf as f64 <= no_item as f64 * 1.25);
+        }
+
+        #[test]
+        fn charcoal_does_not_boost_nonfire() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make = |item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::WaterPulse), None, None, None]),
+                    None, Some(Ability::None), None, item, None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            let no_item  = raw_damage(&make(None),                 &PokemonMove::WaterPulse, &move_dex);
+            let charcoal = raw_damage(&make(Some(Item::Charcoal)), &PokemonMove::WaterPulse, &move_dex);
+
+            assert_eq!(charcoal, no_item, "Charcoal should not boost non-Fire moves");
+        }
+
+        #[test]
+        fn type_boost_suppressed_by_magic_deluge() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make = |suppressed: bool| {
+                let atk = build_pokemon_state(
+                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Flamethrower), None, None, None]),
+                    None, Some(Ability::None), None, Some(Item::Charcoal), None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                let mut state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+                if suppressed {
+                    state.pseudo_weathers.push(PseudoWeather::MagicDeluge);
+                    state.pseudo_weather_turns.push(5);
+                }
+                state
+            };
+
+            let boosted    = raw_damage(&make(false), &PokemonMove::Flamethrower, &move_dex);
+            let suppressed = raw_damage(&make(true),  &PokemonMove::Flamethrower, &move_dex);
+
+            assert!(boosted > suppressed,
+                "Charcoal boost should be suppressed under Magic Room (MagicDeluge)");
+        }
+
+        // ─── Type-resist berries ──────────────────────────────────────────────
+
+        #[test]
+        fn occa_berry_halves_super_effective_fire() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Chikorita is Grass-type → 2× weak to Fire
+            let make_target = |item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Flamethrower), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Chikorita, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, item, None, None, None, false,
+                );
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            let dmg_bare = raw_damage(&make_target(None),                  &PokemonMove::Flamethrower, &move_dex);
+            let dmg_occa = raw_damage(&make_target(Some(Item::OccaBerry)), &PokemonMove::Flamethrower, &move_dex);
+
+            assert!(dmg_occa < dmg_bare, "Occa Berry should reduce SE Fire damage");
+            assert!(dmg_occa as f64 >= dmg_bare as f64 * 0.45, "Reduction should be ~0.5×");
+            assert!(dmg_occa as f64 <= dmg_bare as f64 * 0.55, "Reduction should be ~0.5×");
+
+            // Full turn: berry consumed in every outcome branch.
+            // (Flamethrower has a secondary burn chance → 2 branches, but the berry is consumed
+            // in both, so we iterate all outcomes rather than using extract_battle_state.)
+            let full_outcomes = run_single_turn(
+                &MatchState::BattleState(make_target(Some(Item::OccaBerry))),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let any_not_consumed = full_outcomes.iter().any(|(ms, _)|
+                matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::OccaBerry)
+            );
+            assert!(!any_not_consumed,
+                "Occa Berry should be consumed in every branch after a super-effective Fire hit");
+        }
+
+        #[test]
+        fn resist_berry_not_consumed_on_neutral_fire() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Snorlax is Normal-type → Fire hits at 1.0× (not super-effective); Occa should not fire.
+            let make = |item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Flamethrower), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, item, None, None, None, false,
+                );
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            let dmg_with_berry = raw_damage(&make(Some(Item::OccaBerry)), &PokemonMove::Flamethrower, &move_dex);
+            let dmg_no_berry   = raw_damage(&make(None),                   &PokemonMove::Flamethrower, &move_dex);
+
+            assert_eq!(dmg_with_berry, dmg_no_berry,
+                "Occa Berry should not reduce neutral Fire damage");
+
+            // Full turn: berry should NOT be consumed in any branch.
+            // (Flamethrower secondary burn → 2 branches; OccaBerry stays in all of them.)
+            let full_outcomes = run_single_turn(
+                &MatchState::BattleState(make(Some(Item::OccaBerry))),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            for (ms, _) in &full_outcomes {
+                if let MatchState::BattleState(bs) = ms {
+                    assert_eq!(bs.p2_active_mons[0].item, Item::OccaBerry,
+                        "Occa Berry should not be consumed on a neutral Fire hit");
+                }
+            }
+        }
+
+        #[test]
+        fn chilan_triggers_on_neutral_normal() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Snorlax (Normal) uses Tackle (Normal, no secondary) on Lapras (Water/Ice) with ChilanBerry.
+            // Effectiveness == 1.0 (Lapras is neutral to Normal), but Chilan fires on ANY Normal hit.
+            // Snorlax gets STAB on Tackle so the damage is high enough to see the 0.5× reduction.
+            // Tackle has no secondary effects, so the turn produces a single deterministic outcome.
+            let make = |item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Tackle), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Lapras, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, item, None, None, None, false,
+                );
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            let dmg_bare   = raw_damage(&make(None),                     &PokemonMove::Tackle, &move_dex);
+            let dmg_chilan = raw_damage(&make(Some(Item::ChilanBerry)), &PokemonMove::Tackle, &move_dex);
+
+            assert!(dmg_chilan < dmg_bare, "Chilan Berry should halve Normal-move damage even when not SE");
+            assert!(dmg_chilan as f64 >= dmg_bare as f64 * 0.45, "Reduction should be ~0.5×");
+
+            // Full turn: berry consumed (Tackle has no secondary → single deterministic outcome)
+            let after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(make(Some(Item::ChilanBerry))),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            )).0;
+
+            assert_eq!(after.p2_active_mons[0].item, Item::None,
+                "Chilan Berry should be consumed after any Normal-type hit");
+        }
+
+        #[test]
+        fn chilan_not_triggered_by_nonnormal() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Close Combat (Fighting) is super-effective on Snorlax (Normal), but Chilan
+            // Berry only fires for Normal-type moves — it should not reduce Fighting damage.
+            let make = |item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Machamp, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::CloseCombat), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, item, None, None, None, false,
+                );
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            let dmg_bare   = raw_damage(&make(None),                     &PokemonMove::CloseCombat, &move_dex);
+            let dmg_chilan = raw_damage(&make(Some(Item::ChilanBerry)), &PokemonMove::CloseCombat, &move_dex);
+
+            assert_eq!(dmg_chilan, dmg_bare,
+                "Chilan Berry should not reduce Fighting-move damage");
+
+            // Full turn: berry NOT consumed. CloseCombat may OHKO Snorlax → GameOver.
+            // We iterate all BattleState outcomes; if only GameOver, the berry was never consumed.
+            let full_outcomes = run_single_turn(
+                &MatchState::BattleState(make(Some(Item::ChilanBerry))),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let any_consumed = full_outcomes.iter().any(|(ms, _)|
+                matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::None)
+            );
+            assert!(!any_consumed,
+                "Chilan Berry should not be consumed by a non-Normal move");
+        }
+
+        #[test]
+        fn resist_berry_suppressed_by_magic_deluge() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Occa Berry on a 2× Fire-weak target under Magic Room — no reduction, no consumption.
+            let make = |suppressed: bool| {
+                let atk = build_pokemon_state(
+                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Flamethrower), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Chikorita, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, Some(Item::OccaBerry), None, None, None, false,
+                );
+                let mut state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+                if suppressed {
+                    state.pseudo_weathers.push(PseudoWeather::MagicDeluge);
+                    state.pseudo_weather_turns.push(5);
+                }
+                state
+            };
+
+            let dmg_normal     = raw_damage(&make(false), &PokemonMove::Flamethrower, &move_dex);
+            let dmg_suppressed = raw_damage(&make(true),  &PokemonMove::Flamethrower, &move_dex);
+
+            assert!(dmg_suppressed > dmg_normal,
+                "Occa Berry reduction should be suppressed by Magic Room");
+
+            // Full turn: berry NOT consumed under Magic Room in any outcome branch.
+            // (Flamethrower secondary → 2 branches; Occa should stay in all.)
+            let full_outcomes = run_single_turn(
+                &MatchState::BattleState(make(true)),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let any_consumed = full_outcomes.iter().any(|(ms, _)|
+                matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::None)
+            );
+            assert!(!any_consumed,
+                "Occa Berry should not be consumed under Magic Room");
+        }
+
+        // ─── Status-cure berries ──────────────────────────────────────────────
+
+        #[test]
+        fn cheri_cures_paralysis_immediately() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Thunder Wave onto a Cheri Berry holder. In any branch where the move hits,
+            // the paralysis should be immediately cured and the berry consumed.
+            let atk = build_pokemon_state(
+                Species::Pikachu, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::ThunderWave), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let tgt = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::CheriBerry), None, None, None, false,
+            );
+            let state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            // Target should never end up paralyzed — whenever Thunder Wave hits, Cheri cures it.
+            for (ms, _) in &outcomes {
+                if let MatchState::BattleState(bs) = ms {
+                    assert!(
+                        !matches!(bs.p2_active_mons[0].status, Some(Status::Paralysis)),
+                        "Cheri Berry should have cured paralysis immediately"
+                    );
+                }
+            }
+            // At least one branch consumes the berry (the hit branch).
+            assert!(
+                outcomes.iter().any(|(ms, _)|
+                    matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::None)
+                ),
+                "Cheri Berry should be consumed when Thunder Wave hits"
+            );
+        }
+
+        #[test]
+        fn pecha_cures_toxic() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let atk = build_pokemon_state(
+                Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Toxic), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let tgt = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::PechaBerry), None, None, None, false,
+            );
+            let state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            // Target should never end up poisoned/badly poisoned.
+            for (ms, _) in &outcomes {
+                if let MatchState::BattleState(bs) = ms {
+                    assert!(
+                        !matches!(bs.p2_active_mons[0].status,
+                            Some(Status::Poison | Status::ToxicPoison(_))),
+                        "Pecha Berry should have cured toxic status immediately"
+                    );
+                }
+            }
+            assert!(
+                outcomes.iter().any(|(ms, _)|
+                    matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::None)
+                ),
+                "Pecha Berry should be consumed when Toxic hits"
+            );
+        }
+
+        #[test]
+        fn lum_cures_any_status() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let atk = build_pokemon_state(
+                Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::WillOWisp), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let tgt = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::LumBerry), None, None, None, false,
+            );
+            let state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            // Target should never end up burned — Lum cures immediately.
+            for (ms, _) in &outcomes {
+                if let MatchState::BattleState(bs) = ms {
+                    assert!(
+                        !matches!(bs.p2_active_mons[0].status, Some(Status::Burn)),
+                        "Lum Berry should have cured burn immediately"
+                    );
+                }
+            }
+            assert!(
+                outcomes.iter().any(|(ms, _)|
+                    matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::None)
+                ),
+                "Lum Berry should be consumed when Will-O-Wisp hits"
+            );
+        }
+
+        #[test]
+        fn lum_cures_confusion() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Confuse Ray has 100% accuracy and always confuses. With Lum Berry, confusion
+            // is immediately cured and the berry is consumed.
+            let atk = build_pokemon_state(
+                Species::Gastly, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::ConfuseRay), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let tgt = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::LumBerry), None, None, None, false,
+            );
+            let state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+
+            let after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            )).0;
+
+            assert!(
+                !simulator_helpers::is_confused(&after.p2_active_mons[0]),
+                "Lum Berry should have cured confusion immediately"
+            );
+            assert_eq!(after.p2_active_mons[0].item, Item::None,
+                "Lum Berry should be consumed after curing confusion");
+        }
+
+        #[test]
+        fn persim_cures_confusion_only() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // (a) ConfuseRay onto PersimBerry holder: confusion cured, berry consumed.
+            let atk_c = build_pokemon_state(
+                Species::Gastly, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::ConfuseRay), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let tgt_c = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::PersimBerry), None, None, None, false,
+            );
+            let after_c = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(
+                    battle_state_from_lists(vec![atk_c], vec![], vec![tgt_c], vec![])
+                ),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            )).0;
+
+            assert!(
+                !simulator_helpers::is_confused(&after_c.p2_active_mons[0]),
+                "Persim Berry should cure confusion"
+            );
+            assert_eq!(after_c.p2_active_mons[0].item, Item::None,
+                "Persim Berry should be consumed after curing confusion");
+
+            // (b) WillOWisp onto PersimBerry holder: burn remains, berry NOT consumed.
+            let atk_b = build_pokemon_state(
+                Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::WillOWisp), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let tgt_b = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::PersimBerry), None, None, None, false,
+            );
+            let outcomes_b = run_single_turn(
+                &MatchState::BattleState(
+                    battle_state_from_lists(vec![atk_b], vec![], vec![tgt_b], vec![])
+                ),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            // Persim should never be consumed — it only cures confusion, not burn.
+            for (ms, _) in &outcomes_b {
+                if let MatchState::BattleState(bs) = ms {
+                    assert_eq!(bs.p2_active_mons[0].item, Item::PersimBerry,
+                        "Persim Berry should not be consumed when burn is inflicted");
+                }
+            }
+        }
+
+        #[test]
+        fn status_cure_suppressed_by_magic_deluge() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Confuse Ray onto PersimBerry holder under Magic Room — berry should not fire.
+            let atk = build_pokemon_state(
+                Species::Gastly, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::ConfuseRay), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let tgt = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::PersimBerry), None, None, None, false,
+            );
+            let mut state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+            state.pseudo_weathers.push(PseudoWeather::MagicDeluge);
+            state.pseudo_weather_turns.push(5);
+
+            let after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            )).0;
+
+            assert!(
+                simulator_helpers::is_confused(&after.p2_active_mons[0]),
+                "Confusion should not be cured when Magic Room suppresses items"
+            );
+            assert_eq!(after.p2_active_mons[0].item, Item::PersimBerry,
+                "Persim Berry should not be consumed under Magic Room");
+        }
+    }
+
 }
