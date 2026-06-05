@@ -47,12 +47,6 @@ When researching a mechanic, specifically check for:
 
 - **Interactions with other moves/abilities/items** (e.g. does this move still
   work under Magic Room? under Mold Breaker?)
-- **Priority exceptions** — some moves change priority under specific conditions
-- **Failure conditions** — when does the move/ability do nothing?
-- **Target exceptions** — does it hit through Substitute? affect allies?
-- **Generation differences** — Pokémon Champions may differ from prior gens;
-  note any gen-specific behaviour found and implement the newest-gen rule
-- **Doubles/multi-battle rules** — spread moves, redirection, etc.
 
 ## Commands
 
