@@ -87,6 +87,7 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
     };
 
     if let Some(move_index) = move_index {
+        let items_suppressed = simulator_helpers::items_are_suppressed(next_state);
         if let Some(mon) = match user_slot.player {
             Player::P1 => next_state.p1_active_mons.get_mut(user_slot.slot_index as usize),
             Player::P2 => next_state.p2_active_mons.get_mut(user_slot.slot_index as usize),
@@ -94,6 +95,7 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             if let Some(pp) = mon.move_pp.get_mut(move_index) {
                 *pp = pp.saturating_sub(1);
             }
+            simulator_helpers::try_consume_leppa_berry(mon, items_suppressed);
         }
     }
 }
@@ -1646,6 +1648,14 @@ fn has_healthy_bench(bs: &BattleState, player: Player) -> bool {
     }
 }
 
+fn slot_has_substitute(bs: &BattleState, slot: FieldSlot) -> bool {
+    simulator_helpers::get_pokemon_at_slot(bs, slot).map_or(false, |m| {
+        m.volatiles.iter().any(|v|
+            matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+        )
+    })
+}
+
 fn apply_post_damage_move_effects(
     mut bs: BattleState,
     attacker_slot: FieldSlot,
@@ -1717,21 +1727,11 @@ fn apply_post_damage_move_effects(
                 Player::P2 => bs.p2_active_mons.get(attacker_slot.slot_index as usize).map(|m| !m.fainted).unwrap_or(false),
             };
             let move_connected = total_dmg > 0 || matches!(move_data.category, MoveCategory::Status);
-            // For ShedTail: success requires attacker to have a Substitute volatile AND HP ≤ max_hp/2.
-            // After a successful use the HP cost (ceil(max_hp/2)) has been paid, so HP ends up ≤ half.
-            // With a pre-existing substitute the HP is NOT reduced, so it remains > max_hp/2, letting
-            // us distinguish "sub just created" from "sub already existed before the move".
+            // For ShedTail: success ⇔ attacker now has a Substitute AND did not have one before
+            // the move (baseline). Using baseline comparison instead of an HP check means items
+            // like Sitrus Berry healing after the HP cost cannot mask a successful switch.
             let shed_tail_sub_created = move_data.self_switch != SelfSwitchType::ShedTail
-                || match attacker_slot.player {
-                    Player::P1 => bs.p1_active_mons.get(attacker_slot.slot_index as usize),
-                    Player::P2 => bs.p2_active_mons.get(attacker_slot.slot_index as usize),
-                }.map_or(false, |m| {
-                    let has_sub = m.volatiles.iter().any(|v|
-                        matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
-                    );
-                    let max_hp = m.stats[0].max(1);
-                    has_sub && m.hp <= max_hp / 2
-                });
+                || (slot_has_substitute(&bs, attacker_slot) && !slot_has_substitute(baseline, attacker_slot));
             if attacker_alive && move_connected && shed_tail_sub_created {
                 bs.self_switch_pending = Some((attacker_slot, move_data.self_switch));
             }
