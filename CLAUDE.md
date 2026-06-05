@@ -8,6 +8,52 @@ game. The `TODO.md` at the repo root tracks the Pokémon Champions moves, items,
 abilities, and berries that still need work; an entry is removed from `TODO.md`
 once its full effect is implemented in the simulator.
 
+## Research Requirements
+
+Pokémon mechanics are notoriously full of edge cases, exceptions, and interaction
+quirks that are not obvious from a move or ability's surface description. **Always
+do web research before implementing or modifying any mechanic**, even ones that
+seem straightforward. A move's Bulbapedia article routinely documents a dozen
+edge cases that would otherwise be silently wrong in the simulator.
+
+### Bulbapedia
+
+Bulbapedia is the primary reference. Article URLs follow a predictable pattern:
+
+```
+https://bulbapedia.bulbagarden.net/wiki/<Name>_(move)
+https://bulbapedia.bulbagarden.net/wiki/<Name>_(ability)
+https://bulbapedia.bulbagarden.net/wiki/<Name>_(item)
+https://bulbapedia.bulbagarden.net/wiki/<Pokémon_name>_(Pokémon)
+```
+
+Examples:
+- Move:    https://bulbapedia.bulbagarden.net/wiki/Lucky_Chant_(move)
+- Ability: https://bulbapedia.bulbagarden.net/wiki/Intimidate_(Ability)
+- Item:    https://bulbapedia.bulbagarden.net/wiki/Choice_Scarf
+
+Spaces in names become underscores. Disambiguation suffixes (`_(move)`,
+`_(Ability)`, `_(item)`) are added when the name is shared with a Pokémon or
+other article. When in doubt, try with and without the suffix.
+
+Each article's **Effect** and **Description** sections describe the base
+behaviour. The **In battle** subsection and any **Trivia / Notes** at the bottom
+are where generation-specific exceptions and interaction quirks live — always
+read those before coding.
+
+### What to look for
+
+When researching a mechanic, specifically check for:
+
+- **Interactions with other moves/abilities/items** (e.g. does this move still
+  work under Magic Room? under Mold Breaker?)
+- **Priority exceptions** — some moves change priority under specific conditions
+- **Failure conditions** — when does the move/ability do nothing?
+- **Target exceptions** — does it hit through Substitute? affect allies?
+- **Generation differences** — Pokémon Champions may differ from prior gens;
+  note any gen-specific behaviour found and implement the newest-gen rule
+- **Doubles/multi-battle rules** — spread moves, redirection, etc.
+
 ## Commands
 
 All commands run from `poke_rust/`:
