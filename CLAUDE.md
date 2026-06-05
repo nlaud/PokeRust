@@ -8,6 +8,42 @@ game. The `TODO.md` at the repo root tracks the Pokémon Champions moves, items,
 abilities, and berries that still need work; an entry is removed from `TODO.md`
 once its full effect is implemented in the simulator.
 
+## Research Requirements
+
+Pokémon mechanics are notoriously full of edge cases, exceptions, and interaction
+quirks that are not obvious from a move or ability's surface description. **Always
+do web research before implementing or modifying any mechanic**, even ones that
+seem straightforward. A move's Bulbapedia article routinely documents a dozen
+edge cases that would otherwise be silently wrong in the simulator.
+
+### Bulbapedia
+
+Bulbapedia is the primary reference. Article URLs follow a predictable pattern:
+
+```
+https://bulbapedia.bulbagarden.net/wiki/<Name>_(move)
+https://bulbapedia.bulbagarden.net/wiki/<Name>_(ability)
+https://bulbapedia.bulbagarden.net/wiki/<Name>_(item)
+https://bulbapedia.bulbagarden.net/wiki/<Pokémon_name>_(Pokémon)
+```
+
+Spaces in names become underscores. Disambiguation suffixes (`_(move)`,
+`_(Ability)`, `_(item)`) are added when the name is shared with a Pokémon or
+other article. When in doubt, try with and without the suffix.
+
+Each article's **Effect** and **Description** sections describe the base
+behaviour. The **In battle** subsection and any **Trivia / Notes** at the bottom
+are where generation-specific exceptions and interaction quirks live — always
+read those before coding. Always implement the **newest-generation behaviour**
+(Pokémon Champions), not behaviour from older games.
+
+### What to look for
+
+When researching a mechanic, specifically check for:
+
+- **Interactions with other moves/abilities/items** (e.g. does this move still
+  work under Magic Room? under Mold Breaker?)
+
 ## Commands
 
 All commands run from `poke_rust/`:
