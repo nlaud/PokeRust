@@ -3647,6 +3647,126 @@ mod tests {
                     && bs.weather_turns == Some(4)
             )));
         }
+
+        // Mega Charizard Y gains Drought on mega evolution. Base Charizard (Blaze) sets no
+        // weather on send-out; Sun should only appear after it mega evolves.
+        #[test]
+        fn mega_charizard_y_sets_sun_on_mega_evolve_only() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let charizard = build_pokemon_state(
+                Species::Charizard,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Blaze),
+                Some(Nature::Hardy),
+                Some(Item::CharizarditeY),
+                None,
+                None,
+                None,
+                false,
+            );
+            let foe = build_pokemon_state(
+                Species::Garchomp,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Hardy),
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+
+            let initial = battle_state_from_lists(vec![charizard], vec![], vec![foe], vec![]);
+            // Base Blaze sets no weather on send-out.
+            assert_eq!(initial.weather, None);
+
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack_mega(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+                false,
+                1,
+            );
+
+            assert!(!outcomes.is_empty());
+            assert!(outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs)
+                if bs.p1_active_mons[0].species == Species::CharizardMegaY
+                    && bs.p1_active_mons[0].is_mega
+                    && bs.weather == Some(Weather::Sun)
+            )));
+        }
+
+        // Mega Manectric gains Intimidate on mega evolution. Base Manectric (Static) does
+        // not lower the foe's Attack on send-out; the drop should only happen on mega evolve.
+        #[test]
+        fn mega_manectric_intimidates_on_mega_evolve_only() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let manectric = build_pokemon_state(
+                Species::Manectric,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Static),
+                Some(Nature::Hardy),
+                Some(Item::Manectite),
+                None,
+                None,
+                None,
+                false,
+            );
+            let foe = build_pokemon_state(
+                Species::Garchomp,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::Illuminate),
+                Some(Nature::Hardy),
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+
+            let initial = battle_state_from_lists(vec![manectric], vec![], vec![foe], vec![]);
+            // Base Static does not Intimidate on send-out.
+            assert_eq!(initial.p2_active_mons[0].boosts[0], 0);
+
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack_mega(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+                false,
+                1,
+            );
+
+            assert!(!outcomes.is_empty());
+            assert!(outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs)
+                if bs.p1_active_mons[0].species == Species::ManectricMega
+                    && bs.p1_active_mons[0].is_mega
+                    && bs.p2_active_mons[0].boosts[0] == -1
+            )));
+        }
     }
 
     mod weather {

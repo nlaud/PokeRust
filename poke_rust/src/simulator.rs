@@ -1732,8 +1732,14 @@ fn execute_action(
         Action::MegaAction(m) => {
             let slot_idx = m.user_slot.slot_index as usize;
             let mons = match m.user_slot.player { Player::P1 => &mut state.p1_active_mons, Player::P2 => &mut state.p2_active_mons };
-            if let Some(mon) = mons.get_mut(slot_idx) { crate::battle::try_mega_evolution(mon, pokemon_dex); }
+            let evolved = mons.get_mut(slot_idx).map(|mon| crate::battle::try_mega_evolution(mon, pokemon_dex)).unwrap_or(false);
             match m.user_slot.player { Player::P1 => state.p1_has_mega = false, Player::P2 => state.p2_has_mega = false }
+            if evolved {
+                // The mega form may have a different ability; trigger its on-gain effects
+                // (weather/terrain setters, Intimidate) the same way a Pokémon gaining an
+                // ability mid-battle does.
+                simulator_helpers::process_pokemon_gain_ability(&mut state, m.user_slot);
+            }
             vec![(MatchState::BattleState(state), 1.0)]
         }
         Action::TeraAction(t) => {
