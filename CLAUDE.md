@@ -27,11 +27,6 @@ https://bulbapedia.bulbagarden.net/wiki/<Name>_(item)
 https://bulbapedia.bulbagarden.net/wiki/<Pokémon_name>_(Pokémon)
 ```
 
-Examples:
-- Move:    https://bulbapedia.bulbagarden.net/wiki/Lucky_Chant_(move)
-- Ability: https://bulbapedia.bulbagarden.net/wiki/Intimidate_(Ability)
-- Item:    https://bulbapedia.bulbagarden.net/wiki/Choice_Scarf
-
 Spaces in names become underscores. Disambiguation suffixes (`_(move)`,
 `_(Ability)`, `_(item)`) are added when the name is shared with a Pokémon or
 other article. When in doubt, try with and without the suffix.
@@ -39,7 +34,8 @@ other article. When in doubt, try with and without the suffix.
 Each article's **Effect** and **Description** sections describe the base
 behaviour. The **In battle** subsection and any **Trivia / Notes** at the bottom
 are where generation-specific exceptions and interaction quirks live — always
-read those before coding.
+read those before coding. Always implement the **newest-generation behaviour**
+(Pokémon Champions), not behaviour from older games.
 
 ### What to look for
 
