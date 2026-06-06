@@ -7,17 +7,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Items
 
-### Passive damage / crit modifier items
-No consumption. Hook directly into the damage calculation or critical-hit formula.
-- King's Rock — 10% flinch on any damaging hit
-- Light Ball — double Pikachu's Attack and Sp. Atk
-- Scope Lens — +1 critical-hit ratio stage
-
-### End-of-turn and on-hit recovery items
-Hook into the end-of-turn loop and the drain/damage resolution path.
-- Leftovers — restore 1/16 max HP at end of every turn
-- Shell Bell — restore HP equal to 1/8 of damage dealt
-
 ### Turn-order items
 Affect speed computation or the action-priority queue.
 - Choice Scarf — 1.5× Speed stat; locks holder to one move until switched out
