@@ -430,7 +430,9 @@ pub fn damage_targets_multiplier(target_count: usize) -> f64 {
     if target_count > 1 { 0.75 } else { 1.0 }
 }
 
-pub(crate) fn effective_move_type(state: &BattleState, attacker: &PokemonState, move_data: &MoveData) -> PokemonType {
+/// The move's type after applying only its *own* conditional mechanics (Weather Ball, Terrain
+/// Pulse, etc.), but *before* any ability-based type conversion (Aerilate, Liquid Voice, …).
+fn natural_move_type(state: &BattleState, attacker: &PokemonState, move_data: &MoveData) -> PokemonType {
     match move_data.name {
         PokemonMove::WeatherBall => match current_weather(state) {
             Some(Weather::Sun | Weather::ExtremeSunlight) => PokemonType::Fire,
@@ -448,6 +450,63 @@ pub(crate) fn effective_move_type(state: &BattleState, attacker: &PokemonState, 
         },
         _ => move_data.pokemon_type.clone(),
     }
+}
+
+/// Moves whose own type-setting depends on a held item/plate/memory/drive/berry or the user's
+/// own type — mechanics the simulator does not yet model. We conservatively skip -ate conversion
+/// for these so we don't wrongly boost a move that almost always has a non-Normal type in play.
+/// Once their type logic is implemented in `natural_move_type`, remove them from this list.
+fn ate_typeset_unmodeled(name: &PokemonMove) -> bool {
+    matches!(
+        name,
+        PokemonMove::Judgment
+            | PokemonMove::MultiAttack
+            | PokemonMove::TechnoBlast
+            | PokemonMove::NaturalGift
+            | PokemonMove::RevelationDance
+    )
+}
+
+/// The type that an -ate ability converts Normal moves into, or `None` for any other ability.
+fn ate_ability_target_type(ability: &Ability) -> Option<PokemonType> {
+    match ability {
+        Ability::Aerilate    => Some(PokemonType::Flying),
+        Ability::Pixilate    => Some(PokemonType::Fairy),
+        Ability::Refrigerate => Some(PokemonType::Ice),
+        Ability::Dragonize   => Some(PokemonType::Dragon),
+        Ability::Galvanize   => Some(PokemonType::Electric),
+        _ => None,
+    }
+}
+
+/// Returns `true` iff the holder's -ate ability will actually convert `move_data` this use.
+/// This single predicate drives *both* the type change and the 1.2× power boost — they must
+/// be tied together so the boost only fires when the type actually changes.
+fn ate_ability_converts(state: &BattleState, attacker: &PokemonState, move_data: &MoveData) -> bool {
+    if pokemon_ability_is_suppressed(state, attacker) { return false; }
+    if ate_ability_target_type(&attacker.ability).is_none() { return false; }
+    // Tera Blast sets its own type while Terastallized; skip conversion then.
+    if move_data.name == PokemonMove::TeraBlast && attacker.is_tera { return false; }
+    // Moves whose own type-setting is unmodeled — skip to avoid wrong conversions.
+    if ate_typeset_unmodeled(&move_data.name) { return false; }
+    // Convert only when the move's own-effect-resolved type is still Normal.
+    // This naturally handles Weather Ball (non-Normal in weather) and Terrain Pulse
+    // (non-Normal on grounded + active terrain) without any special-casing.
+    matches!(natural_move_type(state, attacker, move_data), PokemonType::Normal)
+}
+
+pub(crate) fn effective_move_type(state: &BattleState, attacker: &PokemonState, move_data: &MoveData) -> PokemonType {
+    let base = natural_move_type(state, attacker, move_data);
+    if pokemon_ability_is_suppressed(state, attacker) { return base; }
+    // Liquid Voice: any sound-based move → Water (no power boost).
+    if attacker.ability == Ability::LiquidVoice && move_has_flag(move_data, &MoveFlag::Sound) {
+        return PokemonType::Water;
+    }
+    // -ate abilities: Normal-typed moves → the ability's target type.
+    if ate_ability_converts(state, attacker, move_data) {
+        return ate_ability_target_type(&attacker.ability).unwrap();
+    }
+    base
 }
 
 // ── Damage-calculation sub-helpers ────────────────────────────────────────────
@@ -548,6 +607,12 @@ fn effective_base_power(
         bp = (bp * 1.2).floor();
     }
 
+    // -ate abilities grant a 1.2× boost to the moves they convert (Gen 7+ rate).
+    // Liquid Voice is intentionally excluded: `ate_ability_converts` returns false for it.
+    if ate_ability_converts(state, attacker, move_data) {
+        bp = (bp * 1.2).floor();
+    }
+
     // HydroSteam in sun: BP boost (no accompanying damage-type penalty)
     if move_data.name == PokemonMove::HydroSteam && weather_is_sunlight(state) {
         bp = (bp * 1.5).floor();
@@ -565,18 +630,21 @@ fn effective_base_power(
 }
 
 /// Weather damage multiplier for Fire/Water in sun/rain (HydroSteam is excluded — its bonus is in base power).
-fn weather_damage_multiplier(state: &BattleState, move_data: &MoveData) -> f64 {
+/// Takes `attack_type` (the *effective* type after ability conversion) so that e.g. Liquid Voice
+/// sound moves get the rain boost after becoming Water-type, and Weather Ball gets the correct
+/// multiplier for its own active-weather type.
+fn weather_damage_multiplier(state: &BattleState, move_data: &MoveData, attack_type: &PokemonType) -> f64 {
     let Some(weather) = current_weather(state) else { return 1.0; };
     match weather {
         Weather::Sun | Weather::ExtremeSunlight => {
             if move_data.name == PokemonMove::HydroSteam { 1.0 }
-            else if matches!(move_data.pokemon_type, PokemonType::Fire) { 1.5 }
-            else if matches!(move_data.pokemon_type, PokemonType::Water) { 0.5 }
+            else if matches!(attack_type, PokemonType::Fire) { 1.5 }
+            else if matches!(attack_type, PokemonType::Water) { 0.5 }
             else { 1.0 }
         }
         Weather::Rain | Weather::HeavyRain => {
-            if matches!(move_data.pokemon_type, PokemonType::Fire) { 0.5 }
-            else if matches!(move_data.pokemon_type, PokemonType::Water) { 1.5 }
+            if matches!(attack_type, PokemonType::Fire) { 0.5 }
+            else if matches!(attack_type, PokemonType::Water) { 1.5 }
             else { 1.0 }
         }
         _ => 1.0,
@@ -814,7 +882,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     if bp == 0.0 {
         return vec![(0, false, 1.0)];
     }
-    let weather_mult  = weather_damage_multiplier(_state, move_data);
+    let weather_mult  = weather_damage_multiplier(_state, move_data, &attack_type);
     let burn_mult     = burn_damage_multiplier(attacker, move_data);
     let dry_skin_mult = dry_skin_fire_multiplier(target, &attack_type);
     let type_boost_mult = if items_are_suppressed(_state) { 1.0 }

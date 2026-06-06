@@ -4194,8 +4194,12 @@ mod tests {
             assert!((rain_probability - 1.0).abs() < 1e-9);
             assert!((sun_probability - 1.0).abs() < 1e-9);
             assert_eq!(no_weather_initial_hp - no_weather_final_state.p2_active_mons[0].hp, 24);
-            assert_eq!(rain_initial_hp - rain_final_state.p2_active_mons[0].hp, 70);
-            assert_eq!(sun_initial_hp - sun_final_state.p2_active_mons[0].hp, 47);
+            // Weather Ball becomes Water-type in rain → rain ×1.5 weather mult now applies correctly.
+            // Previously this was 70 (buggy: weather_damage_multiplier was reading the base Normal type).
+            assert_eq!(rain_initial_hp - rain_final_state.p2_active_mons[0].hp, 105);
+            // Weather Ball becomes Fire-type in sun → sun ×1.5 weather mult now applies correctly.
+            // Previously this was 47 (same latent bug as above).
+            assert_eq!(sun_initial_hp - sun_final_state.p2_active_mons[0].hp, 70);
         }
 
         #[test]
@@ -5141,6 +5145,236 @@ mod tests {
             assert!((adaptability_total_probability - 1.0).abs() < 1e-9);
             assert!(no_ability_outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == expected_no_ability_hp)));
             assert!(adaptability_outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == expected_adaptability_hp)));
+        }
+
+        // ── -ate ability tests ────────────────────────────────────────────────────
+
+        /// Build a 1v1 state for -ate tests.
+        /// P1 (attacker) has the specified move + ability; P2 (defender) uses Splash so it never
+        /// deals damage and never triggers any KO flow.
+        fn ate_make_state(
+            attacker_species: Species,
+            attacker_move: PokemonMove,
+            attacker_ability: Ability,
+            defender_species: Species,
+            pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+        ) -> BattleState {
+            let attacker = build_pokemon_state(
+                attacker_species, pokemon_dex, move_dex,
+                Some(50), Some([Some(attacker_move), None, None, None]),
+                None, Some(attacker_ability), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            let defender = build_pokemon_state(
+                defender_species, pokemon_dex, move_dex,
+                Some(50), Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])
+        }
+
+        /// Run one deterministic turn (1 damage roll, no crit) and return P2's HP after.
+        /// Returns 0 if P2 fainted and the game ended (GameOverState / no back-mons).
+        fn ate_run_and_get_p2_hp(state: BattleState, move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>, pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>) -> u16 {
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex, pokemon_dex, false, 1,
+            );
+            match &outcomes.first().expect("at least one outcome").0 {
+                MatchState::BattleState(bs) => bs.p2_active_mons[0].hp,
+                _ => 0, // P2 fainted with no back-mons → game over; treat as 0 HP remaining
+            }
+        }
+
+        #[test]
+        fn ate_aerilate_bypasses_normal_type_immunity() {
+            // Normal-type moves cannot hit Ghost-type Pokémon (immunity).
+            // Aerilate converts Normal → Flying, which hits Ghost normally.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let initial_hp = ate_make_state(
+                Species::Incineroar, PokemonMove::BodySlam, Ability::Aerilate, Species::Gengar,
+                &pokemon_dex, &move_dex,
+            ).p2_active_mons[0].hp;
+
+            let no_ability_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::None, Species::Gengar, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+            let aerilate_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::Aerilate, Species::Gengar, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+
+            assert_eq!(no_ability_hp, initial_hp, "Body Slam (Normal) should deal 0 to Ghost-type");
+            assert!(aerilate_hp < initial_hp, "Aerilate (→ Flying) should deal damage to Ghost-type");
+        }
+
+        #[test]
+        fn ate_refrigerate_converts_and_boosts() {
+            // Refrigerate: Body Slam (Normal) → Ice-type + 1.2× boost.
+            // Dragonite is Dragon/Flying; Ice is 2× vs Dragon.
+            // Combined multiplier ≥ 2.4× baseline, so refrigerate damage > 2× baseline.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let initial_hp = ate_make_state(
+                Species::Incineroar, PokemonMove::BodySlam, Ability::None, Species::Dragonite,
+                &pokemon_dex, &move_dex,
+            ).p2_active_mons[0].hp;
+
+            let no_ability_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::None, Species::Dragonite, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+            let refrigerate_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::Refrigerate, Species::Dragonite, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+
+            let no_ability_dmg = initial_hp - no_ability_hp;
+            let refrigerate_dmg = initial_hp - refrigerate_hp;
+            assert!(
+                refrigerate_dmg > no_ability_dmg * 2,
+                "Refrigerate (Ice 2×, 1.2× boost) vs Dragon should more than double baseline damage: {} vs {}",
+                refrigerate_dmg, no_ability_dmg,
+            );
+        }
+
+        #[test]
+        fn ate_liquid_voice_no_power_boost() {
+            // Liquid Voice converts sound moves to Water-type but grants NO power boost.
+            //
+            // Target: Machamp (pure Fighting) — both Normal and Water are 1× neutral vs Fighting,
+            // so the only difference between LiquidVoice and no-ability should be zero (same BP,
+            // same type effectiveness, no STAB for Incineroar on either type).
+            // NOTE: Dragon resists Water (0.5×), so Dragonite would give a misleading result.
+            //
+            // We also contrast with Pixilate: Fairy is 2× vs Fighting, so with +1.2× boost
+            // the damage should be well over 2× the baseline.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let initial_hp = ate_make_state(
+                Species::Incineroar, PokemonMove::HyperVoice, Ability::None, Species::Machamp,
+                &pokemon_dex, &move_dex,
+            ).p2_active_mons[0].hp;
+
+            let no_ability_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::None, Species::Machamp, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+            let liquid_voice_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::LiquidVoice, Species::Machamp, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+            let pixilate_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::Pixilate, Species::Machamp, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+
+            let no_ability_dmg = initial_hp - no_ability_hp;
+            let liquid_voice_dmg = initial_hp - liquid_voice_hp;
+            let pixilate_dmg = initial_hp - pixilate_hp;
+
+            assert_eq!(
+                liquid_voice_dmg, no_ability_dmg,
+                "Liquid Voice: same BP, same effectiveness vs Fighting → same damage (no 1.2× boost): {} vs {}",
+                liquid_voice_dmg, no_ability_dmg,
+            );
+            assert!(
+                pixilate_dmg > no_ability_dmg * 2,
+                "Pixilate (Fairy 2×, 1.2× boost) vs Fighting should more than double damage: {} vs {}",
+                pixilate_dmg, no_ability_dmg,
+            );
+        }
+
+        #[test]
+        fn ate_no_effect_on_non_normal_moves() {
+            // Refrigerate only converts NORMAL moves. A Fire-type move (Flamethrower) is unchanged.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let initial_hp = ate_make_state(
+                Species::Incineroar, PokemonMove::Flamethrower, Ability::None, Species::Incineroar,
+                &pokemon_dex, &move_dex,
+            ).p2_active_mons[0].hp;
+
+            let no_ability_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::Flamethrower, Ability::None, Species::Incineroar, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+            let refrigerate_hp = ate_run_and_get_p2_hp(
+                ate_make_state(Species::Incineroar, PokemonMove::Flamethrower, Ability::Refrigerate, Species::Incineroar, &pokemon_dex, &move_dex),
+                &move_dex, &pokemon_dex,
+            );
+
+            assert_eq!(
+                no_ability_hp, refrigerate_hp,
+                "Refrigerate should not affect Flamethrower (Fire move); damage should be identical"
+            );
+            // Sanity: the move actually dealt some damage.
+            assert!(no_ability_hp < initial_hp, "Flamethrower should deal damage");
+        }
+
+        #[test]
+        fn ate_weather_ball_conditional_conversion() {
+            // Weather Ball's own-effect sets its type to Water in rain — in that case -ate must
+            // NOT convert it (the move's own type already fired). Without rain, Weather Ball is
+            // Normal and SHOULD be converted+boosted by the -ate ability.
+            //
+            // Assertions:
+            //   no_weather + Pixilate:  Fairy-type 60 BP (50 × 1.2) → some damage D_fairy
+            //   no_weather + no ability: Normal 50 BP → baseline damage D_normal; D_fairy > D_normal
+            //
+            //   rain + Pixilate:         Water 100 BP (Weather Ball doubles in rain), rain mult ×1.5
+            //                            → NOT converted, no ate boost → D_rain_pixilate
+            //   rain + no ability:       same Water 100 BP × ×1.5 → D_rain_no_ability
+            //   D_rain_pixilate == D_rain_no_ability  (Pixilate did nothing in rain)
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make = |ability: Ability, rain: bool| {
+                let mut state = ate_make_state(
+                    Species::Incineroar, PokemonMove::WeatherBall, ability, Species::Incineroar,
+                    &pokemon_dex, &move_dex,
+                );
+                if rain {
+                    state.weather = Some(Weather::Rain);
+                    state.weather_turns = Some(5);
+                }
+                state
+            };
+
+            let initial_hp = make(Ability::None, false).p2_active_mons[0].hp;
+
+            let no_weather_no_ability_hp  = ate_run_and_get_p2_hp(make(Ability::None,    false), &move_dex, &pokemon_dex);
+            let no_weather_pixilate_hp    = ate_run_and_get_p2_hp(make(Ability::Pixilate, false), &move_dex, &pokemon_dex);
+            let rain_no_ability_hp        = ate_run_and_get_p2_hp(make(Ability::None,    true),  &move_dex, &pokemon_dex);
+            let rain_pixilate_hp          = ate_run_and_get_p2_hp(make(Ability::Pixilate, true),  &move_dex, &pokemon_dex);
+
+            let no_weather_no_ability_dmg = initial_hp - no_weather_no_ability_hp;
+            let no_weather_pixilate_dmg   = initial_hp - no_weather_pixilate_hp;
+
+            // Without rain: Pixilate converts Normal Weather Ball → Fairy (+1.2×); more damage.
+            assert!(
+                no_weather_pixilate_dmg > no_weather_no_ability_dmg,
+                "No weather: Pixilate should boost Weather Ball (Normal→Fairy +1.2×): {} vs {}",
+                no_weather_pixilate_dmg, no_weather_no_ability_dmg,
+            );
+            // With rain: Weather Ball's own type is Water; Pixilate does NOT convert → same damage.
+            assert_eq!(
+                rain_pixilate_hp, rain_no_ability_hp,
+                "Rain: Pixilate must NOT convert Weather Ball (already Water); damage should be identical",
+            );
+            // Sanity: rain genuinely increases damage (Water Ball in rain = 100 BP × 1.5 weather mult).
+            assert!(rain_no_ability_hp < no_weather_no_ability_hp,
+                "Rain should increase Water-type Weather Ball damage");
         }
 
         #[test]
