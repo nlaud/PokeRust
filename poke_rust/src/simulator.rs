@@ -347,7 +347,7 @@ fn multihit_hit_base_power(
 }
 
 fn apply_single_hit_branch(
-    mut branch_state: BattleState,
+    branch_state: BattleState,
     target_slot: FieldSlot,
     move_name: &PokemonMove,
     move_data: &MoveData,
@@ -356,10 +356,6 @@ fn apply_single_hit_branch(
     branch_probability: f64,
 ) -> Vec<(BattleState, f64)> {
     let mut outcomes = Vec::new();
-    let mut absorbed_by_dry_skin = false;
-    let mut sand_spit_triggered = false;
-    let mut seed_sower_triggered = false;
-    let mut target_fainted = false;
     let items_suppressed = simulator_helpers::items_are_suppressed(&branch_state);
 
     // Evaluate whether the target's resist berry should fire, before any mutation.
@@ -379,18 +375,62 @@ fn apply_single_hit_branch(
         }
     };
 
-    if let Some(target_mon) = match target_slot.player {
-        Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
-        Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
-    } {
-        if target_mon.ability == Ability::DrySkin && matches!(move_data.pokemon_type, PokemonType::Water) {
+    // Dry Skin + Water-type move: absorb the hit entirely, no secondary effects, no endure.
+    let absorbed_by_dry_skin = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
+        .map_or(false, |t| t.ability == Ability::DrySkin && matches!(move_data.pokemon_type, PokemonType::Water));
+
+    if absorbed_by_dry_skin {
+        let mut branch_state = branch_state;
+        if let Some(target_mon) = match target_slot.player {
+            Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
+            Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+        } {
             let max_hp = target_mon.stats[0].max(1);
             let heal_amount = (max_hp as u32 / 4) as u16;
             simulator_helpers::gain_hp(target_mon, heal_amount, items_suppressed);
-            absorbed_by_dry_skin = true;
-        } else {
-            simulator_helpers::take_damage(target_mon, damage, items_suppressed);
+        }
+        outcomes.push((branch_state, branch_probability));
+        return outcomes;
+    }
 
+    // Focus Sash / Focus Band endure outcomes. Each entry is (eff_damage, consume_item, prob).
+    // - Normal case:   one entry  (damage, false, 1.0)
+    // - Focus Sash KO: one entry  (hp-1,   true,  1.0)
+    // - Focus Band KO: two entries (damage, false, 0.9) and (hp-1, false, 0.1)
+    // Multi-hit calls us once per hit, so Band's 10% is rolled independently each hit.
+    let endure_outcomes = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
+        .map_or_else(
+            || vec![(damage, false, 1.0)],
+            |t| simulator_helpers::compute_endure_outcomes(t, damage, items_suppressed),
+        );
+
+    let n = endure_outcomes.len();
+    // Use Option so the last iteration can move out of branch_state without cloning.
+    let mut branch_state_opt = Some(branch_state);
+
+    for (i, (eff_damage, consume_sash, endure_prob)) in endure_outcomes.into_iter().enumerate() {
+        let mut bs = if i < n - 1 {
+            branch_state_opt.as_ref().unwrap().clone()
+        } else {
+            branch_state_opt.take().unwrap()
+        };
+
+        let mut sand_spit_triggered = false;
+        let mut seed_sower_triggered = false;
+        let mut target_fainted = false;
+
+        if let Some(target_mon) = match target_slot.player {
+            Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
+            Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
+        } {
+            simulator_helpers::take_damage(target_mon, eff_damage, items_suppressed);
+
+            // Focus Sash was spent to survive this hit.
+            if consume_sash {
+                target_mon.item = crate::data::item::Item::None;
+            }
+
+            // Air Balloon pops on any hit (use original `damage` as the "was hit" signal).
             if damage > 0 && !items_suppressed && matches!(target_mon.item, crate::data::item::Item::AirBalloon) {
                 target_mon.item = crate::data::item::Item::None;
             }
@@ -407,7 +447,7 @@ fn apply_single_hit_branch(
                 seed_sower_triggered = true;
             }
 
-            simulator_helpers::handle_unfreeze_on_damage(target_mon, move_name, &move_data.pokemon_type, damage);
+            simulator_helpers::handle_unfreeze_on_damage(target_mon, move_name, &move_data.pokemon_type, eff_damage);
 
             if *move_name == PokemonMove::Uproar {
                 if let Some(crate::dex_data::Status::Sleep(_)) = target_mon.status {
@@ -424,30 +464,26 @@ fn apply_single_hit_branch(
                 target_fainted = true;
             }
         }
-    }
 
-    if target_fainted {
-        simulator_helpers::handle_pokemon_faint(&mut branch_state, target_slot.player, target_slot.slot_index);
-    }
+        if target_fainted {
+            simulator_helpers::handle_pokemon_faint(&mut bs, target_slot.player, target_slot.slot_index);
+        }
 
-    if sand_spit_triggered {
-        simulator_helpers::set_weather(&mut branch_state, crate::dex_data::Weather::Sandstorm, 5);
-    }
+        if sand_spit_triggered {
+            simulator_helpers::set_weather(&mut bs, crate::dex_data::Weather::Sandstorm, 5);
+        }
 
-    if seed_sower_triggered {
-        simulator_helpers::set_terrain(&mut branch_state, crate::dex_data::Terrain::GrassyTerrain, 5);
-    }
+        if seed_sower_triggered {
+            simulator_helpers::set_terrain(&mut bs, crate::dex_data::Terrain::GrassyTerrain, 5);
+        }
 
-    if matches!(move_name, PokemonMove::IceSpinner | PokemonMove::SteelRoller) {
-        simulator_helpers::clear_terrain(&mut branch_state);
-    }
+        if matches!(move_name, PokemonMove::IceSpinner | PokemonMove::SteelRoller) {
+            simulator_helpers::clear_terrain(&mut bs);
+        }
 
-    if absorbed_by_dry_skin {
-        outcomes.push((branch_state, branch_probability));
-    } else {
-        let sec_branches = simulator_helpers::apply_secondary_effects(&branch_state, attack_slot, target_slot, move_data);
-        for (bs, sec_prob) in sec_branches {
-            outcomes.push((bs, branch_probability * sec_prob));
+        let sec_branches = simulator_helpers::apply_secondary_effects(&bs, attack_slot, target_slot, move_data);
+        for (sec_bs, sec_prob) in sec_branches {
+            outcomes.push((sec_bs, branch_probability * endure_prob * sec_prob));
         }
     }
 

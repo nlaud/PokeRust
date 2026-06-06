@@ -10819,6 +10819,436 @@ mod tests {
             assert_eq!(bs.p1_active_mons[0].hp, 75,
                 "HP should be 75 after cost 51 and Sitrus heal +25");
         }
+
+        // ── Focus Sash / Focus Band tests ─────────────────────────────────────
+        // Setup trick: set target stats[0] = 1, hp = 1 so the holder is at
+        // "full HP" (for Sash's condition) and any damaging move deals ≥ 2
+        // (from the +2 floor in the damage formula), guaranteeing a lethal hit.
+        // Both crit and non-crit branches KO the target, so they all trigger the
+        // same endure logic and coalesce to a single outcome (prob 1.0).
+
+        #[test]
+        fn focus_sash_survives_lethal_hit_at_full_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::FocusSash),
+                None, None, None, false,
+            );
+            p1.stats[0] = 1;
+            p1.hp = 1; // at full HP (1 == stats[0])
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            // Both crit and non-crit branches both trigger Sash → same surviving
+            // state → coalesce_branches merges to exactly 1 outcome.
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p1_active_mons[0].hp, 1, "Focus Sash should leave the holder at 1 HP");
+            assert!(!bs.p1_active_mons[0].fainted, "Holder should not be fainted");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Focus Sash should be consumed");
+        }
+
+        #[test]
+        fn focus_sash_does_not_fire_when_not_at_full_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::FocusSash),
+                None, None, None, false,
+            );
+            p1.stats[0] = 2;
+            p1.hp = 1; // NOT at full HP (1 < 2)
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            // Sash full-HP condition fails → holder faints → game over (P2 wins).
+            let game_over_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if matches!(s, MatchState::GameOverState { winner: Player::P2 }) { *p } else { 0.0 }
+            }).sum();
+            assert!((game_over_prob - 1.0).abs() < 1e-9,
+                "P1 should always faint when not at full HP (Sash cannot fire)");
+        }
+
+        #[test]
+        fn focus_sash_not_consumed_on_non_lethal_hit() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Snorlax at full HP (~330 HP at level 50). Shuckle's Tackle deals
+            // only ~3 damage — far from lethal — so Sash has no reason to fire.
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::FocusSash),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            // Across all branches (including crits): Sash should always be retained.
+            let sash_retained_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p1_active_mons[0].item == Item::FocusSash { *p } else { 0.0 }
+                } else { 0.0 }
+            }).sum();
+            assert!((sash_retained_prob - 1.0).abs() < 1e-9,
+                "Focus Sash should not be consumed by a non-lethal hit");
+        }
+
+        #[test]
+        fn focus_band_gives_10_percent_survive_chance() {
+            // Focus Band: 10% to survive any lethal hit at any HP; not consumed.
+            // With crit branching, non-crit (93.75%) and crit (6.25%) both KO
+            // the target, and Band rolls 10% to save each. After coalescing:
+            // survive total = 0.1, faint total = 0.9.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::FocusBand),
+                None, None, None, false,
+            );
+            p1.stats[0] = 1;
+            p1.hp = 1;
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            let survive_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p1_active_mons[0].hp == 1
+                        && bs.p1_active_mons[0].item == Item::FocusBand
+                        && !bs.p1_active_mons[0].fainted
+                    {
+                        *p
+                    } else { 0.0 }
+                } else { 0.0 }
+            }).sum();
+
+            let faint_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if matches!(s, MatchState::GameOverState { winner: Player::P2 }) { *p } else { 0.0 }
+            }).sum();
+
+            assert!((survive_prob - 0.1).abs() < 1e-9,
+                "Focus Band survive probability should be exactly 10%");
+            assert!((faint_prob - 0.9).abs() < 1e-9,
+                "Focus Band faint probability should be exactly 90%");
+        }
+
+        // ── White Herb tests ──────────────────────────────────────────────────
+
+        #[test]
+        fn white_herb_restores_stat_drop_from_growl() {
+            // P2 uses Growl (lowers P1's Atk by −1). White Herb fires immediately,
+            // restoring the stage to 0 and consuming the item.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::WhiteHerb),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Growl), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
+                "White Herb should restore the Growl-induced −1 Atk drop to 0");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "White Herb should be consumed after restoring a stat drop");
+        }
+
+        #[test]
+        fn white_herb_restores_intimidate_drop_on_send_out() {
+            // Intimidate fires inside battle_state_from_lists (process_pokemon_send_out).
+            // White Herb should also fire there — no turn needed.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::WhiteHerb),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::Intimidate), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+            assert_eq!(initial.p1_active_mons[0].boosts[0], 0,
+                "White Herb should restore Intimidate's −1 Atk drop immediately on send-out");
+            assert_eq!(initial.p1_active_mons[0].item, Item::None,
+                "White Herb should be consumed after restoring the Intimidate drop");
+        }
+
+        #[test]
+        fn white_herb_not_consumed_on_stat_raise() {
+            // Swords Dance gives P1 +2 Atk (a raise, not a drop).
+            // White Herb should not fire.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::SwordsDance), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::WhiteHerb),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 2,
+                "Swords Dance should give +2 Atk");
+            assert_eq!(bs.p1_active_mons[0].item, Item::WhiteHerb,
+                "White Herb should not be consumed when only stat raises occur");
+        }
+
+        #[test]
+        fn white_herb_not_consumed_when_items_suppressed() {
+            // With Magic Deluge active items are suppressed; White Herb should not fire
+            // even though Growl drops Atk.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::WhiteHerb),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Growl), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let mut initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            // Activate Magic Deluge to suppress items.
+            initial.pseudo_weathers.push(PseudoWeather::MagicDeluge);
+            initial.pseudo_weather_turns.push(5);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p1_active_mons[0].boosts[0], -1,
+                "Growl should still drop Atk by 1 under Magic Deluge");
+            assert_eq!(bs.p1_active_mons[0].item, Item::WhiteHerb,
+                "White Herb should not be consumed when items are suppressed");
+        }
+
+        // ── Mental Herb tests ─────────────────────────────────────────────────
+
+        #[test]
+        fn mental_herb_cures_taunt() {
+            // P2 uses Taunt on P1. Mental Herb fires immediately inside
+            // apply_volatile_to_pokemon, removing Taunt and consuming the item.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::MentalHerb),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Taunt), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            let has_taunt = bs.p1_active_mons[0].volatiles.iter().any(|v| {
+                matches!(v, VolatileStatusState::MoveStatus(VolatileStatus::Taunt, _))
+            });
+            assert!(!has_taunt, "Mental Herb should cure Taunt");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Mental Herb should be consumed after curing a mental volatile");
+        }
+
+        #[test]
+        fn mental_herb_not_consumed_by_non_mental_volatile() {
+            // Confuse Ray inflicts Confusion, which is NOT in the Mental Herb's
+            // cure list. The herb should remain held.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::MentalHerb),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::ConfuseRay), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            // Across all branches (including confusion self-hit branching):
+            // herb should always be retained.
+            let herb_retained_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p1_active_mons[0].item == Item::MentalHerb { *p } else { 0.0 }
+                } else { 0.0 }
+            }).sum();
+            assert!((herb_retained_prob - 1.0).abs() < 1e-9,
+                "Mental Herb should not be consumed by a non-mental volatile (Confusion)");
+        }
+
+        #[test]
+        fn mental_herb_not_consumed_when_items_suppressed() {
+            // With Magic Deluge active, Taunt is inflicted but Mental Herb should
+            // not fire (items suppressed).
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::MentalHerb),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Taunt), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+
+            let mut initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            initial.pseudo_weathers.push(PseudoWeather::MagicDeluge);
+            initial.pseudo_weather_turns.push(5);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            let has_taunt = bs.p1_active_mons[0].volatiles.iter().any(|v| {
+                matches!(v, VolatileStatusState::MoveStatus(VolatileStatus::Taunt, _))
+            });
+            assert!(has_taunt, "Taunt should still be inflicted under Magic Deluge");
+            assert_eq!(bs.p1_active_mons[0].item, Item::MentalHerb,
+                "Mental Herb should not be consumed when items are suppressed");
+        }
     }
 
 }
