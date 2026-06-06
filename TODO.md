@@ -85,15 +85,6 @@ and "move lands" gate.
 - Volt Absorb — Electric → restore ¼ max HP
 - Water Absorb — Water → restore ¼ max HP
 
-### -ate abilities (type conversion + power boost)
-Convert Normal-type moves to another type and grant 1.2× power. Hook into the
-move-type resolution step before damage.
-- Aerilate (→ Flying)
-- Dragonize (→ Dragon)
-- Pixilate (→ Fairy)
-- Refrigerate (→ Ice)
-- Liquid Voice — sound-based moves → Water (no power boost)
-
 ### On-contact reactive abilities — damage and status
 Fire when the holder is struck by a contact move. Requires a post-contact-hit hook.
 **HP damage to attacker:**
