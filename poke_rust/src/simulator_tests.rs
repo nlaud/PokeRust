@@ -9696,4 +9696,896 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Self-switch tests (U-turn, Baton Pass, Shed Tail, …)
+    // -------------------------------------------------------------------------
+    mod self_switch {
+        use super::*;
+        use crate::battle::{AttackCommand, SwitchCommand};
+        use crate::dex_data::SelfSwitchType;
+        use crate::simulator::get_possible_commands_for_active_slot;
+
+        // ── helpers ──────────────────────────────────────────────────────────
+
+        fn u_turn_set() -> [Option<PokemonMove>; 4] {
+            [Some(PokemonMove::Uturn), None, None, None]
+        }
+
+        fn baton_pass_set() -> [Option<PokemonMove>; 4] {
+            [Some(PokemonMove::BatonPass), None, None, None]
+        }
+
+        fn shed_tail_set() -> [Option<PokemonMove>; 4] {
+            [Some(PokemonMove::ShedTail), None, None, None]
+        }
+
+        fn splash_set() -> [Option<PokemonMove>; 4] {
+            [Some(PokemonMove::Splash), None, None, None]
+        }
+
+        // Extract BattleState from an outcome Vec.  Panics if there is not exactly one
+        // BattleState branch.
+        fn single_battle_state(outcomes: &[(MatchState, f64)]) -> BattleState {
+            let bs_outcomes: Vec<_> = outcomes.iter()
+                .filter_map(|(s, _)| if let MatchState::BattleState(bs) = s { Some(bs.clone()) } else { None })
+                .collect();
+            assert_eq!(bs_outcomes.len(), 1, "Expected exactly one BattleState branch");
+            bs_outcomes.into_iter().next().unwrap()
+        }
+
+        // ── test 1: U-turn interrupts mid-turn ───────────────────────────────
+
+        #[test]
+        fn u_turn_sets_self_switch_pending_mid_turn() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // P1: fast (high Spe) U-turn user with a healthy bench mon.
+            // P2: slow Shuckle using Splash — it should NOT have acted yet.
+            let p1_active = build_pokemon_state(
+                Species::Jolteon, &pokemon_dex, &move_dex, None,
+                Some(u_turn_set()), None, None, None, None, None, None, None, false,
+            );
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
+            );
+            let p2_hp = initial.p2_active_mons[0].hp;
+
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            );
+
+            let bs = single_battle_state(&outcomes);
+
+            // U-turn damage dealt to P2
+            assert!(bs.p2_active_mons[0].hp < p2_hp, "U-turn should have dealt damage");
+
+            // Self-switch pending for P1 slot 0
+            let pending = bs.self_switch_pending.expect("self_switch_pending should be Some after U-turn");
+            assert_eq!(pending.0, FieldSlot { player: Player::P1, slot_index: 0 });
+            assert!(matches!(pending.1, SelfSwitchType::Normal));
+
+            // Turn flags: started = true, ended = false
+            assert!(bs.turn_started, "turn_started should still be true mid-queue");
+            assert!(!bs.turn_ended, "turn_ended should be false — turn is not over");
+
+            // Opponent's Splash is still queued
+            assert!(!bs.action_queue.is_empty(), "opponent's queued Splash should still be in action_queue");
+        }
+
+        // ── test 2: legal choices are restricted while pending ────────────────
+
+        #[test]
+        fn restricted_choices_while_self_switch_pending() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1_active = build_pokemon_state(
+                Species::Jolteon, &pokemon_dex, &move_dex, None,
+                Some(u_turn_set()), None, None, None, None, None, None, None, false,
+            );
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
+            );
+
+            // Drive to the pending state
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            );
+            let bs = single_battle_state(&outcomes);
+            assert!(bs.self_switch_pending.is_some());
+
+            // Pending slot (P1 slot 0) should only offer Switch commands
+            let p1_cmds = get_possible_commands_for_active_slot(&bs, Player::P1, 0, &move_dex, &pokemon_dex);
+            assert!(!p1_cmds.is_empty(), "pending slot must have at least one command");
+            for cmd in &p1_cmds {
+                assert!(matches!(cmd, BattleCommand::Switch(_)),
+                    "pending slot should only offer Switch, got {:?}", cmd);
+            }
+
+            // P2 (non-pending) should only get Pass
+            let p2_cmds = get_possible_commands_for_active_slot(&bs, Player::P2, 0, &move_dex, &pokemon_dex);
+            assert_eq!(p2_cmds, vec![BattleCommand::Pass],
+                "non-pending player must only have Pass");
+        }
+
+        // ── test 3: resume — opponent acts, turn ends normally ────────────────
+
+        #[test]
+        fn u_turn_resume_resolves_turn() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1_active = build_pokemon_state(
+                Species::Jolteon, &pokemon_dex, &move_dex, None,
+                Some(u_turn_set()), None, None, None, None, None, None, None, false,
+            );
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
+            );
+
+            // Turn 1 step 1: U-turn fires
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let after_uturn = single_battle_state(&run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            ));
+            assert!(after_uturn.self_switch_pending.is_some());
+
+            // Turn 1 step 2: send in Slowpoke (bench index 0)
+            let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
+            let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
+            let after_switch = single_battle_state(&run_single_turn(
+                &MatchState::BattleState(after_uturn), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
+            ));
+
+            // self_switch_pending cleared
+            assert!(after_switch.self_switch_pending.is_none(), "pending should be cleared after switch-in");
+
+            // Slowpoke is now the active mon for P1
+            assert_eq!(after_switch.p1_active_mons[0].species, Species::Slowpoke,
+                "Slowpoke should be active after U-turn switch");
+
+            // Jolteon is on bench
+            assert_eq!(after_switch.p1_back_mons[0].species, Species::Jolteon,
+                "Jolteon should be on the bench");
+
+            // Turn ended normally: both flags reset for next turn
+            assert!(!after_switch.turn_started, "turn should be fully over");
+            assert!(!after_switch.turn_ended, "turn should be fully over");
+        }
+
+        // ── test 4: no healthy bench — no switch ─────────────────────────────
+
+        #[test]
+        fn u_turn_no_healthy_bench_does_not_switch() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1_active = build_pokemon_state(
+                Species::Jolteon, &pokemon_dex, &move_dex, None,
+                Some(u_turn_set()), None, None, None, None, None, None, None, false,
+            );
+            // No bench mons
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![], vec![p2_active], vec![],
+            );
+
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            );
+            let bs = single_battle_state(&outcomes);
+
+            assert!(bs.self_switch_pending.is_none(), "no bench → no switch pending");
+            // Turn completed normally
+            assert!(!bs.turn_started);
+            assert!(!bs.turn_ended);
+        }
+
+        // ── test 5: switch-out ability fires (DesolateLand / primal weather) ─────────────────────
+        // DesolateLand sets primal sun (ExtremeSunlight) that ONLY lasts while its holder is on the
+        // field. Regular Drought sets Weather::Sun for 5 turns regardless of whether the holder is
+        // present, so it is intentionally not used here.
+
+        #[test]
+        fn u_turn_switch_out_ability_fires() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1_active = build_pokemon_state(
+                Species::Torkoal, &pokemon_dex, &move_dex, None,
+                Some(u_turn_set()), None, Some(Ability::DesolateLand), None, None, None, None, None, false,
+            );
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
+            );
+            // DesolateLand sets extreme sun on send-out
+            assert!(matches!(initial.weather, Some(crate::dex_data::Weather::ExtremeSunlight)),
+                "DesolateLand should have set ExtremeSunlight on send-out");
+
+            // U-turn fires — returns with self_switch_pending set but the switch is not yet done
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let after_uturn = single_battle_state(&run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            ));
+            assert!(after_uturn.self_switch_pending.is_some());
+            // The physical switch (and thus handle_pokemon_switch_out) has not happened yet;
+            // extreme sun is still active while we await the replacement choice.
+            assert!(matches!(after_uturn.weather, Some(crate::dex_data::Weather::ExtremeSunlight)),
+                "Extreme sun should still be active while awaiting the switch-in choice");
+
+            // Send in Slowpoke — this triggers perform_self_switch → perform_switch_out_in →
+            // handle_pokemon_switch_out → handle_primal_weather_departure, ending the extreme sun.
+            let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
+            let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
+            let after_switch = single_battle_state(&run_single_turn(
+                &MatchState::BattleState(after_uturn), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
+            ));
+
+            // DesolateLand source (Torkoal) left the field → extreme sun should be gone
+            assert!(after_switch.weather.is_none(),
+                "DesolateLand weather should end when Torkoal switches out via U-turn");
+        }
+
+        // ── test 6: Baton Pass transfers boosts and passable volatiles ────────
+
+        #[test]
+        fn baton_pass_transfers_boosts_and_volatiles() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1_active = build_pokemon_state(
+                Species::Espeon, &pokemon_dex, &move_dex, None,
+                Some(baton_pass_set()), None, None, None, None, None, None, None, false,
+            );
+            // Give Espeon +2 Atk and a LeechSeed volatile
+            p1_active.boosts[0] = 2; // atk
+            p1_active.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::LeechSeed, 0));
+            // Also give a Burn (non-passable status)
+            p1_active.status = Some(Status::Burn);
+
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
+            );
+
+            // Baton Pass (status category — always "connects")
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let after_bp = single_battle_state(&run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            ));
+            assert!(after_bp.self_switch_pending.is_some());
+            let pending = after_bp.self_switch_pending.unwrap();
+            assert!(matches!(pending.1, SelfSwitchType::BatonPass));
+
+            // Send in Slowpoke
+            let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
+            let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
+            let after_switch = single_battle_state(&run_single_turn(
+                &MatchState::BattleState(after_bp), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
+            ));
+
+            let replacement = &after_switch.p1_active_mons[0];
+            assert_eq!(replacement.species, Species::Slowpoke);
+
+            // +2 Atk boost passed
+            assert_eq!(replacement.boosts[0], 2, "Baton Pass should transfer +2 Atk boost");
+
+            // LeechSeed volatile passed
+            let has_leech = replacement.volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::LeechSeed, _))
+            );
+            assert!(has_leech, "Baton Pass should transfer LeechSeed volatile");
+
+            // Burn NOT passed (non-volatile status)
+            assert!(replacement.status.is_none(), "Baton Pass must NOT transfer non-volatile status (Burn)");
+        }
+
+        // ── test 7: Shed Tail creates a Substitute and passes it ─────────────
+
+        #[test]
+        fn shed_tail_creates_sub_and_passes_it() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1_active = build_pokemon_state(
+                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Some(shed_tail_set()), None, None, None, None, None, None, None, false,
+            );
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
+            );
+            let max_hp = initial.p1_active_mons[0].stats[0];
+
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let after_shed = single_battle_state(&run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            ));
+
+            assert!(after_shed.self_switch_pending.is_some(), "Shed Tail should set self_switch_pending");
+            let pending = after_shed.self_switch_pending.unwrap();
+            assert!(matches!(pending.1, SelfSwitchType::ShedTail));
+
+            // Orthworm lost ~half HP to create the substitute
+            let expected_hp_after = max_hp - (max_hp + 1) / 2;
+            let hp_after = after_shed.p1_active_mons[0].hp;
+            assert!(hp_after <= expected_hp_after + 1, "Orthworm should have lost ~half HP for Shed Tail");
+
+            // Send in Slowpoke
+            let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
+            let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
+            let after_switch = single_battle_state(&run_single_turn(
+                &MatchState::BattleState(after_shed), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
+            ));
+
+            let replacement = &after_switch.p1_active_mons[0];
+            assert_eq!(replacement.species, Species::Slowpoke);
+
+            // Slowpoke has a Substitute volatile
+            let has_sub = replacement.volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+            );
+            assert!(has_sub, "Shed Tail replacement should have a Substitute volatile");
+
+            // Slowpoke should NOT have boosts
+            assert_eq!(replacement.boosts, [0i8; 7], "Shed Tail must NOT transfer boosts");
+        }
+
+        // ── test 8: Shed Tail fails when HP is ≤ 50% ─────────────────────────
+
+        #[test]
+        fn shed_tail_fails_when_low_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1_active = build_pokemon_state(
+                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Some(shed_tail_set()), None, None, None, None, None, None, None, false,
+            );
+            // Set HP to exactly 50% — should fail
+            let max_hp = p1_active.stats[0];
+            p1_active.hp = max_hp / 2;
+
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
+            );
+
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            );
+            let bs = single_battle_state(&outcomes);
+
+            assert!(bs.self_switch_pending.is_none(), "Shed Tail with HP ≤ 50% should fail — no switch pending");
+            // No substitute on active mon
+            let no_sub = bs.p1_active_mons[0].volatiles.iter().all(|v|
+                !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+            );
+            assert!(no_sub, "No Substitute should have been created when Shed Tail fails");
+        }
+
+        // ── test 9: Shed Tail fails when user already has a Substitute ────────
+
+        #[test]
+        fn shed_tail_fails_with_existing_substitute() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1_active = build_pokemon_state(
+                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Some(shed_tail_set()), None, None, None, None, None, None, None, false,
+            );
+            let initial_hp = p1_active.hp;
+            // Pre-existing Substitute (HP value doesn't matter since blocking is unimplemented)
+            p1_active.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute, 30));
+
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
+            );
+
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            );
+            let bs = single_battle_state(&outcomes);
+
+            // No switch pending
+            assert!(bs.self_switch_pending.is_none(),
+                "Shed Tail with existing Substitute should fail — no switch pending");
+            // HP cost must NOT have been applied
+            assert_eq!(bs.p1_active_mons[0].hp, initial_hp,
+                "No HP cost should be taken when Shed Tail fails due to existing Substitute");
+            // Still exactly one Substitute volatile (the original; no second one created)
+            let sub_count = bs.p1_active_mons[0].volatiles.iter()
+                .filter(|v| matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _)))
+                .count();
+            assert_eq!(sub_count, 1, "Should still have exactly the original Substitute, not a new one");
+        }
+
+        // ── test 10: Shed Tail fails when there are no healthy teammates ───────
+
+        #[test]
+        fn shed_tail_fails_with_no_healthy_bench() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1_active = build_pokemon_state(
+                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Some(shed_tail_set()), None, None, None, None, None, None, None, false,
+            );
+            let initial_hp = p1_active.hp;
+            // No bench mons at all
+            let p2_active = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some(splash_set()), None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1_active], vec![], vec![p2_active], vec![],
+            );
+
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            );
+            let bs = single_battle_state(&outcomes);
+
+            // No switch pending
+            assert!(bs.self_switch_pending.is_none(),
+                "Shed Tail with no healthy bench should fail — no switch pending");
+            // HP cost must NOT have been applied
+            assert_eq!(bs.p1_active_mons[0].hp, initial_hp,
+                "No HP cost should be taken when Shed Tail fails due to no healthy bench");
+            // No Substitute should have been created
+            let no_sub = bs.p1_active_mons[0].volatiles.iter().all(|v|
+                !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+            );
+            assert!(no_sub, "No Substitute should have been created when Shed Tail fails");
+            // Turn completes normally (both flags reset)
+            assert!(!bs.turn_started, "turn should be fully over");
+            assert!(!bs.turn_ended, "turn should be fully over");
+        }
+
+        // ── HP-restoration berry tests ────────────────────────────────────────
+        // Use poison residual as the trigger: it flows through take_damage →
+        // on_hp_change, is deterministic (no RNG), and lets us set up exact HP.
+
+        #[test]
+        fn oran_heals_10_at_half_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Snorlax: very bulky, easy to control HP maths.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::OranBerry),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            // Place P1 just above threshold so poison residual drops them to ≤50%.
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            // Poison residual = max_hp/8 (min 1), drops HP below threshold → berry fires.
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_after_poison = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            let expected_hp = (hp_after_poison + 10).min(max_hp);
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Oran Berry should be consumed");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Oran Berry should have healed 10 HP");
+        }
+
+        #[test]
+        fn sitrus_heals_quarter_at_half_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::SitrusBerry),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_after_poison = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            let expected_hp = (hp_after_poison + max_hp / 4).min(max_hp);
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Sitrus Berry should be consumed");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Sitrus Berry should have healed max_hp/4");
+        }
+
+        #[test]
+        fn hp_berry_not_eaten_above_half() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // P1: Snorlax at full HP with poison — poison damage stays well above 50%.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::OranBerry),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            // At full HP, poison damage (max_hp/8) leaves us well above max_hp/2.
+            p1.hp = max_hp;
+            p1.status = Some(Status::Poison);
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            let poison_dmg = (max_hp / 8).max(1);
+            let expected_hp = max_hp.saturating_sub(poison_dmg);
+            assert!(expected_hp > max_hp / 2,
+                "Sanity: test setup should leave holder above threshold");
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::OranBerry,
+                "Oran Berry should NOT be eaten when HP stays above 50%");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp,
+                "HP should only reflect poison damage, not berry healing");
+        }
+
+        #[test]
+        fn hp_berry_suppressed_by_magic_deluge() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::OranBerry),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let mut initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            // Magic Deluge suppresses held items.
+            initial.pseudo_weathers.push(PseudoWeather::MagicDeluge);
+            initial.pseudo_weather_turns.push(5);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            // Berry should not have fired — item still held, HP only reflects poison damage.
+            let poison_dmg = (max_hp / 8).max(1);
+            let expected_hp = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            assert_eq!(bs.p1_active_mons[0].item, Item::OranBerry,
+                "Oran Berry must NOT be consumed while Magic Deluge suppresses items");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp,
+                "HP should only reflect poison damage when items are suppressed");
+        }
+
+        // ── Leppa Berry test ──────────────────────────────────────────────────
+
+        #[test]
+        fn leppa_restores_pp_when_move_hits_zero() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // P1 uses Splash with 1 PP remaining — after the turn it hits 0, triggering Leppa.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::LeppaBerry),
+                None, None, None, false,
+            );
+            p1.move_pp[0] = 1; // will hit 0 after this use
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            // Leppa restores 10 PP (capped at max_pp).
+            let max_pp = bs.p1_active_mons[0].max_pp[0];
+            let expected_pp = max_pp.min(10);
+            assert_eq!(bs.p1_active_mons[0].move_pp[0], expected_pp,
+                "Leppa Berry should restore 10 PP (capped at max) when move hits 0");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Leppa Berry should be consumed");
+        }
+
+        #[test]
+        fn leppa_not_eaten_when_pp_above_zero() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // P1 has 5 PP remaining — Splash use brings it to 4, not 0.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::LeppaBerry),
+                None, None, None, false,
+            );
+            p1.move_pp[0] = 5;
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p1_active_mons[0].move_pp[0], 4, "PP should simply decrement by 1");
+            assert_eq!(bs.p1_active_mons[0].item, Item::LeppaBerry,
+                "Leppa Berry must NOT be consumed when PP does not reach 0");
+        }
+
+        // ── Sitrus × Shed Tail interaction ────────────────────────────────────
+        // These tests verify two invariants together:
+        //   (a) Shed Tail costs ceil(max_hp/2), which always leaves HP ≤ floor(max_hp/2),
+        //       so Sitrus always activates after a successful Shed Tail.
+        //   (b) Even though Sitrus pushes HP back above threshold, the switch still triggers
+        //       (baseline-comparison proxy in apply_post_damage_move_effects).
+
+        #[test]
+        fn sitrus_activates_after_shed_tail_even_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::ShedTail), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::SitrusBerry),
+                None, None, None, false,
+            );
+            // Force an even max HP for determinism.
+            p1.stats[0] = 100;
+            p1.hp = 100;
+
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, None, None, None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1], vec![p1_bench], vec![p2], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            // Switch should still be pending despite Sitrus healing P1 above 50%.
+            assert!(bs.self_switch_pending.is_some(),
+                "Shed Tail switch must still be pending even after Sitrus heals P1 above 50%");
+
+            // Sitrus was consumed.
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Sitrus Berry should have fired after the Shed Tail HP cost");
+
+            // HP: cost = ceil(100/2) = 50 → 50 remaining (≤50% threshold fires Sitrus)
+            // Sitrus heals 100/4 = 25 → final HP = 75.
+            assert_eq!(bs.p1_active_mons[0].hp, 75,
+                "HP should be 75 after Shed Tail cost (50) and Sitrus heal (+25)");
+        }
+
+        #[test]
+        fn sitrus_activates_after_shed_tail_odd_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::ShedTail), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::SitrusBerry),
+                None, None, None, false,
+            );
+            // Odd max HP: cost = ceil(101/2) = 51, leaving exactly 50 = floor(101/2).
+            // This confirms the ceil rounding: with floor rounding the cost would be 50,
+            // leaving 51 > 50 = floor(101/2), so Sitrus would NOT fire.
+            p1.stats[0] = 101;
+            p1.hp = 101;
+
+            let p1_bench = build_pokemon_state(
+                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, None, None, None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(
+                vec![p1], vec![p1_bench], vec![p2], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert!(bs.self_switch_pending.is_some(),
+                "Shed Tail switch must still be pending after Sitrus fires on odd-HP user");
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Sitrus Berry should fire when HP = 50 ≤ floor(101/2) = 50");
+
+            // cost 51 → HP 50; Sitrus heals 101/4 = 25 → HP 75.
+            assert_eq!(bs.p1_active_mons[0].hp, 75,
+                "HP should be 75 after cost 51 and Sitrus heal +25");
+        }
+    }
+
 }
+
