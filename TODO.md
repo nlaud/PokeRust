@@ -13,13 +13,6 @@ No consumption. Hook directly into the damage calculation or critical-hit formul
 - Light Ball — double Pikachu's Attack and Sp. Atk
 - Scope Lens — +1 critical-hit ratio stage
 
-### One-time consumable reaction items
-Consumed when the trigger fires. Hooks into a "hit would KO" or "stat just dropped" gate.
-- Focus Band — 10% chance to survive any hit (not consumed; reusable)
-- Focus Sash — full HP → survive any one hit (one-time)
-- Mental Herb — cure binding volatile statuses (Infatuated, Taunted, Disabled, etc.)
-- White Herb — cure any lowered stat stages (consumed once)
-
 ### End-of-turn and on-hit recovery items
 Hook into the end-of-turn loop and the drain/damage resolution path.
 - Leftovers — restore 1/16 max HP at end of every turn

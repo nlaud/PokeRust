@@ -1157,6 +1157,77 @@ pub(crate) fn try_consume_leppa_berry(mon: &mut PokemonState, items_suppressed: 
     }
 }
 
+/// Consume a White Herb if the holder has any lowered stat stage, restoring all negative
+/// stages to 0. Called from `apply_stat_boosts_to_pokemon` whenever the incoming delta
+/// contains a negative entry, so it fires from all sources (moves, Intimidate, etc.).
+pub(crate) fn try_consume_white_herb(mon: &mut PokemonState, items_suppressed: bool) {
+    if items_suppressed || mon.item != Item::WhiteHerb { return; }
+    if !mon.boosts.iter().any(|&b| b < 0) { return; }
+    for b in mon.boosts.iter_mut() {
+        if *b < 0 { *b = 0; }
+    }
+    mon.item = Item::None;
+}
+
+/// Consume a Mental Herb if the holder is currently afflicted by any of the six "mental"
+/// volatile statuses (Attract, Taunt, Encore, Torment, Heal Block, Disable), curing all
+/// that are present. Called from `apply_volatile_to_pokemon` after each push, so it fires
+/// from all sources (move effects on target or attacker, Cursed Body, etc.).
+pub(crate) fn try_consume_mental_herb(mon: &mut PokemonState, items_suppressed: bool) {
+    if items_suppressed || mon.item != Item::MentalHerb { return; }
+    let mental_volatiles = [
+        VolatileStatus::Attract,
+        VolatileStatus::Taunt,
+        VolatileStatus::Encore,
+        VolatileStatus::Torment,
+        VolatileStatus::HealBlock,
+        VolatileStatus::Disable,
+    ];
+    let mut any_removed = false;
+    for v in &mental_volatiles {
+        if has_status_volatile(mon, v) {
+            remove_status_volatile(mon, v);
+            any_removed = true;
+        }
+    }
+    if any_removed {
+        mon.item = Item::None;
+    }
+}
+
+/// Returns the set of `(damage_to_apply, consume_item, probability)` outcomes for a direct
+/// move hit, accounting for Focus Sash and Focus Band survivability.
+///
+/// - Normal / non-lethal:         `[(damage, false, 1.0)]`.
+/// - Focus Sash at full HP, KO:   `[(hp − 1, true,  1.0)]` — survive at 1 HP, item consumed.
+/// - Focus Band, would KO:        `[(damage, false, 0.9), (hp − 1, false, 0.1)]` — 10% survive,
+///   not consumed; chance is checked independently on each hit of multi-hit moves.
+///
+/// Must only be called for direct move hits; residual / recoil / confusion self-damage bypass
+/// this so that Sash / Band do not protect against those sources.
+pub(crate) fn compute_endure_outcomes(
+    target: &PokemonState,
+    damage: u16,
+    items_suppressed: bool,
+) -> Vec<(u16, bool, f64)> {
+    if items_suppressed || damage == 0 || target.fainted || damage < target.hp {
+        return vec![(damage, false, 1.0)];
+    }
+    // damage >= target.hp: this hit would KO the target
+    let survive_damage = target.hp.saturating_sub(1); // leaves 1 HP after taking this amount
+    match target.item {
+        Item::FocusSash if target.hp == target.stats[0].max(1) => {
+            // Full-HP requirement: Sash only activates when the holder is at max HP
+            vec![(survive_damage, true, 1.0)]
+        }
+        Item::FocusBand => {
+            // 10% chance to survive; not consumed; chance rolled independently per hit
+            vec![(damage, false, 0.9), (survive_damage, false, 0.1)]
+        }
+        _ => vec![(damage, false, 1.0)],
+    }
+}
+
 /// Apply damage and trigger the HP-change hook. Use this instead of bare `apply_damage`
 /// at any call site where item-triggered effects should fire (direct hits, recoil, residual).
 pub(crate) fn take_damage(mon: &mut PokemonState, damage: u16, items_suppressed: bool) {
@@ -1876,9 +1947,10 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
             Player::P1 => Player::P2,
             Player::P2 => Player::P1,
         };
+        let items_suppressed = items_are_suppressed(state);
         for target in collect_active_slots(state, opposing_player, None) {
             if let Some(mon) = get_pokemon_at_slot_mut(state, target) {
-                apply_stat_boosts_to_pokemon(mon, &[-1, 0, 0, 0, 0, 0, 0]);
+                apply_stat_boosts_to_pokemon(mon, &[-1, 0, 0, 0, 0, 0, 0], items_suppressed);
             }
         }
     }
@@ -2584,13 +2656,21 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
         } else {
             mon.volatiles.push(VolatileStatusState::TurnStatus(volatile.clone(), duration));
         }
+
+        // Mental Herb: immediately cure if the newly-added volatile is one it targets.
+        let items_suppressed = items_are_suppressed(state);
+        try_consume_mental_herb(mon, items_suppressed);
     }
 }
 
-/// Apply stat boosts to a pokemon.
-fn apply_stat_boosts_to_pokemon(mon: &mut PokemonState, boosts: &[i8; 7]) {
+/// Apply stat boosts to a pokemon. If any entry of `boosts` is negative (a stat drop was
+/// applied), also try to trigger a White Herb.
+fn apply_stat_boosts_to_pokemon(mon: &mut PokemonState, boosts: &[i8; 7], items_suppressed: bool) {
     for i in 0..7 {
         mon.boosts[i] = (mon.boosts[i] + boosts[i]).clamp(-6, 6);
+    }
+    if boosts.iter().any(|&b| b < 0) {
+        try_consume_white_herb(mon, items_suppressed);
     }
 }
 
@@ -2659,7 +2739,7 @@ fn apply_effect_to_target(
         try_consume_status_cure_berry(target_mon, items_suppressed);
 
         if effect.boosts != [0; 7] {
-            apply_stat_boosts_to_pokemon(target_mon, &effect.boosts);
+            apply_stat_boosts_to_pokemon(target_mon, &effect.boosts, items_suppressed);
         }
     }
 
@@ -2697,7 +2777,7 @@ fn apply_effect_to_attacker(
         try_consume_status_cure_berry(attacker_mon, items_suppressed);
 
         if effect.boosts != [0; 7] {
-            apply_stat_boosts_to_pokemon(attacker_mon, &effect.boosts);
+            apply_stat_boosts_to_pokemon(attacker_mon, &effect.boosts, items_suppressed);
         }
     }
 
@@ -2868,13 +2948,14 @@ pub fn apply_secondary_effects(
     if move_data.self_boost != [0; 7] {
         for (bs, _) in branches.iter_mut() {
             let growth_in_sun = move_data.name == PokemonMove::Growth && weather_is_sunlight(bs);
+            let items_suppressed = items_are_suppressed(bs);
             if let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
                 let mut boosts = move_data.self_boost;
                 if growth_in_sun {
                     boosts[0] = boosts[0].saturating_add(1);
                     boosts[2] = boosts[2].saturating_add(1);
                 }
-                apply_stat_boosts_to_pokemon(attacker_mon, &boosts);
+                apply_stat_boosts_to_pokemon(attacker_mon, &boosts, items_suppressed);
             }
         }
     }
