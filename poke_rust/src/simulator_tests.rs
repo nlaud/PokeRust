@@ -11249,6 +11249,367 @@ mod tests {
             assert_eq!(bs.p1_active_mons[0].item, Item::MentalHerb,
                 "Mental Herb should not be consumed when items are suppressed");
         }
+
+        // ── Leftovers tests ───────────────────────────────────────────────────
+        // Poison residual ticks first (via apply_status_residual) then Leftovers
+        // heals at end of turn, so we can set up exact HP deltas.
+
+        #[test]
+        fn leftovers_heals_sixteenth_each_turn() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::Leftovers),
+                None, None, None, false,
+            );
+            let max_hp = p1.stats[0];
+            // Start at half HP so there is room to heal.
+            p1.hp = max_hp / 2;
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            let heal = (max_hp as u32 / 16).max(1) as u16;
+            let expected_hp = (max_hp / 2 + heal).min(max_hp);
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers, "Leftovers should not be consumed");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Leftovers should heal 1/16 max HP");
+        }
+
+        #[test]
+        fn leftovers_does_not_overheal_at_full_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::Leftovers),
+                None, None, None, false,
+            );
+            // Start at full HP.
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp;
+
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p1_active_mons[0].hp, max_hp, "Leftovers should not overheal past max HP");
+        }
+
+        // ── Shell Bell tests ──────────────────────────────────────────────────
+
+        #[test]
+        fn shell_bell_heals_eighth_of_damage_dealt() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Attacker with Shell Bell; starts below max HP so there is room to heal.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::ShellBell),
+                None, None, None, false,
+            );
+            let p1_max_hp = p1.stats[0];
+            p1.hp = p1_max_hp / 2;
+            let p1_before_hp = p1.hp;
+
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let p2_before_hp = p2.stats[0]; // starts at full HP
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            let damage_dealt = p2_before_hp.saturating_sub(bs.p2_active_mons[0].hp) as u32;
+            let expected_heal = (damage_dealt / 8) as u16;
+            let expected_p1_hp = (p1_before_hp + expected_heal).min(p1_max_hp);
+
+            assert!(damage_dealt > 0, "P1 Tackle should deal damage to P2");
+            assert!(expected_heal > 0, "damage should be large enough for at least 1 HP of Shell Bell healing");
+            assert_eq!(bs.p1_active_mons[0].item, Item::ShellBell, "Shell Bell should not be consumed");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_p1_hp, "Shell Bell should restore 1/8 of damage dealt");
+        }
+
+        // ── Scope Lens tests ──────────────────────────────────────────────────
+        // Tested through simulate_turn with consider_crit=true, damage_rolls=1.
+        // With one roll, outcomes split into exactly two groups: the crit branch
+        // (higher damage, lower target HP) and the non-crit branch.  The probability
+        // mass on the min-HP group equals the crit rate: 1/8 with Scope Lens (vs 1/24).
+
+        #[test]
+        fn scope_lens_increases_crit_rate_to_one_eighth() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::ScopeLens),
+                None, None, None, false,
+            );
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+                true, // consider crits
+                1,    // one damage roll → exactly two outcome buckets
+            );
+
+            // Crit outcomes have lower P2 HP (higher damage).
+            let min_hp = outcomes.iter().filter_map(|(s, _)| {
+                if let MatchState::BattleState(bs) = s { Some(bs.p2_active_mons[0].hp) } else { None }
+            }).min().unwrap();
+
+            let crit_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p2_active_mons[0].hp == min_hp { *p } else { 0.0 }
+                } else { 0.0 }
+            }).sum();
+
+            let expected = 1.0 / 8.0;
+            assert!((crit_prob - expected).abs() < 1e-9,
+                "Scope Lens should give 1/8 crit rate; got {crit_prob}");
+        }
+
+        // ── King's Rock tests ─────────────────────────────────────────────────
+        // P1 is given a boosted Speed to guarantee it moves first, so the target
+        // might be flinched before it acts.  Flinch detection: if the target used
+        // its move, its PP decrements; if flinched, PP stays at its initial value.
+
+        #[test]
+        fn kings_rock_adds_10_percent_flinch_single_hit() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::KingsRock),
+                None, None, None, false,
+            );
+            p1.stats[5] = 200; // guarantee P1 moves first
+
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let initial_target_pp = p2.move_pp[0];
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+                false, // no crits — keep it to 2 branches
+                1,
+            );
+
+            let flinch_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if let MatchState::BattleState(bs) = s {
+                    // Flinched = target's PP unchanged (never used Splash).
+                    if bs.p2_active_mons[0].move_pp[0] == initial_target_pp { *p } else { 0.0 }
+                } else { 0.0 }
+            }).sum();
+
+            let eps = 1e-9;
+            // Tackle has 100% accuracy → P(flinch) = 1.0 * 0.10 = 0.10
+            assert!((flinch_prob - 0.10).abs() < eps,
+                "King's Rock should add 10% flinch on single-hit Tackle; got {flinch_prob}");
+        }
+
+        #[test]
+        fn kings_rock_combined_flinch_chance_for_two_hits() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // DoubleKick: Fighting, exactly 2 hits, 100% accuracy, no flinch secondary.
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::DoubleKick), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::KingsRock),
+                None, None, None, false,
+            );
+            p1.stats[5] = 200;
+
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let initial_target_pp = p2.move_pp[0];
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+                false,
+                1,
+            );
+
+            let flinch_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p2_active_mons[0].move_pp[0] == initial_target_pp { *p } else { 0.0 }
+                } else { 0.0 }
+            }).sum();
+
+            // 2 hits × 10% each, combined: 1 - 0.9^2 = 0.19
+            let expected = 1.0 - 0.9_f64.powi(2);
+            let eps = 1e-9;
+            assert!((flinch_prob - expected).abs() < eps,
+                "King's Rock should give combined 1-0.9^2 ≈ 19% flinch over 2 hits; got {flinch_prob}");
+        }
+
+        #[test]
+        fn kings_rock_does_not_stack_on_move_with_flinch() {
+            // AirSlash already has a 30% flinch secondary; King's Rock should NOT
+            // add an additional 10% on top of it.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::AirSlash), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::KingsRock),
+                None, None, None, false,
+            );
+            p1.stats[5] = 200;
+
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let initial_target_pp = p2.move_pp[0];
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+                false,
+                1,
+            );
+
+            let flinch_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p2_active_mons[0].move_pp[0] == initial_target_pp { *p } else { 0.0 }
+                } else { 0.0 }
+            }).sum();
+
+            // AirSlash accuracy 95%, flinch 30%.  King's Rock must not add a second layer.
+            // P(flinch) = 0.95 * 0.30 = 0.285 (not 0.95 * (1 - 0.7 * 0.9) = 0.95 * 0.37 = 0.3515)
+            let expected = 0.95 * 0.30;
+            let eps = 1e-9;
+            assert!((flinch_prob - expected).abs() < eps,
+                "King's Rock must not stack on a move that already flinches; got {flinch_prob}, expected {expected}");
+        }
+
+        // ── Light Ball tests ──────────────────────────────────────────────────
+        // Tested via effective_stat so we don't need to compute full damage calcs.
+
+        #[test]
+        fn light_ball_doubles_pikachus_attack_and_spatk() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let pikachu_no_item = build_pokemon_state(
+                Species::Pikachu, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+            let mut pikachu_with_ball = pikachu_no_item.clone();
+            pikachu_with_ball.item = Item::LightBall;
+
+            let state = battle_state_from_lists(
+                vec![pikachu_no_item.clone()], vec![], vec![pikachu_no_item.clone()], vec![],
+            );
+
+            let atk_no_ball  = simulator_helpers::effective_stat(&state, &pikachu_no_item,  crate::dex_data::PokemonStat::Atk, false, false);
+            let spa_no_ball  = simulator_helpers::effective_stat(&state, &pikachu_no_item,  crate::dex_data::PokemonStat::SpA, false, false);
+            let atk_with_ball = simulator_helpers::effective_stat(&state, &pikachu_with_ball, crate::dex_data::PokemonStat::Atk, false, false);
+            let spa_with_ball = simulator_helpers::effective_stat(&state, &pikachu_with_ball, crate::dex_data::PokemonStat::SpA, false, false);
+
+            assert!((atk_with_ball - 2.0 * atk_no_ball).abs() < 1e-9,
+                "Light Ball should double Pikachu's Attack: {atk_no_ball} → {atk_with_ball}");
+            assert!((spa_with_ball - 2.0 * spa_no_ball).abs() < 1e-9,
+                "Light Ball should double Pikachu's SpA: {spa_no_ball} → {spa_with_ball}");
+        }
+
+        #[test]
+        fn light_ball_does_not_boost_raichu() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let raichu_no_item = build_pokemon_state(
+                Species::Raichu, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                None, None, None, false,
+            );
+            let mut raichu_with_ball = raichu_no_item.clone();
+            raichu_with_ball.item = Item::LightBall;
+
+            let state = battle_state_from_lists(
+                vec![raichu_no_item.clone()], vec![], vec![raichu_no_item.clone()], vec![],
+            );
+
+            let atk_no_ball  = simulator_helpers::effective_stat(&state, &raichu_no_item,  crate::dex_data::PokemonStat::Atk, false, false);
+            let atk_with_ball = simulator_helpers::effective_stat(&state, &raichu_with_ball, crate::dex_data::PokemonStat::Atk, false, false);
+
+            assert!((atk_with_ball - atk_no_ball).abs() < 1e-9,
+                "Light Ball should not boost Raichu's Attack");
+        }
     }
 
 }

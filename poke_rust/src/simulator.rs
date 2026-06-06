@@ -512,19 +512,21 @@ fn resolve_multihit_move_for_target(
     let mut final_outcomes: Vec<(BattleState, f64)> = Vec::new();
 
     for (hit_count, hit_probability) in hit_count_branches {
-        let mut sequence_branches: Vec<(BattleState, f64, Option<u8>)> = vec![(state.clone(), hit_probability, None)];
+        // Tuple: (state, probability, shared_roll, hits_landed)
+        // hits_landed tracks damaging hits per branch for King's Rock combined-chance flinch.
+        let mut sequence_branches: Vec<(BattleState, f64, Option<u8>, u32)> = vec![(state.clone(), hit_probability, None, 0)];
 
         for hit_index in 0..hit_count {
-            let mut next_sequence_branches: Vec<(BattleState, f64, Option<u8>)> = Vec::new();
+            let mut next_sequence_branches: Vec<(BattleState, f64, Option<u8>, u32)> = Vec::new();
 
-            for (branch_state, branch_probability, shared_roll) in sequence_branches {
+            for (branch_state, branch_probability, shared_roll, hits_landed) in sequence_branches {
                 let Some(current_target) = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot).cloned() else {
-                    next_sequence_branches.push((branch_state, branch_probability, shared_roll));
+                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed));
                     continue;
                 };
 
                 if current_target.fainted {
-                    next_sequence_branches.push((branch_state, branch_probability, shared_roll));
+                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed));
                     continue;
                 }
 
@@ -548,7 +550,8 @@ fn resolve_multihit_move_for_target(
                 };
 
                 if hit_accuracy_probability < 1.0 {
-                    next_sequence_branches.push((branch_state.clone(), branch_probability * (1.0 - hit_accuracy_probability), shared_roll));
+                    // Miss branch: hits_landed unchanged.
+                    next_sequence_branches.push((branch_state.clone(), branch_probability * (1.0 - hit_accuracy_probability), shared_roll, hits_landed));
                 }
 
                 if hit_accuracy_probability <= 0.0 {
@@ -589,7 +592,9 @@ fn resolve_multihit_move_for_target(
                                 attack_slot,
                                 branch_probability * hit_accuracy_probability * damage_probability * roll_probability,
                             ) {
-                                next_sequence_branches.push((next_state, next_probability, Some(roll)));
+                                // Count only damaging hits toward King's Rock combined chance.
+                                let new_hits = if damage > 0 { hits_landed + 1 } else { hits_landed };
+                                next_sequence_branches.push((next_state, next_probability, Some(roll), new_hits));
                             }
                         }
                     }
@@ -619,7 +624,9 @@ fn resolve_multihit_move_for_target(
                             attack_slot,
                             branch_probability * hit_accuracy_probability * damage_probability,
                         ) {
-                            next_sequence_branches.push((next_state, next_probability, shared_roll));
+                            // Count only damaging hits toward King's Rock combined chance.
+                            let new_hits = if damage > 0 { hits_landed + 1 } else { hits_landed };
+                            next_sequence_branches.push((next_state, next_probability, shared_roll, new_hits));
                         }
                     }
                 }
@@ -628,9 +635,18 @@ fn resolve_multihit_move_for_target(
             sequence_branches = next_sequence_branches;
         }
 
-        final_outcomes.extend(sequence_branches.into_iter().map(|(branch_state, branch_probability, _)| {
-            (branch_state, branch_probability)
-        }));
+        // Apply King's Rock flinch once per move per target using the combined chance
+        // P(flinch) = 1 - 0.9^hits_landed, avoiding per-hit tree blowup.
+        for (branch_state, branch_probability, _, hits_landed) in sequence_branches {
+            let branches = simulator_helpers::apply_kings_rock_flinch(
+                vec![(branch_state, branch_probability)],
+                attack_slot,
+                target_slot,
+                move_data,
+                hits_landed,
+            );
+            final_outcomes.extend(branches);
+        }
     }
 
     final_outcomes
@@ -1215,8 +1231,15 @@ fn possible_damage_outcomes_for_move(
                 let combined_prob = existing_prob * outcome_prob;
 
                 if *hit {
-                    // Delegate to the already-extracted single-hit helper
-                    for (bs, prob) in apply_single_hit_branch(branch_state, *target_slot, &move_name, move_data, *damage, action.user_slot, combined_prob) {
+                    // Delegate to the already-extracted single-hit helper.
+                    let hit_branches = apply_single_hit_branch(branch_state, *target_slot, &move_name, move_data, *damage, action.user_slot, combined_prob);
+                    // King's Rock: 10% flinch on damaging hits (combined chance = 1 - 0.9^hits).
+                    let hit_branches = if *damage > 0 {
+                        simulator_helpers::apply_kings_rock_flinch(hit_branches, action.user_slot, *target_slot, move_data, 1)
+                    } else {
+                        hit_branches
+                    };
+                    for (bs, prob) in hit_branches {
                         new_all_outcomes.push((MatchState::BattleState(bs), prob));
                     }
                 } else {
@@ -1717,6 +1740,14 @@ fn apply_post_damage_move_effects(
         // Drain heal
         if move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
             let heal = ((total_dmg * move_data.drain_fraction[0] as u32) / move_data.drain_fraction[1] as u32) as u16;
+            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, items_suppressed); }
+        }
+
+        // Shell Bell: restore 1/8 of damage dealt (rounded down) to the attacker.
+        // Does not consume the item. Based on damage dealt, not HP lost by target.
+        // TODO: gate on Heal Block when that mechanic is implemented.
+        if !items_suppressed && attacker_mon.item == crate::data::item::Item::ShellBell {
+            let heal = (total_dmg / 8) as u16;
             if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, items_suppressed); }
         }
 

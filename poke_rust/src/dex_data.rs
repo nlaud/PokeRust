@@ -273,7 +273,7 @@ pub enum Weather {
     StrongWinds,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct HitEffect {
     pub boosts: PokemonBoostTable,
     pub status: Option<Status>,

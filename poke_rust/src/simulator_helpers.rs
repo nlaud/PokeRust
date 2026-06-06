@@ -2,6 +2,7 @@ use crate::battle::{Action, BattleState, FieldSlot, Player, MoveAction};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
+use crate::data::species::Species;
 use crate::dex_data::{AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonType, PseudoWeather, SideCondition, SelfSwitchType, Terrain, Weather, HitEffect, MoveFlag, PokemonStat, Status};
 use crate::pokemon::{PokemonState, VolatileStatusState};
 use crate::dex_data::VolatileStatus;
@@ -130,6 +131,20 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
     let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::Def, Ability::MarvelScale, mon.status.is_some(), 1.5, val);
     let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::Def, Ability::GrassPelt, matches!(current_terrain(state), Some(Terrain::GrassyTerrain)), 1.5, val);
     let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::SpA, Ability::HadronEngine, matches!(current_terrain(state), Some(Terrain::ElectricTerrain)), 5461.0 / 4096.0, val);
+
+    // Light Ball: doubles Pikachu's Attack and Special Attack.
+    let val = if !items_are_suppressed(state)
+        && mon.item == Item::LightBall
+        && matches!(mon.species,
+            Species::Pikachu | Species::PikachuAlola | Species::PikachuBelle
+            | Species::PikachuCosplay | Species::PikachuGmax | Species::PikachuHoenn
+            | Species::PikachuKalos | Species::PikachuLibre | Species::PikachuOriginal
+            | Species::PikachuPartner | Species::PikachuPhD | Species::PikachuPopStar
+            | Species::PikachuRockStar | Species::PikachuSinnoh | Species::PikachuStarter
+            | Species::PikachuUnova | Species::PikachuWorld)
+        && (stat == PokemonStat::Atk || stat == PokemonStat::SpA)
+    { val * 2.0 } else { val };
+
     val
 }
 
@@ -272,6 +287,15 @@ pub fn crit_is_guaranteed(attacker: &PokemonState, target: &PokemonState, move_n
     );
 
     merciless_crit || laser_focus || always_crit_move
+}
+
+/// Returns the effective crit ratio after applying held-item boosts (e.g. Scope Lens).
+fn effective_crit_ratio(state: &BattleState, attacker: &PokemonState, base: u8) -> u8 {
+    if !items_are_suppressed(state) && attacker.item == Item::ScopeLens {
+        base.saturating_add(1)
+    } else {
+        base
+    }
 }
 
 pub fn critical_hit_probability(
@@ -892,7 +916,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let screen_mult   = screen_damage_multiplier(_state, _target_slot, move_data, false); // overridden per-crit below
 
     let rolls   = forced_damage_roll.map(|r| vec![r]).unwrap_or_else(|| selected_damage_rolls(config.damage_rolls));
-    let crits   = critical_hit_probability(attacker, target, &move_data.name, config.consider_crit, move_data.crit_ratio);
+    let crits   = critical_hit_probability(attacker, target, &move_data.name, config.consider_crit, effective_crit_ratio(_state, attacker, move_data.crit_ratio));
 
     let mut outcomes = Vec::new();
 
@@ -2562,6 +2586,16 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
         }
     }
 
+    // Leftovers: restore 1/16 max HP (rounded down, min 1) at end of turn.
+    // Does not consume the item. Capped at max HP by gain_hp.
+    // TODO: gate on Heal Block when that mechanic is implemented.
+    for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+        if !mon.fainted && !ctx.items_suppressed && mon.item == Item::Leftovers {
+            let max_hp = mon.stats[0].max(1);
+            gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, ctx.items_suppressed);
+        }
+    }
+
     for mon in state.p1_active_mons.iter_mut() { apply_status_residual(mon, ctx.abilities_suppressed, ctx.items_suppressed, ctx.rain); }
     for mon in state.p2_active_mons.iter_mut() { apply_status_residual(mon, ctx.abilities_suppressed, ctx.items_suppressed, ctx.rain); }
 }
@@ -2865,6 +2899,53 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
         _ => return false,
     }
     true
+}
+
+/// Apply a King's Rock (or Razor Fang) flinch once per move, using the combined
+/// probability across all connecting strikes: P(flinch) = 1 - 0.9^hits_landed.
+///
+/// Called *after* all per-hit branches for a target are resolved, so we never
+/// fork the tree once-per-strike.  Returns `branches` unchanged if the move is
+/// ineligible (status move, move already flinches, 0 hits, items suppressed,
+/// holder doesn't carry King's Rock).
+///
+/// Serene Grace would double the per-hit rate to 20% (combined: 1 - 0.8^n), but
+/// Serene Grace is not yet implemented; add it here when that ability is handled.
+pub fn apply_kings_rock_flinch(
+    branches: Vec<(BattleState, f64)>,
+    attacker_slot: FieldSlot,
+    target_slot: FieldSlot,
+    move_data: &MoveData,
+    hits_landed: u32,
+) -> Vec<(BattleState, f64)> {
+    if hits_landed == 0 { return branches; }
+    if matches!(move_data.category, MoveCategory::Status) { return branches; }
+
+    // Skip if the move already has a flinch secondary (don't double-dip).
+    let move_already_flinches = move_data.secondaries.iter().any(|sec| {
+        sec.effect.volatile_status == Some(VolatileStatus::Flinch)
+            || sec.random_choices.iter().any(|c| c.volatile_status == Some(VolatileStatus::Flinch))
+    });
+    if move_already_flinches { return branches; }
+
+    // Check that the attacker holds King's Rock and items are not suppressed.
+    let eligible = branches.first().map_or(false, |(bs, _)| {
+        !items_are_suppressed(bs)
+            && get_pokemon_at_slot(bs, attacker_slot)
+                .map_or(false, |m| m.item == Item::KingsRock)
+    });
+    if !eligible { return branches; }
+
+    let chance = 1.0 - 0.9_f64.powi(hits_landed as i32);
+    let flinch_effect = HitEffect {
+        volatile_status: Some(VolatileStatus::Flinch),
+        ..Default::default()
+    };
+    // side_condition_player is unused by the flinch path in apply_effect_to_target.
+    let side_condition_player = target_slot.player;
+    branch_on_secondary_effects(branches, chance, std::slice::from_ref(&flinch_effect), |bs, eff| {
+        apply_effect_to_target(bs, attacker_slot, target_slot, eff, side_condition_player);
+    })
 }
 
 /// Apply move secondary effects with appropriate probability.
