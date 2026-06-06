@@ -96,6 +96,7 @@ pub struct PokemonState{
     pub hp: u16,
     pub moves: [Option<PokemonMove>; 4],
     pub move_pp: [u8; 4],
+    pub max_pp: [u8; 4],
     pub item: Item,
     pub nature: Nature,
 
@@ -383,6 +384,7 @@ pub fn build_pokemon_state(
     if use_stat_points { evs = scale_evs_for_stat_points(evs); }
 
     let move_pp = compute_move_pp(&moves, move_dex);
+    let max_pp  = move_pp;
     let (types, base_stats, weight_hg) = dex_entry
         .map(|d| (d.types.clone(), d.base_stats, d.weight))
         .unwrap_or_else(|| (vec![PokemonType::Normal], [100u16; 6], 0u16));
@@ -392,7 +394,7 @@ pub fn build_pokemon_state(
     PokemonState {
         fainted: false, species, types, is_tera: false, is_mega,
         has_mega_form: mega_species.is_some(), level, hp: stats[0],
-        moves, move_pp, item, nature, boosts: [0; 7], stats,
+        moves, move_pp, max_pp, item, nature, boosts: [0; 7], stats,
         status: None, volatiles: Vec::new(),
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,

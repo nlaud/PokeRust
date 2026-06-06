@@ -9,7 +9,7 @@ use crate::pokemon::{
     PokemonState, parse_team_sheet
 };
 use crate::dex_data::{MoveData, MoveTarget, PokemonData};
-use crate::dex_data::{MoveCategory, Status, VolatileStatus};
+use crate::dex_data::{MoveCategory, SelfSwitchType, Status, VolatileStatus};
 use crate::data::ability::Ability;
 use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
@@ -87,6 +87,7 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
     };
 
     if let Some(move_index) = move_index {
+        let items_suppressed = simulator_helpers::items_are_suppressed(next_state);
         if let Some(mon) = match user_slot.player {
             Player::P1 => next_state.p1_active_mons.get_mut(user_slot.slot_index as usize),
             Player::P2 => next_state.p2_active_mons.get_mut(user_slot.slot_index as usize),
@@ -94,6 +95,7 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             if let Some(pp) = mon.move_pp.get_mut(move_index) {
                 *pp = pp.saturating_sub(1);
             }
+            simulator_helpers::try_consume_leppa_berry(mon, items_suppressed);
         }
     }
 }
@@ -384,11 +386,10 @@ fn apply_single_hit_branch(
         if target_mon.ability == Ability::DrySkin && matches!(move_data.pokemon_type, PokemonType::Water) {
             let max_hp = target_mon.stats[0].max(1);
             let heal_amount = (max_hp as u32 / 4) as u16;
-            target_mon.hp = target_mon.hp.saturating_add(heal_amount).min(max_hp);
-            target_mon.fainted = false;
+            simulator_helpers::gain_hp(target_mon, heal_amount, items_suppressed);
             absorbed_by_dry_skin = true;
         } else {
-            simulator_helpers::apply_damage(target_mon, damage);
+            simulator_helpers::take_damage(target_mon, damage, items_suppressed);
 
             if damage > 0 && !items_suppressed && matches!(target_mon.item, crate::data::item::Item::AirBalloon) {
                 target_mon.item = crate::data::item::Item::None;
@@ -1440,6 +1441,20 @@ fn generate_commands_for_active(
     if slot_idx >= my_active.len() { return Vec::new(); }
     let mon = &my_active[slot_idx];
 
+    // Mid-turn self-switch: the pending slot may only switch to a healthy bench mon;
+    // every other active slot must Pass.
+    if let Some((pending_slot, _)) = state.self_switch_pending {
+        let this_slot = FieldSlot { player, slot_index: slot_idx as u8 };
+        if this_slot == pending_slot {
+            return my_back.iter().enumerate()
+                .filter(|(_, m)| !m.fainted)
+                .map(|(i, _)| BattleCommand::Switch(SwitchCommand { party_index: i }))
+                .collect();
+        } else {
+            return vec![BattleCommand::Pass];
+        }
+    }
+
     // Locked: must recharge
     if mon.volatiles.iter().any(|v| matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MustRecharge, _))) {
         return vec![BattleCommand::Pass];
@@ -1625,6 +1640,22 @@ fn total_damage_to_opponent(baseline: &BattleState, after: &BattleState, opposin
 }
 
 /// Apply the attacker's heal/drain/recoil and then resolve game-over after a move lands.
+/// Returns true if `player` has at least one non-fainted Pokémon on the bench.
+fn has_healthy_bench(bs: &BattleState, player: Player) -> bool {
+    match player {
+        Player::P1 => bs.p1_back_mons.iter().any(|m| !m.fainted),
+        Player::P2 => bs.p2_back_mons.iter().any(|m| !m.fainted),
+    }
+}
+
+fn slot_has_substitute(bs: &BattleState, slot: FieldSlot) -> bool {
+    simulator_helpers::get_pokemon_at_slot(bs, slot).map_or(false, |m| {
+        m.volatiles.iter().any(|v|
+            matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+        )
+    })
+}
+
 fn apply_post_damage_move_effects(
     mut bs: BattleState,
     attacker_slot: FieldSlot,
@@ -1634,6 +1665,7 @@ fn apply_post_damage_move_effects(
 ) -> MatchState {
     let total_dmg = total_damage_to_opponent(baseline, &bs, opposing_player);
     let opponent_wiped = !simulator_helpers::team_has_remaining_pokemon(&bs, opposing_player) && total_dmg > 0;
+    let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
     let mut forced_winner: Option<Player> = None;
     let mut attacker_fainted = false;
 
@@ -1643,13 +1675,13 @@ fn apply_post_damage_move_effects(
         // Unconditional self-heal
         if move_data.heal_fraction[0] > 0 && move_data.heal_fraction[1] > 0 {
             let heal = ((max_hp as u32 * move_data.heal_fraction[0] as u32) / move_data.heal_fraction[1] as u32) as u16;
-            if heal > 0 { attacker_mon.hp = attacker_mon.hp.saturating_add(heal).min(max_hp); attacker_mon.fainted = false; }
+            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, items_suppressed); }
         }
 
         // Drain heal
         if move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
             let heal = ((total_dmg * move_data.drain_fraction[0] as u32) / move_data.drain_fraction[1] as u32) as u16;
-            if heal > 0 { attacker_mon.hp = attacker_mon.hp.saturating_add(heal).min(max_hp); attacker_mon.fainted = false; }
+            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, items_suppressed); }
         }
 
         // Recoil
@@ -1662,7 +1694,7 @@ fn apply_post_damage_move_effects(
             } else { 0 };
 
             if recoil > 0 {
-                simulator_helpers::apply_damage(attacker_mon, recoil);
+                simulator_helpers::take_damage(attacker_mon, recoil, items_suppressed);
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
@@ -1681,6 +1713,29 @@ fn apply_post_damage_move_effects(
     } else if let Some(game_over) = game_over_state_if_battle_finished(&bs) {
         game_over
     } else {
+        // Set self_switch_pending if:
+        //  - the move has a self-switch type
+        //  - the attacker is still alive
+        //  - the attacker has a healthy bench mon to switch to
+        //  - the move actually connected (total_dmg > 0) OR it's a status/non-damaging move
+        //    (so a missed damaging self-switch like a missed U-turn does NOT trigger)
+        //  - for Shed Tail specifically: the Substitute was actually created this step
+        //    (user now carries a Substitute volatile)
+        if move_data.self_switch != SelfSwitchType::None && !attacker_fainted && has_healthy_bench(&bs, attacker_slot.player) {
+            let attacker_alive = match attacker_slot.player {
+                Player::P1 => bs.p1_active_mons.get(attacker_slot.slot_index as usize).map(|m| !m.fainted).unwrap_or(false),
+                Player::P2 => bs.p2_active_mons.get(attacker_slot.slot_index as usize).map(|m| !m.fainted).unwrap_or(false),
+            };
+            let move_connected = total_dmg > 0 || matches!(move_data.category, MoveCategory::Status);
+            // For ShedTail: success ⇔ attacker now has a Substitute AND did not have one before
+            // the move (baseline). Using baseline comparison instead of an HP check means items
+            // like Sitrus Berry healing after the HP cost cannot mask a successful switch.
+            let shed_tail_sub_created = move_data.self_switch != SelfSwitchType::ShedTail
+                || (slot_has_substitute(&bs, attacker_slot) && !slot_has_substitute(baseline, attacker_slot));
+            if attacker_alive && move_connected && shed_tail_sub_created {
+                bs.self_switch_pending = Some((attacker_slot, move_data.self_switch));
+            }
+        }
         MatchState::BattleState(bs)
     }
 }
@@ -1868,6 +1923,13 @@ pub fn simulate_turn(
             return vec![(state.clone(), 1.0)];
         };
 
+        // A self-switch move resolved and the player must choose a replacement.
+        // Return the state as-is to the caller; action_queue is preserved so the
+        // turn resumes once the replacement is sent in.
+        if battle.self_switch_pending.is_some() {
+            return vec![(state.clone(), 1.0)];
+        }
+
         let outcomes = step_action_queue(battle, move_dex, pokemon_dex, config);
 
         if battle.action_queue.is_empty() {
@@ -1925,6 +1987,92 @@ fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, ben
     // All switch-out side effects (switch-out abilities, Neutralizing Gas lift, primal
     // weather ending) are handled here, after the departing Pokémon has reached the bench.
     simulator_helpers::handle_pokemon_switch_out(next_state, user_slot.player, bench_index);
+}
+
+/// Perform a self-switch (U-turn, Baton Pass, Shed Tail, etc.) from `user_slot` to
+/// `bench_index`.  Always calls `perform_switch_out_in` first so switch-out ability hooks
+/// (Desolate Land, Neutralizing Gas, …) always fire, then:
+///
+/// - `Normal`: nothing extra — replacement enters cleared.
+/// - `BatonPass`: boost table and passable volatile statuses are snapshot *before* the base
+///   call, then restored onto the replacement after the swap.
+/// - `ShedTail`: only the Substitute volatile (if present) is forwarded; all other boosts
+///   and volatiles are cleared by the base call.
+fn perform_self_switch(
+    next_state: &mut BattleState,
+    user_slot: FieldSlot,
+    bench_index: usize,
+    switch_type: SelfSwitchType,
+) {
+    let slot_idx = user_slot.slot_index as usize;
+
+    // Snapshot the leaving mon's transferable state BEFORE the base call clears it.
+    let (boosts_to_pass, volatiles_to_pass) = match switch_type {
+        SelfSwitchType::BatonPass => {
+            let mons = match user_slot.player {
+                Player::P1 => &next_state.p1_active_mons,
+                Player::P2 => &next_state.p2_active_mons,
+            };
+            if let Some(mon) = mons.get(slot_idx) {
+                let boosts = mon.boosts;
+                // Passable volatiles per Bulbapedia (newest generation).
+                // Note: Perish Song and Aqua Ring are not yet representable in VolatileStatus.
+                let passable = mon.volatiles.iter().filter(|v| {
+                    use crate::pokemon::VolatileStatusState;
+                    use VolatileStatus::*;
+                    matches!(v,
+                        VolatileStatusState::TurnStatus(Confusion, _)
+                        | VolatileStatusState::TurnStatus(FocusEnergy, _)
+                        | VolatileStatusState::TurnStatus(PartiallyTrapped, _)
+                        | VolatileStatusState::TurnStatus(LeechSeed, _)
+                        | VolatileStatusState::TurnStatus(Curse, _)
+                        | VolatileStatusState::TurnStatus(Substitute, _)
+                        | VolatileStatusState::TurnStatus(Ingrain, _)
+                        | VolatileStatusState::TurnStatus(PowerTrick, _)
+                        | VolatileStatusState::TurnStatus(HealBlock, _)
+                        | VolatileStatusState::TurnStatus(Embargo, _)
+                        | VolatileStatusState::TurnStatus(MagnetRise, _)
+                        | VolatileStatusState::TurnStatus(Telekinesis, _)
+                        | VolatileStatusState::TurnStatus(GastroAcid, _)
+                    )
+                }).cloned().collect::<Vec<_>>();
+                (Some(boosts), passable)
+            } else {
+                (None, vec![])
+            }
+        }
+        SelfSwitchType::ShedTail => {
+            // Pass only the Substitute volatile; boosts and all other volatiles are cleared.
+            let mons = match user_slot.player {
+                Player::P1 => &next_state.p1_active_mons,
+                Player::P2 => &next_state.p2_active_mons,
+            };
+            let sub = mons.get(slot_idx).and_then(|mon| {
+                mon.volatiles.iter().find(|v|
+                    matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+                ).cloned()
+            });
+            (None, sub.into_iter().collect())
+        }
+        SelfSwitchType::Normal | SelfSwitchType::None => (None, vec![]),
+    };
+
+    // Base swap + switch-out ability hooks (always runs so Desolate Land / Neutralizing Gas fire).
+    perform_switch_out_in(next_state, user_slot, bench_index);
+
+    // Apply the snapshot to the now-active replacement (which just came out of the bench, cleared).
+    if boosts_to_pass.is_some() || !volatiles_to_pass.is_empty() {
+        let mons = match user_slot.player {
+            Player::P1 => &mut next_state.p1_active_mons,
+            Player::P2 => &mut next_state.p2_active_mons,
+        };
+        if let Some(replacement) = mons.get_mut(slot_idx) {
+            if let Some(boosts) = boosts_to_pass {
+                replacement.boosts = boosts;
+            }
+            replacement.volatiles.extend(volatiles_to_pass);
+        }
+    }
 }
 
 // Process a list of send-out slots in effective-speed order, branching on speed ties.
@@ -2057,6 +2205,7 @@ fn battle_state_from_preview_branching(
         p2_side_condition_turns: vec![],
         p1_slot_conditions: vec![Vec::new(); preview.active_per_side as usize],
         p2_slot_conditions: vec![Vec::new(); preview.active_per_side as usize],
+        self_switch_pending: None,
     };
 
     // Collect all active send-out slots
@@ -2127,6 +2276,30 @@ fn apply_player_commands_branching(
 
                 let branches = perform_simultaneous_switches_branching(&next_state, &queued_switches);
                 return simulator_helpers::coalesce_branches(branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect());
+            }
+
+            // Self-switch pending: a self-switch move resolved mid-turn and the owning player
+            // must choose a replacement.  The pending slot's player sends a Switch command; every
+            // other active slot sends Pass (which queues no Action).  Once the replacement is in,
+            // self_switch_pending is cleared and the remaining action_queue drains as normal.
+            if let Some((pending_slot, switch_type)) = battle.self_switch_pending {
+                // Extract the chosen bench index from the owning player's command.
+                let owning_cmd = match pending_slot.player {
+                    Player::P1 => p1_cmd,
+                    Player::P2 => p2_cmd,
+                };
+                let party_index = if let PlayerCommand::Battle(cmds) = owning_cmd {
+                    cmds.get(pending_slot.slot_index as usize)
+                        .and_then(|cmd| if let BattleCommand::Switch(s) = cmd { Some(s.party_index) } else { None })
+                } else {
+                    None
+                };
+                if let Some(bench_idx) = party_index {
+                    perform_self_switch(&mut next_state, pending_slot, bench_idx, switch_type);
+                    simulator_helpers::process_pokemon_send_out(&mut next_state, pending_slot);
+                    next_state.self_switch_pending = None;
+                }
+                return vec![(MatchState::BattleState(next_state), 1.0)];
             }
 
             // Default: just queue commands mid-turn

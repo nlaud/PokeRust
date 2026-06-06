@@ -115,7 +115,7 @@ pub enum PokemonStat {
     Spe,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelfSwitchType {
     ShedTail,
     BatonPass,
