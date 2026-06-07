@@ -187,6 +187,7 @@ pub enum VolatileStatus {
     NoRetreat,
     Obstruct,
     OctoLock,
+    ChoiceLock(PokemonMove),
     LockedMove,
     SemiInvulnerable(PokemonMove),
     Powder,

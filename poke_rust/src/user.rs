@@ -202,6 +202,12 @@ fn battle_command_description(state: &BattleState, player: Player, slot_idx: usi
             }
             label
         }
+        BattleCommand::Struggle { target } => {
+            let target_label = target
+                .map(|slot| format!("{}'s {}", player_name(slot.player), active_mon_name(state, slot)))
+                .unwrap_or_else(|| "no target".to_string());
+            format!("Struggle -> {}", target_label)
+        }
         BattleCommand::Pass => {
             "Pass".to_string()
         }
