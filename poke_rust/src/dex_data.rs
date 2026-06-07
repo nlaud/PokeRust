@@ -165,6 +165,7 @@ pub enum VolatileStatus {
     Embargo,
     Encore,
     Endure,
+    FlashFire,
     FocusEnergy,
     FollowMe,
     Foresight,
