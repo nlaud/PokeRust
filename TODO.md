@@ -7,23 +7,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Abilities
 
-### Damage reduction abilities (defender side)
-All hook into the damage multiplier chain on the defender's side.
-- Filter / Solid Rock — −25% from super-effective hits
-- Friend Guard — allies take 25% less damage
-- Fur Coat — halve damage from physical moves
-- Heatproof — halve damage from Fire moves; halve burn residual
-- Multiscale — halve damage received at full HP
-- Purifying Salt — halve Ghost damage; immune to status conditions
-- Thick Fat — halve damage from Fire and Ice moves
-- Water Bubble — halve Fire damage; double Water power; cannot be burned
-
-### Stat protection abilities
-Prevent opposing stat reductions. Hook into stat-change application.
-- Big Pecks — Defense cannot be lowered by others
-- Clear Body — no stats can be lowered by others
-- Hyper Cutter — Attack cannot be lowered by others
-- White Smoke — no stats can be lowered by others
 
 ### Type immunity and absorption abilities
 Negate an entire attacking type; apply a bonus instead. Hook into the type-effectiveness

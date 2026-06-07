@@ -12621,5 +12621,503 @@ mod tests {
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // Stat-protection abilities
+    // ════════════════════════════════════════════════════════════════════
+    mod stat_protection_abilities {
+        use super::*;
+
+        /// Build a level-50 Snorlax (Normal — no special type interactions) with a
+        /// forced ability and one move.  All other build params are default/zero.
+        fn mon(ability: Ability, first_move: PokemonMove) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(first_move), None, None, None]),
+                None, Some(ability), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            )
+        }
+
+        // ── Clear Body / White Smoke / Full Metal Body block Intimidate ─────────
+
+        #[test]
+        fn clear_body_blocks_intimidate() {
+            let p1 = mon(Ability::Intimidate, PokemonMove::Splash);
+            let p2 = mon(Ability::ClearBody, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            assert_eq!(state.p2_active_mons[0].boosts[0], 0,
+                "Clear Body should block Intimidate's Attack drop");
+        }
+
+        #[test]
+        fn white_smoke_blocks_intimidate() {
+            let p1 = mon(Ability::Intimidate, PokemonMove::Splash);
+            let p2 = mon(Ability::WhiteSmoke, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            assert_eq!(state.p2_active_mons[0].boosts[0], 0,
+                "White Smoke should block Intimidate's Attack drop");
+        }
+
+        #[test]
+        fn full_metal_body_blocks_intimidate() {
+            let p1 = mon(Ability::Intimidate, PokemonMove::Splash);
+            let p2 = mon(Ability::FullMetalBody, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            assert_eq!(state.p2_active_mons[0].boosts[0], 0,
+                "Full Metal Body should block Intimidate's Attack drop");
+        }
+
+        // Verify that ordinary Intimidate still fires (guards against accidental over-blocking).
+        #[test]
+        fn intimidate_still_fires_vs_no_protection() {
+            let p1 = mon(Ability::Intimidate, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            assert_eq!(state.p2_active_mons[0].boosts[0], -1,
+                "Intimidate should still lower Attack of unprotected foes");
+        }
+
+        // ── Clear Body blocks move-induced stat drops ───────────────────────────
+
+        #[test]
+        fn clear_body_blocks_growl() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // P1 has Clear Body, P2 uses Growl (−1 Atk on target).
+            let p1 = mon(Ability::ClearBody, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Growl);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
+                "Clear Body should block Growl's Attack drop");
+        }
+
+        // ── Hyper Cutter ────────────────────────────────────────────────────────
+
+        #[test]
+        fn hyper_cutter_blocks_attack_drop() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = mon(Ability::HyperCutter, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Growl);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
+                "Hyper Cutter should block opponent Attack drops (index 0)");
+        }
+
+        #[test]
+        fn hyper_cutter_allows_defense_drop() {
+            // Hyper Cutter only blocks Attack (index 0); Leer's Defense (index 1) drop goes through.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = mon(Ability::HyperCutter, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Leer);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[1], -1,
+                "Hyper Cutter must not block Defense drops");
+        }
+
+        // ── Big Pecks ───────────────────────────────────────────────────────────
+
+        #[test]
+        fn big_pecks_blocks_defense_drop() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = mon(Ability::BigPecks, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Leer);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[1], 0,
+                "Big Pecks should block Defense drops (index 1)");
+        }
+
+        #[test]
+        fn big_pecks_allows_attack_drop() {
+            // Big Pecks only blocks Defense (index 1); Growl's Attack drop still applies.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = mon(Ability::BigPecks, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Growl);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], -1,
+                "Big Pecks must not block Attack drops");
+        }
+
+        // ── Self-inflicted drops bypass stat protection ──────────────────────────
+
+        #[test]
+        fn clear_body_does_not_block_self_inflicted_drops() {
+            // Close Combat lowers the USER's own Def (index 1) and SpD (index 3) by −1.
+            // Clear Body must not interfere — these go through the attacker-effect path.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = mon(Ability::ClearBody, PokemonMove::CloseCombat);
+            let p2 = mon(Ability::None, PokemonMove::Splash);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[1], -1,
+                "Clear Body must not block own Close Combat Def drop");
+            assert_eq!(bs.p1_active_mons[0].boosts[3], -1,
+                "Clear Body must not block own Close Combat SpD drop");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Damage-reduction abilities
+    // ════════════════════════════════════════════════════════════════════
+    mod damage_reduction_abilities {
+        use super::*;
+        use crate::battle::AttackCommand;
+
+        /// Build a level-50 mon with a specific ability, first move, and Nature::Hardy.
+        /// All stat-points are zero for predictable, reproducible stats.
+        fn make_mon(species: Species, ability: Ability, first_move: PokemonMove) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            build_pokemon_state(
+                species, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(first_move), None, None, None]),
+                None, Some(ability), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            )
+        }
+
+        /// Run a one-turn P1-attacks-P2 scenario and return the probability-weighted
+        /// expected damage dealt to P2 slot 0.
+        fn run_damage(
+            attacker: PokemonState,
+            defender: PokemonState,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+            pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>,
+        ) -> f64 {
+            let initial_hp = defender.hp;
+            let state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex, pokemon_dex,
+            );
+            outcomes.iter().map(|(s, p)| {
+                let hp = match s {
+                    MatchState::BattleState(bs) => bs.p2_active_mons[0].hp,
+                    _ => 0,
+                };
+                (initial_hp.saturating_sub(hp) as f64) * p
+            }).sum()
+        }
+
+        // ── Filter / Solid Rock ─────────────────────────────────────────────────
+        // Geodude is Rock/Ground — 4× weak to Water.  Filter/Solid Rock bring it to ×3.
+        // The damage ratio vs no-ability should be 0.75.
+
+        #[test]
+        fn filter_reduces_super_effective_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let attacker = make_mon(Species::Blastoise, Ability::None, PokemonMove::WaterGun);
+            // Charizard (Fire/Flying) is 2× weak to Water.  A 4× target (Geodude) would
+            // faint in both the Filter and no-Filter cases, masking the reduction.
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Charizard, Ability::None,      PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_filter = run_damage(attacker.clone(), make_mon(Species::Charizard, Ability::Filter,    PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_solid  = run_damage(attacker,         make_mon(Species::Charizard, Ability::SolidRock, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_filter / dmg_none - 0.75).abs() < 0.02,
+                "Filter: expected ~0.75× SE damage, got {:.4}", dmg_filter / dmg_none);
+            assert!((dmg_solid / dmg_none - 0.75).abs() < 0.02,
+                "Solid Rock: expected ~0.75× SE damage, got {:.4}", dmg_solid / dmg_none);
+        }
+
+        // Filter must NOT reduce neutral-effectiveness damage.
+        #[test]
+        fn filter_does_not_reduce_neutral_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let attacker = make_mon(Species::Blastoise, Ability::None, PokemonMove::WaterGun);
+            // Snorlax is Normal — Water is neutral (×1).
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_filter = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Filter, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_filter - dmg_none).abs() < 1.0,
+                "Filter must not reduce neutral hits (expected {dmg_none:.1}, got {dmg_filter:.1})");
+        }
+
+        // ── Multiscale / Shadow Shield ──────────────────────────────────────────
+
+        #[test]
+        fn multiscale_halves_damage_at_full_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let attacker = make_mon(Species::Blastoise, Ability::None, PokemonMove::WaterGun);
+
+            let defender_full = make_mon(Species::Snorlax, Ability::Multiscale, PokemonMove::Splash);
+            let mut defender_damaged = defender_full.clone();
+            defender_damaged.hp -= 1; // one below max → ability does not fire
+
+            let dmg_full    = run_damage(attacker.clone(), defender_full,    &move_dex, &pokemon_dex);
+            let dmg_damaged = run_damage(attacker,         defender_damaged, &move_dex, &pokemon_dex);
+
+            assert!((dmg_full / dmg_damaged - 0.5).abs() < 0.05,
+                "Multiscale: expected ~0.5× damage at full HP (ratio={:.4})", dmg_full / dmg_damaged);
+        }
+
+        #[test]
+        fn shadow_shield_halves_damage_at_full_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let attacker = make_mon(Species::Blastoise, Ability::None, PokemonMove::WaterGun);
+
+            let defender_shield  = make_mon(Species::Snorlax, Ability::ShadowShield, PokemonMove::Splash);
+            let defender_no_abil = make_mon(Species::Snorlax, Ability::None,         PokemonMove::Splash);
+
+            let dmg_shield = run_damage(attacker.clone(), defender_shield,  &move_dex, &pokemon_dex);
+            let dmg_none   = run_damage(attacker,         defender_no_abil, &move_dex, &pokemon_dex);
+
+            assert!((dmg_shield / dmg_none - 0.5).abs() < 0.05,
+                "Shadow Shield: expected ~0.5× damage at full HP (ratio={:.4})", dmg_shield / dmg_none);
+        }
+
+        // ── Fur Coat ────────────────────────────────────────────────────────────
+
+        #[test]
+        fn fur_coat_halves_physical_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Close Combat is Physical (120 BP Fighting).  Snorlax is Normal — neutral.
+            let attacker = make_mon(Species::Lucario, Ability::None, PokemonMove::CloseCombat);
+            let dmg_none     = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,    PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_fur_coat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::FurCoat, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_fur_coat / dmg_none - 0.5).abs() < 0.02,
+                "Fur Coat: expected ~0.5× physical damage (ratio={:.4})", dmg_fur_coat / dmg_none);
+        }
+
+        #[test]
+        fn fur_coat_does_not_reduce_special_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Psychic is Special.
+            let attacker = make_mon(Species::Alakazam, Ability::None, PokemonMove::Psychic);
+            let dmg_none     = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,    PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_fur_coat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::FurCoat, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_fur_coat - dmg_none).abs() < 1.0,
+                "Fur Coat must not reduce special damage (expected {dmg_none:.1}, got {dmg_fur_coat:.1})");
+        }
+
+        // ── Heatproof ───────────────────────────────────────────────────────────
+
+        #[test]
+        fn heatproof_halves_fire_move_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::Flamethrower);
+            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,      PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_heatproof = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Heatproof, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_heatproof / dmg_none - 0.5).abs() < 0.02,
+                "Heatproof: expected ~0.5× Fire damage (ratio={:.4})", dmg_heatproof / dmg_none);
+        }
+
+        #[test]
+        fn heatproof_halves_burn_residual() {
+            // A burned Heatproof holder should take max_hp/32 per turn instead of max_hp/16.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut burned = make_mon(Species::Snorlax, Ability::Heatproof, PokemonMove::Splash);
+            burned.status = Some(Status::Burn);
+            let max_hp     = burned.stats[0];
+            let initial_hp = burned.hp;
+            let p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+
+            let state = battle_state_from_lists(vec![burned], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            let expected_residual = ((max_hp as u32 / 32) as u16).max(1);
+            let actual_residual   = initial_hp.saturating_sub(bs.p1_active_mons[0].hp);
+            assert_eq!(actual_residual, expected_residual,
+                "Heatproof burn: expected max_hp/32={expected_residual}, got {actual_residual}");
+        }
+
+        // ── Thick Fat ───────────────────────────────────────────────────────────
+
+        #[test]
+        fn thick_fat_halves_fire_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::Flamethrower);
+            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,     PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_thick_fat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_thick_fat / dmg_none - 0.5).abs() < 0.02,
+                "Thick Fat: expected ~0.5× Fire damage (ratio={:.4})", dmg_thick_fat / dmg_none);
+        }
+
+        #[test]
+        fn thick_fat_halves_ice_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let attacker = make_mon(Species::Lapras, Ability::None, PokemonMove::IceBeam);
+            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,     PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_thick_fat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_thick_fat / dmg_none - 0.5).abs() < 0.02,
+                "Thick Fat: expected ~0.5× Ice damage (ratio={:.4})", dmg_thick_fat / dmg_none);
+        }
+
+        // ── Water Bubble ────────────────────────────────────────────────────────
+
+        #[test]
+        fn water_bubble_halves_fire_damage_taken() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::Flamethrower);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,        PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_bubble = run_damage(attacker,         make_mon(Species::Snorlax, Ability::WaterBubble, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            // Tolerance is 0.05 (not 0.02) because WaterBubble prevents burn so the
+            // no-ability branch includes occasional burn residual that skews the ratio.
+            assert!((dmg_bubble / dmg_none - 0.5).abs() < 0.05,
+                "Water Bubble: expected ~0.5× Fire damage taken (ratio={:.4})", dmg_bubble / dmg_none);
+        }
+
+        #[test]
+        fn water_bubble_doubles_water_move_power() {
+            // The holder's Water-type moves have their base power doubled.
+            // Use Surf (90 BP) so the formula's constant +2 is relatively smaller,
+            // keeping the ratio close to 2.0 within the 0.05 tolerance.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let dmg_none   = run_damage(
+                make_mon(Species::Blastoise, Ability::None,        PokemonMove::Surf),
+                make_mon(Species::Snorlax,  Ability::None,         PokemonMove::Splash),
+                &move_dex, &pokemon_dex,
+            );
+            let dmg_bubble = run_damage(
+                make_mon(Species::Blastoise, Ability::WaterBubble, PokemonMove::Surf),
+                make_mon(Species::Snorlax,  Ability::None,         PokemonMove::Splash),
+                &move_dex, &pokemon_dex,
+            );
+            assert!((dmg_bubble / dmg_none - 2.0).abs() < 0.05,
+                "Water Bubble: expected ~2× Water move power (ratio={:.4})", dmg_bubble / dmg_none);
+        }
+
+        // ── Purifying Salt ──────────────────────────────────────────────────────
+
+        #[test]
+        fn purifying_salt_halves_ghost_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Machamp (Fighting) is not immune to Ghost (unlike Normal/Dark types).
+            let attacker = make_mon(Species::Gengar, Ability::None, PokemonMove::ShadowBall);
+            let dmg_none = run_damage(attacker.clone(), make_mon(Species::Machamp, Ability::None,          PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_salt = run_damage(attacker,         make_mon(Species::Machamp, Ability::PurifyingSalt, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_salt / dmg_none - 0.5).abs() < 0.02,
+                "Purifying Salt: expected ~0.5× Ghost damage (ratio={:.4})", dmg_salt / dmg_none);
+        }
+
+        // ── Friend Guard ────────────────────────────────────────────────────────
+        // Doubles: P2[0] is the Friend Guard ally; P1[0] explicitly targets P2[1].
+
+        #[test]
+        fn friend_guard_reduces_ally_damage_by_25_percent() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let attacker   = make_mon(Species::Blastoise, Ability::None,        PokemonMove::WaterGun);
+            let dummy_p1   = make_mon(Species::Snorlax,   Ability::None,        PokemonMove::Splash);
+            let target     = make_mon(Species::Snorlax,   Ability::None,        PokemonMove::Splash);
+            let initial_hp = target.hp;
+
+            // Command: P1[0] attacks P2 slot 1 explicitly; P1[1] splashes.
+            let p1_cmd = PlayerCommand::Battle(vec![
+                BattleCommand::Attack(AttackCommand {
+                    move_slot: 0,
+                    target: Some(FieldSlot { player: Player::P2, slot_index: 1 }),
+                    terastallize: false,
+                    mega_evolve: false,
+                }),
+                BattleCommand::Attack(AttackCommand {
+                    move_slot: 0,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: false,
+                }),
+            ]);
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0]));
+
+            // Without Friend Guard: P2[0] has no relevant ability.
+            let state_no_guard = battle_state_from_lists(
+                vec![attacker.clone(), dummy_p1.clone()], vec![],
+                vec![make_mon(Species::Snorlax, Ability::None, PokemonMove::Splash), target.clone()],
+                vec![],
+            );
+            let outcomes_no = run_single_turn(
+                &MatchState::BattleState(state_no_guard),
+                &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            );
+            let dmg_no_guard: f64 = outcomes_no.iter().map(|(s, p)| {
+                let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[1].hp, _ => 0 };
+                (initial_hp.saturating_sub(hp) as f64) * p
+            }).sum();
+
+            // With Friend Guard: P2[0] carries Friend Guard.
+            let state_guard = battle_state_from_lists(
+                vec![attacker, dummy_p1], vec![],
+                vec![make_mon(Species::Snorlax, Ability::FriendGuard, PokemonMove::Splash), target],
+                vec![],
+            );
+            let outcomes_guard = run_single_turn(
+                &MatchState::BattleState(state_guard),
+                &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+            );
+            let dmg_guard: f64 = outcomes_guard.iter().map(|(s, p)| {
+                let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[1].hp, _ => 0 };
+                (initial_hp.saturating_sub(hp) as f64) * p
+            }).sum();
+
+            assert!((dmg_guard / dmg_no_guard - 0.75).abs() < 0.05,
+                "Friend Guard: expected ~0.75× ally damage (ratio={:.4})", dmg_guard / dmg_no_guard);
+        }
+    }
+
 }
 
