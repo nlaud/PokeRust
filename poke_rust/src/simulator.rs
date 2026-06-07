@@ -389,22 +389,17 @@ fn apply_single_hit_branch(
         }
     };
 
-    // Dry Skin + Water-type move: absorb the hit entirely, no secondary effects, no endure.
-    let absorbed_by_dry_skin = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
-        .map_or(false, |t| t.ability == Ability::DrySkin && matches!(move_data.pokemon_type, PokemonType::Water));
-
-    if absorbed_by_dry_skin {
-        let mut branch_state = branch_state;
-        if let Some(target_mon) = match target_slot.player {
-            Player::P1 => branch_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
-            Player::P2 => branch_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
-        } {
-            let max_hp = target_mon.stats[0].max(1);
-            let heal_amount = (max_hp as u32 / 4) as u16;
-            simulator_helpers::gain_hp(target_mon, heal_amount, items_suppressed);
+    // Type-absorption / react-on-hit abilities: absorb the hit entirely, no secondary effects,
+    // no endure. Covers Volt Absorb, Water Absorb, Earth Eater, Sap Sipper, Motor Drive,
+    // Flash Fire, and Dry Skin (Water).  Lightning Rod / Storm Drain are draw-in abilities
+    // handled earlier (pre-accuracy gate in the per-target loop).
+    let attacker_for_absorb = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot).cloned();
+    if let Some(atk) = attacker_for_absorb {
+        let mut branch_state_absorb = branch_state.clone();
+        if simulator_helpers::try_absorb_move(&mut branch_state_absorb, target_slot, &atk, move_data, items_suppressed) {
+            outcomes.push((branch_state_absorb, branch_probability));
+            return outcomes;
         }
-        outcomes.push((branch_state, branch_probability));
-        return outcomes;
     }
 
     // Focus Sash / Focus Band endure outcomes. Each entry is (eff_damage, consume_item, prob).
@@ -999,11 +994,11 @@ fn possible_damage_outcomes_for_move(
         }
     };
 
-    // Apply Follow Me / Rage Powder redirection for single-target moves
+    // Apply Follow Me / Rage Powder / Lightning Rod / Storm Drain redirection for single-target moves
     if !simulator_helpers::move_target_is_multitarget(&move_data.target)
         && !(move_name == PokemonMove::ExpandingForce && simulator_helpers::pokemon_is_on_terrain(&next_state, &attacker, &crate::dex_data::Terrain::PsychicTerrain))
     {
-        target_slots = simulator_helpers::check_and_apply_redirection(&next_state, action.user_slot, target_slots);
+        target_slots = simulator_helpers::check_and_apply_redirection(&next_state, action.user_slot, target_slots, Some(move_data));
     }
 
     if target_slots.is_empty() {
@@ -1176,6 +1171,18 @@ fn possible_damage_outcomes_for_move(
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
+        }
+
+        // Lightning Rod / Storm Drain draw-in: negate the move and apply +1 Sp. Atk to the
+        // target BEFORE the accuracy roll.  The ability fires even on a miss or through Protect.
+        // `try_drawin_negate` also handles the case where the target was redirected to this slot.
+        {
+            let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+            if simulator_helpers::try_drawin_negate(&mut next_state, *target_slot, &attacker, move_data, items_suppressed) {
+                outcomes_for_target.push((0, false, false, 1.0));
+                per_target_outcomes.push((*target_slot, outcomes_for_target));
+                continue;
+            }
         }
 
         let hit_probability = simulator_helpers::accuracy_hit_probability(

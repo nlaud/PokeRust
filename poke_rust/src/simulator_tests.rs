@@ -8521,7 +8521,7 @@ mod tests {
         }
 
         fn redirect(state: &BattleState) -> Vec<FieldSlot> {
-            simulator_helpers::check_and_apply_redirection(state, user_slot(), vec![primary_slot()])
+            simulator_helpers::check_and_apply_redirection(state, user_slot(), vec![primary_slot()], None)
         }
 
         #[test]
@@ -8588,7 +8588,7 @@ mod tests {
                 redirector(VolatileStatus::FollowMe),
             );
             let spread = vec![primary_slot(), redirector_slot()];
-            let result = simulator_helpers::check_and_apply_redirection(&state, user_slot(), spread.clone());
+            let result = simulator_helpers::check_and_apply_redirection(&state, user_slot(), spread.clone(), None);
             assert_eq!(result, spread);
         }
     }
@@ -13116,6 +13116,627 @@ mod tests {
 
             assert!((dmg_guard / dmg_no_guard - 0.75).abs() < 0.05,
                 "Friend Guard: expected ~0.75× ally damage (ratio={:.4})", dmg_guard / dmg_no_guard);
+        }
+    }
+
+    // ── Type immunity & absorption abilities ─────────────────────────────────────
+    mod type_immunity_abilities {
+        use super::*;
+        use crate::battle::AttackCommand;
+
+        // Build a level-50 mon with the given ability and a single move.
+        fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(mv), None, None, None]),
+                None, Some(ability), Some(Nature::Hardy),
+                None, None, Some([0; 6]), None, false,
+            )
+        }
+
+        // ── react-on-hit: heal abilities ─────────────────────────────────────────
+
+        #[test]
+        fn volt_absorb_heals_on_electric_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut absorber = mon(Species::Jolteon, Ability::VoltAbsorb, PokemonMove::Splash);
+            let max_hp = absorber.stats[0];
+            absorber.hp = max_hp.saturating_sub(max_hp / 4);
+            let initial_hp = absorber.hp;
+
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Raichu, Ability::Pressure, PokemonMove::Thunderbolt)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let expected_hp = initial_hp + max_hp / 4;
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == expected_hp)),
+                "Volt Absorb: expected HP={} in all branches", expected_hp,
+            );
+        }
+
+        #[test]
+        fn water_absorb_heals_on_water_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut absorber = mon(Species::Vaporeon, Ability::WaterAbsorb, PokemonMove::Splash);
+            let max_hp = absorber.stats[0];
+            absorber.hp = max_hp.saturating_sub(max_hp / 4);
+            let initial_hp = absorber.hp;
+
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Blastoise, Ability::Pressure, PokemonMove::Surf)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let expected_hp = initial_hp + max_hp / 4;
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == expected_hp)),
+                "Water Absorb: expected HP={} in all branches", expected_hp,
+            );
+        }
+
+        #[test]
+        fn earth_eater_heals_on_ground_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut absorber = mon(Species::Garchomp, Ability::EarthEater, PokemonMove::Splash);
+            let max_hp = absorber.stats[0];
+            absorber.hp = max_hp.saturating_sub(max_hp / 4);
+            let initial_hp = absorber.hp;
+
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Garchomp, Ability::Pressure, PokemonMove::Earthquake)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let expected_hp = initial_hp + max_hp / 4;
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == expected_hp)),
+                "Earth Eater: expected HP={} in all branches", expected_hp,
+            );
+        }
+
+        // ── react-on-hit: stat-boost abilities ───────────────────────────────────
+
+        #[test]
+        fn sap_sipper_boosts_attack_on_grass_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Azumarill, Ability::SapSipper, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Leafeon, Ability::Pressure, PokemonMove::LeafBlade)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[0] == 1)),
+                "Sap Sipper: expected Attack boost +1 in all branches",
+            );
+        }
+
+        #[test]
+        fn motor_drive_boosts_speed_on_electric_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Electivire, Ability::MotorDrive, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Raichu, Ability::Pressure, PokemonMove::Thunderbolt)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[4] == 1)),
+                "Motor Drive: expected Speed boost +1 in all branches",
+            );
+        }
+
+        // ── react-on-hit: status-move absorption ─────────────────────────────────
+
+        #[test]
+        fn volt_absorb_absorbs_thunder_wave() {
+            // Thunder Wave (90% accuracy) is Electric-type. Volt Absorb should negate it on
+            // hit: heal 1/4 max HP and no paralysis. Miss branches leave HP unchanged and no
+            // paralysis either (it simply missed).
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut absorber = mon(Species::Jolteon, Ability::VoltAbsorb, PokemonMove::Splash);
+            let max_hp = absorber.stats[0];
+            absorber.hp = max_hp.saturating_sub(max_hp / 4);
+            let initial_hp = absorber.hp;
+
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Raichu, Ability::Pressure, PokemonMove::ThunderWave)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let expected_hp_on_hit = initial_hp + max_hp / 4;
+            // There must be a branch where HP was healed (the hit branch).
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == expected_hp_on_hit)),
+                "Volt Absorb vs Thunder Wave: expected a hit branch with HP={}", expected_hp_on_hit,
+            );
+            // In NO branch should the absorber be paralysed (absorption negate on hit; miss → no status either).
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert!(bs.p1_active_mons[0].status.is_none(),
+                        "Volt Absorb vs Thunder Wave: should never be paralysed");
+                }
+            }
+        }
+
+        #[test]
+        fn sap_sipper_absorbs_spore() {
+            // Spore is a Grass-type status move. Sap Sipper should negate it (no sleep) and
+            // boost Attack by 1.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Miltank, Ability::SapSipper, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Amoonguss, Ability::Pressure, PokemonMove::Spore)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Sap Sipper vs Spore: expected +1 Atk");
+                    assert!(bs.p1_active_mons[0].status.is_none(), "Sap Sipper vs Spore: should not be asleep");
+                }
+            }
+        }
+
+        #[test]
+        fn sap_sipper_absorbs_leech_seed() {
+            // Leech Seed (90% accuracy) is Grass-type. Sap Sipper should negate it on hit:
+            // +1 Atk and no Leech Seed volatile. In miss branches: no +1 Atk but also no
+            // Leech Seed applied.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Miltank, Ability::SapSipper, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Leafeon, Ability::Pressure, PokemonMove::LeechSeed)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // There must be a hit branch where Attack was boosted.
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[0] == 1)),
+                "Sap Sipper vs Leech Seed: expected a hit branch with +1 Atk",
+            );
+            // In NO branch should the absorber gain Leech Seed (neither hit-absorbed nor missed).
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    let has_leech = bs.p1_active_mons[0].volatiles.iter().any(|v|
+                        matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::LeechSeed, _))
+                    );
+                    assert!(!has_leech, "Sap Sipper vs Leech Seed: should never gain Leech Seed volatile");
+                }
+            }
+        }
+
+        // ── Flash Fire ────────────────────────────────────────────────────────────
+
+        #[test]
+        fn flash_fire_sets_volatile_on_fire_move() {
+            // A Fire move hitting a Flash Fire mon should set the FlashFire volatile and
+            // deal 0 damage.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Ninetales, Ability::FlashFire, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Charizard, Ability::Pressure, PokemonMove::Flamethrower)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    let max_hp = bs.p1_active_mons[0].stats[0];
+                    assert_eq!(bs.p1_active_mons[0].hp, max_hp, "Flash Fire: should take 0 damage from Fire move");
+                    let has_ff = bs.p1_active_mons[0].volatiles.iter().any(|v|
+                        matches!(v, VolatileStatusState::MoveStatus(VolatileStatus::FlashFire, _))
+                    );
+                    assert!(has_ff, "Flash Fire: should gain FlashFire volatile");
+                }
+            }
+        }
+
+        #[test]
+        fn flash_fire_absorbs_will_o_wisp() {
+            // Will-O-Wisp (85% accuracy) is a Fire-type status move. Flash Fire should absorb
+            // it on hit (no burn, FlashFire volatile set). In miss branches: no burn, no
+            // volatile either.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Ninetales, Ability::FlashFire, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Charizard, Ability::Pressure, PokemonMove::WillOWisp)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // There must be a hit branch where FlashFire volatile was set.
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].volatiles.iter().any(|v|
+                        matches!(v, VolatileStatusState::MoveStatus(VolatileStatus::FlashFire, _))))),
+                "Flash Fire vs Will-O-Wisp: expected a hit branch with FlashFire volatile",
+            );
+            // In NO branch should the absorber be burned (absorption negate on hit; miss → no status either).
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert!(bs.p1_active_mons[0].status.is_none(),
+                        "Flash Fire vs Will-O-Wisp: should never be burned");
+                }
+            }
+        }
+
+        #[test]
+        fn flash_fire_boosts_fire_move_power() {
+            // After Flash Fire activates, the holder's Fire-type moves should do ~1.5× more
+            // damage.  Use 0.05 tolerance (crit branching and floor-rounding).
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+
+            // Baseline: Ninetales (no boost) uses Flamethrower vs Snorlax.
+            let attacker_base = mon(Species::Ninetales, Ability::FlashFire, PokemonMove::Flamethrower);
+            let target_base = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+            let snorlax_max_hp = target_base.stats[0];
+            let state_base = battle_state_from_lists(
+                vec![attacker_base],
+                vec![],
+                vec![target_base],
+                vec![],
+            );
+            let outcomes_base = run_single_turn(
+                &MatchState::BattleState(state_base),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let dmg_base: f64 = outcomes_base.iter().map(|(s, p)| {
+                let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => snorlax_max_hp };
+                (snorlax_max_hp.saturating_sub(hp) as f64) * p
+            }).sum();
+
+            // Boosted: Ninetales already has FlashFire volatile.
+            let mut attacker_boost = mon(Species::Ninetales, Ability::FlashFire, PokemonMove::Flamethrower);
+            attacker_boost.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::FlashFire, 0));
+            let target_boost = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+            let state_boost = battle_state_from_lists(
+                vec![attacker_boost],
+                vec![],
+                vec![target_boost],
+                vec![],
+            );
+            let outcomes_boost = run_single_turn(
+                &MatchState::BattleState(state_boost),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let dmg_boost: f64 = outcomes_boost.iter().map(|(s, p)| {
+                let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => snorlax_max_hp };
+                (snorlax_max_hp.saturating_sub(hp) as f64) * p
+            }).sum();
+
+            let ratio = dmg_boost / dmg_base;
+            assert!(
+                (ratio - 1.5).abs() < 0.05,
+                "Flash Fire power boost: expected ~1.5× ratio, got {:.4}", ratio,
+            );
+        }
+
+        // ── draw-in: Lightning Rod & Storm Drain ─────────────────────────────────
+
+        #[test]
+        fn lightning_rod_boosts_spatk_on_electric_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Raichu, Ability::LightningRod, PokemonMove::Splash);
+            let max_hp = absorber.stats[0];
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Jolteon, Ability::Pressure, PokemonMove::Thunderbolt)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(bs.p1_active_mons[0].hp, max_hp, "Lightning Rod: should take 0 damage");
+                    assert_eq!(bs.p1_active_mons[0].boosts[2], 1, "Lightning Rod: expected +1 Sp. Atk");
+                }
+            }
+        }
+
+        #[test]
+        fn lightning_rod_boosts_on_miss() {
+            // Thunder has 70% accuracy. Lightning Rod must fire in EVERY branch (hit and miss alike).
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Raichu, Ability::LightningRod, PokemonMove::Splash);
+            let max_hp = absorber.stats[0];
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Jolteon, Ability::Pressure, PokemonMove::Thunder)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // All branches (hit and miss) should show +1 Sp. Atk and full HP.
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(bs.p1_active_mons[0].hp, max_hp,
+                        "Lightning Rod vs Thunder: should take 0 damage in all branches");
+                    assert_eq!(bs.p1_active_mons[0].boosts[2], 1,
+                        "Lightning Rod vs Thunder: +1 SpA must apply even in miss branches");
+                }
+            }
+        }
+
+        #[test]
+        fn storm_drain_boosts_spatk_on_water_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Gastrodon, Ability::StormDrain, PokemonMove::Splash);
+            let max_hp = absorber.stats[0];
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Blastoise, Ability::Pressure, PokemonMove::HydroPump)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(bs.p1_active_mons[0].hp, max_hp, "Storm Drain: should take 0 damage");
+                    assert_eq!(bs.p1_active_mons[0].boosts[2], 1, "Storm Drain: expected +1 Sp. Atk");
+                }
+            }
+        }
+
+        #[test]
+        fn lightning_rod_boosts_on_thunder_wave() {
+            // Thunder Wave is Electric-type (status). Lightning Rod should negate it (no
+            // paralysis) and grant +1 Sp. Atk.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Raichu, Ability::LightningRod, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Jolteon, Ability::Pressure, PokemonMove::ThunderWave)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(bs.p1_active_mons[0].boosts[2], 1, "Lightning Rod vs Thunder Wave: expected +1 SpA");
+                    assert!(bs.p1_active_mons[0].status.is_none(), "Lightning Rod vs Thunder Wave: should not be paralysed");
+                }
+            }
+        }
+
+        // ── doubles: redirection ──────────────────────────────────────────────────
+
+        /// In doubles, a single-target Electric move aimed at the partner is drawn to the
+        /// Lightning Rod holder; the holder absorbs it (+1 SpA, no damage).
+        #[test]
+        fn lightning_rod_redirects_in_doubles() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+
+            // P1: slot 0 = Lightning Rod holder (Raichu), slot 1 = partner (Snorlax)
+            // P2: slot 0 = attacker (Jolteon using Thunderbolt targeting P1 slot 1),
+            //     slot 1 = dummy (Clefable using Splash)
+            let holder = mon(Species::Raichu, Ability::LightningRod, PokemonMove::Splash);
+            let partner = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+            let attacker_p2 = mon(Species::Jolteon, Ability::Pressure, PokemonMove::Thunderbolt);
+            let dummy = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+
+            let state = battle_state_from_lists(
+                vec![holder, partner],
+                vec![],
+                vec![attacker_p2, dummy],
+                vec![],
+            );
+            let holder_max_hp = state.p1_active_mons[0].stats[0];
+            let partner_max_hp = state.p1_active_mons[1].stats[0];
+
+            // P2 slot 0 (Jolteon) targets P1 slot 1 (Snorlax partner)
+            let p2_cmd = PlayerCommand::Battle(vec![
+                BattleCommand::Attack(AttackCommand {
+                    move_slot: 0,
+                    target: Some(FieldSlot { player: Player::P1, slot_index: 1 }),
+                    terastallize: false,
+                    mega_evolve: false,
+                }),
+                BattleCommand::Attack(AttackCommand {
+                    move_slot: 0,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: false,
+                }),
+            ]);
+            let p1_cmd = PlayerCommand::Battle(vec![
+                BattleCommand::Attack(AttackCommand {
+                    move_slot: 0,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: false,
+                }),
+                BattleCommand::Attack(AttackCommand {
+                    move_slot: 0,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: false,
+                }),
+            ]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &p1_cmd, &p2_cmd, &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    // Partner (Snorlax) must be undamaged
+                    assert_eq!(bs.p1_active_mons[1].hp, partner_max_hp,
+                        "Lightning Rod redirect: partner should take 0 damage");
+                    // Holder gets +1 SpA and no damage
+                    assert_eq!(bs.p1_active_mons[0].hp, holder_max_hp,
+                        "Lightning Rod redirect: holder should take 0 damage");
+                    assert_eq!(bs.p1_active_mons[0].boosts[2], 1,
+                        "Lightning Rod redirect: holder should gain +1 Sp. Atk");
+                }
+            }
+        }
+
+        // ── negative: wrong type / suppressed ────────────────────────────────────
+
+        #[test]
+        fn volt_absorb_does_not_absorb_non_electric_move() {
+            // Volt Absorb holder hit by a non-Electric move should take normal damage.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let absorber = mon(Species::Jolteon, Ability::VoltAbsorb, PokemonMove::Splash);
+            let max_hp = absorber.stats[0];
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Charizard, Ability::Pressure, PokemonMove::Flamethrower)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // Should take some damage (not full HP in all branches)
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp < max_hp)),
+                "Volt Absorb: should take damage from non-Electric move",
+            );
+        }
+
+        #[test]
+        fn flash_fire_suppressed_takes_fire_damage() {
+            // With GastroAcid volatile suppressing Flash Fire, the mon should take normal
+            // Fire damage.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut absorber = mon(Species::Ninetales, Ability::FlashFire, PokemonMove::Splash);
+            // GastroAcid suppresses the ability
+            absorber.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::GastroAcid, 200));
+            let max_hp = absorber.stats[0];
+            let state = battle_state_from_lists(
+                vec![absorber],
+                vec![],
+                vec![mon(Species::Charizard, Ability::Pressure, PokemonMove::Flamethrower)],
+                vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp < max_hp)),
+                "Flash Fire suppressed: should take Fire damage when ability is suppressed",
+            );
         }
     }
 

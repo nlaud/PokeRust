@@ -7,18 +7,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Abilities
 
-
-### Type immunity and absorption abilities
-Negate an entire attacking type; apply a bonus instead. Hook into the type-effectiveness
-and "move lands" gate.
-- Earth Eater — Ground → restore ¼ max HP
-- Flash Fire — Fire → boost Fire move power by 50%
-- Lightning Rod — Electric → +1 Sp. Atk
-- Motor Drive — Electric → +1 Speed
-- Sap Sipper — Grass → +1 Attack
-- Volt Absorb — Electric → restore ¼ max HP
-- Water Absorb — Water → restore ¼ max HP
-
 ### On-contact reactive abilities — damage and status
 Fire when the holder is struck by a contact move. Requires a post-contact-hit hook.
 **HP damage to attacker:**

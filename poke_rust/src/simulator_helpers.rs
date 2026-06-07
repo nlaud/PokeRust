@@ -735,6 +735,16 @@ fn effective_base_power(
             bp = (bp * pinch_mult).floor();
         }
 
+        // Flash Fire: ×1.5 power on Fire-type moves when the Flash Fire volatile is active.
+        // This stacks with weather/STAB but not with itself (second Fire hit re-grants immunity
+        // but does not add a second volatile).
+        if has_status_volatile(attacker, &VolatileStatus::FlashFire) {
+            let eff_type = effective_move_type(state, attacker, move_data);
+            if matches!(eff_type, PokemonType::Fire) {
+                bp = (bp * 1.5).floor();
+            }
+        }
+
         // Technician: ×1.5 for moves with variable base power ≤ 60 (inclusive).
         // The gate uses the snapshot taken before terrain/Helping-Hand modifiers.
         if attacker.ability == Ability::Technician && technician_bp_snapshot <= 60.0 {
@@ -1634,7 +1644,12 @@ pub fn abilities_are_suppressed(state: &BattleState) -> bool {
 }
 
 fn pokemon_ability_is_suppressed(state: &BattleState, mon: &PokemonState) -> bool {
-    abilities_are_suppressed(state) && mon.ability != Ability::NeutralizingGas
+    // Field-wide suppression via Neutralizing Gas (does not suppress NeutralizingGas itself).
+    if abilities_are_suppressed(state) && mon.ability != Ability::NeutralizingGas {
+        return true;
+    }
+    // Per-Pokémon suppression via the Gastro Acid volatile.
+    has_status_volatile(mon, &VolatileStatus::GastroAcid)
 }
 
 fn terrain_matches(state: &BattleState, terrain: &Terrain) -> bool {
@@ -3236,6 +3251,118 @@ pub fn apply_kings_rock_flinch(
     })
 }
 
+// ── Type-immunity / absorption abilities ──────────────────────────────────────
+
+/// React-on-hit absorption: absorb a move that has *already hit* the target and apply the
+/// appropriate bonus (heal, stat boost, or Flash Fire flag) to the target instead of damage.
+///
+/// Returns `true` if an absorption ability fires, in which case the caller must
+/// - skip all damage, endure, and secondary effects (treat the move as fully consumed),
+/// - push the mutated state as the sole outcome.
+///
+/// Returns `false` (and leaves `state` unchanged) when no react-on-hit ability matches.
+///
+/// Covers: Volt Absorb, Water Absorb, Earth Eater, Sap Sipper, Motor Drive, Flash Fire,
+/// and Dry Skin's Water absorption.
+///
+/// Lightning Rod and Storm Drain are **not** handled here — they are draw-in abilities that
+/// fire before the accuracy roll.  See `try_drawin_negate`.
+///
+/// Note: Mold Breaker bypass is not yet implemented (separate TODO).
+pub(crate) fn try_absorb_move(
+    state: &mut BattleState,
+    target_slot: FieldSlot,
+    attacker: &PokemonState,
+    move_data: &MoveData,
+    items_suppressed: bool,
+) -> bool {
+    // Fetch the target's ability; if suppressed the move hits normally.
+    let target_ability = match get_pokemon_at_slot(state, target_slot) {
+        Some(t) if !pokemon_ability_is_suppressed(state, t) => t.ability.clone(),
+        _ => return false,
+    };
+
+    // Use the canonical move type (respects -ate abilities, Liquid Voice, etc.).
+    let move_type = effective_move_type(state, attacker, move_data);
+
+    let absorbs = match (&move_type, &target_ability) {
+        (PokemonType::Electric, Ability::VoltAbsorb)
+        | (PokemonType::Water,   Ability::WaterAbsorb)
+        | (PokemonType::Water,   Ability::DrySkin)
+        | (PokemonType::Ground,  Ability::EarthEater) => {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                let heal = (mon.stats[0].max(1) as u32 / 4) as u16;
+                gain_hp(mon, heal, items_suppressed);
+            }
+            true
+        }
+        (PokemonType::Grass, Ability::SapSipper) => {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed);
+            }
+            true
+        }
+        (PokemonType::Electric, Ability::MotorDrive) => {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed);
+            }
+            true
+        }
+        (PokemonType::Fire, Ability::FlashFire) => {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                if !has_status_volatile(mon, &VolatileStatus::FlashFire) {
+                    mon.volatiles.push(
+                        crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::FlashFire, 0),
+                    );
+                }
+            }
+            true
+        }
+        _ => false,
+    };
+
+    absorbs
+}
+
+/// Draw-in negation: Lightning Rod (Electric) and Storm Drain (Water) pull a single-target
+/// move of the matching type toward the holder and absorb it, granting +1 Sp. Atk.
+///
+/// Crucially, this fires **before** accuracy is rolled — the move is negated and the bonus
+/// applied whether the move would have hit or missed (or been blocked by Protect once that
+/// mechanic is implemented).
+///
+/// Returns `true` if a draw-in ability fires (caller should push no-effect outcome and skip
+/// the rest of target processing for this slot).  Returns `false` otherwise.
+///
+/// Note: Mold Breaker bypass is not yet implemented (separate TODO).
+pub(crate) fn try_drawin_negate(
+    state: &mut BattleState,
+    target_slot: FieldSlot,
+    attacker: &PokemonState,
+    move_data: &MoveData,
+    items_suppressed: bool,
+) -> bool {
+    let target_ability = match get_pokemon_at_slot(state, target_slot) {
+        Some(t) if !pokemon_ability_is_suppressed(state, t) => t.ability.clone(),
+        _ => return false,
+    };
+
+    let move_type = effective_move_type(state, attacker, move_data);
+
+    let negated = match (&move_type, &target_ability) {
+        (PokemonType::Electric, Ability::LightningRod)
+        | (PokemonType::Water,   Ability::StormDrain) => {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                apply_stat_boosts_to_pokemon(mon, &[0, 0, 1, 0, 0, 0, 0], items_suppressed);
+            }
+            true
+        }
+        _ => false,
+    };
+
+    negated
+}
+
 /// Apply move secondary effects with appropriate probability.
 /// This is called after a move hits to apply status, volatile status, side conditions, etc.
 pub fn apply_secondary_effects(
@@ -3376,10 +3503,14 @@ fn has_skyrop_and_redirect(mon: &PokemonState) -> bool {
 
 /// Check for and apply move redirection based on Follow Me and Rage Powder volatile statuses.
 /// Returns the potentially modified target_slots.
+/// `move_data`: The move being used, if known. Required for Lightning Rod / Storm Drain
+/// type-based redirection.  Pass `None` to skip ability-based redirection (e.g. in unit tests
+/// that only exercise FollowMe / Rage Powder behaviour).
 pub fn check_and_apply_redirection(
     state: &BattleState,
     user_slot: FieldSlot,
     target_slots: Vec<FieldSlot>,
+    move_data: Option<&MoveData>,
 ) -> Vec<FieldSlot> {
     // Only apply redirection if there's exactly one target
     if target_slots.len() != 1 {
@@ -3410,11 +3541,10 @@ pub fn check_and_apply_redirection(
         .map(|attacker| is_immune_to_powder(state, attacker))
         .unwrap_or(false);
 
-    // Find all opposing PokÃ©mon with FollowMe or RagePowder, excluding those with SkyDrop+redirect
+    // --- Priority 1: FollowMe / RagePowder (volatile-based) ---
     let mut redirectors: Vec<(FieldSlot, &PokemonState)> = Vec::new();
 
     for (idx, mon) in opposing_mons.iter().enumerate() {
-        // Skip fainted PokÃ©mon
         if mon.fainted || has_skyrop_and_redirect(mon) {
             continue;
         }
@@ -3445,7 +3575,7 @@ pub fn check_and_apply_redirection(
         }
     }
 
-    // If there are redirectors, pick the one with the highest effective speed
+    // FollowMe/RagePowder take priority over ability-based redirection.
     if !redirectors.is_empty() {
         let best_redirector = redirectors.into_iter().max_by(|a, b| {
             let speed_a = get_effective_speed(state, a.1);
@@ -3455,6 +3585,44 @@ pub fn check_and_apply_redirection(
 
         if let Some((slot, _)) = best_redirector {
             return vec![slot];
+        }
+    }
+
+    // --- Priority 2: Lightning Rod (Electric) / Storm Drain (Water) ---
+    // These draw single-target moves of the matching type toward the ability holder.
+    // Mold Breaker bypass is not yet implemented (separate TODO).
+    if let Some(md) = move_data {
+        if let Some(attacker) = get_pokemon_at_slot(state, user_slot) {
+            let move_type = effective_move_type(state, attacker, md);
+            let mut ability_redirectors: Vec<(FieldSlot, &PokemonState)> = Vec::new();
+
+            for (idx, mon) in opposing_mons.iter().enumerate() {
+                if mon.fainted { continue; }
+                if pokemon_ability_is_suppressed(state, mon) { continue; }
+
+                let draws = matches!(
+                    (&move_type, &mon.ability),
+                    (PokemonType::Electric, Ability::LightningRod)
+                    | (PokemonType::Water, Ability::StormDrain)
+                );
+                if draws {
+                    ability_redirectors.push((
+                        FieldSlot { player: opposing_player, slot_index: idx as u8 },
+                        mon,
+                    ));
+                }
+            }
+
+            if !ability_redirectors.is_empty() {
+                let best = ability_redirectors.into_iter().max_by(|a, b| {
+                    let speed_a = get_effective_speed(state, a.1);
+                    let speed_b = get_effective_speed(state, b.1);
+                    speed_a.partial_cmp(&speed_b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                if let Some((slot, _)) = best {
+                    return vec![slot];
+                }
+            }
         }
     }
 
