@@ -11,6 +11,7 @@ use crate::pokemon::{
 use crate::dex_data::{MoveData, MoveTarget, PokemonData};
 use crate::dex_data::{MoveCategory, SelfSwitchType, Status, VolatileStatus};
 use crate::data::ability::Ability;
+use crate::data::item::Item;
 use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
 use crate::dex_data::PokemonType;
@@ -96,6 +97,19 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
                 *pp = pp.saturating_sub(1);
             }
             simulator_helpers::try_consume_leppa_berry(mon, items_suppressed);
+
+            // Choice items: lock the holder into the first move it uses.
+            // Struggle is excluded — a PP-depleted mon shouldn't be locked into Struggle.
+            // If already locked, no-op (lock was set by the first use this send-in).
+            let is_choice = matches!(mon.item, Item::ChoiceBand | Item::ChoiceScarf | Item::ChoiceSpecs);
+            let already_locked = mon.volatiles.iter().any(|v|
+                matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(_), _))
+            );
+            if !items_suppressed && is_choice && !already_locked && *move_name != PokemonMove::Struggle {
+                mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::ChoiceLock(move_name.clone()), 0,
+                ));
+            }
         }
     }
 }
@@ -710,23 +724,30 @@ fn possible_damage_outcomes_for_move(
     // Check if the move has the Recharge flag
     let move_has_recharge = simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Recharge);
 
+    // Struggle has no moveset slot — it's forced when no usable move exists.
+    // For all other moves, locate the PP slot; bail if the move isn't in the moveset.
     let pp_slot = attacker
         .moves
         .iter()
         .position(|move_entry| move_entry.as_ref() == Some(&action.move_name));
 
-    let Some(pp_index) = pp_slot else {
+    let is_struggle = action.move_name == PokemonMove::Struggle;
+    if pp_slot.is_none() && !is_struggle {
         return vec![(MatchState::BattleState(next_state), 1.0)];
-    };
+    }
+    let pp_index = pp_slot; // Option<usize>; None iff is_struggle
 
-    let current_pp = match action.user_slot.player {
-        Player::P1 => next_state.p1_active_mons.get(action.user_slot.slot_index as usize).map(|mon| mon.move_pp[pp_index]).unwrap_or(0),
-        Player::P2 => next_state.p2_active_mons.get(action.user_slot.slot_index as usize).map(|mon| mon.move_pp[pp_index]).unwrap_or(0),
-    };
-
-    if current_pp == 0 {
-        println!("{}", "Struggle is unimplemented.".bright_red());
-        return vec![(MatchState::BattleState(next_state), 1.0)];
+    // Verify the move still has PP (unless it's Struggle, which skips PP tracking).
+    if let Some(idx) = pp_index {
+        let current_pp = match action.user_slot.player {
+            Player::P1 => next_state.p1_active_mons.get(action.user_slot.slot_index as usize).map(|mon| mon.move_pp[idx]).unwrap_or(0),
+            Player::P2 => next_state.p2_active_mons.get(action.user_slot.slot_index as usize).map(|mon| mon.move_pp[idx]).unwrap_or(0),
+        };
+        if current_pp == 0 {
+            // Should not be reachable — generate_commands_for_active filters 0-PP moves,
+            // and choice-lock + 0-PP already routes to Struggle. Guard defensively.
+            return vec![(MatchState::BattleState(next_state), 1.0)];
+        }
     }
 
     let mut move_name = action.move_name.clone();
@@ -747,12 +768,14 @@ fn possible_damage_outcomes_for_move(
 
     if attacker.volatiles.iter().any(|volatile| matches!(volatile, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _))) {
         let mut fail_state = pre_move_state.clone();
-        if let Some(mon) = match action.user_slot.player {
-            Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-            Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
-        } {
-            if let Some(pp) = mon.move_pp.get_mut(pp_index) {
-                *pp = pp.saturating_sub(1);
+        if let Some(idx) = pp_index {
+            if let Some(mon) = match action.user_slot.player {
+                Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+            } {
+                if let Some(pp) = mon.move_pp.get_mut(idx) {
+                    *pp = pp.saturating_sub(1);
+                }
             }
         }
         return vec![(MatchState::BattleState(fail_state), 1.0)];
@@ -1202,6 +1225,12 @@ fn possible_damage_outcomes_for_move(
         let target_names: Vec<String> = target_slots.iter().filter_map(|slot| {
             simulator_helpers::get_pokemon_at_slot(&next_state, *slot).map(|m| simulator_helpers::species_name_sim(&m.species))
         }).collect();
+        let pp_display = pp_index
+            .and_then(|idx| next_state.p1_active_mons.get(action.user_slot.slot_index as usize)
+                .or_else(|| next_state.p2_active_mons.get(action.user_slot.slot_index as usize))
+                .and_then(|mon| mon.move_pp.get(idx)))
+            .map(|pp| pp.to_string())
+            .unwrap_or_else(|| "—".to_string());
         println!(
             "{}",
             format!(
@@ -1210,7 +1239,7 @@ fn possible_damage_outcomes_for_move(
                 simulator_helpers::move_name_sim(&move_name),
                 target_names.join(", "),
                 simulator_helpers::pokemon_type_name(&move_data.pokemon_type),
-                current_pp,
+                pp_display,
             )
             .bright_cyan()
         );
@@ -1303,9 +1332,11 @@ fn possible_damage_outcomes_for_move(
     // paralysis fail branch
     if par_fail_prob > 0.0 {
         let mut fail_state = pre_move_state.clone();
-        if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
-            if let Some(pp) = mon.move_pp.get_mut(pp_index) {
-                *pp = pp.saturating_sub(1);
+        if let Some(idx) = pp_index {
+            if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                if let Some(pp) = mon.move_pp.get_mut(idx) {
+                    *pp = pp.saturating_sub(1);
+                }
             }
         }
         final_outcomes.push((MatchState::BattleState(fail_state), par_fail_prob));
@@ -1315,9 +1346,11 @@ fn possible_damage_outcomes_for_move(
     if status_fail_prob > 0.0 {
         let mut status_fail_state = pre_move_state.clone();
         if let Some(mon) = match action.user_slot.player { Player::P1 => status_fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => status_fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
-            // Decrement PP
-            if let Some(pp) = mon.move_pp.get_mut(pp_index) {
-                *pp = pp.saturating_sub(1);
+            // Decrement PP (Struggle has no PP slot to track)
+            if let Some(idx) = pp_index {
+                if let Some(pp) = mon.move_pp.get_mut(idx) {
+                    *pp = pp.saturating_sub(1);
+                }
             }
 
             // Increment sleep/frozen counters on failure
@@ -1548,9 +1581,28 @@ fn generate_commands_for_active(
         item_ok
     };
 
-    // Attacks
+    // Determine the choice-locked move (if any).
+    let choice_locked_move: Option<PokemonMove> = mon.volatiles.iter().find_map(|v| {
+        if let crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(m), _) = v {
+            Some(m.clone())
+        } else {
+            None
+        }
+    });
+
+    // Attacks: filter by choice-lock and 0-PP, then fall back to Struggle.
+    let mut emitted_attack = false;
     for (i, move_name_opt) in mon.moves.iter().enumerate() {
         let Some(move_name) = move_name_opt else { continue; };
+
+        // Choice lock: only the locked move is selectable.
+        if let Some(ref locked) = choice_locked_move {
+            if move_name != locked { continue; }
+        }
+
+        // Moves with 0 PP are not selectable.
+        if mon.move_pp.get(i).copied().unwrap_or(0) == 0 { continue; }
+
         let target_type = move_dex.get(move_name).map(|d| &d.target).unwrap_or(&MoveTarget::Normal);
 
         let valid_targets = if *move_name == PokemonMove::ExpandingForce
@@ -1563,6 +1615,15 @@ fn generate_commands_for_active(
 
         for target in valid_targets {
             push_attack_variants(&mut cmds, i, target, can_tera, can_mega);
+            emitted_attack = true;
+        }
+    }
+
+    // If no attack could be emitted (all PP exhausted, or locked move has no PP),
+    // force Struggle. Struggle targets a random opponent (Normal targeting).
+    if !emitted_attack {
+        for target in get_valid_targets(&MoveTarget::Normal, player, state, slot_idx) {
+            cmds.push(BattleCommand::Struggle { target });
         }
     }
 
@@ -1624,6 +1685,16 @@ fn queue_battle_commands_for_player(
                     priority,
                     user_slot,
                     target_slot: a.target,
+                    quick_claw_active: false,
+                }));
+            }
+            BattleCommand::Struggle { target } => {
+                action_queue.push(Action::MoveAction(MoveAction {
+                    move_name: PokemonMove::Struggle,
+                    priority: 0,
+                    user_slot,
+                    target_slot: *target,
+                    quick_claw_active: false,
                 }));
             }
             BattleCommand::Pass => {}
@@ -1752,9 +1823,13 @@ fn apply_post_damage_move_effects(
         }
 
         // Recoil
-        let has_recoil = (move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0) || move_data.struggle_recoil;
-        if has_recoil && attacker_mon.ability != Ability::RockHead && attacker_mon.ability != Ability::MagicGuard {
-            let recoil = if move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0 {
+        // Struggle recoil (¼ max HP) ignores Rock Head and Magic Guard; ordinary recoil does not.
+        let has_normal_recoil = move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0;
+        let has_recoil = has_normal_recoil || move_data.struggle_recoil;
+        let ability_blocks_recoil = !move_data.struggle_recoil
+            && (attacker_mon.ability == Ability::RockHead || attacker_mon.ability == Ability::MagicGuard);
+        if has_recoil && !ability_blocks_recoil {
+            let recoil = if has_normal_recoil {
                 ((total_dmg * move_data.recoil_fraction[0] as u32) / move_data.recoil_fraction[1] as u32) as u16
             } else if move_data.struggle_recoil {
                 (max_hp as u32 / 4) as u16
@@ -1964,6 +2039,55 @@ pub fn simulate_turn(
 
     // Populate the action queue; may branch due to speed-tied send-outs
     let initial_branches = apply_player_commands_branching(state, p1_cmd, p2_cmd, move_dex);
+
+    // Quick Claw: 20% chance to act first within the same priority bracket.
+    // For each MoveAction whose user holds Quick Claw (and items aren't suppressed),
+    // branch independently into active (0.2) and inactive (0.8) variants.
+    let initial_branches: Vec<(MatchState, f64)> = initial_branches
+        .into_iter()
+        .flat_map(|(st, prob)| {
+            let MatchState::BattleState(ref bs) = st else {
+                return vec![(st, prob)];
+            };
+            // Collect indices of MoveActions in the queue whose users hold Quick Claw.
+            let quick_claw_indices: Vec<usize> = bs.action_queue.iter().enumerate()
+                .filter_map(|(i, action)| {
+                    if let Action::MoveAction(ma) = action {
+                        let user = simulator_helpers::get_pokemon_at_slot(bs, ma.user_slot);
+                        if let Some(mon) = user {
+                            if !simulator_helpers::items_are_suppressed(bs) && mon.item == Item::QuickClaw {
+                                return Some(i);
+                            }
+                        }
+                    }
+                    None
+                })
+                .collect();
+            if quick_claw_indices.is_empty() {
+                return vec![(st, prob)];
+            }
+            // Expand independently: cartesian product of (true, false) for each holder.
+            // Each combination has probability prob * 0.2^k * 0.8^(n-k).
+            let n = quick_claw_indices.len();
+            let total = 1usize << n;  // 2^n combinations
+            let mut branches: Vec<(MatchState, f64)> = Vec::with_capacity(total);
+            for mask in 0..total {
+                let mut branch = st.clone();
+                let MatchState::BattleState(ref mut bbs) = branch else { continue; };
+                let mut branch_prob = prob;
+                for (bit, &queue_idx) in quick_claw_indices.iter().enumerate() {
+                    let active = (mask >> bit) & 1 == 1;
+                    if let Action::MoveAction(ref mut ma) = bbs.action_queue[queue_idx] {
+                        ma.quick_claw_active = active;
+                    }
+                    branch_prob *= if active { 0.2 } else { 0.8 };
+                }
+                branches.push((branch, branch_prob));
+            }
+            branches
+        })
+        .collect();
+    let initial_branches = simulator_helpers::coalesce_branches(initial_branches);
 
     // When the queue starts empty, set turn-flag state before expanding
     let initial_branches: Vec<(MatchState, f64)> = initial_branches

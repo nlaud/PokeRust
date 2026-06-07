@@ -57,6 +57,8 @@ pub struct MoveAction{
     pub priority: i8,
     pub user_slot: FieldSlot,
     pub target_slot: Option<FieldSlot>,
+    /// True when Quick Claw activated this turn for this action (20% chance, decided at turn start).
+    pub quick_claw_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -331,6 +333,9 @@ impl std::fmt::Debug for SwitchCommand {
 pub enum BattleCommand {
     Attack(AttackCommand),
     Switch(SwitchCommand),
+    /// Forced when the holder has no usable move (all PP exhausted, or choice-locked move is out of PP).
+    /// Carries no tera/mega fields — the holder cannot Tera or Mega Evolve on a Struggle turn.
+    Struggle { target: Option<FieldSlot> },
     Pass,
 }
 
@@ -339,6 +344,11 @@ impl std::fmt::Debug for BattleCommand {
         match self {
             BattleCommand::Attack(a) => write!(f, "{:?}", a),
             BattleCommand::Switch(s) => write!(f, "{:?}", s),
+            BattleCommand::Struggle { target } => {
+                write!(f, "Struggle")?;
+                if let Some(t) = target { write!(f, "->{:?}", t)?; }
+                Ok(())
+            }
             BattleCommand::Pass => write!(f, "Pass"),
         }
     }

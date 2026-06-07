@@ -1,4 +1,4 @@
-use crate::battle::{Action, BattleState, FieldSlot, Player, MoveAction};
+use crate::battle::{Action, BattleState, FieldSlot, Player};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
@@ -144,6 +144,18 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
             | Species::PikachuUnova | Species::PikachuWorld)
         && (stat == PokemonStat::Atk || stat == PokemonStat::SpA)
     { val * 2.0 } else { val };
+
+    // Choice Band: 1.5× Attack.
+    let val = if !items_are_suppressed(state)
+        && mon.item == Item::ChoiceBand
+        && stat == PokemonStat::Atk
+    { val * 1.5 } else { val };
+
+    // Choice Specs: 1.5× Special Attack.
+    let val = if !items_are_suppressed(state)
+        && mon.item == Item::ChoiceSpecs
+        && stat == PokemonStat::SpA
+    { val * 1.5 } else { val };
 
     val
 }
@@ -898,7 +910,11 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
         return vec![(dmg, false, 1.0)];
     }
 
-    let stab          = stab_multiplier(attacker, &attack_type);
+    // Struggle is typeless (???): neutral vs every type, no STAB, hits Ghost.
+    // The parser stores its type as Normal — override both effectiveness and STAB here.
+    let is_struggle = move_data.name == crate::data::pokemon_move::PokemonMove::Struggle;
+    let effectiveness = if is_struggle { 1.0 } else { effectiveness };
+    let stab = if is_struggle { 1.0 } else { stab_multiplier(attacker, &attack_type) };
     let bp            = effective_base_power(_state, attacker, target, move_data, base_power_override);
 
     // A genuinely 0-BP hit deals 0 damage — no phantom +2 from the formula,
@@ -1814,6 +1830,11 @@ fn get_effective_speed(state: &BattleState, mon: &PokemonState) -> f32 {
         speed *= 0.5;
     }
 
+    // Choice Scarf: 1.5× Speed.
+    if !items_are_suppressed(state) && mon.item == Item::ChoiceScarf {
+        speed *= 1.5;
+    }
+
     speed
 }
 
@@ -1885,6 +1906,14 @@ pub fn compare_action_order(
         (Action::MoveAction(m1), Action::MoveAction(m2)) => {
             if m1.priority != m2.priority {
                 return m2.priority.cmp(&m1.priority);
+            }
+
+            // Quick Claw: within the same integer-priority bracket, an active Quick Claw
+            // moves before an inactive one, regardless of Trick Room or speed.
+            match (m1.quick_claw_active, m2.quick_claw_active) {
+                (true, false) => return Ordering::Less,
+                (false, true) => return Ordering::Greater,
+                _ => {}
             }
 
             let user1 = get_pokemon_at_slot(state, m1.user_slot);

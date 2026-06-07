@@ -7,11 +7,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Items
 
-### Turn-order items
-Affect speed computation or the action-priority queue.
-- Choice Scarf — 1.5× Speed stat; locks holder to one move until switched out
-- Quick Claw — 23.4% chance to act first among moves of the same priority
-
 ---
 
 ## Abilities

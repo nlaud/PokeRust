@@ -6582,12 +6582,14 @@ mod tests {
                     priority: 0,
                     user_slot: FieldSlot { player: Player::P1, slot_index: 0 },
                     target_slot: None,
+                    quick_claw_active: false,
                 });
                 let action_p2 = Action::MoveAction(MoveAction {
                     move_name: PokemonMove::Splash,
                     priority: 0,
                     user_slot: FieldSlot { player: Player::P2, slot_index: 0 },
                     target_slot: None,
+                    quick_claw_active: false,
                 });
 
                 let base_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &state, &move_dex);
@@ -7836,6 +7838,7 @@ mod tests {
                 priority,
                 user_slot: FieldSlot { player, slot_index: 0 },
                 target_slot: None,
+                quick_claw_active: false,
             })
         }
 
@@ -11609,6 +11612,473 @@ mod tests {
 
             assert!((atk_with_ball - atk_no_ball).abs() < 1e-9,
                 "Light Ball should not boost Raichu's Attack");
+        }
+    }
+
+    mod choice_items {
+        use super::*;
+        use crate::simulator::get_possible_commands_for_active_slot;
+
+        // ── Stat boosts ────────────────────────────────────────────────────
+
+        #[test]
+        fn choice_band_boosts_attack_by_1_5x() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mon = build_pokemon_state(
+                Species::Raticate, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let mut banded = mon.clone();
+            banded.item = Item::ChoiceBand;
+
+            let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
+
+            let atk_no_band = simulator_helpers::effective_stat(&state, &mon, crate::dex_data::PokemonStat::Atk, false, false);
+            let atk_banded  = simulator_helpers::effective_stat(&state, &banded, crate::dex_data::PokemonStat::Atk, false, false);
+            let spa_banded  = simulator_helpers::effective_stat(&state, &banded, crate::dex_data::PokemonStat::SpA, false, false);
+            let spa_no_band = simulator_helpers::effective_stat(&state, &mon, crate::dex_data::PokemonStat::SpA, false, false);
+
+            assert!((atk_banded - 1.5 * atk_no_band).abs() < 1e-9,
+                "Choice Band should give 1.5x Attack");
+            assert!((spa_banded - spa_no_band).abs() < 1e-9,
+                "Choice Band must not boost Special Attack");
+        }
+
+        #[test]
+        fn choice_specs_boosts_spa_by_1_5x() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mon = build_pokemon_state(
+                Species::Kadabra, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Psychic), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let mut specs = mon.clone();
+            specs.item = Item::ChoiceSpecs;
+
+            let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
+
+            let spa_no_specs = simulator_helpers::effective_stat(&state, &mon, crate::dex_data::PokemonStat::SpA, false, false);
+            let spa_specs    = simulator_helpers::effective_stat(&state, &specs, crate::dex_data::PokemonStat::SpA, false, false);
+            let atk_specs    = simulator_helpers::effective_stat(&state, &specs, crate::dex_data::PokemonStat::Atk, false, false);
+            let atk_no_specs = simulator_helpers::effective_stat(&state, &mon, crate::dex_data::PokemonStat::Atk, false, false);
+
+            assert!((spa_specs - 1.5 * spa_no_specs).abs() < 1e-9,
+                "Choice Specs should give 1.5x SpA");
+            assert!((atk_specs - atk_no_specs).abs() < 1e-9,
+                "Choice Specs must not boost Attack");
+        }
+
+        // ── Speed boost (Scarf) ────────────────────────────────────────────
+
+        #[test]
+        fn choice_scarf_increases_speed_by_1_5x() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mon = build_pokemon_state(
+                Species::Raticate, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let mut scarfed = mon.clone();
+            scarfed.item = Item::ChoiceScarf;
+
+            let state = battle_state_from_lists(
+                vec![mon.clone()], vec![], vec![mon.clone()], vec![],
+            );
+            let slot = crate::battle::FieldSlot { player: Player::P1, slot_index: 0 };
+
+            let speed_no_scarf = simulator_helpers::effective_speed_for_slot(&state, slot, &mon);
+            let speed_scarfed  = simulator_helpers::effective_speed_for_slot(&state, slot, &scarfed);
+
+            assert!(
+                (speed_scarfed - speed_no_scarf * 1.5).abs() < 0.1,
+                "Choice Scarf must give exactly 1.5x speed: {speed_no_scarf} -> {speed_scarfed}"
+            );
+        }
+
+        // ── Move lock ──────────────────────────────────────────────────────
+
+        #[test]
+        fn choice_band_locks_into_first_move() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Use Tackle (100% accuracy) to avoid multi-branch outcomes from accuracy.
+            let banded = build_pokemon_state(
+                Species::Machoke, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), Some(PokemonMove::BodySlam), None, None]),
+                None, Some(Ability::None), None, Some(Item::ChoiceBand),
+                Some(crate::dex_data::PokemonType::Fighting), None, None, false,
+            );
+            let dummy = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+
+            // Before any move: both moves available.
+            let state = battle_state_from_lists(vec![banded.clone()], vec![], vec![dummy.clone()], vec![]);
+            let initial_cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &move_dex, &pokemon_dex);
+            let initial_attack_count = initial_cmds.iter()
+                .filter(|c| matches!(c, BattleCommand::Attack(_))).count();
+            assert_eq!(initial_attack_count, 2, "both moves should be available before locking");
+
+            // After using Tackle (move 0): only Tackle should remain selectable.
+            let state_after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            )).0;
+
+            let locked_cmds = get_possible_commands_for_active_slot(
+                &state_after, Player::P1, 0, &move_dex, &pokemon_dex,
+            );
+            let locked_attacks: Vec<_> = locked_cmds.iter()
+                .filter(|c| matches!(c, BattleCommand::Attack(_))).collect();
+            let has_tackle = locked_attacks.iter().any(|c| {
+                if let BattleCommand::Attack(a) = c {
+                    state_after.p1_active_mons[0].moves[a.move_slot] == Some(PokemonMove::Tackle)
+                } else { false }
+            });
+            let has_body_slam = locked_attacks.iter().any(|c| {
+                if let BattleCommand::Attack(a) = c {
+                    state_after.p1_active_mons[0].moves[a.move_slot] == Some(PokemonMove::BodySlam)
+                } else { false }
+            });
+            assert!(has_tackle, "Tackle (locked move) should still be available");
+            assert!(!has_body_slam, "Body Slam should be blocked by choice lock");
+        }
+
+        #[test]
+        fn choice_lock_clears_on_switch_out() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let banded = build_pokemon_state(
+                Species::Machoke, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), Some(PokemonMove::BodySlam), None, None]),
+                None, Some(Ability::None), None, Some(Item::ChoiceBand),
+                Some(crate::dex_data::PokemonType::Fighting), None, None, false,
+            );
+            let bench = build_pokemon_state(
+                Species::Rattata, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+            let dummy = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+
+            // Turn 1: use CrossChop → get locked.
+            let state = battle_state_from_lists(
+                vec![banded.clone()], vec![bench.clone()],
+                vec![dummy.clone()], vec![],
+            );
+            let after_t1 = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            )).0;
+
+            // Confirm locked.
+            let locked = get_possible_commands_for_active_slot(
+                &after_t1, Player::P1, 0, &move_dex, &pokemon_dex,
+            );
+            let body_slam_before_switch = locked.iter().any(|c| {
+                if let BattleCommand::Attack(a) = c {
+                    after_t1.p1_active_mons[0].moves[a.move_slot] == Some(PokemonMove::BodySlam)
+                } else { false }
+            });
+            assert!(!body_slam_before_switch, "should be locked before switching");
+
+            // Turn 2: switch out banded mon → switch back in next turn.
+            let after_t2 = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(after_t1),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            )).0;
+
+            // Turn 3: switch banded back in.
+            let after_t3 = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(after_t2),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            )).0;
+
+            let unlocked = get_possible_commands_for_active_slot(
+                &after_t3, Player::P1, 0, &move_dex, &pokemon_dex,
+            );
+            let body_slam_after_switch = unlocked.iter().any(|c| {
+                if let BattleCommand::Attack(a) = c {
+                    after_t3.p1_active_mons[0].moves[a.move_slot] == Some(PokemonMove::BodySlam)
+                } else { false }
+            });
+            assert!(body_slam_after_switch, "choice lock should have cleared on switch");
+        }
+    }
+
+    mod quick_claw {
+        use super::*;
+
+        #[test]
+        fn quick_claw_branches_with_correct_probabilities() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Both mons at 1 HP with Tackle. Whoever moves first KOs the other.
+            // P1 is slower but holds Quick Claw; P2 is faster and has no item.
+            //
+            // - QC fires   (0.2): P1 goes first → KOs P2 → GameOverState { winner: P1 }
+            // - QC inactive(0.8): P2 goes first → KOs P1 → GameOverState { winner: P2 }
+            //
+            // Probability P1 wins = probability QC fired.
+            let mut slow_qc = build_pokemon_state(
+                Species::Golem, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::QuickClaw),
+                Some(crate::dex_data::PokemonType::Rock), None, None, false,
+            );
+            slow_qc.hp = 1;
+
+            let mut fast_no_item = build_pokemon_state(
+                Species::Electrode, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Electric), None, None, false,
+            );
+            fast_no_item.hp = 1;
+
+            let state = battle_state_from_lists(
+                vec![slow_qc.clone()], vec![], vec![fast_no_item.clone()], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            let p1_wins: f64 = outcomes.iter()
+                .filter_map(|(state, prob)| {
+                    if let MatchState::GameOverState { winner } = state {
+                        if *winner == Player::P1 { Some(prob) } else { None }
+                    } else { None }
+                })
+                .sum();
+
+            assert!(
+                (p1_wins - 0.2).abs() < 0.01,
+                "Quick Claw should give the slow holder a 20% chance to act first, got {p1_wins}"
+            );
+        }
+
+        #[test]
+        fn quick_claw_does_not_reorder_across_priority_brackets() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Slow mon with Quick Claw uses priority-0 move.
+            // Opponent uses +1 priority move (QuickAttack). QC must never beat +1.
+            let slow_qc = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::BodySlam), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::QuickClaw),
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+            let fast_priority = build_pokemon_state(
+                Species::Pikachu, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::QuickAttack), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Electric), None, None, false,
+            );
+
+            let state = battle_state_from_lists(
+                vec![slow_qc.clone()], vec![], vec![fast_priority.clone()], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            // Pikachu's Quick Attack (+1 priority) must always go first.
+            let initial_p1_hp = slow_qc.hp;
+            let p2_always_first = outcomes.iter().all(|(state, _)| {
+                match state {
+                    MatchState::BattleState(bs) => bs.p1_active_mons[0].hp < initial_p1_hp,
+                    MatchState::GameOverState { .. } => true,
+                    _ => false,
+                }
+            });
+            assert!(p2_always_first,
+                "Quick Claw must not reorder across priority brackets — +1 priority should always go first");
+        }
+    }
+
+    mod struggle {
+        use super::*;
+        use crate::simulator::get_possible_commands_for_active_slot;
+
+        // Helper: a Pokémon whose single move has 0 PP.
+        fn exhausted_mon(species: Species, pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>, move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>) -> PokemonState {
+            let mut mon = build_pokemon_state(
+                species, pokemon_dex, move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+            mon.move_pp[0] = 0;
+            mon
+        }
+
+        #[test]
+        fn struggle_offered_when_all_pp_zero() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mon = exhausted_mon(Species::Rattata, &pokemon_dex, &move_dex);
+            let dummy = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+
+            let state = battle_state_from_lists(vec![mon], vec![], vec![dummy], vec![]);
+            let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &move_dex, &pokemon_dex);
+
+            let has_struggle = cmds.iter().any(|c| matches!(c, BattleCommand::Struggle { .. }));
+            let has_attack = cmds.iter().any(|c| matches!(c, BattleCommand::Attack(_)));
+            assert!(has_struggle, "Struggle should be offered when all PP are 0");
+            assert!(!has_attack, "Normal attacks must not be offered alongside Struggle");
+        }
+
+        #[test]
+        fn zero_pp_move_not_offered_when_other_moves_remain() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut mon = build_pokemon_state(
+                Species::Rattata, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), Some(PokemonMove::QuickAttack), None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+            mon.move_pp[0] = 0; // Tackle out of PP; Quick Attack still has PP.
+
+            let dummy = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+
+            let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![dummy], vec![]);
+            let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &move_dex, &pokemon_dex);
+
+            let has_struggle = cmds.iter().any(|c| matches!(c, BattleCommand::Struggle { .. }));
+            let has_tackle = cmds.iter().any(|c| {
+                if let BattleCommand::Attack(a) = c {
+                    mon.moves[a.move_slot] == Some(PokemonMove::Tackle)
+                } else { false }
+            });
+            let has_quick_attack = cmds.iter().any(|c| {
+                if let BattleCommand::Attack(a) = c {
+                    mon.moves[a.move_slot] == Some(PokemonMove::QuickAttack)
+                } else { false }
+            });
+
+            assert!(has_quick_attack, "Quick Attack (has PP) should be available");
+            assert!(!has_tackle, "Tackle (0 PP) must not be offered");
+            assert!(!has_struggle, "Struggle must not appear when other moves have PP");
+        }
+
+        #[test]
+        fn struggle_deals_damage_to_ghost_type() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let attacker = exhausted_mon(Species::Rattata, &pokemon_dex, &move_dex);
+            let ghost_target = build_pokemon_state(
+                Species::Gengar, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Ghost), None, None, false,
+            );
+
+            let initial_hp = ghost_target.hp;
+            let state = battle_state_from_lists(
+                vec![attacker], vec![], vec![ghost_target], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(vec![BattleCommand::Struggle { target: Some(crate::battle::FieldSlot { player: Player::P2, slot_index: 0 }) }]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            let ghost_took_damage = outcomes.iter().any(|(state, _)| {
+                match state {
+                    MatchState::BattleState(bs) => bs.p2_active_mons[0].hp < initial_hp,
+                    MatchState::GameOverState { .. } => true,
+                    _ => false,
+                }
+            });
+            assert!(ghost_took_damage, "Struggle is typeless and must damage Ghost types");
+        }
+
+        #[test]
+        fn struggle_deals_recoil_and_recoil_ignores_rock_head() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Rock Head normally blocks recoil — Struggle must bypass it.
+            let mut attacker = exhausted_mon(Species::Aggron, &pokemon_dex, &move_dex);
+            attacker.ability = Ability::RockHead;
+
+            let target = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None,
+                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+            );
+
+            let initial_attacker_hp = attacker.hp;
+            let state = battle_state_from_lists(
+                vec![attacker.clone()], vec![], vec![target], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(vec![BattleCommand::Struggle { target: Some(crate::battle::FieldSlot { player: Player::P2, slot_index: 0 }) }]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+
+            let attacker_took_recoil = outcomes.iter().any(|(state, _)| {
+                match state {
+                    MatchState::BattleState(bs) => bs.p1_active_mons[0].hp < initial_attacker_hp,
+                    MatchState::GameOverState { winner } => *winner == Player::P2, // attacker fainted to recoil
+                    _ => false,
+                }
+            });
+            assert!(attacker_took_recoil,
+                "Struggle recoil must apply even to Rock Head holders");
         }
     }
 
