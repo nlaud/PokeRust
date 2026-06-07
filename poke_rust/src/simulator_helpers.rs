@@ -683,6 +683,12 @@ fn effective_base_power(
         if attacker.ability == Ability::MegaLauncher && move_has_flag(move_data, &MoveFlag::Pulse) {
             bp = (bp * 1.5).floor();
         }
+        // Water Bubble: ×2 power for Water-type moves used by the holder.
+        if attacker.ability == Ability::WaterBubble
+            && matches!(effective_move_type(state, attacker, move_data), PokemonType::Water)
+        {
+            bp = (bp * 2.0).floor();
+        }
     }
 
     // HydroSteam in sun: BP boost (no accompanying damage-type penalty)
@@ -777,6 +783,82 @@ fn burn_damage_multiplier(attacker: &PokemonState, move_data: &MoveData) -> f64 
 /// Dry Skin ×1.25 when hit by Fire.
 fn dry_skin_fire_multiplier(target: &PokemonState, attack_type: &PokemonType) -> f64 {
     if target.ability == Ability::DrySkin && matches!(attack_type, PokemonType::Fire) { 1.25 } else { 1.0 }
+}
+
+// ──── Defender-side damage reduction abilities ─────────────────────────────
+
+/// Filter / Solid Rock: ×0.75 damage from super-effective hits.
+fn filter_solidrock_mult(state: &BattleState, target: &PokemonState, effectiveness: f64) -> f64 {
+    if effectiveness > 1.0
+        && !pokemon_ability_is_suppressed(state, target)
+        && matches!(target.ability, Ability::Filter | Ability::SolidRock | Ability::PrismArmor)
+    { 0.75 } else { 1.0 }
+}
+
+/// Multiscale / Shadow Shield: ×0.5 damage when the holder is at full HP.
+fn multiscale_mult(state: &BattleState, target: &PokemonState) -> f64 {
+    if !pokemon_ability_is_suppressed(state, target)
+        && matches!(target.ability, Ability::Multiscale | Ability::ShadowShield)
+        && target.hp == target.stats[0].max(1)
+    { 0.5 } else { 1.0 }
+}
+
+/// Fur Coat: ×0.5 damage from Physical moves.
+fn fur_coat_mult(state: &BattleState, target: &PokemonState, move_data: &MoveData) -> f64 {
+    if !pokemon_ability_is_suppressed(state, target)
+        && target.ability == Ability::FurCoat
+        && matches!(move_data.category, MoveCategory::Physical)
+    { 0.5 } else { 1.0 }
+}
+
+/// Defender type-based damage reduction abilities.  Each ability halves damage from one or
+/// two attacking types; they compose multiplicatively if somehow stacked.
+///
+/// - Heatproof       → ×0.5 vs Fire
+/// - Thick Fat       → ×0.5 vs Fire and ×0.5 vs Ice
+/// - Water Bubble    → ×0.5 vs Fire (defensive half; offensive ×2 Water is in base-power)
+/// - Purifying Salt  → ×0.5 vs Ghost
+fn defender_type_reduction_mult(state: &BattleState, target: &PokemonState, attack_type: &PokemonType) -> f64 {
+    if pokemon_ability_is_suppressed(state, target) {
+        return 1.0;
+    }
+    let mut mult = 1.0f64;
+    match target.ability {
+        Ability::Heatproof => {
+            if matches!(attack_type, PokemonType::Fire) { mult *= 0.5; }
+        }
+        Ability::ThickFat => {
+            if matches!(attack_type, PokemonType::Fire | PokemonType::Ice) { mult *= 0.5; }
+        }
+        Ability::WaterBubble => {
+            if matches!(attack_type, PokemonType::Fire) { mult *= 0.5; }
+        }
+        Ability::PurifyingSalt => {
+            if matches!(attack_type, PokemonType::Ghost) { mult *= 0.5; }
+        }
+        _ => {}
+    }
+    mult
+}
+
+/// Friend Guard: an unsuppressed, non-fainted ally with this ability reduces damage to the
+/// target by ×0.75 per ally (stacks multiplicatively, matching the in-game rule).
+/// The holder itself does NOT benefit from its own Friend Guard.
+fn friend_guard_mult(state: &BattleState, target_slot: FieldSlot) -> f64 {
+    let target_side = match target_slot.player {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    };
+    let ally_count = target_side.iter().enumerate()
+        .filter(|(i, ally)| {
+            // Not the target itself, not fainted, ability not suppressed.
+            *i != target_slot.slot_index as usize
+                && !ally.fainted
+                && !pokemon_ability_is_suppressed(state, ally)
+                && ally.ability == Ability::FriendGuard
+        })
+        .count();
+    0.75f64.powi(ally_count as i32)
 }
 
 // ──── Type-boosting held items (1.2×, never consumed) ────────────────────────
@@ -1023,6 +1105,18 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
         else                                { 1.0 }
     } else { 1.0 };
 
+    // ── Defender-side damage reduction abilities ──────────────────────────────
+    // Filter / Solid Rock / Prism Armor: ×0.75 from super-effective hits.
+    let filter_solidrock_mult = filter_solidrock_mult(_state, target, effectiveness);
+    // Multiscale / Shadow Shield: ×0.5 when the target is at full HP.
+    let multiscale_mult = multiscale_mult(_state, target);
+    // Fur Coat: ×0.5 from Physical moves.
+    let fur_coat_mult = fur_coat_mult(_state, target, move_data);
+    // Heatproof / Thick Fat / Water Bubble / Purifying Salt: type-keyed ×0.5.
+    let defender_type_mult = defender_type_reduction_mult(_state, target, &attack_type);
+    // Friend Guard: ×0.75 per unsuppressed, non-fainted ally carrying the ability.
+    let friend_guard_mult = friend_guard_mult(_state, _target_slot);
+
     let rolls   = forced_damage_roll.map(|r| vec![r]).unwrap_or_else(|| selected_damage_rolls(config.damage_rolls));
     let crits   = critical_hit_probability(attacker, target, &move_data.name, config.consider_crit, effective_crit_ratio(_state, attacker, move_data.crit_ratio));
 
@@ -1062,6 +1156,12 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
             dmg = (dmg * type_boost_mult).floor();    // type-boosting item in the "other" multiplier bucket
             dmg = (dmg * analytic_mult).floor();      // Analytic: ×1.3 when moving last
             dmg = (dmg * aura_mult).floor();          // Fairy Aura / Aura Break field effect
+            // Defender-side damage reduction abilities:
+            dmg = (dmg * filter_solidrock_mult).floor(); // Filter / Solid Rock / Prism Armor
+            dmg = (dmg * multiscale_mult).floor();       // Multiscale / Shadow Shield
+            dmg = (dmg * fur_coat_mult).floor();         // Fur Coat
+            dmg = (dmg * defender_type_mult).floor();    // Heatproof / Thick Fat / Water Bubble / Purifying Salt
+            dmg = (dmg * friend_guard_mult).floor();     // Friend Guard
 
             let mut damage = dmg.max(0.0) as u16;
             if damage == 0
@@ -2109,8 +2209,15 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
         };
         let items_suppressed = items_are_suppressed(state);
         for target in collect_active_slots(state, opposing_player, None) {
+            // Compute suppression via immutable borrow before the mutable borrow below.
+            let ability_suppressed = get_pokemon_at_slot(state, target)
+                .map(|m| pokemon_ability_is_suppressed(state, m))
+                .unwrap_or(false);
             if let Some(mon) = get_pokemon_at_slot_mut(state, target) {
-                apply_stat_boosts_to_pokemon(mon, &[-1, 0, 0, 0, 0, 0, 0], items_suppressed);
+                let delta = filter_opponent_stat_drops(mon, &[-1, 0, 0, 0, 0, 0, 0], ability_suppressed);
+                if delta != [0; 7] {
+                    apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed);
+                }
             }
         }
     }
@@ -2683,7 +2790,11 @@ fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, ite
 
     match mon.status {
         Some(Status::Burn) => {
-            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16, items_suppressed); }
+            if !magic_guard {
+                // Heatproof halves burn residual damage (from 1/16 to 1/32 max HP).
+                let divisor = if !abilities_suppressed && mon.ability == Ability::Heatproof { 32 } else { 16 };
+                deal_residual_damage(mon, (mon.stats[0] as u32 / divisor) as u16, items_suppressed);
+            }
         }
         Some(Status::Poison) => {
             if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 8) as u16, items_suppressed); }
@@ -2844,6 +2955,38 @@ fn apply_stat_boosts_to_pokemon(mon: &mut PokemonState, boosts: &[i8; 7], items_
     }
 }
 
+/// Zero out stat-drop entries in `boosts` that the target's ability blocks when the
+/// stat change originates from another Pokémon (i.e. not self-inflicted).
+///
+/// - `ClearBody | WhiteSmoke | FullMetalBody` — block all external stat drops.
+/// - `HyperCutter` — block only Attack (index 0) being lowered.
+/// - `BigPecks`    — block only Defense (index 1) being lowered.
+///
+/// Positive entries and self-inflicted drops (those going through the attacker/self_boost
+/// paths) are never touched.  Callers must pass the pre-computed suppression flag so that
+/// Mold Breaker and Neutralizing Gas are respected when they land.
+fn filter_opponent_stat_drops(mon: &PokemonState, boosts: &[i8; 7], ability_suppressed: bool) -> [i8; 7] {
+    if ability_suppressed {
+        return *boosts;
+    }
+    let mut filtered = *boosts;
+    match mon.ability {
+        Ability::ClearBody | Ability::WhiteSmoke | Ability::FullMetalBody => {
+            for b in &mut filtered {
+                if *b < 0 { *b = 0; }
+            }
+        }
+        Ability::HyperCutter => {
+            if filtered[0] < 0 { filtered[0] = 0; }
+        }
+        Ability::BigPecks => {
+            if filtered[1] < 0 { filtered[1] = 0; }
+        }
+        _ => {}
+    }
+    filtered
+}
+
 /// Apply weather or pseudo-weather effects.
 fn apply_weather_effects(state: &mut BattleState, effect: &HitEffect) {
     if let Some(weather) = &effect.weather {
@@ -2880,6 +3023,10 @@ fn apply_effect_to_target(
 ) {
     // Extract attacker ability before taking a mutable borrow of the target
     let attacker_ability = get_pokemon_at_slot(state, attacker_slot).map(|a| a.ability.clone());
+    // Also snapshot target suppression before the mutable borrow (needed for stat-drop filtering).
+    let target_ability_suppressed = get_pokemon_at_slot(state, target_slot)
+        .map(|m| pokemon_ability_is_suppressed(state, m))
+        .unwrap_or(false);
     let sun_blocks_freeze = weather_is_sunlight(state);
     let items_suppressed = items_are_suppressed(state);
     let terrain_snapshot = state.clone();
@@ -2909,7 +3056,12 @@ fn apply_effect_to_target(
         try_consume_status_cure_berry(target_mon, items_suppressed);
 
         if effect.boosts != [0; 7] {
-            apply_stat_boosts_to_pokemon(target_mon, &effect.boosts, items_suppressed);
+            // Filter out stat drops that the target's ability blocks when caused by another
+            // Pokémon (Clear Body / White Smoke / Full Metal Body / Hyper Cutter / Big Pecks).
+            let filtered = filter_opponent_stat_drops(target_mon, &effect.boosts, target_ability_suppressed);
+            if filtered != [0; 7] {
+                apply_stat_boosts_to_pokemon(target_mon, &filtered, items_suppressed);
+            }
         }
     }
 

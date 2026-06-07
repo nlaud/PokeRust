@@ -14,7 +14,7 @@ Pokémon mechanics are notoriously full of edge cases, exceptions, and interacti
 quirks that are not obvious from a move or ability's surface description. **Always
 do web research before implementing or modifying any mechanic**, even ones that
 seem straightforward. A move's Bulbapedia article routinely documents a dozen
-edge cases that would otherwise be silently wrong in the simulator. ALWAYS RESEARCH ON BULBAPEDIA BEFORE FINALIZING YOUR PLANS, TODO.md is not a source of truth.
+edge cases that would otherwise be silently wrong in the simulator. ALWAYS RESEARCH ON BULBAPEDIA BEFORE SEARCHING CODE OR FORMING THE PLAN, TODO.md is not a source of truth.
 
 ### Bulbapedia
 
