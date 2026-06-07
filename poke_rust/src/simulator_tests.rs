@@ -5773,6 +5773,545 @@ mod tests {
             // Gas has left; Drizzle reactivates and sets rain.
             assert_eq!(state_after_turn.weather, Some(Weather::Rain));
         }
+
+        // ── Group B: Attack-stat boosts ───────────────────────────────────────
+
+        #[test]
+        fn huge_power_doubles_attack_stat() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mon = build_pokemon_state(
+                Species::Marill, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let mut huge = mon.clone();
+            huge.ability = Ability::HugePower;
+            let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
+            let atk_base = simulator_helpers::effective_stat(&state, &mon,  crate::dex_data::PokemonStat::Atk, false, false);
+            let atk_huge = simulator_helpers::effective_stat(&state, &huge, crate::dex_data::PokemonStat::Atk, false, false);
+            let spa_huge = simulator_helpers::effective_stat(&state, &huge, crate::dex_data::PokemonStat::SpA, false, false);
+            let spa_base = simulator_helpers::effective_stat(&state, &mon,  crate::dex_data::PokemonStat::SpA, false, false);
+            assert!((atk_huge - 2.0 * atk_base).abs() < 1e-9, "Huge Power should double Attack");
+            assert!((spa_huge - spa_base).abs() < 1e-9, "Huge Power must not affect SpA");
+        }
+
+        #[test]
+        fn pure_power_doubles_attack_stat() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mon = build_pokemon_state(
+                Species::Medicham, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let mut pure = mon.clone();
+            pure.ability = Ability::PurePower;
+            let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
+            let atk_base = simulator_helpers::effective_stat(&state, &mon,  crate::dex_data::PokemonStat::Atk, false, false);
+            let atk_pure = simulator_helpers::effective_stat(&state, &pure, crate::dex_data::PokemonStat::Atk, false, false);
+            assert!((atk_pure - 2.0 * atk_base).abs() < 1e-9, "Pure Power should double Attack");
+        }
+
+        #[test]
+        fn hustle_boosts_attack_stat_by_1_5x() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mon = build_pokemon_state(
+                Species::Deino, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let mut hustle = mon.clone();
+            hustle.ability = Ability::Hustle;
+            let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
+            let atk_base   = simulator_helpers::effective_stat(&state, &mon,    crate::dex_data::PokemonStat::Atk, false, false);
+            let atk_hustle = simulator_helpers::effective_stat(&state, &hustle, crate::dex_data::PokemonStat::Atk, false, false);
+            let spa_hustle = simulator_helpers::effective_stat(&state, &hustle, crate::dex_data::PokemonStat::SpA, false, false);
+            let spa_base   = simulator_helpers::effective_stat(&state, &mon,    crate::dex_data::PokemonStat::SpA, false, false);
+            assert!((atk_hustle - 1.5 * atk_base).abs() < 1e-9, "Hustle should give 1.5x Attack");
+            assert!((spa_hustle - spa_base).abs() < 1e-9, "Hustle must not affect SpA");
+        }
+
+        // ── Group A: Move-flag-based BP boosts ────────────────────────────────
+
+        /// Helper: run a single turn with no-crit + 1 roll and return the
+        /// probability-weighted expected damage dealt to P2's active mon.
+        /// Using expected-damage (rather than extract_battle_state) means moves
+        /// with probabilistic secondary effects don't cause assertion failures.
+        fn damage_with_ability(
+            attacker_species: Species,
+            attacker_move: PokemonMove,
+            ability: Ability,
+            pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+        ) -> f64 {
+            let attacker = build_pokemon_state(
+                attacker_species, pokemon_dex, move_dex, Some(50),
+                Some([Some(attacker_move), None, None, None]),
+                None, Some(ability), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            let defender = build_pokemon_state(
+                Species::Blissey, pokemon_dex, move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            let initial_hp = defender.hp;
+            let state = battle_state_from_lists(
+                vec![attacker], vec![], vec![defender], vec![],
+            );
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex, pokemon_dex, false, 1,
+            );
+            // Sum probability-weighted damage across all outcome branches.
+            outcomes.iter().map(|(state, prob)| {
+                let hp_after = match state {
+                    MatchState::BattleState(bs) => bs.p2_active_mons[0].hp,
+                    MatchState::GameOverState { .. } => 0,
+                    _ => initial_hp,
+                };
+                (initial_hp.saturating_sub(hp_after) as f64) * prob
+            }).sum()
+        }
+
+        #[test]
+        fn iron_fist_boosts_punch_moves() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Bullet Punch (40 BP, punch flag) — boosted.
+            let dmg_no  = damage_with_ability(Species::Hitmonchan, PokemonMove::BulletPunch, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_yes = damage_with_ability(Species::Hitmonchan, PokemonMove::BulletPunch, Ability::IronFist, &pokemon_dex, &move_dex);
+            assert!(dmg_yes > dmg_no, "Iron Fist should boost punch moves");
+            // Tackle (no punch flag) — not boosted.
+            let dmg_tackle_no  = damage_with_ability(Species::Hitmonchan, PokemonMove::Tackle, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_tackle_yes = damage_with_ability(Species::Hitmonchan, PokemonMove::Tackle, Ability::IronFist, &pokemon_dex, &move_dex);
+            assert_eq!(dmg_tackle_no, dmg_tackle_yes, "Iron Fist must not boost non-punch moves");
+        }
+
+        #[test]
+        fn tough_claws_boosts_contact_moves() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Tackle has Contact flag — boosted.
+            let dmg_no  = damage_with_ability(Species::Linoone, PokemonMove::Tackle, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_yes = damage_with_ability(Species::Linoone, PokemonMove::Tackle, Ability::ToughClaws, &pokemon_dex, &move_dex);
+            assert!(dmg_yes > dmg_no, "Tough Claws should boost contact moves");
+            // Swift has no Contact flag — not boosted.
+            let dmg_swift_no  = damage_with_ability(Species::Linoone, PokemonMove::Swift, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_swift_yes = damage_with_ability(Species::Linoone, PokemonMove::Swift, Ability::ToughClaws, &pokemon_dex, &move_dex);
+            assert_eq!(dmg_swift_no, dmg_swift_yes, "Tough Claws must not boost non-contact moves");
+        }
+
+        #[test]
+        fn strong_jaw_boosts_bite_moves() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Jaw Lock (80 BP, bite flag, no probabilistic secondary) — boosted.
+            let dmg_no  = damage_with_ability(Species::Arcanine, PokemonMove::JawLock, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_yes = damage_with_ability(Species::Arcanine, PokemonMove::JawLock, Ability::StrongJaw, &pokemon_dex, &move_dex);
+            assert!(dmg_yes > dmg_no, "Strong Jaw should boost bite moves");
+        }
+
+        #[test]
+        fn sharpness_boosts_slicing_moves() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Psycho Cut (70 BP, slicing flag) — boosted.
+            let dmg_no  = damage_with_ability(Species::Gallade, PokemonMove::PsychoCut, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_yes = damage_with_ability(Species::Gallade, PokemonMove::PsychoCut, Ability::Sharpness, &pokemon_dex, &move_dex);
+            assert!(dmg_yes > dmg_no, "Sharpness should boost slicing moves");
+        }
+
+        #[test]
+        fn mega_launcher_boosts_pulse_moves() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Aura Sphere (80 BP, pulse flag) — boosted.
+            let dmg_no  = damage_with_ability(Species::Blastoise, PokemonMove::AuraSphere, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_yes = damage_with_ability(Species::Blastoise, PokemonMove::AuraSphere, Ability::MegaLauncher, &pokemon_dex, &move_dex);
+            assert!(dmg_yes > dmg_no, "Mega Launcher should boost pulse/aura moves");
+            // Tackle (no pulse flag) — not boosted.
+            let dmg_tackle_no  = damage_with_ability(Species::Blastoise, PokemonMove::Tackle, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_tackle_yes = damage_with_ability(Species::Blastoise, PokemonMove::Tackle, Ability::MegaLauncher, &pokemon_dex, &move_dex);
+            assert_eq!(dmg_tackle_no, dmg_tackle_yes, "Mega Launcher must not boost non-pulse moves");
+        }
+
+        // ── Group A: Rivalry ──────────────────────────────────────────────────
+
+        #[test]
+        fn rivalry_boosts_vs_same_gender_and_reduces_vs_opposite() {
+            use crate::pokemon::PokemonGender;
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make_attacker = |ability: Ability, gender: PokemonGender| {
+                let mut mon = build_pokemon_state(
+                    Species::Zangoose, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Tackle), None, None, None]),
+                    None, Some(ability), Some(Nature::Hardy),
+                    None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+                );
+                mon.gender = gender;
+                mon
+            };
+            let make_defender = |gender: PokemonGender| {
+                let mut mon = build_pokemon_state(
+                    Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), Some(Nature::Hardy),
+                    None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+                );
+                mon.gender = gender;
+                mon
+            };
+
+            let run = |attacker: crate::pokemon::PokemonState, defender: crate::pokemon::PokemonState| -> u16 {
+                let initial_hp = defender.hp;
+                let state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+                let _hp_after = state.p2_active_mons[0].hp; // baseline before turn
+                let outcomes = simulate_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex, false, 1,
+                );
+                let (final_state, _) = extract_battle_state(outcomes);
+                initial_hp - final_state.p2_active_mons[0].hp
+            };
+
+            let dmg_neutral  = run(make_attacker(Ability::None, PokemonGender::Male), make_defender(PokemonGender::Male));
+            let dmg_same     = run(make_attacker(Ability::Rivalry, PokemonGender::Male), make_defender(PokemonGender::Male));
+            let dmg_opposite = run(make_attacker(Ability::Rivalry, PokemonGender::Male), make_defender(PokemonGender::Female));
+            let dmg_genderless = run(make_attacker(Ability::Rivalry, PokemonGender::Genderless), make_defender(PokemonGender::Male));
+
+            assert!(dmg_same > dmg_neutral, "Rivalry same-gender should boost damage");
+            assert!(dmg_opposite < dmg_neutral, "Rivalry opposite-gender should reduce damage");
+            assert_eq!(dmg_genderless, dmg_neutral, "Rivalry genderless should be neutral");
+        }
+
+        // ── Group A: Pinch abilities ──────────────────────────────────────────
+
+        #[test]
+        fn blaze_boosts_fire_moves_at_low_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make_attacker = |hp_fraction: f32| {
+                let mut mon = build_pokemon_state(
+                    Species::Charizard, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Ember), None, None, None]),
+                    None, Some(Ability::Blaze), Some(Nature::Hardy),
+                    None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+                );
+                // Set HP to requested fraction.
+                mon.hp = ((mon.stats[0] as f32 * hp_fraction) as u16).max(1);
+                mon
+            };
+            let defender = build_pokemon_state(
+                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+
+            let run = |attacker: crate::pokemon::PokemonState| -> f64 {
+                let initial_hp = defender.hp;
+                let state = battle_state_from_lists(vec![attacker], vec![], vec![defender.clone()], vec![]);
+                let outcomes = simulate_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex, false, 1,
+                );
+                outcomes.iter().map(|(s, p)| {
+                    let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
+                    (initial_hp.saturating_sub(hp) as f64) * p
+                }).sum()
+            };
+
+            let dmg_full_hp = run(make_attacker(1.0));   // > 1/3 HP — no boost
+            let dmg_low_hp  = run(make_attacker(0.25));  // ≤ 1/3 HP — boosted
+            assert!(dmg_low_hp > dmg_full_hp, "Blaze should boost Fire moves at ≤1/3 HP");
+
+            // A non-Fire move from a Blaze user at low HP should NOT be boosted.
+            let mut blaze_tackle = build_pokemon_state(
+                Species::Charizard, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::Blaze), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            blaze_tackle.hp = (blaze_tackle.stats[0] as f32 * 0.25) as u16;
+            let mut no_ability_tackle = blaze_tackle.clone();
+            no_ability_tackle.ability = Ability::None;
+            let dmg_tackle_blaze   = run(blaze_tackle);
+            let dmg_tackle_no_abil = run(no_ability_tackle);
+            assert!((dmg_tackle_blaze - dmg_tackle_no_abil).abs() < 0.01, "Blaze must not boost non-Fire moves");
+        }
+
+        #[test]
+        fn overgrow_boosts_grass_moves_at_low_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let make = |hp_frac: f32| {
+                let mut mon = build_pokemon_state(
+                    Species::Venusaur, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::VineWhip), None, None, None]),
+                    None, Some(Ability::Overgrow), Some(Nature::Hardy),
+                    None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+                );
+                mon.hp = ((mon.stats[0] as f32 * hp_frac) as u16).max(1);
+                mon
+            };
+            let defender = build_pokemon_state(
+                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            let run = |attacker| -> f64 {
+                let initial_hp = defender.hp;
+                let state = battle_state_from_lists(vec![attacker], vec![], vec![defender.clone()], vec![]);
+                let outcomes = simulate_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex, false, 1,
+                );
+                outcomes.iter().map(|(s, p)| {
+                    let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
+                    (initial_hp.saturating_sub(hp) as f64) * p
+                }).sum()
+            };
+            assert!(run(make(0.25)) > run(make(1.0)), "Overgrow should boost Grass moves at ≤1/3 HP");
+        }
+
+        #[test]
+        fn swarm_boosts_bug_moves_at_low_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let make = |hp_frac: f32| {
+                let mut mon = build_pokemon_state(
+                    Species::Scizor, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::XScissor), None, None, None]),
+                    None, Some(Ability::Swarm), Some(Nature::Hardy),
+                    None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+                );
+                mon.hp = ((mon.stats[0] as f32 * hp_frac) as u16).max(1);
+                mon
+            };
+            let defender = build_pokemon_state(
+                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            let run = |attacker| -> f64 {
+                let initial_hp = defender.hp;
+                let state = battle_state_from_lists(vec![attacker], vec![], vec![defender.clone()], vec![]);
+                let outcomes = simulate_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex, false, 1,
+                );
+                outcomes.iter().map(|(s, p)| {
+                    let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
+                    (initial_hp.saturating_sub(hp) as f64) * p
+                }).sum()
+            };
+            assert!(run(make(0.25)) > run(make(1.0)), "Swarm should boost Bug moves at ≤1/3 HP");
+        }
+
+        #[test]
+        fn torrent_boosts_water_moves_at_low_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let make = |hp_frac: f32| {
+                let mut mon = build_pokemon_state(
+                    Species::Blastoise, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::WaterGun), None, None, None]),
+                    None, Some(Ability::Torrent), Some(Nature::Hardy),
+                    None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+                );
+                mon.hp = ((mon.stats[0] as f32 * hp_frac) as u16).max(1);
+                mon
+            };
+            let defender = build_pokemon_state(
+                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            let run = |attacker| -> f64 {
+                let initial_hp = defender.hp;
+                let state = battle_state_from_lists(vec![attacker], vec![], vec![defender.clone()], vec![]);
+                let outcomes = simulate_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex, false, 1,
+                );
+                outcomes.iter().map(|(s, p)| {
+                    let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
+                    (initial_hp.saturating_sub(hp) as f64) * p
+                }).sum()
+            };
+            assert!(run(make(0.25)) > run(make(1.0)), "Torrent should boost Water moves at ≤1/3 HP");
+        }
+
+        // ── Group A: Technician ───────────────────────────────────────────────
+
+        #[test]
+        fn technician_boosts_moves_at_60_bp_or_less() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Tackle (40 BP) — boosted.
+            let dmg_tackle_no  = damage_with_ability(Species::Meowth, PokemonMove::Tackle, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_tackle_yes = damage_with_ability(Species::Meowth, PokemonMove::Tackle, Ability::Technician, &pokemon_dex, &move_dex);
+            assert!(dmg_tackle_yes > dmg_tackle_no, "Technician should boost 40 BP move");
+
+            // Swift (60 BP exactly) — also boosted (threshold is inclusive).
+            let dmg_swift_no  = damage_with_ability(Species::Meowth, PokemonMove::Swift, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_swift_yes = damage_with_ability(Species::Meowth, PokemonMove::Swift, Ability::Technician, &pokemon_dex, &move_dex);
+            assert!(dmg_swift_yes > dmg_swift_no, "Technician should boost exactly 60 BP move");
+
+            // Aura Sphere (80 BP) — not boosted.
+            let dmg_aura_no  = damage_with_ability(Species::Meowth, PokemonMove::AuraSphere, Ability::None, &pokemon_dex, &move_dex);
+            let dmg_aura_yes = damage_with_ability(Species::Meowth, PokemonMove::AuraSphere, Ability::Technician, &pokemon_dex, &move_dex);
+            assert_eq!(dmg_aura_no, dmg_aura_yes, "Technician must not boost moves above 60 BP");
+        }
+
+        // ── Group C: Analytic ─────────────────────────────────────────────────
+
+        #[test]
+        fn analytic_boosts_damage_when_moving_last() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Build a Magmar attacker (decent SpA, uses Ember).  We override its
+            // speed stat directly to control turn order without needing different
+            // EV spreads across species with incompatible base speeds.
+            // Defender is Blissey with speed stat 100.
+            let make_attacker = |ability: Ability, spe_stat: u16| {
+                let mut mon = build_pokemon_state(
+                    Species::Magmar, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Ember), None, None, None]),
+                    None, Some(ability), Some(Nature::Hardy),
+                    None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+                );
+                mon.stats[5] = spe_stat; // override speed: low = moves last, high = moves first
+                mon
+            };
+            let defender = {
+                let mut d = build_pokemon_state(
+                    Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), Some(Nature::Hardy),
+                    None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+                );
+                d.stats[5] = 100; // fixed reference speed
+                d
+            };
+
+            let run = |attacker: crate::pokemon::PokemonState| -> f64 {
+                let initial_hp = defender.hp;
+                let state = battle_state_from_lists(
+                    vec![attacker], vec![], vec![defender.clone()], vec![],
+                );
+                let outcomes = simulate_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex, false, 1,
+                );
+                outcomes.iter().map(|(s, p)| {
+                    let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
+                    (initial_hp.saturating_sub(hp) as f64) * p
+                }).sum()
+            };
+
+            // Attacker spe=1 → slower than defender (100) → moves LAST → Analytic fires.
+            let dmg_analytic_last = run(make_attacker(Ability::Analytic, 1));
+            let dmg_no_analytic   = run(make_attacker(Ability::None, 1));
+            assert!(dmg_analytic_last > dmg_no_analytic,
+                "Analytic should boost damage when moving last");
+
+            // Attacker spe=999 → faster than defender → moves FIRST → Analytic does NOT fire.
+            let dmg_analytic_first   = run(make_attacker(Ability::Analytic, 999));
+            let dmg_no_analytic_fast = run(make_attacker(Ability::None, 999));
+            assert!((dmg_analytic_first - dmg_no_analytic_fast).abs() < 0.01,
+                "Analytic must not boost damage when moving first");
+        }
+
+        // ── Group C: Fairy Aura ───────────────────────────────────────────────
+
+        #[test]
+        fn fairy_aura_boosts_fairy_type_moves() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // P1 attacker uses Dazzling Gleam (Fairy, 80 BP).
+            let make_attacker = || build_pokemon_state(
+                Species::Sylveon, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::DazzlingGleam), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+            let make_defender = || build_pokemon_state(
+                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            );
+
+            let run = |attacker: crate::pokemon::PokemonState, defender: crate::pokemon::PokemonState| -> f64 {
+                let initial_hp: u16 = defender.hp;
+                let state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
+                let outcomes = simulate_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex, false, 1,
+                );
+                outcomes.iter().map(|(s, p)| {
+                    let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
+                    (initial_hp.saturating_sub(hp) as f64) * p
+                }).sum()
+            };
+
+            // No Fairy Aura active — baseline damage.
+            let dmg_no_aura = run(make_attacker(), make_defender());
+
+            // Fairy Aura on the attacker — boosted.
+            let mut aura_attacker = make_attacker();
+            aura_attacker.ability = Ability::FairyAura;
+            let dmg_aura_on_attacker = run(aura_attacker, make_defender());
+            assert!(dmg_aura_on_attacker > dmg_no_aura,
+                "Fairy Aura on attacker should boost Fairy moves");
+
+            // Fairy Aura on the DEFENDER (field-wide) — still boosted.
+            let mut aura_defender = make_defender();
+            aura_defender.ability = Ability::FairyAura;
+            let dmg_aura_on_defender = run(make_attacker(), aura_defender);
+            assert!(dmg_aura_on_defender > dmg_no_aura,
+                "Fairy Aura on the defender should still boost Fairy moves (field-wide)");
+
+            // Non-Fairy move — not affected by Fairy Aura.
+            let mut ember_attacker = make_attacker();
+            ember_attacker.moves[0] = Some(PokemonMove::Ember);
+            ember_attacker.ability = Ability::FairyAura;
+            let mut ember_attacker_no = ember_attacker.clone();
+            ember_attacker_no.ability = Ability::None;
+            let dmg_ember_aura   = run(ember_attacker, make_defender());
+            let dmg_ember_no     = run(ember_attacker_no, make_defender());
+            assert!((dmg_ember_aura - dmg_ember_no).abs() < 0.01,
+                "Fairy Aura must not boost non-Fairy moves");
+        }
     }
 
     mod status {

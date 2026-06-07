@@ -132,6 +132,12 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
     let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::Def, Ability::GrassPelt, matches!(current_terrain(state), Some(Terrain::GrassyTerrain)), 1.5, val);
     let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::SpA, Ability::HadronEngine, matches!(current_terrain(state), Some(Terrain::ElectricTerrain)), 5461.0 / 4096.0, val);
 
+    // Huge Power / Pure Power: double Attack stat (unconditional; only physical moves read Atk).
+    let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::Atk, Ability::HugePower, true, 2.0, val);
+    let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::Atk, Ability::PurePower, true, 2.0, val);
+    // Hustle: +50% Attack (accuracy penalty is handled separately in compute_accuracy_modifier_fp).
+    let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::Atk, Ability::Hustle, true, 1.5, val);
+
     // Light Ball: doubles Pikachu's Attack and Special Attack.
     let val = if !items_are_suppressed(state)
         && mon.item == Item::LightBall
@@ -634,6 +640,12 @@ fn effective_base_power(
         bp = (bp * 0.5).floor();
     }
 
+    // Technician checks the move's variable/callback base power at THIS point — after
+    // the intrinsic-power block above (Facade, WeatherBall, SolarBeam half) but BEFORE
+    // terrain and Helping Hand modifiers.  The ×1.5 is applied at the end of the
+    // function so it compounds with those later modifiers, matching game behaviour.
+    let technician_bp_snapshot = bp;
+
     bp = (bp * terrain_type_bp_boost(state, attacker, &move_data.pokemon_type)).floor();
     bp = (bp * move_terrain_bp_modifier(state, attacker, target, move_data)).floor();
 
@@ -649,6 +661,30 @@ fn effective_base_power(
         bp = (bp * 1.2).floor();
     }
 
+    // Move-flag-based ability boosts. Suppression guard is shared.
+    if !pokemon_ability_is_suppressed(state, attacker) {
+        // Iron Fist: 1.2× punching moves.
+        if attacker.ability == Ability::IronFist && move_has_flag(move_data, &MoveFlag::Punch) {
+            bp = (bp * 1.2).floor();
+        }
+        // Tough Claws: 1.3× contact moves.
+        if attacker.ability == Ability::ToughClaws && move_has_flag(move_data, &MoveFlag::Contact) {
+            bp = (bp * 1.3).floor();
+        }
+        // Strong Jaw: 1.5× biting moves.
+        if attacker.ability == Ability::StrongJaw && move_has_flag(move_data, &MoveFlag::Bite) {
+            bp = (bp * 1.5).floor();
+        }
+        // Sharpness: 1.5× slicing moves.
+        if attacker.ability == Ability::Sharpness && move_has_flag(move_data, &MoveFlag::Slicing) {
+            bp = (bp * 1.5).floor();
+        }
+        // Mega Launcher: 1.5× pulse/aura moves.
+        if attacker.ability == Ability::MegaLauncher && move_has_flag(move_data, &MoveFlag::Pulse) {
+            bp = (bp * 1.5).floor();
+        }
+    }
+
     // HydroSteam in sun: BP boost (no accompanying damage-type penalty)
     if move_data.name == PokemonMove::HydroSteam && weather_is_sunlight(state) {
         bp = (bp * 1.5).floor();
@@ -660,6 +696,44 @@ fn effective_base_power(
         | VolatileStatusState::MoveStatus(VolatileStatus::HelpingHand, _)
     )) {
         bp = (bp * 1.5).floor();
+    }
+
+    // Condition / stat power boosts (grouped together; suppression guard is shared).
+    if !pokemon_ability_is_suppressed(state, attacker) {
+        // Rivalry: ×1.25 same gender, ×0.75 opposite gender, ×1.0 if either is Genderless.
+        use crate::pokemon::PokemonGender;
+        let rivalry_mult = match (attacker.gender, target.gender) {
+            (PokemonGender::Male, PokemonGender::Male)
+            | (PokemonGender::Female, PokemonGender::Female) if attacker.ability == Ability::Rivalry => 1.25,
+            (PokemonGender::Male, PokemonGender::Female)
+            | (PokemonGender::Female, PokemonGender::Male) if attacker.ability == Ability::Rivalry => 0.75,
+            _ => 1.0,
+        };
+        bp = (bp * rivalry_mult).floor();
+
+        // Low-HP emergency type boosts (Blaze/Overgrow/Swarm/Torrent): ×1.5 when the
+        // attacker's HP ≤ 1/3 max AND the move's effective type matches.
+        // Note: these are technically Attack-stat multipliers in-game; applying them here as
+        // a BP multiplier yields the same final damage and keeps all condition-based BP
+        // boosts in one coherent block.
+        let at_low_hp = attacker.hp.saturating_mul(3) <= attacker.stats[0].max(1) as u16;
+        if at_low_hp {
+            let eff_type = effective_move_type(state, attacker, move_data);
+            let pinch_mult = match (&attacker.ability, &eff_type) {
+                (Ability::Blaze,   PokemonType::Fire)  => 1.5,
+                (Ability::Overgrow, PokemonType::Grass) => 1.5,
+                (Ability::Swarm,   PokemonType::Bug)   => 1.5,
+                (Ability::Torrent, PokemonType::Water) => 1.5,
+                _ => 1.0,
+            };
+            bp = (bp * pinch_mult).floor();
+        }
+
+        // Technician: ×1.5 for moves with variable base power ≤ 60 (inclusive).
+        // The gate uses the snapshot taken before terrain/Helping-Hand modifiers.
+        if attacker.ability == Ability::Technician && technician_bp_snapshot <= 60.0 {
+            bp = (bp * 1.5).floor();
+        }
     }
 
     bp
@@ -931,6 +1005,24 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
         else { resist_berry_multiplier(target, &attack_type, effectiveness) };
     let screen_mult   = screen_damage_multiplier(_state, _target_slot, move_data, false); // overridden per-crit below
 
+    // Analytic: ×1.3 when the attacker is the very last mover this turn.
+    let analytic_mult = if !pokemon_ability_is_suppressed(_state, attacker)
+        && attacker.ability == Ability::Analytic
+        && attacker_is_last_mover(_state, _user_slot)
+    { 1.3 } else { 1.0 };
+
+    // Fairy Aura: ×5448/4096 (~1.33) to all Fairy-type moves for any Pokémon on the field
+    // when any active mon carries the ability.  Non-stacking.  Aura Break inverts to ×4096/5448.
+    let aura_mult = if matches!(attack_type, PokemonType::Fairy) {
+        let has_fairy_aura = _state.p1_active_mons.iter().chain(_state.p2_active_mons.iter())
+            .any(|mon| !mon.fainted && !pokemon_ability_is_suppressed(_state, mon) && mon.ability == Ability::FairyAura);
+        let has_aura_break = _state.p1_active_mons.iter().chain(_state.p2_active_mons.iter())
+            .any(|mon| !mon.fainted && !pokemon_ability_is_suppressed(_state, mon) && mon.ability == Ability::AuraBreak);
+        if has_fairy_aura && has_aura_break { 4096.0 / 5448.0 }
+        else if has_fairy_aura              { 5448.0 / 4096.0 }
+        else                                { 1.0 }
+    } else { 1.0 };
+
     let rolls   = forced_damage_roll.map(|r| vec![r]).unwrap_or_else(|| selected_damage_rolls(config.damage_rolls));
     let crits   = critical_hit_probability(attacker, target, &move_data.name, config.consider_crit, effective_crit_ratio(_state, attacker, move_data.crit_ratio));
 
@@ -968,6 +1060,8 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
             dmg = (dmg * weather_mult).floor();
             dmg = (dmg * dry_skin_mult).floor();
             dmg = (dmg * type_boost_mult).floor();    // type-boosting item in the "other" multiplier bucket
+            dmg = (dmg * analytic_mult).floor();      // Analytic: ×1.3 when moving last
+            dmg = (dmg * aura_mult).floor();          // Fairy Aura / Aura Break field effect
 
             let mut damage = dmg.max(0.0) as u16;
             if damage == 0
@@ -1639,6 +1733,19 @@ fn target_has_acted_this_turn(state: &BattleState, target_slot: FieldSlot) -> bo
 
         slot.map(|s| s.player == target_slot.player && s.slot_index == target_slot.slot_index)
             .unwrap_or(false)
+    })
+}
+
+/// Returns true when the attacker's slot is the last (or only) remaining mover this turn.
+/// The attacker's own action has already been removed from the queue before execution,
+/// so Analytic fires when no MoveAction from any OTHER slot is still pending.
+fn attacker_is_last_mover(state: &BattleState, user_slot: FieldSlot) -> bool {
+    !state.action_queue.iter().any(|action| {
+        if let Action::MoveAction(m) = action {
+            !(m.user_slot.player == user_slot.player && m.user_slot.slot_index == user_slot.slot_index)
+        } else {
+            false
+        }
     })
 }
 

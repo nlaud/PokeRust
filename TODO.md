@@ -5,33 +5,7 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ---
 
-## Items
-
----
-
 ## Abilities
-
-### Move power multipliers (attacker side)
-All hook into the damage multiplier chain on the attacker's side.
-Single per-hit multipliers; batch these together as they share the code pattern exactly.
-
-**Low-HP emergency type boosts (≤ 1/3 HP → 1.5× for one type):**
-- Blaze (Fire), Overgrow (Grass), Swarm (Bug), Torrent (Water)
-
-**Move-flag-based boosts:**
-- Iron Fist — 1.2× punching moves
-- Mega Launcher — 1.5× pulse moves
-- Sharpness — 1.5× slicing moves
-- Strong Jaw — 1.5× biting moves
-- Tough Claws — 1.3× contact moves
-
-**Condition / stat power boosts:**
-- Analytic — 1.3× when acting last in the turn
-- Fairy Aura — all Fairy-type moves ×1.33 field-wide
-- Huge Power / Pure Power — double Attack stat for physical moves
-- Hustle — 1.5× Attack; physical move accuracy ×0.8
-- Rivalry — 1.25× same gender; 0.75× opposite gender
-- Technician — 1.5× moves with base power ≤ 60
 
 ### Damage reduction abilities (defender side)
 All hook into the damage multiplier chain on the defender's side.
