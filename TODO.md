@@ -4,16 +4,11 @@ Entries are grouped into session-sized batches. Each group shares a common imple
 hook and should be researchable, plannable, and implementable in a single focused session.
 
 ---
+## Saved for later (Information only)
+- Illusion — enter disguised as the last party member
+
 
 ## Abilities
-
-### Priority manipulation abilities
-Modify when a move is queued relative to others at the same priority.
-- Armor Tail / Queenly Majesty — opponents can't use priority moves against holder's side
-- Gale Wings — Flying moves get +1 priority at full HP
-- Prankster — status moves get +1 priority
-- Quick Draw — 30% chance to act first among same-priority moves
-- Stall — holder's moves always go last among same-priority moves
 
 ### Entry effects
 Trigger once when the Pokémon enters battle. Hook into process_pokemon_send_out.
@@ -27,7 +22,6 @@ Trigger once when the Pokémon enters battle. Hook into process_pokemon_send_out
 - Supreme Overlord — +10% move power per fainted party member (max +50%)
 
 **Complex (copy or disguise):**
-- Illusion — enter disguised as the last party member
 - Imposter — transform into the opposing Pokémon (copies all stats except HP)
 - Trace — copy an opponent's ability on entry
 
