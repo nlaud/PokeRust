@@ -12,15 +12,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Abilities
 
-### End-of-turn ability effects
-Trigger during end-of-turn processing, after status residuals.
-- Harvest — 50% chance (100% in sun) to regenerate a consumed Berry
-- Healer — 50% chance to cure a random ally's status condition
-- Hunger Switch — toggle between Full Belly and Hangry form each turn
-- Moody — +2 to a random stat, −1 to a different random stat
-- Shed Skin — 30% chance to cure the holder's own status condition
-- Speed Boost — +1 Speed at end of every turn
-
 ### Berry-interaction abilities
 Modify how Berries are triggered or consumed. Depends on the Oran/Sitrus/Leppa
 framework already in place; these extend it.
@@ -99,7 +90,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 Change the Pokémon's in-battle form under specific triggers.
 - Disguise — absorb first hit (lose 1/8 HP) → switch to Busted Form
 - Forecast — type changes to match weather (Water / Fire / Ice / Normal)
-- Hunger Switch — alternate Full Belly ↔ Hangry at end of every turn
 - Stance Change — Blade Forme when using an attack; Shield Forme when using King's Shield
 - Zero To Hero — switch out of battle → permanently become Hero Form
 
@@ -322,7 +312,6 @@ Already partially implemented (Fly, Dig, Dive work). Remaining variants:
 ### Complex moves — battle-state conditions
 These check or modify ongoing battle state. Each is individually moderate in complexity.
 - Acupressure — +2 to a random stat (user or random ally in doubles)
-- Aura Wheel — +1 Speed; type depends on Morpeko's current form
 - Belch — 120-power; fails unless user has eaten a Berry this battle
 - Body Slam — 30% paralyze; ×2 power and never misses vs. Minimized target
 - Burn Up — 130-power Fire move; user loses their Fire type after use

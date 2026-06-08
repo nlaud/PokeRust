@@ -785,6 +785,22 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(fail_state), 1.0)];
     }
 
+    // Aura Wheel: only usable by Morpeko (either form). Any other user fails the move.
+    // The +1 Speed self-boost comes from the parsed move data (self_secondaries, chance 100).
+    if move_name == PokemonMove::AuraWheel {
+        let is_morpeko = matches!(attacker.species, Species::Morpeko | Species::MorpekoHangry)
+            || attacker.pre_transform.as_ref().map_or(false, |pre| {
+                matches!(pre.species, Species::Morpeko | Species::MorpekoHangry)
+            });
+        if !is_morpeko {
+            // Move fails: no PP cost, no boost, set last_move_failed for Stomping Tantrum.
+            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+                mon.last_move_failed = true;
+            }
+            return vec![(MatchState::BattleState(next_state), 1.0)];
+        }
+    }
+
     // --- Status pre-move handling: Sleep, Frozen, Paralysis ---
     // Handle moves that thaw the user on use: thaw before attempt
     if let Some(Status::Frozen(_)) = attacker.status {
@@ -2084,20 +2100,27 @@ fn step_action_queue(
 ) -> Vec<(MatchState, f64)> {
     let mut next_state = state.clone();
 
-    // Empty queue — end of turn / replacement phase
+    // Empty queue — end of turn / replacement phase.
+    // end_turn now returns Vec<(BattleState, f64)> because probabilistic abilities
+    // (Shed Skin, Healer, Moody, Harvest) can branch the outcome tree.
     if next_state.action_queue.is_empty() {
-        simulator_helpers::end_turn(&mut next_state);
-        if let Some(game_over) = game_over_state_if_battle_finished(&next_state) {
-            return vec![(game_over, 1.0)];
+        let eot_branches = simulator_helpers::end_turn(&mut next_state);
+        let mut result: Vec<(MatchState, f64)> = Vec::with_capacity(eot_branches.len());
+        for (mut bs, prob) in eot_branches {
+            if let Some(game_over) = game_over_state_if_battle_finished(&bs) {
+                result.push((game_over, prob));
+            } else {
+                if replacement_needed(&bs) {
+                    bs.turn_started = true;
+                    bs.turn_ended = true;
+                } else {
+                    bs.turn_started = false;
+                    bs.turn_ended = false;
+                }
+                result.push((MatchState::BattleState(bs), prob));
+            }
         }
-        if replacement_needed(&next_state) {
-            next_state.turn_started = true;
-            next_state.turn_ended = true;
-        } else {
-            next_state.turn_started = false;
-            next_state.turn_ended = false;
-        }
-        return vec![(MatchState::BattleState(next_state), 1.0)];
+        return simulator_helpers::coalesce_branches(result);
     }
 
     // Find the highest-priority action(s), branching equally on speed ties
@@ -2274,11 +2297,18 @@ pub fn validate_battle_command_combination(cmds: &[BattleCommand]) -> bool {
 
 /// Reset volatile statuses and boosts on a Pokémon that is switching out.
 fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
+    use crate::data::species::Species;
     mon.volatiles.clear();
     mon.boosts.iter_mut().for_each(|b| *b = 0);
     if matches!(mon.status, Some(Status::ToxicPoison(_))) {
         mon.status = Some(Status::ToxicPoison(0));
     }
+    // Hunger Switch: Morpeko reverts to Full Belly form on switch-out.
+    if mon.species == Species::MorpekoHangry {
+        mon.species = Species::Morpeko;
+    }
+    // Clear the entry flag so it doesn't persist on the bench.
+    mon.entered_this_turn = false;
 }
 
 fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, bench_index: usize) {
