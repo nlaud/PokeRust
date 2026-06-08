@@ -1425,7 +1425,7 @@ pub(crate) fn try_consume_mental_herb(mon: &mut PokemonState, items_suppressed: 
         VolatileStatus::Encore,
         VolatileStatus::Torment,
         VolatileStatus::HealBlock,
-        VolatileStatus::Disable,
+        VolatileStatus::Disable(PokemonMove::Struggle),
     ];
     let mut any_removed = false;
     for v in &mental_volatiles {
@@ -2371,6 +2371,10 @@ fn apply_switch_out_ability_effects(mon: &mut PokemonState, items_suppressed: bo
     if mon.fainted {
         return;
     }
+    // Revert ability stolen/replaced by Mummy or Wandering Spirit.
+    if let Some(original) = mon.original_ability.take() {
+        mon.ability = original;
+    }
     match mon.ability {
         Ability::NaturalCure => {
             mon.status = None;
@@ -2929,7 +2933,7 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
 
             let is_move_status = matches!(
                 volatile,
-                VolatileStatus::Disable
+                VolatileStatus::Disable(_)
                     | VolatileStatus::Encore
                     | VolatileStatus::GlaiveRush
                     | VolatileStatus::Taunt
@@ -2938,7 +2942,7 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             );
 
         let duration = match volatile {
-            VolatileStatus::Disable => 4,
+            VolatileStatus::Disable(_) => 4,
             VolatileStatus::Encore => 3,
             VolatileStatus::Taunt => 3,
             VolatileStatus::GlaiveRush => 1,
@@ -3249,6 +3253,266 @@ pub fn apply_kings_rock_flinch(
     branch_on_secondary_effects(branches, chance, std::slice::from_ref(&flinch_effect), |bs, eff| {
         apply_effect_to_target(bs, attacker_slot, target_slot, eff, side_condition_player);
     })
+}
+
+// ── On-contact / on-hit reactive abilities ───────────────────────────────────
+
+fn ability_excluded_from_mummy(ability: &Ability) -> bool {
+    matches!(ability,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::BattleBond
+        | Ability::Comatose | Ability::Commander | Ability::Disguise | Ability::GulpMissile
+        | Ability::IceFace | Ability::LingeringAroma | Ability::Multitype
+        | Ability::PowerConstruct | Ability::RKSSystem | Ability::Schooling
+        | Ability::ShieldsDown | Ability::StanceChange | Ability::ZenMode
+        | Ability::ZerotoHero | Ability::Mummy
+    )
+}
+
+fn ability_excluded_from_wandering_spirit(ability: &Ability) -> bool {
+    matches!(ability,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::BattleBond
+        | Ability::Comatose | Ability::Commander | Ability::Disguise | Ability::FlowerGift
+        | Ability::Forecast | Ability::GulpMissile | Ability::HungerSwitch | Ability::IceFace
+        | Ability::Illusion | Ability::Imposter | Ability::Multitype | Ability::NeutralizingGas
+        | Ability::PowerofAlchemy | Ability::Receiver | Ability::RKSSystem | Ability::Schooling
+        | Ability::ShieldsDown | Ability::StanceChange | Ability::WonderGuard | Ability::ZenMode
+        | Ability::ZerotoHero
+    )
+}
+
+/// Return true if infatuation can be applied from `source_slot` to `target_slot`.
+/// Requires opposite, non-genderless genders; target must not already be Attracted or Oblivious.
+pub fn can_be_infatuated(state: &BattleState, source_slot: FieldSlot, target_slot: FieldSlot) -> bool {
+    use crate::pokemon::PokemonGender;
+    let (sg, tg, tab, already) = {
+        let Some(src) = get_pokemon_at_slot(state, source_slot) else { return false };
+        let Some(tgt) = get_pokemon_at_slot(state, target_slot) else { return false };
+        (src.gender, tgt.gender, tgt.ability.clone(), has_status_volatile(tgt, &VolatileStatus::Attract))
+    };
+    if matches!(sg, PokemonGender::Genderless) || matches!(tg, PokemonGender::Genderless) { return false; }
+    if sg == tg { return false; }
+    if already { return false; }
+    if tab == Ability::Oblivious { return false; }
+    true
+}
+
+/// Apply the Attract volatile from `source_slot` to `target_slot`. Returns true if applied.
+pub fn try_apply_attract(state: &mut BattleState, source_slot: FieldSlot, target_slot: FieldSlot) -> bool {
+    if !can_be_infatuated(state, source_slot, target_slot) { return false; }
+    let effect = HitEffect { volatile_status: Some(VolatileStatus::Attract), ..Default::default() };
+    apply_effect_to_target(state, source_slot, target_slot, &effect, target_slot.player);
+    true
+}
+
+/// Apply Disable to `target_slot` using its `last_used_move`. Returns true if applied.
+pub fn try_apply_disable(state: &mut BattleState, source_slot: FieldSlot, target_slot: FieldSlot) -> bool {
+    let (last_move, already_disabled) = {
+        let Some(tgt) = get_pokemon_at_slot(state, target_slot) else { return false };
+        let m = match &tgt.last_used_move {
+            Some(mv) if *mv != PokemonMove::Struggle => mv.clone(),
+            _ => return false,
+        };
+        let disabled = has_status_volatile(tgt, &VolatileStatus::Disable(PokemonMove::Struggle));
+        (m, disabled)
+    };
+    if already_disabled { return false; }
+    let effect = HitEffect { volatile_status: Some(VolatileStatus::Disable(last_move)), ..Default::default() };
+    apply_effect_to_target(state, source_slot, target_slot, &effect, target_slot.player);
+    true
+}
+
+/// Damage the attacker by `numer/denom` of its max HP (Rough Skin / Aftermath pattern).
+/// Blocked by Magic Guard. Handles faint bookkeeping.
+fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSlot, numer: u32, denom: u32) {
+    let abilities_suppressed = abilities_are_suppressed(bs);
+    let items_suppressed = items_are_suppressed(bs);
+    let (max_hp, magic_guard) = {
+        let Some(m) = get_pokemon_at_slot(bs, attacker_slot) else { return };
+        if m.fainted { return; }
+        let mg = !abilities_suppressed && m.ability == Ability::MagicGuard;
+        (m.stats[0].max(1), mg)
+    };
+    if magic_guard { return; }
+    let damage = ((max_hp as u32 * numer) / denom).max(1) as u16;
+    let mut fainted = false;
+    if let Some(atk) = get_pokemon_at_slot_mut(bs, attacker_slot) {
+        take_damage(atk, damage, items_suppressed);
+        if atk.fainted {
+            clear_pokemon_on_faint(atk);
+            fainted = true;
+        }
+    }
+    if fainted {
+        handle_pokemon_faint(bs, attacker_slot.player, attacker_slot.slot_index);
+    }
+}
+
+/// Fire all on-hit reactive ability effects for the ability holder (`holder_slot`) after it
+/// takes `damage_dealt` HP damage from `attacker_slot`'s move. Returns the updated branch set.
+///
+/// Called from `apply_single_hit_branch` immediately before the per-hit outcomes are returned.
+/// Because this runs per-hit, multi-hit moves get independent rolls — matching game behaviour.
+pub fn apply_contact_hit_reactions(
+    branches: Vec<(BattleState, f64)>,
+    holder_slot: FieldSlot,
+    attacker_slot: FieldSlot,
+    move_name: &PokemonMove,
+    move_data: &MoveData,
+    damage_dealt: u16,
+) -> Vec<(BattleState, f64)> {
+    if damage_dealt == 0 || branches.is_empty() { return branches; }
+
+    let holder_ability = {
+        let ability_opt = {
+            let first_bs = &branches[0].0;
+            get_pokemon_at_slot(first_bs, holder_slot)
+                .filter(|m| !pokemon_ability_is_suppressed(first_bs, m))
+                .map(|m| m.ability.clone())
+        };
+        match ability_opt {
+            Some(a) => a,
+            None => return branches,
+        }
+    };
+
+    let is_contact = move_has_flag(move_data, &MoveFlag::Contact);
+    let is_physical = matches!(move_data.category, MoveCategory::Physical);
+
+    match holder_ability {
+        Ability::RoughSkin => {
+            if !is_contact { return branches; }
+            branches.into_iter().map(|(mut bs, prob)| {
+                apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 8);
+                (bs, prob)
+            }).collect()
+        }
+        Ability::Aftermath => {
+            if !is_contact { return branches; }
+            branches.into_iter().map(|(mut bs, prob)| {
+                let holder_fainted = get_pokemon_at_slot(&bs, holder_slot).map(|m| m.fainted).unwrap_or(false);
+                if !holder_fainted { return (bs, prob); }
+                if active_mons_have_ability(&bs, &Ability::Damp) { return (bs, prob); }
+                apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 4);
+                (bs, prob)
+            }).collect()
+        }
+        Ability::FlameBody => {
+            if !is_contact { return branches; }
+            let eff = HitEffect { status: Some(Status::Burn), ..Default::default() };
+            branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
+                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+            })
+        }
+        Ability::PoisonPoint => {
+            if !is_contact { return branches; }
+            let eff = HitEffect { status: Some(Status::Poison), ..Default::default() };
+            branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
+                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+            })
+        }
+        Ability::Static => {
+            if !is_contact { return branches; }
+            let eff = HitEffect { status: Some(Status::Paralysis), ..Default::default() };
+            branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
+                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+            })
+        }
+        Ability::SpicySpray => {
+            // Any damaging move; fires even when the holder has already fainted.
+            let eff = HitEffect { status: Some(Status::Burn), ..Default::default() };
+            branches.into_iter().map(|(mut bs, prob)| {
+                apply_effect_to_target(&mut bs, holder_slot, attacker_slot, &eff, attacker_slot.player);
+                (bs, prob)
+            }).collect()
+        }
+        Ability::CuteCharm => {
+            if !is_contact { return branches; }
+            let eligible = {
+                let first_bs = &branches[0].0;
+                can_be_infatuated(first_bs, holder_slot, attacker_slot)
+            };
+            if !eligible { return branches; }
+            let eff = HitEffect { volatile_status: Some(VolatileStatus::Attract), ..Default::default() };
+            branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
+                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+            })
+        }
+        Ability::CursedBody => {
+            // Any damaging move; Struggle cannot be disabled.
+            if *move_name == PokemonMove::Struggle { return branches; }
+            let eff = HitEffect { volatile_status: Some(VolatileStatus::Disable(move_name.clone())), ..Default::default() };
+            branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
+                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+            })
+        }
+        Ability::Gooey => {
+            if !is_contact { return branches; }
+            let eff = HitEffect { boosts: [0, 0, 0, 0, -1, 0, 0], ..Default::default() };
+            branches.into_iter().map(|(mut bs, prob)| {
+                apply_effect_to_target(&mut bs, holder_slot, attacker_slot, &eff, attacker_slot.player);
+                (bs, prob)
+            }).collect()
+        }
+        Ability::WeakArmor => {
+            if !is_physical { return branches; }
+            let boosts: [i8; 7] = [0, -1, 0, 0, 2, 0, 0];
+            branches.into_iter().map(|(mut bs, prob)| {
+                let alive = get_pokemon_at_slot(&bs, holder_slot).map(|m| !m.fainted).unwrap_or(false);
+                if !alive { return (bs, prob); }
+                let items_suppressed = items_are_suppressed(&bs);
+                if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
+                    apply_stat_boosts_to_pokemon(mon, &boosts, items_suppressed);
+                }
+                (bs, prob)
+            }).collect()
+        }
+        Ability::Mummy => {
+            if !is_contact { return branches; }
+            branches.into_iter().map(|(mut bs, prob)| {
+                let (atk_ability, excluded) = {
+                    let Some(atk) = get_pokemon_at_slot(&bs, attacker_slot) else { return (bs, prob); };
+                    if atk.fainted { return (bs, prob); }
+                    (atk.ability.clone(), ability_excluded_from_mummy(&atk.ability) || atk.ability == Ability::Mummy)
+                };
+                if excluded { return (bs, prob); }
+                if let Some(atk) = get_pokemon_at_slot_mut(&mut bs, attacker_slot) {
+                    if atk.original_ability.is_none() { atk.original_ability = Some(atk_ability); }
+                    atk.ability = Ability::Mummy;
+                }
+                (bs, prob)
+            }).collect()
+        }
+        Ability::WanderingSpirit => {
+            if !is_contact { return branches; }
+            branches.into_iter().map(|(mut bs, prob)| {
+                // Check attacker's ability can be swapped
+                let (atk_ability, excluded) = {
+                    let Some(atk) = get_pokemon_at_slot(&bs, attacker_slot) else { return (bs, prob); };
+                    let excluded = atk.fainted || ability_excluded_from_wandering_spirit(&atk.ability);
+                    (atk.ability.clone(), excluded)
+                };
+                if excluded { return (bs, prob); }
+                let hld_ability = {
+                    let Some(hld) = get_pokemon_at_slot(&bs, holder_slot) else { return (bs, prob); };
+                    hld.ability.clone()
+                };
+                // Swap: attacker gets hld_ability (WanderingSpirit), holder gets atk_ability
+                if let Some(atk) = get_pokemon_at_slot_mut(&mut bs, attacker_slot) {
+                    if atk.original_ability.is_none() { atk.original_ability = Some(atk_ability.clone()); }
+                    atk.ability = hld_ability.clone();
+                }
+                if let Some(hld) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
+                    if hld.original_ability.is_none() { hld.original_ability = Some(hld_ability); }
+                    hld.ability = atk_ability;
+                }
+                // Fire on-gain effects for both
+                process_pokemon_gain_ability(&mut bs, attacker_slot);
+                process_pokemon_gain_ability(&mut bs, holder_slot);
+                (bs, prob)
+            }).collect()
+        }
+        _ => branches,
+    }
 }
 
 // ── Type-immunity / absorption abilities ──────────────────────────────────────
