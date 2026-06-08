@@ -6,24 +6,11 @@ hook and should be researchable, plannable, and implementable in a single focuse
 ---
 ## Saved for later (Information only)
 - Illusion — enter disguised as the last party member
+- Anticipation — signal if opponents have SE or OHKO moves (message-only; no battle-state change in a full-information sim)
+- Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
 
 ## Abilities
-
-### Entry effects
-Trigger once when the Pokémon enters battle. Hook into process_pokemon_send_out.
-**Immediate and simple:**
-- Anticipation — signal if opponents have SE or OHKO moves
-- Curious Medicine — remove all stat changes from allies
-- Frisk — reveal an opponent's held item
-- Hospitality — restore ¼ max HP of an ally
-- Screen Cleaner — remove Light Screen, Reflect, and Aurora Veil from both sides
-- Supersweet Syrup — lower all opponents' evasiveness by 1 (once per battle)
-- Supreme Overlord — +10% move power per fainted party member (max +50%)
-
-**Complex (copy or disguise):**
-- Imposter — transform into the opposing Pokémon (copies all stats except HP)
-- Trace — copy an opponent's ability on entry
 
 ### End-of-turn ability effects
 Trigger during end-of-turn processing, after status residuals.
@@ -120,7 +107,6 @@ Change the Pokémon's in-battle form under specific triggers.
 Overwrite, swap, or inherit abilities mid-battle.
 - Mummy — overwrite attacker's ability (see also on-contact section)
 - Receiver — inherit the ability of a knocked-out ally
-- Trace — copy an opponent's ability (see also entry effects section)
 - Wandering Spirit — swap abilities with attacker (see also on-contact section)
 
 ### Item-interaction abilities
