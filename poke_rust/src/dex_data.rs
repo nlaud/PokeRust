@@ -207,6 +207,9 @@ pub enum VolatileStatus {
     SkyDrop,
     Spotlight,
     Stockpile,
+    /// Carries the fainted-ally count (1–5) snapshotted at switch-in. Stored as
+    /// TurnStatus(_, 0) so it lasts indefinitely on the field and is wiped on switch-out.
+    SupremeOverlord(u8),
     SyrupBomb,
     TarShot,
     Taunt,

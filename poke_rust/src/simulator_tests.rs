@@ -8861,6 +8861,561 @@ mod tests {
         }
     }
 
+    mod entry_effect_abilities {
+        use super::*;
+
+        // Shared mon builder: at lv50, given ability/item/status.
+        fn mon(species: Species, ability: Ability, item: Option<Item>, status: Option<Status>) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p = build_pokemon_state(
+                species,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None,          // gender
+                Some(ability),
+                None,          // nature
+                item,          // item  (position 9 in build_pokemon_state)
+                None,          // tera_type (position 10)
+                Some([0; 6]),  // evs
+                None,          // ivs
+                false,
+            );
+            p.status = status;
+            p
+        }
+
+        // Local copy of switch_p1_out (the one in switch_abilities is private to that mod).
+        fn switch_p1_out(initial: BattleState) -> BattleState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+            extract_battle_state(outcomes).0
+        }
+
+        // ── Curious Medicine ─────────────────────────────────────────────────────────
+
+        #[test]
+        fn curious_medicine_resets_ally_boosts_on_entry() {
+            // Build two allies: one with CuriousMedicine (enters second), one with preset boosts.
+            let ally_with_boosts = {
+                let mut m = mon(Species::Snorlax, Ability::Pressure, None, None);
+                m.boosts = [2, -1, 1, 0, 0, 0, 0]; // some arbitrary boosts
+                m
+            };
+            // CuriousMedicine mon enters as the second active mon in a doubles setup.
+            let medicine_mon = mon(Species::Chansey, Ability::CuriousMedicine, None, None);
+            // Build with both active; battle_state_from_lists fires send-out for both.
+            let state = battle_state_from_lists(
+                vec![ally_with_boosts, medicine_mon],
+                vec![],
+                vec![mon(Species::Snorlax, Ability::Pressure, None, None), mon(Species::Snorlax, Ability::Pressure, None, None)],
+                vec![],
+            );
+            // Ally's boosts should be zeroed; medicine mon's own boosts are untouched (also 0).
+            assert_eq!(state.p1_active_mons[0].boosts, [0; 7]);
+            assert_eq!(state.p1_active_mons[1].boosts, [0; 7]);
+        }
+
+        #[test]
+        fn curious_medicine_does_not_affect_self() {
+            // Give the CuriousMedicine holder itself some boosts before send-out.
+            // In practice boosts are always 0 at lead send-out, so we only check the post-state.
+            // The ally's boosts are zeroed; self remains 0.
+            let ally = {
+                let mut m = mon(Species::Snorlax, Ability::Pressure, None, None);
+                m.boosts = [3, 0, 0, 0, 0, 0, 0];
+                m
+            };
+            let medicine = mon(Species::Chansey, Ability::CuriousMedicine, None, None);
+            let state = battle_state_from_lists(
+                vec![ally, medicine],
+                vec![],
+                vec![mon(Species::Snorlax, Ability::Pressure, None, None), mon(Species::Snorlax, Ability::Pressure, None, None)],
+                vec![],
+            );
+            assert_eq!(state.p1_active_mons[0].boosts, [0; 7]);
+        }
+
+        // ── Hospitality ──────────────────────────────────────────────────────────────
+
+        #[test]
+        fn hospitality_heals_ally_one_quarter_max_hp_on_entry() {
+            // Build a Blissey ally at reduced HP so the heal is visible but not capped.
+            // Blissey has very high max HP — reduce by 80 HP so 1/4 max fits cleanly.
+            let ally = {
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+                let mut m = build_pokemon_state(
+                    Species::Blissey,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Tackle), None, None, None]),
+                    None,
+                    Some(Ability::Pressure),
+                    None,
+                    None,
+                    None,
+                    Some([0; 6]),
+                    None,
+                    false,
+                );
+                let lost = m.stats[0] / 2; // lose half HP — well below full
+                m.hp = m.hp.saturating_sub(lost);
+                m
+            };
+            let ally_max_hp = {
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+                build_pokemon_state(
+                    Species::Blissey,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Tackle), None, None, None]),
+                    None,
+                    Some(Ability::Pressure),
+                    None, None, None,
+                    Some([0; 6]),
+                    None,
+                    false,
+                ).stats[0]
+            };
+            let expected_heal = (ally_max_hp / 4).max(1);
+            let starting_hp = ally.hp;
+
+            let hospital = mon(Species::Chansey, Ability::Hospitality, None, None);
+            let state = battle_state_from_lists(
+                vec![ally, hospital],
+                vec![],
+                vec![
+                    mon(Species::Snorlax, Ability::Pressure, None, None),
+                    mon(Species::Snorlax, Ability::Pressure, None, None),
+                ],
+                vec![],
+            );
+            let actual_hp = state.p1_active_mons[0].hp;
+            assert_eq!(actual_hp, starting_hp + expected_heal,
+                "Hospitality should heal 1/4 ally max HP");
+        }
+
+        // ── Screen Cleaner ────────────────────────────────────────────────────────────
+
+        #[test]
+        fn screen_cleaner_removes_all_three_screens_from_both_sides() {
+            use crate::dex_data::SideCondition;
+
+            let holder = mon(Species::Snorlax, Ability::ScreenCleaner, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+
+            // Build state, then manually set screens on both sides.
+            let mut state = battle_state_from_lists(
+                vec![mon(Species::Clefable, Ability::Pressure, None, None)],
+                vec![holder],
+                vec![target],
+                vec![],
+            );
+            // Add all three screens to both sides before the Screen Cleaner switches in.
+            for player in [Player::P1, Player::P2] {
+                simulator_helpers::add_side_condition(&mut state, player, SideCondition::Reflect, 5);
+                simulator_helpers::add_side_condition(&mut state, player, SideCondition::LightScreen, 5);
+                simulator_helpers::add_side_condition(&mut state, player, SideCondition::AuroraVeil, 5);
+            }
+
+            // Now switch the Screen Cleaner in (replaces Clefable).
+            let state = switch_p1_out(state);
+
+            // All three screens on both sides should be gone.
+            assert!(state.p1_side_conditions.is_empty(), "P1 screens should be cleared");
+            assert!(state.p2_side_conditions.is_empty(), "P2 screens should be cleared");
+        }
+
+        // ── Supersweet Syrup ──────────────────────────────────────────────────────────
+
+        #[test]
+        fn supersweet_syrup_lowers_opponent_evasiveness_on_entry() {
+            let syrup = mon(Species::Snorlax, Ability::SupersweetSyrup, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let state = battle_state_from_lists(vec![syrup], vec![], vec![target], vec![]);
+            // Eva is boost index 6; should be -1 after Supersweet Syrup triggers.
+            assert_eq!(state.p2_active_mons[0].boosts[6], -1);
+        }
+
+        #[test]
+        fn supersweet_syrup_fires_only_once_per_battle() {
+            let syrup = mon(Species::Snorlax, Ability::SupersweetSyrup, None, None);
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(
+                vec![syrup],
+                vec![replacement],
+                vec![target],
+                vec![],
+            );
+            // First entry: -1 evasion, flag set.
+            assert_eq!(initial.p2_active_mons[0].boosts[6], -1);
+            assert!(initial.p1_active_mons[0].one_time_ability_used);
+
+            // Switch out the syrup mon and bring it back in.
+            let after_switch = switch_p1_out(initial);
+            let syrup_bench = &after_switch.p1_back_mons[0];
+            assert!(syrup_bench.one_time_ability_used, "Flag persists on bench");
+            // Evasion should not have dropped a second time (-1, not -2).
+            assert_eq!(after_switch.p2_active_mons[0].boosts[6], -1);
+        }
+
+        #[test]
+        fn supersweet_syrup_blocked_by_clear_body() {
+            let syrup = mon(Species::Snorlax, Ability::SupersweetSyrup, None, None);
+            let immune = mon(Species::Snorlax, Ability::ClearBody, None, None);
+            let state = battle_state_from_lists(vec![syrup], vec![], vec![immune], vec![]);
+            // Clear Body blocks the evasion drop.
+            assert_eq!(state.p2_active_mons[0].boosts[6], 0);
+        }
+
+        // ── Supreme Overlord ─────────────────────────────────────────────────────────
+
+        #[test]
+        fn supreme_overlord_volatile_set_to_fainted_count() {
+            let overlord = mon(Species::Snorlax, Ability::SupremeOverlord, None, None);
+            let mut fainted1 = mon(Species::Clefable, Ability::Pressure, None, None);
+            fainted1.fainted = true;
+            let mut fainted2 = mon(Species::Blissey, Ability::Pressure, None, None);
+            fainted2.fainted = true;
+
+            let state = battle_state_from_lists(
+                vec![overlord.clone()],
+                vec![fainted1, fainted2],
+                vec![mon(Species::Snorlax, Ability::Pressure, None, None)],
+                vec![],
+            );
+
+            // SupremeOverlord volatile should carry count = 2.
+            let has_correct_volatile = state.p1_active_mons[0].volatiles.iter().any(|v| {
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::SupremeOverlord(2), 0))
+            });
+            assert!(has_correct_volatile, "Should have SupremeOverlord(2) volatile");
+
+            // Also test with 0 fainted: no volatile.
+            let state_no_fainted = battle_state_from_lists(
+                vec![overlord],
+                vec![],
+                vec![mon(Species::Snorlax, Ability::Pressure, None, None)],
+                vec![],
+            );
+            let has_volatile = state_no_fainted.p1_active_mons[0].volatiles.iter().any(|v| {
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::SupremeOverlord(_), _))
+            });
+            assert!(!has_volatile, "No volatile when no allies fainted");
+        }
+
+        #[test]
+        fn supreme_overlord_boosts_damage_by_fainted_count() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            // Build attacker with SupremeOverlord and 2 fainted bench mons.
+            let build_attacker = |fainted_count: u8| {
+                let attacker = build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex,
+                    &move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Tackle), None, None, None]),
+                    None,
+                    Some(Ability::SupremeOverlord),
+                    Some(Nature::Adamant),
+                    None,
+                    None,
+                    Some([0, 252, 0, 0, 0, 0]),
+                    None,
+                    false,
+                );
+                let bench: Vec<PokemonState> = (0..fainted_count).map(|_| {
+                    let mut m = mon(Species::Clefable, Ability::Pressure, None, None);
+                    m.fainted = true;
+                    m
+                }).collect();
+                (attacker, bench)
+            };
+
+            // Bulky target: Blissey — high HP, neutral to Normal, won't faint.
+            let make_target = || build_pokemon_state(
+                Species::Blissey,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None,
+                Some(Ability::Pressure),
+                None,
+                None,
+                None,
+                Some([0; 6]),
+                None,
+                false,
+            );
+
+            let run_damage = |fainted: u8| {
+                let (attacker, bench) = build_attacker(fainted);
+                let state = battle_state_from_lists(
+                    vec![attacker],
+                    bench,
+                    vec![make_target()],
+                    vec![],
+                );
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(state.clone()),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex,
+                    &pokemon_dex,
+                );
+                let target_hp = simulator_helpers::get_pokemon_at_slot(&state, FieldSlot { player: Player::P2, slot_index: 0 }).unwrap().hp;
+                damage_distribution(&outcomes, target_hp)
+            };
+
+            let base_dist    = run_damage(0);
+            let two_fainted  = run_damage(2);
+
+            // With 2 fainted allies, damage should be ×1.2 (base × 1.2).
+            // Compare expected distributions within 0.05 tolerance (per project memory).
+            let expected: HashMap<u16, f64> = base_dist.iter()
+                .map(|(dmg, prob)| (((*dmg as f64) * 1.2).floor() as u16, *prob))
+                .collect();
+            assert_distribution_close(two_fainted, expected);
+        }
+
+        // ── Trace ────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn trace_copies_opponent_ability_on_entry() {
+            let tracer = mon(Species::Snorlax, Ability::Trace, None, None);
+            let target  = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let state = battle_state_from_lists(vec![tracer], vec![], vec![target], vec![]);
+            // Trace should have copied Pressure.
+            assert_eq!(state.p1_active_mons[0].ability, Ability::Pressure);
+            // original_ability should be set to Trace.
+            assert_eq!(state.p1_active_mons[0].original_ability, Some(Ability::Trace));
+        }
+
+        #[test]
+        fn trace_reverts_on_switch_out() {
+            let tracer      = mon(Species::Snorlax, Ability::Trace, None, None);
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let target      = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(
+                vec![tracer],
+                vec![replacement],
+                vec![target],
+                vec![],
+            );
+            assert_eq!(initial.p1_active_mons[0].ability, Ability::Pressure);
+
+            let after = switch_p1_out(initial);
+            // Benched Trace mon should have reverted to Trace.
+            assert_eq!(after.p1_back_mons[0].ability, Ability::Trace);
+            assert_eq!(after.p1_back_mons[0].original_ability, None);
+        }
+
+        #[test]
+        fn trace_does_not_copy_untraceable_ability() {
+            let tracer = mon(Species::Snorlax, Ability::Trace, None, None);
+            // Disguise is on the untraceable blocklist.
+            let target = mon(Species::Snorlax, Ability::Disguise, None, None);
+            let state = battle_state_from_lists(vec![tracer], vec![], vec![target], vec![]);
+            // Trace should remain Trace since it could not copy Disguise.
+            assert_eq!(state.p1_active_mons[0].ability, Ability::Trace);
+            assert_eq!(state.p1_active_mons[0].original_ability, None);
+        }
+
+        #[test]
+        fn trace_of_intimidate_triggers_intimidate() {
+            let tracer = mon(Species::Snorlax, Ability::Trace, None, None);
+            let target  = mon(Species::Snorlax, Ability::Intimidate, None, None);
+            let state = battle_state_from_lists(vec![tracer], vec![], vec![target], vec![]);
+            // Tracer copies Intimidate; copied Intimidate fires and lowers the opponent's Attack.
+            assert_eq!(state.p1_active_mons[0].ability, Ability::Intimidate);
+            // The trace-fired Intimidate lowers the target's (P2's) Attack.
+            assert_eq!(state.p2_active_mons[0].boosts[0], -1,
+                "Traced Intimidate should lower opponent's Attack");
+        }
+
+        // ── Imposter ─────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn imposter_copies_species_and_moves_not_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Imposter Ditto vs a Snorlax with specific moves.
+            let target = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Tackle), None, None]),
+                None,
+                Some(Ability::ThickFat),
+                None, None, None,
+                Some([0; 6]),
+                None,
+                false,
+            );
+            let ditto = build_pokemon_state(
+                Species::Ditto,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Transform), None, None, None]),
+                None,
+                Some(Ability::Imposter),
+                None, None, None,
+                Some([0; 6]),
+                None,
+                false,
+            );
+            let ditto_max_hp = ditto.stats[0];
+            let state = battle_state_from_lists(
+                vec![ditto],
+                vec![],
+                vec![target],
+                vec![],
+            );
+            let transformed = &state.p1_active_mons[0];
+            // Species, types, and moves should be copied.
+            assert_eq!(transformed.species, Species::Snorlax);
+            // Moves copied; PP capped at 5.
+            assert_eq!(transformed.moves[0], Some(PokemonMove::Earthquake));
+            assert_eq!(transformed.moves[1], Some(PokemonMove::Tackle));
+            assert!(transformed.move_pp[0] <= 5, "Earthquake PP capped at 5");
+            // HP is NOT copied — Ditto keeps its own.
+            assert_eq!(transformed.stats[0], ditto_max_hp);
+            // pre_transform is set (transform happened).
+            assert!(transformed.pre_transform.is_some());
+        }
+
+        #[test]
+        fn imposter_reverts_on_switch_out() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let target = mon(Species::Snorlax, Ability::ThickFat, None, None);
+            let ditto = build_pokemon_state(
+                Species::Ditto,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Transform), None, None, None]),
+                None,
+                Some(Ability::Imposter),
+                None, None, None,
+                Some([0; 6]),
+                None,
+                false,
+            );
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+
+            let initial = battle_state_from_lists(
+                vec![ditto],
+                vec![replacement],
+                vec![target],
+                vec![],
+            );
+            // Confirm transformed.
+            assert_eq!(initial.p1_active_mons[0].species, Species::Snorlax);
+
+            let after = switch_p1_out(initial);
+            // Benched Ditto should have reverted to Ditto species.
+            assert_eq!(after.p1_back_mons[0].species, Species::Ditto);
+            assert!(after.p1_back_mons[0].pre_transform.is_none(), "pre_transform cleared after revert");
+        }
+
+        #[test]
+        fn imposter_fails_against_substitute() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            // Give target a Substitute volatile.
+            target.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute, 0));
+
+            let ditto = build_pokemon_state(
+                Species::Ditto,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Transform), None, None, None]),
+                None,
+                Some(Ability::Imposter),
+                None, None, None,
+                Some([0; 6]),
+                None,
+                false,
+            );
+            let state = battle_state_from_lists(vec![ditto], vec![], vec![target], vec![]);
+            // Transform should have failed; Ditto keeps its own species.
+            assert_eq!(state.p1_active_mons[0].species, Species::Ditto);
+            assert!(state.p1_active_mons[0].pre_transform.is_none(), "No transform if target behind Substitute");
+        }
+
+        // ── Transform (move) ─────────────────────────────────────────────────────────
+
+        #[test]
+        fn transform_move_copies_target_species_and_caps_pp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Ditto with Transform move vs Snorlax.
+            let user = build_pokemon_state(
+                Species::Ditto,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Transform), None, None, None]),
+                None,
+                Some(Ability::Limber),
+                None, None, None,
+                Some([0; 6]),
+                None,
+                false,
+            );
+            let target = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex,
+                &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Earthquake), None, None, None]),
+                None,
+                Some(Ability::ThickFat),
+                None, None, None,
+                Some([0; 6]),
+                None,
+                false,
+            );
+            let state = battle_state_from_lists(vec![user], vec![], vec![target], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+            let (result, _) = extract_battle_state(outcomes);
+            let transformed = &result.p1_active_mons[0];
+            // After Transform, Ditto takes on Snorlax's species.
+            assert_eq!(transformed.species, Species::Snorlax);
+            // Copied Earthquake PP is capped at 5.
+            assert_eq!(transformed.moves[0], Some(PokemonMove::Earthquake));
+            assert!(transformed.move_pp[0] <= 5);
+        }
+    }
+
     mod items {
         use super::*;
 

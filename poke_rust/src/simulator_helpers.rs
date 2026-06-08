@@ -798,6 +798,22 @@ fn effective_base_power(
         if attacker.ability == Ability::Technician && technician_bp_snapshot <= 60.0 {
             bp = (bp * 1.5).floor();
         }
+
+        // Supreme Overlord: +10% move power per fainted ally, up to +50% (5 allies).
+        // The count is snapshotted at switch-in into a permanent TurnStatus(SupremeOverlord(n), 0)
+        // volatile, so it correctly reflects the count at the time the Pokémon entered.
+        if attacker.ability == Ability::SupremeOverlord {
+            let fainted = attacker.volatiles.iter().find_map(|v| {
+                if let VolatileStatusState::TurnStatus(VolatileStatus::SupremeOverlord(n), _) = v {
+                    Some(*n)
+                } else {
+                    None
+                }
+            }).unwrap_or(0);
+            if fainted > 0 {
+                bp = (bp * (1.0 + 0.1 * fainted as f64)).floor();
+            }
+        }
     }
 
     bp
@@ -2281,6 +2297,7 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     if !pokemon_ability_is_suppressed(state, mon) {
         apply_entry_ability_field_effects(state, &ability);
         apply_entry_ability_target_effects(state, slot, &ability);
+        apply_send_out_only_ability_effects(state, slot, &ability);
     }
 
     trigger_terrain_seed_items(state);
@@ -2288,6 +2305,73 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     // A Pokémon entering may bring Neutralizing Gas, which suppresses primal-weather
     // abilities and so ends the extreme weather they were maintaining.
     handle_gas_primal_weather_suppression(state);
+}
+
+/// Transform `transformer` into `target`, following the rules for both the Transform move
+/// and the Imposter ability.
+///
+/// Returns `true` if the transform succeeded; the caller is responsible for firing any
+/// on-gain ability effects afterwards when needed.
+///
+/// **What is copied:** species, types, non-HP stats, stat stages, moves (PP capped at 5),
+/// ability, base_ability, gender, weight.
+/// **What is NOT copied:** HP (both current and max), level, item, status, nature, EVs/IVs,
+/// tera_type / is_tera.
+///
+/// **Failure conditions (no change, returns false):**
+/// - Target is behind a Substitute.
+/// - Target is already transformed.
+/// - Target has Illusion or Imposter ability.
+pub fn transform_into(transformer: &mut PokemonState, target: &PokemonState) -> bool {
+    // Fail if target is behind a Substitute.
+    if has_status_volatile(target, &VolatileStatus::Substitute) {
+        return false;
+    }
+    // Fail if target is already transformed.
+    if target.pre_transform.is_some() {
+        return false;
+    }
+    // Fail if target's ability is Illusion or Imposter.
+    if matches!(target.ability, Ability::Illusion | Ability::Imposter) {
+        return false;
+    }
+
+    // Save original form exactly once (re-entering after a failed transform is fine).
+    if transformer.pre_transform.is_none() {
+        transformer.pre_transform = Some(Box::new(transformer.clone()));
+    }
+
+    // Copy species and appearance.
+    transformer.species   = target.species.clone();
+    transformer.types     = target.types.clone();
+    transformer.gender    = target.gender;
+    transformer.weight_hg = target.weight_hg;
+
+    // Copy non-HP stats (index 0 = max HP, which stays own).
+    transformer.stats[1] = target.stats[1];
+    transformer.stats[2] = target.stats[2];
+    transformer.stats[3] = target.stats[3];
+    transformer.stats[4] = target.stats[4];
+    transformer.stats[5] = target.stats[5];
+
+    // Copy stat stages.
+    transformer.boosts = target.boosts;
+
+    // Copy moves, capping PP at 5 per move (Transform/Imposter rule).
+    transformer.moves = target.moves.clone();
+    for i in 0..4 {
+        let capped = target.max_pp[i].min(5);
+        transformer.move_pp[i] = capped;
+        transformer.max_pp[i]  = capped;
+    }
+
+    // Copy ability.
+    transformer.base_ability = target.ability.clone();
+    transformer.ability      = target.ability.clone();
+
+    // Note: hp, stats[0], level, item, status, nature, evs, ivs, tera_type, is_tera
+    // are intentionally not copied.
+    true
 }
 
 /// Apply entry abilities that affect opposing Pokémon (e.g. Intimidate lowering the
@@ -2312,6 +2396,161 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
                 }
             }
         }
+    }
+}
+
+/// Apply entry abilities whose effects only make sense on switch-in (healing, stat resets,
+/// screen removal, Imposter/Trace). These are deliberately NOT shared with
+/// `apply_entry_ability_field_effects` or `apply_entry_ability_target_effects`, so they
+/// will not re-fire when Neutralizing Gas lifts.
+fn apply_send_out_only_ability_effects(state: &mut BattleState, slot: FieldSlot, ability: &Ability) {
+    let own_player  = slot.player;
+    let opp_player  = match slot.player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+    let items_suppressed = items_are_suppressed(state);
+
+    match ability {
+        // ── Curious Medicine ──────────────────────────────────────────────────────────
+        // Reset all stat stages of every ally (not self) to zero.
+        Ability::CuriousMedicine => {
+            for ally_slot in collect_active_slots(state, own_player, Some(slot.slot_index)) {
+                if let Some(mon) = get_pokemon_at_slot_mut(state, ally_slot) {
+                    mon.boosts = [0; 7];
+                }
+            }
+        }
+
+        // ── Hospitality ───────────────────────────────────────────────────────────────
+        // Heal each ally by ¼ of that ally's max HP.
+        Ability::Hospitality => {
+            for ally_slot in collect_active_slots(state, own_player, Some(slot.slot_index)) {
+                let heal = get_pokemon_at_slot(state, ally_slot)
+                    .map(|m| (m.stats[0] / 4).max(1))
+                    .unwrap_or(0);
+                if heal > 0 {
+                    if let Some(mon) = get_pokemon_at_slot_mut(state, ally_slot) {
+                        gain_hp(mon, heal, items_suppressed);
+                    }
+                }
+            }
+        }
+
+        // ── Screen Cleaner ────────────────────────────────────────────────────────────
+        // Remove Light Screen, Reflect, and Aurora Veil from BOTH sides.
+        Ability::ScreenCleaner => {
+            for player in [Player::P1, Player::P2] {
+                remove_side_condition(state, player, &SideCondition::LightScreen);
+                remove_side_condition(state, player, &SideCondition::Reflect);
+                remove_side_condition(state, player, &SideCondition::AuroraVeil);
+            }
+        }
+
+        // ── Supersweet Syrup ──────────────────────────────────────────────────────────
+        // Once per battle: lower all opponents' evasiveness by 1.
+        Ability::SupersweetSyrup => {
+            let already_used = get_pokemon_at_slot(state, slot)
+                .map(|m| m.one_time_ability_used)
+                .unwrap_or(true);
+            if !already_used {
+                // Mark used first (borrow ends before the loop below).
+                if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+                    mon.one_time_ability_used = true;
+                }
+                for target in collect_active_slots(state, opp_player, None) {
+                    let ability_suppressed = get_pokemon_at_slot(state, target)
+                        .map(|m| pokemon_ability_is_suppressed(state, m))
+                        .unwrap_or(false);
+                    if let Some(mon) = get_pokemon_at_slot_mut(state, target) {
+                        // Index 6 = Evasiveness.
+                        let delta = filter_opponent_stat_drops(mon, &[0, 0, 0, 0, 0, 0, -1], ability_suppressed);
+                        if delta != [0; 7] {
+                            apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Supreme Overlord ──────────────────────────────────────────────────────────
+        // Snapshot fainted ally count (1–5) into a permanent volatile at switch-in.
+        Ability::SupremeOverlord => {
+            let (active, back) = match own_player {
+                Player::P1 => (&state.p1_active_mons, &state.p1_back_mons),
+                Player::P2 => (&state.p2_active_mons, &state.p2_back_mons),
+            };
+            // Count all fainted party members (holder itself is not fainted — guarded at top).
+            let fainted = active.iter().chain(back.iter())
+                .filter(|m| m.fainted)
+                .count()
+                .min(5) as u8;
+
+            // Remove any stale SupremeOverlord volatile (re-entry after bench time).
+            if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+                mon.volatiles.retain(|v| !matches!(v,
+                    VolatileStatusState::TurnStatus(VolatileStatus::SupremeOverlord(_), _)
+                ));
+                if fainted > 0 {
+                    mon.volatiles.push(VolatileStatusState::TurnStatus(
+                        VolatileStatus::SupremeOverlord(fainted), 0,
+                    ));
+                }
+            }
+        }
+
+        // ── Trace ────────────────────────────────────────────────────────────────────
+        // Copy the first traceable opponent's ability; revert on switch-out via
+        // the existing `original_ability` mechanism.
+        Ability::Trace => {
+            // Find the first eligible opponent (non-fainted, non-suppressed, traceable ability).
+            let mut traced: Option<Ability> = None;
+            for opp_slot in collect_active_slots(state, opp_player, None) {
+                let eligible = get_pokemon_at_slot(state, opp_slot).and_then(|m| {
+                    let suppressed = pokemon_ability_is_suppressed(state, m);
+                    if !suppressed && !ability_cannot_be_traced(&m.ability) {
+                        Some(m.ability.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(ab) = eligible {
+                    traced = Some(ab);
+                    break;
+                }
+            }
+            if let Some(new_ability) = traced {
+                if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+                    // Stash original so switch-out reverts it (same as Mummy/Wandering Spirit).
+                    if mon.original_ability.is_none() {
+                        mon.original_ability = Some(mon.ability.clone());
+                    }
+                    mon.ability = new_ability.clone();
+                }
+                // Fire the newly-traced ability's gain effects (Intimidate, weather, etc.).
+                apply_entry_ability_field_effects(state, &new_ability);
+                apply_entry_ability_target_effects(state, slot, &new_ability);
+            }
+        }
+
+        // ── Imposter ─────────────────────────────────────────────────────────────────
+        // Transform into the directly-opposite opponent on entry.
+        Ability::Imposter => {
+            // In singles (and as the default for doubles), the directly-opposite slot
+            // is the slot with the same index on the opposing side.
+            let opposite = FieldSlot { player: opp_player, slot_index: slot.slot_index };
+            let target_snapshot = get_pokemon_at_slot(state, opposite).cloned();
+            if let Some(target) = target_snapshot {
+                if let Some(transformer) = get_pokemon_at_slot_mut(state, slot) {
+                    let success = transform_into(transformer, &target);
+                    if success {
+                        let new_ability = transformer.ability.clone();
+                        // Fire the copied ability's gain effects (Intimidate, weather, etc.).
+                        apply_entry_ability_field_effects(state, &new_ability);
+                        apply_entry_ability_target_effects(state, slot, &new_ability);
+                    }
+                }
+            }
+        }
+
+        _ => {}
     }
 }
 
@@ -2447,6 +2686,21 @@ fn handle_gas_primal_weather_suppression(state: &mut BattleState) {
 fn apply_switch_out_ability_effects(mon: &mut PokemonState, items_suppressed: bool) {
     if mon.fainted {
         return;
+    }
+    // Revert a Transform/Imposter transformation.  Preserve live HP, status, and the
+    // fainted flag (damage taken while transformed carries over); everything else reverts
+    // to the saved pre-transform snapshot.  Boosts are zeroed separately by
+    // `clear_pokemon_for_switch_out`, which runs before this function, so we don't
+    // need to touch them here.
+    if let Some(saved) = mon.pre_transform.take() {
+        let live_hp      = mon.hp;
+        let live_status  = mon.status.clone();
+        let live_fainted = mon.fainted;
+        *mon = *saved;
+        mon.hp      = live_hp;
+        mon.status  = live_status;
+        mon.fainted = live_fainted;
+        // `boosts` will be zeroed by the caller; no need to overwrite here.
     }
     // Revert ability stolen/replaced by Mummy or Wandering Spirit.
     if let Some(original) = mon.original_ability.take() {
@@ -3345,6 +3599,24 @@ fn ability_excluded_from_mummy(ability: &Ability) -> bool {
     )
 }
 
+/// Gen IX blocklist for Trace — abilities that cannot be copied.
+fn ability_cannot_be_traced(ability: &Ability) -> bool {
+    matches!(ability,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::BattleBond
+        | Ability::Comatose | Ability::Commander | Ability::Disguise
+        | Ability::EmbodyAspectCornerstone | Ability::EmbodyAspectHearthflame
+        | Ability::EmbodyAspectTeal | Ability::EmbodyAspectWellspring
+        | Ability::FlowerGift | Ability::Forecast | Ability::GulpMissile
+        | Ability::HungerSwitch | Ability::IceFace | Ability::Illusion
+        | Ability::Imposter | Ability::Multitype | Ability::NeutralizingGas
+        | Ability::PoisonPuppeteer | Ability::PowerConstruct | Ability::PowerofAlchemy
+        | Ability::Protosynthesis | Ability::QuarkDrive | Ability::Receiver
+        | Ability::RKSSystem | Ability::Schooling | Ability::ShieldsDown
+        | Ability::StanceChange | Ability::TeraShell | Ability::TeraShift
+        | Ability::TeraformZero | Ability::Trace | Ability::ZenMode | Ability::ZerotoHero
+    )
+}
+
 fn ability_excluded_from_wandering_spirit(ability: &Ability) -> bool {
     matches!(ability,
         Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::BattleBond
@@ -3814,6 +4086,31 @@ pub fn apply_secondary_effects(
     let terrain_snapshot = state.clone();
     for (bs, _) in branches.iter_mut() {
         apply_healing_move(bs, attacker_slot, &move_data.name, &terrain_snapshot);
+    }
+
+    // Transform move: deterministic, no branching.
+    if move_data.name == PokemonMove::Transform {
+        // The default opposite slot for Transform is the directly-opposite slot index on
+        // the other side (same slot_index, opposing player).
+        let opp_player = match attacker_slot.player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+        let opposite = FieldSlot { player: opp_player, slot_index: attacker_slot.slot_index };
+        for (bs, _) in branches.iter_mut() {
+            let target_snapshot = get_pokemon_at_slot(bs, opposite).cloned();
+            if let Some(target) = target_snapshot {
+                let success = get_pokemon_at_slot_mut(bs, attacker_slot)
+                    .map(|t| transform_into(t, &target))
+                    .unwrap_or(false);
+                if success {
+                    let new_ability = get_pokemon_at_slot(bs, attacker_slot)
+                        .map(|m| m.ability.clone());
+                    if let Some(ab) = new_ability {
+                        // Fire the copied ability's gain effects.
+                        apply_entry_ability_field_effects(bs, &ab);
+                        apply_entry_ability_target_effects(bs, attacker_slot, &ab);
+                    }
+                }
+            }
+        }
     }
 
     branches.into_iter().filter(|(_, p)| *p > 0.0).collect()
