@@ -98,6 +98,10 @@ pub struct PokemonState{
     pub move_pp: [u8; 4],
     pub max_pp: [u8; 4],
     pub item: Item,
+    /// The last item consumed by this Pokémon (set when eating a Berry or consuming an item).
+    /// Used by Harvest to restore a Berry, and Recycle to recover any consumed item.
+    /// Not set for items lost via Knock Off, theft, or other non-consumption means.
+    pub consumed_item: Option<Item>,
     pub nature: Nature,
 
     pub boosts: PokemonBoostTable,
@@ -126,6 +130,13 @@ pub struct PokemonState{
     /// (e.g. Supersweet Syrup, Intrepid Sword). Persists across switch-outs — a volatile
     /// would be wiped by `clear_pokemon_for_switch_out`.
     pub one_time_ability_used: bool,
+
+    /// True on the turn this Pokémon entered battle via a SwitchAction (voluntary or forced
+    /// mid-turn). Cleared at the end of end_turn after ability effects are applied.
+    /// Used by Speed Boost to skip the boost on the entry turn.
+    /// NOT set for faint replacements (which enter after end_turn has already run for
+    /// the KO turn and should receive Speed Boost normally on their first end_turn).
+    pub entered_this_turn: bool,
 
     /// Saved pre-transform snapshot for Imposter / Transform revert. Boxed to avoid
     /// an infinite-size struct (recursive types require indirection in Rust).
@@ -411,7 +422,8 @@ pub fn build_pokemon_state(
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,
         last_move_failed: false, original_ability: None, last_used_move: None,
-        one_time_ability_used: false, pre_transform: None, evs, ivs,
+        one_time_ability_used: false, entered_this_turn: false, consumed_item: None,
+        pre_transform: None, evs, ivs,
     }
 }
 

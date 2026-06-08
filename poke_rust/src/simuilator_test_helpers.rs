@@ -169,13 +169,14 @@ pub fn confusion_turns(mon: &PokemonState) -> Option<u8> {
     })
 }
 
-/// Strip transient tracking fields (`last_used_move`, `original_ability`) from every
-/// Pokémon in every outcome state so that existing tests can compare states without
-/// caring about fields that were added for Disable/Mummy mechanics.
+/// Strip transient tracking fields (`last_used_move`, `original_ability`, `entered_this_turn`)
+/// from every Pokémon in every outcome state so that existing tests can compare states without
+/// caring about fields that are only relevant within a single turn's execution.
 pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(MatchState, f64)> {
     fn strip(mon: &mut PokemonState) {
         mon.last_used_move = None;
         mon.original_ability = None;
+        mon.entered_this_turn = false;
     }
     outcomes.into_iter().map(|(state, prob)| {
         let state = match state {

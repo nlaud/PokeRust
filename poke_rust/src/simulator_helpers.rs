@@ -490,6 +490,15 @@ fn natural_move_type(state: &BattleState, attacker: &PokemonState, move_data: &M
             Some(Terrain::PsychicTerrain) => PokemonType::Psychic,
             _ => move_data.pokemon_type.clone(),
         },
+        // Aura Wheel is Electric in Full Belly (Morpeko) and Dark in Hangry (MorpekoHangry).
+        // The type is determined by the user's current form at the time of use.
+        PokemonMove::AuraWheel => {
+            if attacker.species == Species::MorpekoHangry {
+                PokemonType::Dark
+            } else {
+                PokemonType::Electric
+            }
+        }
         _ => move_data.pokemon_type.clone(),
     }
 }
@@ -1048,6 +1057,7 @@ pub(crate) fn try_consume_status_cure_berry(mon: &mut PokemonState, items_suppre
         remove_status_volatile(mon, &VolatileStatus::Confusion);
     }
     if cures_status || cures_confusion {
+        mon.consumed_item = Some(mon.item.clone());
         mon.item = Item::None;
     }
 }
@@ -1442,6 +1452,7 @@ pub(crate) fn try_consume_hp_berry(mon: &mut PokemonState, items_suppressed: boo
         Item::OranBerry   => 10,
         _ => return,
     };
+    mon.consumed_item = Some(mon.item.clone());
     mon.item = Item::None;
     heal_mon(mon, heal);
 }
@@ -1461,6 +1472,7 @@ pub(crate) fn try_consume_leppa_berry(mon: &mut PokemonState, items_suppressed: 
         .position(|(&pp, &max)| pp == 0 && max > 0)
     {
         mon.move_pp[i] = mon.max_pp[i].min(10);
+        mon.consumed_item = Some(mon.item.clone());
         mon.item = Item::None;
     }
 }
@@ -2284,17 +2296,33 @@ pub fn set_weather(state: &mut BattleState, weather: Weather, duration: u8) {
 }
 
 pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
-    let Some(mon) = get_pokemon_at_slot(state, slot) else {
-        return;
+    // Borrow scope: extract the info we need before taking a mutable borrow.
+    let (is_fainted, is_replacement_turn) = match get_pokemon_at_slot(state, slot) {
+        None => return,
+        Some(mon) => (mon.fainted, state.turn_started),
     };
+    if is_fainted { return; }
 
-    if mon.fainted {
-        return;
+    // Mark the Pokémon as having entered this turn, so end-of-turn abilities like Speed Boost
+    // skip their effect on the entry turn.  Faint replacements arrive when turn_started == true
+    // (the replacement "mini-turn" flag), so we leave the flag false in that case — they should
+    // receive Speed Boost normally on their first end_turn.
+    if !is_replacement_turn {
+        if let Some(mon_mut) = get_pokemon_at_slot_mut(state, slot) {
+            mon_mut.entered_this_turn = true;
+        }
     }
 
-    let ability = mon.ability.clone();
+    let ability = match get_pokemon_at_slot(state, slot) {
+        None => return,
+        Some(mon) => mon.ability.clone(),
+    };
 
-    if !pokemon_ability_is_suppressed(state, mon) {
+    let ability_suppressed = get_pokemon_at_slot(state, slot)
+        .map(|mon| pokemon_ability_is_suppressed(state, mon))
+        .unwrap_or(true);
+
+    if !ability_suppressed {
         apply_entry_ability_field_effects(state, &ability);
         apply_entry_ability_target_effects(state, slot, &ability);
         apply_send_out_only_ability_effects(state, slot, &ability);
@@ -2951,19 +2979,45 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
     // timers decremented; other end-of-turn effects handled by `end_turn`
 }
 
-/// Perform full end-of-turn processing.
-/// This wraps timer decrementing and other end-of-turn effects (residual damage, leech seed, poison/burn, etc.).
-pub fn end_turn(state: &mut BattleState) {
-    // Decrement effect timers (weather, pseudo-weather, side conditions)
+/// Perform full end-of-turn processing. Returns all possible outcomes with their probabilities,
+/// branching wherever a probabilistic ability (Shed Skin, Healer, Moody, Harvest) fires.
+///
+/// Pipeline:
+///   1. `apply_pre_status_residuals` — weather/terrain/item healing (deterministic)
+///   2. `apply_status_cure_abilities` — Hydration/Shed Skin/Healer (may branch)
+///   3. `apply_status_damage` — burn/poison/toxic (reads cured status, deterministic per branch)
+///   4. `apply_late_eot_abilities` — Speed Boost/Moody/Harvest/Hunger Switch (may branch)
+///   5. Clear `entered_this_turn` so Speed Boost fires normally next turn.
+pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
+    // Decrement effect timers (weather, pseudo-weather, side conditions).
     decrement_effect_timers(state);
 
-    // Advance the battle turn after end-of-turn processing is complete.
+    // Advance the battle turn counter.
     state.turn_number = state.turn_number.saturating_add(1);
 
-    // Apply residual damage effects (burn, poison, toxic)
-    apply_end_of_turn_status_effects(state);
+    // Phase 1: weather/terrain/item healing (deterministic, &mut in-place).
+    apply_pre_status_residuals(state);
 
-    // TODO: Additional end-of-turn effects: leech seed, sandstorm/hail, etc.
+    // Phase 2: probabilistic status-cure abilities. Branches if Shed Skin or Healer fires.
+    let mut branches = vec![(state.clone(), 1.0)];
+    branches = apply_status_cure_abilities(branches);
+
+    // Phase 3: burn/poison/toxic damage (deterministic per branch).
+    for (bs, _) in branches.iter_mut() {
+        apply_status_damage(bs);
+    }
+
+    // Phase 4: late ability effects (Speed Boost, Moody, Harvest, Hunger Switch).
+    branches = apply_late_eot_abilities(branches);
+
+    // Phase 5: clear the entry-turn flag so Speed Boost fires normally next turn.
+    for (bs, _) in branches.iter_mut() {
+        for mon in bs.p1_active_mons.iter_mut().chain(bs.p2_active_mons.iter_mut()) {
+            mon.entered_this_turn = false;
+        }
+    }
+
+    coalesce_branches(branches)
 }
 
 /// Determine the duration for a volatile status condition.
@@ -3129,12 +3183,10 @@ fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx) {
     }
 }
 
-fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, items_suppressed: bool, rain_active: bool) {
+fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, items_suppressed: bool) {
     if mon.fainted { return; }
 
-    if !abilities_suppressed && mon.ability == Ability::Hydration && rain_active {
-        mon.status = None;
-    }
+    // Hydration is now handled in apply_status_cure_abilities (before damage), not here.
 
     let magic_guard = !abilities_suppressed && mon.ability == Ability::MagicGuard;
 
@@ -3158,8 +3210,9 @@ fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, ite
     }
 }
 
-/// Apply end-of-turn effects for non-volatile status conditions (Burn, Poison, ToxicPoison)
-pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
+/// Phase 1 of end-of-turn processing: deterministic weather/terrain/item healing.
+/// This runs before any status-cure abilities and before burn/poison damage.
+fn apply_pre_status_residuals(state: &mut BattleState) {
     let ctx = WeatherResidualCtx {
         rain: weather_is_rain(state),
         snow: weather_is_snow(state),
@@ -3192,9 +3245,320 @@ pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
             gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, ctx.items_suppressed);
         }
     }
+}
 
-    for mon in state.p1_active_mons.iter_mut() { apply_status_residual(mon, ctx.abilities_suppressed, ctx.items_suppressed, ctx.rain); }
-    for mon in state.p2_active_mons.iter_mut() { apply_status_residual(mon, ctx.abilities_suppressed, ctx.items_suppressed, ctx.rain); }
+/// Phase 3 of end-of-turn processing: apply burn/poison/toxic damage.
+/// Called after the status-cure phase so that cured statuses take no damage.
+fn apply_status_damage(state: &mut BattleState) {
+    let abilities_suppressed = abilities_are_suppressed(state);
+    let items_suppressed = items_are_suppressed(state);
+    for mon in state.p1_active_mons.iter_mut() { apply_status_residual(mon, abilities_suppressed, items_suppressed); }
+    for mon in state.p2_active_mons.iter_mut() { apply_status_residual(mon, abilities_suppressed, items_suppressed); }
+}
+
+/// Public wrapper that combines all three deterministic EoT phases (pre-residuals + cure + damage).
+/// Used by tests and any caller that wants the full deterministic end-of-turn without the
+/// probabilistic ability phases (Shed Skin, Healer, Moody, Harvest).
+/// For the full probabilistic pipeline, use `end_turn` which returns branched outcomes.
+pub fn apply_end_of_turn_status_effects(state: &mut BattleState) {
+    apply_pre_status_residuals(state);
+    // Apply Hydration (the one deterministic status cure) before damage.
+    let rain = weather_is_rain(state);
+    let abilities_suppressed = abilities_are_suppressed(state);
+    for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+        if !mon.fainted && !abilities_suppressed && mon.ability == Ability::Hydration && rain {
+            mon.status = None;
+        }
+    }
+    apply_status_damage(state);
+}
+
+/// Phase 2 of end-of-turn processing: probabilistic status-cure abilities.
+/// Handles: Hydration (deterministic in rain), Shed Skin (1/3 chance), Healer (1/2 per ally).
+/// Returns branched outcomes because Shed Skin and Healer can each flip a coin.
+fn apply_status_cure_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleState, f64)> {
+    let mut result = branches;
+
+    // Collect all active slots across all branches — the ability set is the same, so we can
+    // determine which (player, slot_index) pairs to process from the first branch.
+    let slots_to_check: Vec<FieldSlot> = if let Some((first, _)) = result.first() {
+        let mut slots = Vec::new();
+        for (i, _) in first.p1_active_mons.iter().enumerate() {
+            slots.push(FieldSlot { player: Player::P1, slot_index: i as u8 });
+        }
+        for (i, _) in first.p2_active_mons.iter().enumerate() {
+            slots.push(FieldSlot { player: Player::P2, slot_index: i as u8 });
+        }
+        slots
+    } else {
+        return result;
+    };
+
+    for slot in &slots_to_check {
+        // For each branch, inspect the ability of the mon at this slot.
+        let ability = result.first()
+            .and_then(|(bs, _)| get_pokemon_at_slot(bs, *slot))
+            .map(|m| m.ability.clone())
+            .unwrap_or(Ability::None);
+
+        let abilities_suppressed_for_slot = result.first()
+            .map(|(bs, _)| {
+                get_pokemon_at_slot(bs, *slot)
+                    .map(|m| pokemon_ability_is_suppressed(bs, m))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+
+        if abilities_suppressed_for_slot { continue; }
+
+        match ability {
+            // Hydration: deterministic cure in rain.
+            Ability::Hydration => {
+                for (bs, _) in result.iter_mut() {
+                    let rain = weather_is_rain(bs);
+                    if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
+                        // Setting None to None is a no-op; the is_some() guard is omitted.
+                        if !mon.fainted && rain { mon.status = None; }
+                    }
+                }
+            }
+            // Shed Skin: 1/3 chance to cure the holder's own non-volatile status.
+            Ability::ShedSkin => {
+                result = eot_fork_per_slot(result, *slot, 1.0 / 3.0, |mon| {
+                    if mon.status.is_some() {
+                        mon.status = None;
+                    }
+                });
+            }
+            // Healer: 50% chance per adjacent ally to cure that ally's status.
+            // In singles there are no allies, so this is a no-op.
+            Ability::Healer => {
+                // Collect ally slots (same side, different index).
+                let ally_slots: Vec<FieldSlot> = slots_to_check.iter()
+                    .filter(|s| s.player == slot.player && s.slot_index != slot.slot_index)
+                    .copied()
+                    .collect();
+                for ally_slot in ally_slots {
+                    result = eot_fork_per_slot(result, ally_slot, 0.5, |mon| {
+                        if mon.status.is_some() {
+                            mon.status = None;
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    result
+}
+
+/// Phase 4 of end-of-turn processing: late-trigger ability effects.
+/// Handles: Speed Boost (+1 Spe), Moody (+2/-1 random stats), Harvest (berry restore),
+/// Hunger Switch (Morpeko form toggle).
+fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleState, f64)> {
+    let mut result = branches;
+
+    let slots_to_check: Vec<FieldSlot> = if let Some((first, _)) = result.first() {
+        let mut slots = Vec::new();
+        for (i, _) in first.p1_active_mons.iter().enumerate() {
+            slots.push(FieldSlot { player: Player::P1, slot_index: i as u8 });
+        }
+        for (i, _) in first.p2_active_mons.iter().enumerate() {
+            slots.push(FieldSlot { player: Player::P2, slot_index: i as u8 });
+        }
+        slots
+    } else {
+        return result;
+    };
+
+    for slot in &slots_to_check {
+        let ability = result.first()
+            .and_then(|(bs, _)| get_pokemon_at_slot(bs, *slot))
+            .map(|m| m.ability.clone())
+            .unwrap_or(Ability::None);
+
+        let abilities_suppressed_for_slot = result.first()
+            .map(|(bs, _)| {
+                get_pokemon_at_slot(bs, *slot)
+                    .map(|m| pokemon_ability_is_suppressed(bs, m))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+
+        if abilities_suppressed_for_slot { continue; }
+
+        match ability {
+            // Speed Boost: +1 Speed every turn, but not on the turn the Pokémon switched in.
+            Ability::SpeedBoost => {
+                for (bs, _) in result.iter_mut() {
+                    let items_suppressed = items_are_suppressed(bs);
+                    if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
+                        if !mon.fainted && !mon.entered_this_turn { apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed); }
+                    }
+                }
+            }
+            // Moody: +2 to one random stat, -1 to a different random stat (Gen VIII+: 5 main
+            // stats only, no accuracy/evasion).
+            Ability::Moody => {
+                // Enumerate (raise, lower) pairs from the first branch's state (same boosts on all).
+                let (can_raise, can_lower, boosts_snapshot) =
+                    if let Some((bs, _)) = result.first() {
+                        if let Some(mon) = get_pokemon_at_slot(bs, *slot) {
+                            if mon.fainted {
+                                continue;
+                            }
+                            let b = mon.boosts;
+                            let raise: Vec<usize> = (0..5).filter(|&i| b[i] < 6).collect();
+                            let lower: Vec<usize> = (0..5).filter(|&i| b[i] > -6).collect();
+                            (raise, lower, b)
+                        } else { continue; }
+                    } else { continue; };
+
+                // Build outcome table: each row is (raise_idx_opt, lower_idx_opt, probability).
+                // Degenerate cases handled per Bulbapedia: all-capped → only lower; all-floored → only raise.
+                let outcomes: Vec<(Option<usize>, Option<usize>, f64)> = match (can_raise.len(), can_lower.len()) {
+                    (0, 0) => vec![(None, None, 1.0)],
+                    (0, m) => can_lower.iter().map(|&j| (None, Some(j), 1.0 / m as f64)).collect(),
+                    (n, 0) => can_raise.iter().map(|&i| (Some(i), None, 1.0 / n as f64)).collect(),
+                    (n, _) => {
+                        let mut out = Vec::new();
+                        for &i in &can_raise {
+                            let lower_cands: Vec<usize> = can_lower.iter().copied()
+                                .filter(|&j| j != i || boosts_snapshot[i] > -6)
+                                .collect();
+                            // Re-filter: lower candidates are stats that can still go lower
+                            // and differ from the raised stat.
+                            let lower_eligible: Vec<usize> = (0..5)
+                                .filter(|&j| boosts_snapshot[j] > -6 && j != i)
+                                .collect();
+                            let _ = lower_cands; // replaced by lower_eligible
+                            let m_after = lower_eligible.len();
+                            if m_after == 0 {
+                                // No valid lower stat given this raise — only raise occurs.
+                                out.push((Some(i), None, 1.0 / n as f64));
+                            } else {
+                                for &j in &lower_eligible {
+                                    out.push((Some(i), Some(j), 1.0 / n as f64 / m_after as f64));
+                                }
+                            }
+                        }
+                        out
+                    }
+                };
+
+                // Expand each current branch by the Moody outcome table.
+                let mut new_result: Vec<(BattleState, f64)> = Vec::with_capacity(result.len() * outcomes.len());
+                for (bs, prob) in result {
+                    if prob <= 0.0 { continue; }
+                    let items_suppressed = items_are_suppressed(&bs);
+                    for &(raise_idx, lower_idx, outcome_prob) in &outcomes {
+                        if outcome_prob <= 0.0 { continue; }
+                        let mut branch = bs.clone();
+                        if let Some(mon) = get_pokemon_at_slot_mut(&mut branch, *slot) {
+                            if let Some(i) = raise_idx {
+                                let mut delta = [0i8; 7];
+                                delta[i] = 2;
+                                apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed);
+                            }
+                            if let Some(j) = lower_idx {
+                                let mut delta = [0i8; 7];
+                                delta[j] = -1;
+                                apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed);
+                            }
+                        }
+                        new_result.push((branch, prob * outcome_prob));
+                    }
+                }
+                result = coalesce_branches(new_result);
+            }
+            // Harvest: 50% chance to restore a consumed Berry (100% in harsh sunlight).
+            // Requires: item slot empty, last consumed item was a Berry.
+            Ability::Harvest => {
+                // Check conditions from the first branch (same for all branches at this point).
+                let (has_consumed_berry, in_sun) = if let Some((bs, _)) = result.first() {
+                    if let Some(mon) = get_pokemon_at_slot(bs, *slot) {
+                        let berry = mon.consumed_item.as_ref()
+                            .map(|it| format!("{:?}", it).ends_with("Berry"))
+                            .unwrap_or(false);
+                        let empty = mon.item == Item::None;
+                        (berry && empty && !mon.fainted, weather_is_sunlight(bs))
+                    } else { (false, false) }
+                } else { (false, false) };
+
+                if !has_consumed_berry { continue; }
+                let chance = if in_sun { 1.0 } else { 0.5 };
+
+                result = eot_fork_per_slot(result, *slot, chance, |mon| {
+                    if let Some(berry) = mon.consumed_item.take() {
+                        mon.item = berry;
+                        // consumed_item is now None; on_item_obtained_or_enabled would fire
+                        // pinch-berry re-triggers, but those require items_suppressed context.
+                        // The item is simply restored here; pinch-berry logic runs on next HP change.
+                    }
+                });
+            }
+            // Hunger Switch: toggle Morpeko between Full Belly and Hangry form each turn.
+            // Does not toggle while Terastallized.
+            Ability::HungerSwitch => {
+                for (bs, _) in result.iter_mut() {
+                    if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
+                        if mon.fainted || mon.is_tera { continue; }
+                        mon.species = match mon.species {
+                            Species::Morpeko      => Species::MorpekoHangry,
+                            Species::MorpekoHangry => Species::Morpeko,
+                            _ => mon.species.clone(),
+                        };
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    result
+}
+
+/// Helper: for each branch, fork on a probability `chance` applied to the mon at `slot`.
+/// `apply_fn` mutates the mon in the "triggered" branch.
+fn eot_fork_per_slot<F>(
+    branches: Vec<(BattleState, f64)>,
+    slot: FieldSlot,
+    chance: f64,
+    apply_fn: F,
+) -> Vec<(BattleState, f64)>
+where
+    F: Fn(&mut PokemonState),
+{
+    if chance <= 0.0 { return branches; }
+    if chance >= 1.0 {
+        let mut result = branches;
+        for (bs, _) in result.iter_mut() {
+            if let Some(mon) = get_pokemon_at_slot_mut(bs, slot) {
+                apply_fn(mon);
+            }
+        }
+        return result;
+    }
+    let mut result = Vec::with_capacity(branches.len() * 2);
+    for (bs, prob) in branches {
+        if prob <= 0.0 { continue; }
+        // Check whether the ability should fire at all (skip fainted mons).
+        let should_check = get_pokemon_at_slot(&bs, slot).map(|m| !m.fainted).unwrap_or(false);
+        if !should_check {
+            result.push((bs, prob));
+            continue;
+        }
+        // "Not triggered" branch.
+        result.push((bs.clone(), prob * (1.0 - chance)));
+        // "Triggered" branch.
+        let mut triggered = bs;
+        if let Some(mon) = get_pokemon_at_slot_mut(&mut triggered, slot) {
+            apply_fn(mon);
+        }
+        result.push((triggered, prob * chance));
+    }
+    result
 }
 
 /// If a mon is frozen and takes damage from a fire move or certain moves, unfreeze it.

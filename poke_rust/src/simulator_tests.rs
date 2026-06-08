@@ -15417,5 +15417,382 @@ mod priority_abilities {
              P1 win prob = {p1_wins:.3}"
         );
     }
-}
 
+    mod end_of_turn_abilities {
+        use super::*;
+        use crate::battle::BattleState;
+        use crate::dex_data::{Status, Weather};
+
+        fn splash_mon(species: Species, ability: Ability, item: Option<Item>, status: Option<Status>) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            let mut p = build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(ability), None, item, None, Some([0; 6]), None, false,
+            );
+            p.status = status;
+            p
+        }
+
+        fn aura_wheel_mon(species: Species) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(PokemonMove::AuraWheel), None, None, None]),
+                None, Some(Ability::HungerSwitch), None, None, None, Some([0; 6]), None, false,
+            )
+        }
+
+        fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )
+        }
+
+        // ─── Speed Boost ────────────────────────────────────────────────────────────
+
+        #[test]
+        fn speed_boost_does_not_fire_on_switch_in_turn() {
+            let p1 = splash_mon(Species::Snorlax, Ability::SpeedBoost, None, None);
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None, None);
+            // battle_state_from_lists sets entered_this_turn=true for leads
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run(state);
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].boosts[4] == 0)),
+                "Speed Boost should not fire on the turn the Pokémon switches in"
+            );
+        }
+
+        #[test]
+        fn speed_boost_fires_on_subsequent_turns() {
+            let p1 = splash_mon(Species::Snorlax, Ability::SpeedBoost, None, None);
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None, None);
+            let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            // Simulate a turn having already passed: clear the entry flag.
+            state.p1_active_mons[0].entered_this_turn = false;
+            let outcomes = run(state);
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].boosts[4] == 1)),
+                "Speed Boost should grant +1 Speed at end of every non-entry turn"
+            );
+        }
+
+        // ─── Shed Skin ──────────────────────────────────────────────────────────────
+
+        #[test]
+        fn shed_skin_cures_one_third_of_the_time_before_burn_damage() {
+            let mut p1 = splash_mon(Species::Snorlax, Ability::ShedSkin, None, Some(Status::Burn));
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp;
+            let mut state = battle_state_from_lists(
+                vec![p1],
+                vec![],
+                vec![splash_mon(Species::Snorlax, Ability::None, None, None)],
+                vec![],
+            );
+            state.p1_active_mons[0].entered_this_turn = false;
+            let outcomes = run(state);
+
+            let cured_prob: f64 = outcomes.iter()
+                .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status.is_none()))
+                .map(|(_, p)| p).sum();
+            let burned_prob: f64 = outcomes.iter()
+                .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status.is_some()))
+                .map(|(_, p)| p).sum();
+
+            assert!((cured_prob - 1.0/3.0).abs() < 0.005,
+                "Shed Skin should cure status 1/3 of the time, got {cured_prob:.4}");
+            assert!((burned_prob - 2.0/3.0).abs() < 0.005,
+                "Shed Skin should not cure 2/3 of the time, got {burned_prob:.4}");
+
+            // Cured branches must have taken no burn damage (Shed Skin fires before burn).
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p1_active_mons[0].status.is_none() {
+                        assert_eq!(bs.p1_active_mons[0].hp, max_hp,
+                            "Cured branch should take no burn damage (Shed Skin fires before damage)");
+                    }
+                }
+            }
+
+            // Burned branches must have taken burn damage.
+            let burn_dmg = (max_hp as u32 / 16).max(1) as u16;
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p1_active_mons[0].status.is_some() {
+                        assert!(bs.p1_active_mons[0].hp <= max_hp.saturating_sub(burn_dmg),
+                            "Burned branch should have taken burn damage");
+                    }
+                }
+            }
+        }
+
+        // ─── Healer ─────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn healer_has_no_effect_in_singles() {
+            // Healer only cures adjacent allies; in singles there are none.
+            let p1 = splash_mon(Species::Chansey, Ability::Healer, None, None);
+            let mut p2 = splash_mon(Species::Snorlax, Ability::None, None, Some(Status::Burn));
+            let max_hp = p2.stats[0];
+            p2.hp = max_hp;
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run(state);
+            assert_eq!(outcomes.len(), 1, "Healer in singles should not branch");
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p2_active_mons[0].status.is_some())),
+                "Healer in singles should not cure the opposing Pokémon"
+            );
+        }
+
+        // ─── Moody ──────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn moody_produces_20_outcomes_on_zeroed_stats_and_never_touches_accuracy_evasion() {
+            let p1 = splash_mon(Species::Snorlax, Ability::Moody, None, None);
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None, None);
+            let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            state.p1_active_mons[0].entered_this_turn = false;
+            let outcomes = run(state);
+
+            let total_prob: f64 = outcomes.iter().map(|(_, p)| p).sum();
+            assert!((total_prob - 1.0).abs() < 1e-9);
+
+            // Exactly 20 distinct boost outcomes (5 raise × 4 lower)
+            let boosts_only: Vec<_> = outcomes.iter()
+                .filter_map(|(s, p)| if let MatchState::BattleState(bs) = s {
+                    Some((bs.p1_active_mons[0].boosts, *p))
+                } else { None })
+                .collect();
+            let unique: std::collections::HashSet<_> = boosts_only.iter().map(|(b, _)| *b).collect();
+            assert_eq!(unique.len(), 20, "Moody with all-zero boosts should produce 20 distinct outcomes");
+
+            for (boosts, p) in &boosts_only {
+                // Each has probability 1/20
+                assert!((p - 0.05).abs() < 0.005, "Each Moody outcome should have prob 1/20, got {p:.4}");
+                // Exactly one stat raised by +2, one lowered by -1
+                let raised: Vec<_> = (0..5).filter(|&i| boosts[i] == 2).collect();
+                let lowered: Vec<_> = (0..5).filter(|&i| boosts[i] == -1).collect();
+                assert_eq!(raised.len(), 1, "Moody should raise exactly one stat");
+                assert_eq!(lowered.len(), 1, "Moody should lower exactly one stat");
+                assert_ne!(raised[0], lowered[0], "Moody raised and lowered stat must differ");
+                // Gen VIII+: accuracy and evasion never touched
+                assert_eq!(boosts[5], 0, "Moody must not affect accuracy (Gen VIII+)");
+                assert_eq!(boosts[6], 0, "Moody must not affect evasion (Gen VIII+)");
+            }
+        }
+
+        // ─── Harvest ────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn harvest_restores_consumed_berry_50_percent_normally() {
+            let mut p1 = splash_mon(Species::Snorlax, Ability::Harvest, None, None);
+            p1.consumed_item = Some(Item::SitrusBerry);
+            // item slot is already Item::None (default)
+            let mut state = battle_state_from_lists(
+                vec![p1],
+                vec![],
+                vec![splash_mon(Species::Snorlax, Ability::None, None, None)],
+                vec![],
+            );
+            state.p1_active_mons[0].entered_this_turn = false;
+            let outcomes = run(state);
+
+            let restored: f64 = outcomes.iter()
+                .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].item == Item::SitrusBerry))
+                .map(|(_, p)| p).sum();
+            assert!((restored - 0.5).abs() < 0.005,
+                "Harvest should restore a Berry 50% of the time, got {restored:.4}");
+        }
+
+        #[test]
+        fn harvest_restores_berry_100_percent_in_sun() {
+            let mut p1 = splash_mon(Species::Snorlax, Ability::Harvest, None, None);
+            p1.consumed_item = Some(Item::SitrusBerry);
+            let mut state = battle_state_from_lists(
+                vec![p1],
+                vec![],
+                vec![splash_mon(Species::Snorlax, Ability::None, None, None)],
+                vec![],
+            );
+            state.p1_active_mons[0].entered_this_turn = false;
+            state.weather = Some(Weather::Sun);
+            let outcomes = run(state);
+
+            let restored: f64 = outcomes.iter()
+                .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].item == Item::SitrusBerry))
+                .map(|(_, p)| p).sum();
+            assert!((restored - 1.0).abs() < 0.005,
+                "Harvest should always restore a Berry in Sun, got {restored:.4}");
+        }
+
+        // ─── Hunger Switch ──────────────────────────────────────────────────────────
+
+        #[test]
+        fn hunger_switch_toggles_morpeko_to_hangry_after_one_turn() {
+            let p1 = splash_mon(Species::Morpeko, Ability::HungerSwitch, None, None);
+            let mut state = battle_state_from_lists(
+                vec![p1],
+                vec![],
+                vec![splash_mon(Species::Snorlax, Ability::None, None, None)],
+                vec![],
+            );
+            state.p1_active_mons[0].entered_this_turn = false;
+            let outcomes = run(state);
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].species == Species::MorpekoHangry)),
+                "Hunger Switch should toggle Morpeko to Hangry form at end of turn"
+            );
+        }
+
+        #[test]
+        fn hunger_switch_toggles_hangry_back_to_full_belly() {
+            let mut p1 = splash_mon(Species::Morpeko, Ability::HungerSwitch, None, None);
+            p1.species = Species::MorpekoHangry;
+            let mut state = battle_state_from_lists(
+                vec![p1],
+                vec![],
+                vec![splash_mon(Species::Snorlax, Ability::None, None, None)],
+                vec![],
+            );
+            state.p1_active_mons[0].entered_this_turn = false;
+            let outcomes = run(state);
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].species == Species::Morpeko)),
+                "Hunger Switch should toggle Hangry Morpeko back to Full Belly"
+            );
+        }
+
+        #[test]
+        fn hunger_switch_does_not_fire_while_terastallized() {
+            let p1 = splash_mon(Species::Morpeko, Ability::HungerSwitch, None, None);
+            let mut state = battle_state_from_lists(
+                vec![p1],
+                vec![],
+                vec![splash_mon(Species::Snorlax, Ability::None, None, None)],
+                vec![],
+            );
+            state.p1_active_mons[0].is_tera = true;
+            state.p1_active_mons[0].entered_this_turn = false;
+            let outcomes = run(state);
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].species == Species::Morpeko)),
+                "Hunger Switch must not toggle while Morpeko is Terastallized"
+            );
+        }
+
+        // ─── Aura Wheel ─────────────────────────────────────────────────────────────
+
+        #[test]
+        fn aura_wheel_is_electric_type_in_full_belly_form() {
+            // Electric is immune to Ground-type Pokémon. Garchomp (Dragon/Ground) should take
+            // 0 damage from an Electric Aura Wheel.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let p1 = aura_wheel_mon(Species::Morpeko);          // Full Belly → Electric
+            let p2 = splash_mon(Species::Garchomp, Ability::None, None, None);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let initial_hp = state.p2_active_mons[0].hp;
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p2_active_mons[0].hp == initial_hp)),
+                "Aura Wheel in Full Belly Mode should be Electric-type (immune to Garchomp)"
+            );
+        }
+
+        #[test]
+        fn aura_wheel_is_dark_type_in_hangry_form() {
+            // Dark is not immune to Ground. Garchomp should take normal damage.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let mut p1 = aura_wheel_mon(Species::Morpeko);
+            p1.species = Species::MorpekoHangry;                 // Hangry → Dark
+            let p2 = splash_mon(Species::Garchomp, Ability::None, None, None);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let initial_hp = state.p2_active_mons[0].hp;
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p2_active_mons[0].hp < initial_hp)),
+                "Aura Wheel in Hangry Mode should be Dark-type (deals damage to Ground-type)"
+            );
+        }
+
+        #[test]
+        fn aura_wheel_grants_plus_one_speed_on_hit() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let p1 = aura_wheel_mon(Species::Morpeko);
+            // Snorlax is Normal-type — not immune to Electric
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None, None);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].boosts[4] == 1)),
+                "Aura Wheel should grant +1 Speed to the user on hit"
+            );
+        }
+
+        #[test]
+        fn aura_wheel_fails_for_non_morpeko_user() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            // Give a non-Morpeko (Snorlax) the Aura Wheel move.
+            let p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex(), &move_dex(), Some(50),
+                Some([Some(PokemonMove::AuraWheel), None, None, None]),
+                None, Some(Ability::None), None, None, None, Some([0; 6]), None, false,
+            );
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None, None);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let initial_hp = state.p2_active_mons[0].hp;
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p2_active_mons[0].hp == initial_hp)),
+                "Aura Wheel should fail entirely when used by a non-Morpeko Pokémon"
+            );
+        }
+    }
+
+}
