@@ -1179,6 +1179,37 @@ fn possible_damage_outcomes_for_move(
             continue;
         }
 
+        // Queenly Majesty / Armor Tail / Dazzling: block any move with increased effective
+        // priority (after Prankster / Gale Wings boosts) from an opposing mon.
+        // Bypassed by Mold Breaker (TODO: implement when Mold Breaker is added).
+        // Exception: spread/field-targeting moves are not blocked (TODO for doubles).
+        let effective_priority = simulator_helpers::effective_move_priority(&next_state, &attacker, move_data);
+        let target_has_priority_block_ability =
+            !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+            && matches!(target.ability, Ability::QueenlyMajesty | Ability::ArmorTail | Ability::Dazzling);
+        if effective_priority > 0
+            && action.user_slot.player != target_slot.player
+            && target_has_priority_block_ability
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
+        // Prankster — Dark-type immunity (Gen VII+): opposing Dark-type targets are
+        // immune to moves that gained priority from Prankster. Ally Dark-types are
+        // unaffected. Mold Breaker does NOT bypass this immunity.
+        if attacker.ability == Ability::Prankster
+            && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
+            && matches!(move_data.category, MoveCategory::Status)
+            && action.user_slot.player != target_slot.player
+            && simulator_helpers::pokemon_has_type(&target, &PokemonType::Dark)
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
         let target_is_semi_invulnerable = target.volatiles.iter().any(|volatile| {
             matches!(
                 volatile,
@@ -1738,12 +1769,10 @@ fn queue_battle_commands_for_player(
                     continue;
                 };
 
-                let mut priority = move_dex.get(&move_name).map(|move_data| move_data.priority).unwrap_or(0);
-                if move_name == PokemonMove::GrassyGlide
-                    && simulator_helpers::pokemon_is_on_terrain(state, active_mon, &crate::dex_data::Terrain::GrassyTerrain)
-                {
-                    priority += 1;
-                }
+                // Store raw base priority only. Dynamic boosts (Grassy Glide, Prankster,
+                // Gale Wings) are computed at compare time via effective_move_priority so
+                // that mid-turn HP changes (e.g. Fake Out) are reflected correctly.
+                let priority = move_dex.get(&move_name).map(|move_data| move_data.priority).unwrap_or(0);
 
                 if a.terastallize {
                     action_queue.push(Action::TeraAction(TeraAction {
@@ -1762,7 +1791,7 @@ fn queue_battle_commands_for_player(
                     priority,
                     user_slot,
                     target_slot: a.target,
-                    quick_claw_active: false,
+                    moves_first: false,
                 }));
             }
             BattleCommand::Struggle { target } => {
@@ -1771,7 +1800,7 @@ fn queue_battle_commands_for_player(
                     priority: 0,
                     user_slot,
                     target_slot: *target,
-                    quick_claw_active: false,
+                    moves_first: false,
                 }));
             }
             BattleCommand::Pass => {}
@@ -2117,47 +2146,60 @@ pub fn simulate_turn(
     // Populate the action queue; may branch due to speed-tied send-outs
     let initial_branches = apply_player_commands_branching(state, p1_cmd, p2_cmd, move_dex);
 
-    // Quick Claw: 20% chance to act first within the same priority bracket.
-    // For each MoveAction whose user holds Quick Claw (and items aren't suppressed),
-    // branch independently into active (0.2) and inactive (0.8) variants.
+    // moves_first flag: combines Quick Claw (item, 20%) and Quick Draw (ability, 30%).
+    //
+    // Per-mon combined activation probability:
+    //   p_first = 1 − (1 − p_qc) × (1 − p_qd)
+    // A Quick-Claw-only mon gets 0.20; a Quick-Draw-only mon gets 0.30; both = 0.44.
+    //
+    // Each eligible MoveAction is branched independently (active vs inactive), and the
+    // two branches are weighted by p_first and (1 − p_first) respectively.
+    // coalesce_branches merges structurally identical outcomes afterward.
     let initial_branches: Vec<(MatchState, f64)> = initial_branches
         .into_iter()
         .flat_map(|(st, prob)| {
             let MatchState::BattleState(ref bs) = st else {
                 return vec![(st, prob)];
             };
-            // Collect indices of MoveActions in the queue whose users hold Quick Claw.
-            let quick_claw_indices: Vec<usize> = bs.action_queue.iter().enumerate()
+            // Collect (queue_index, p_first) for each eligible MoveAction.
+            let eligible: Vec<(usize, f64)> = bs.action_queue.iter().enumerate()
                 .filter_map(|(i, action)| {
                     if let Action::MoveAction(ma) = action {
-                        let user = simulator_helpers::get_pokemon_at_slot(bs, ma.user_slot);
-                        if let Some(mon) = user {
-                            if !simulator_helpers::items_are_suppressed(bs) && mon.item == Item::QuickClaw {
-                                return Some(i);
-                            }
-                        }
+                        let user = simulator_helpers::get_pokemon_at_slot(bs, ma.user_slot)?;
+                        let move_data = move_dex.get(&ma.move_name);
+                        let items_ok = !simulator_helpers::items_are_suppressed(bs);
+                        let abilities_ok = !simulator_helpers::pokemon_ability_is_suppressed(bs, user);
+
+                        let p_qc = if items_ok && user.item == Item::QuickClaw { 0.2 } else { 0.0 };
+                        let p_qd = if abilities_ok
+                            && user.ability == Ability::QuickDraw
+                            && move_data.map_or(false, |md| matches!(md.category, MoveCategory::Physical | MoveCategory::Special))
+                        { 0.3 } else { 0.0 };
+
+                        let p_first = 1.0 - (1.0 - p_qc) * (1.0 - p_qd);
+                        if p_first > 0.0 { Some((i, p_first)) } else { None }
+                    } else {
+                        None
                     }
-                    None
                 })
                 .collect();
-            if quick_claw_indices.is_empty() {
+            if eligible.is_empty() {
                 return vec![(st, prob)];
             }
-            // Expand independently: cartesian product of (true, false) for each holder.
-            // Each combination has probability prob * 0.2^k * 0.8^(n-k).
-            let n = quick_claw_indices.len();
+            // Expand independently: cartesian product of (active, inactive) for each holder.
+            let n = eligible.len();
             let total = 1usize << n;  // 2^n combinations
             let mut branches: Vec<(MatchState, f64)> = Vec::with_capacity(total);
             for mask in 0..total {
                 let mut branch = st.clone();
                 let MatchState::BattleState(ref mut bbs) = branch else { continue; };
                 let mut branch_prob = prob;
-                for (bit, &queue_idx) in quick_claw_indices.iter().enumerate() {
+                for (bit, &(queue_idx, p_first)) in eligible.iter().enumerate() {
                     let active = (mask >> bit) & 1 == 1;
                     if let Action::MoveAction(ref mut ma) = bbs.action_queue[queue_idx] {
-                        ma.quick_claw_active = active;
+                        ma.moves_first = active;
                     }
-                    branch_prob *= if active { 0.2 } else { 0.8 };
+                    branch_prob *= if active { p_first } else { 1.0 - p_first };
                 }
                 branches.push((branch, branch_prob));
             }

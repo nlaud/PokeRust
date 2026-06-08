@@ -551,6 +551,54 @@ pub(crate) fn effective_move_type(state: &BattleState, attacker: &PokemonState, 
     base
 }
 
+/// Compute the incremental priority boost contributed by terrain and abilities,
+/// *not* including the move's base priority. This separates "what is the base?"
+/// from "how much do we add?", so callers can supply their own base:
+///
+/// - [`effective_move_priority`] uses `move_data.priority` as the base (correct for
+///   gameplay — the QM block calls this during move execution).
+/// - `compare_action_order` uses the baked `MoveAction.priority` field as the base
+///   so that manually-constructed MoveActions in tests (which override `priority`)
+///   are respected; in production those fields are always equal to the dex value.
+fn effective_priority_boost(state: &BattleState, user: &PokemonState, move_data: &MoveData) -> i8 {
+    let mut boost = 0i8;
+
+    // Grassy Glide: +1 priority on Grassy Terrain.
+    if move_data.name == PokemonMove::GrassyGlide && pokemon_is_on_terrain(state, user, &Terrain::GrassyTerrain) {
+        boost += 1;
+    }
+
+    if !pokemon_ability_is_suppressed(state, user) {
+        // Prankster: status moves get +1 priority.
+        if user.ability == Ability::Prankster && matches!(move_data.category, MoveCategory::Status) {
+            boost += 1;
+        }
+
+        // Gale Wings: Flying-type moves get +1 priority while the user is at full HP.
+        if user.ability == Ability::GaleWings
+            && user.hp == user.stats[0].max(1)
+            && effective_move_type(state, user, move_data) == PokemonType::Flying
+        {
+            boost += 1;
+        }
+    }
+
+    boost
+}
+
+/// Compute the effective priority of a move for turn-order purposes, starting
+/// from the move's dex base priority (`move_data.priority`).
+///
+/// This is the canonical function for gameplay code that needs to check effective
+/// priority (e.g. the Queenly Majesty per-target block in `possible_damage_outcomes_for_move`).
+/// Turn ordering in `compare_action_order` uses the baked `MoveAction.priority` field
+/// as the base (via `effective_priority_boost`) rather than re-reading the dex, so
+/// that mid-turn HP changes (e.g. Fake Out removing a Gale Wings boost) are
+/// reflected correctly at compare time.
+pub(crate) fn effective_move_priority(state: &BattleState, user: &PokemonState, move_data: &MoveData) -> i8 {
+    move_data.priority + effective_priority_boost(state, user, move_data)
+}
+
 // ── Damage-calculation sub-helpers ────────────────────────────────────────────
 
 /// Apply SolarPower / OrichalcumPulse attack boosts.
@@ -1643,7 +1691,7 @@ pub fn abilities_are_suppressed(state: &BattleState) -> bool {
     any_pokemon_has_neutralizing_gas(state)
 }
 
-fn pokemon_ability_is_suppressed(state: &BattleState, mon: &PokemonState) -> bool {
+pub(crate) fn pokemon_ability_is_suppressed(state: &BattleState, mon: &PokemonState) -> bool {
     // Field-wide suppression via Neutralizing Gas (does not suppress NeutralizingGas itself).
     if abilities_are_suppressed(state) && mon.ability != Ability::NeutralizingGas {
         return true;
@@ -2113,7 +2161,7 @@ pub fn compare_action_order(
     action1: &Action,
     action2: &Action,
     state: &BattleState,
-    _move_dex: &std::collections::HashMap<PokemonMove, MoveData>,
+    move_dex: &std::collections::HashMap<PokemonMove, MoveData>,
 ) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
@@ -2126,21 +2174,50 @@ pub fn compare_action_order(
 
     match (action1, action2) {
         (Action::MoveAction(m1), Action::MoveAction(m2)) => {
-            if m1.priority != m2.priority {
-                return m2.priority.cmp(&m1.priority);
+            // Fetch users early — reused for effective priority, Stall, and speed checks.
+            let user1 = get_pokemon_at_slot(state, m1.user_slot);
+            let user2 = get_pokemon_at_slot(state, m2.user_slot);
+
+            // Effective priority: m.priority (baked from the dex at queue-build, or
+            // manually set in tests) plus dynamic boosts (Grassy Glide terrain,
+            // Prankster, Gale Wings) computed from live state so mid-turn HP changes
+            // (e.g. Fake Out dropping a Gale Wings user below full HP) are reflected.
+            // Using m.priority as the base (not move_data.priority) ensures test code
+            // that manually overrides priority on a MoveAction is still respected.
+            let ep1 = match (user1, move_dex.get(&m1.move_name)) {
+                (Some(u), Some(md)) => m1.priority + effective_priority_boost(state, u, md),
+                _ => m1.priority,
+            };
+            let ep2 = match (user2, move_dex.get(&m2.move_name)) {
+                (Some(u), Some(md)) => m2.priority + effective_priority_boost(state, u, md),
+                _ => m2.priority,
+            };
+            if ep1 != ep2 {
+                return ep2.cmp(&ep1);
             }
 
-            // Quick Claw: within the same integer-priority bracket, an active Quick Claw
-            // moves before an inactive one, regardless of Trick Room or speed.
-            match (m1.quick_claw_active, m2.quick_claw_active) {
+            // moves_first flag: set probabilistically at turn start for Quick Claw (20%)
+            // and Quick Draw (30%), combined into a single activation. An active flag
+            // always wins within the same effective-priority bracket.
+            match (m1.moves_first, m2.moves_first) {
                 (true, false) => return Ordering::Less,
                 (false, true) => return Ordering::Greater,
                 _ => {}
             }
 
-            let user1 = get_pokemon_at_slot(state, m1.user_slot);
-            let user2 = get_pokemon_at_slot(state, m2.user_slot);
+            // Stall: holder always moves last within its bracket, regardless of speed
+            // or Trick Room. Overridden only when moves_first is active (handled above).
+            if let (Some(p1), Some(p2)) = (user1, user2) {
+                let m1_stall = p1.ability == Ability::Stall && !pokemon_ability_is_suppressed(state, p1);
+                let m2_stall = p2.ability == Ability::Stall && !pokemon_ability_is_suppressed(state, p2);
+                match (m1_stall, m2_stall) {
+                    (true, false) => return Ordering::Greater,
+                    (false, true) => return Ordering::Less,
+                    _ => {}   // both or neither: fall through to speed
+                }
+            }
 
+            // Speed comparison and Trick Room.
             match (user1, user2) {
                 (Some(p1), Some(p2)) => {
                     let speed1 = effective_speed_for_slot(state, m1.user_slot, p1);
