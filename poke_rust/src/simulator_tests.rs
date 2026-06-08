@@ -26,6 +26,8 @@ mod tests {
         hit_probability,
         is_permutation,
         move_dex,
+        normalize_battle_outcomes,
+        outcomes_permutation,
         pokemon_dex,
         repeat_hit_distribution,
         run_single_turn,
@@ -122,7 +124,7 @@ mod tests {
 
             let expected_outcomes = vec![(MatchState::BattleState(expected_final_state), 1.0)];
 
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -550,7 +552,7 @@ mod tests {
             }
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -623,7 +625,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(outcome), 1.0));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -700,7 +702,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(outcome2), 0.5));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -777,7 +779,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(outcome2), 1.0 / 24.0));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -919,7 +921,7 @@ mod tests {
             }
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -1267,7 +1269,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(outcome), 1.0));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -1340,7 +1342,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(outcome), 1.0));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -1413,7 +1415,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(outcome), 1.0));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -1485,7 +1487,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(outcome), 1.0));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
     }
 
@@ -1564,7 +1566,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(expected_final_state), 0.8));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -1644,7 +1646,7 @@ mod tests {
             expected_outcomes.push((MatchState::BattleState(expected_final_state), (1.0 - 0.8)));
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -2291,7 +2293,7 @@ mod tests {
 
             println!("Got:{:?}", outcomes);
             println!("Expected:{:?}", expected_outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
     }
 
@@ -2395,7 +2397,7 @@ mod tests {
             }
 
             println!("{:?}", outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -2683,7 +2685,7 @@ mod tests {
 
             println!("Got:{:?}", outcomes);
             println!("Expected:{:?}", expected_outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -2843,7 +2845,7 @@ mod tests {
 
             println!("Got:{:?}", outcomes);
             println!("Expected:{:?}", expected_outcomes);
-            assert!(is_permutation(&outcomes, &expected_outcomes));
+            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
         }
 
         #[test]
@@ -13740,5 +13742,655 @@ mod tests {
         }
     }
 
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// On-contact reactive abilities + Attract / Disable moves
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod contact_reactive_abilities {
+    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{VolatileStatus, Weather};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simulator::{get_possible_commands_for_active_slot, simulate_turn};
+    use crate::simulator_helpers;
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn make_mon(
+        species: Species,
+        moves: [Option<PokemonMove>; 4],
+        ability: Ability,
+        gender: Option<crate::pokemon::PokemonGender>,
+    ) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut m = build_pokemon_state(
+            species, pdex, mdex, Some(50), Some(moves), gender, Some(ability),
+            None, None, None, None, None, false,
+        );
+        m.stats[5] = 1;
+        m
+    }
+
+    // ── Rough Skin ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn rough_skin_deals_1_8_damage_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::RoughSkin, None,
+        );
+        let attacker_max_hp = attacker.stats[0];
+        let expected_recoil = (attacker_max_hp as u32 / 8).max(1) as u16;
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let recoil_applied = outcomes.iter().all(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp - expected_recoil));
+        assert!(recoil_applied, "Rough Skin: attacker should lose 1/8 max HP on contact");
+    }
+
+    #[test]
+    fn rough_skin_no_damage_on_non_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Garchomp, [Some(PokemonMove::Earthquake), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::RoughSkin, None,
+        );
+        let attacker_max_hp = attacker.stats[0];
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp)),
+            "Rough Skin should not fire on Earthquake (non-contact)");
+    }
+
+    #[test]
+    fn rough_skin_blocked_by_magic_guard() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::MagicGuard, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::RoughSkin, None,
+        );
+        let attacker_max_hp = attacker.stats[0];
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp)),
+            "Magic Guard should block Rough Skin recoil");
+    }
+
+    // ── Flame Body ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn flame_body_30_percent_burn_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::FlameBody, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let burn_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status == Some(crate::dex_data::Status::Burn)) { *p } else { 0.0 }
+        ).sum();
+        assert!((burn_prob - 0.30).abs() < 0.05, "Flame Body should burn ~30%; got {burn_prob}");
+    }
+
+    #[test]
+    fn flame_body_no_burn_on_fire_type_attacker() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Charizard, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::FlameBody, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let burn_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status == Some(crate::dex_data::Status::Burn)) { *p } else { 0.0 }
+        ).sum();
+        assert!(burn_prob < 1e-9, "Fire-type attacker immune to Flame Body burn; got {burn_prob}");
+    }
+
+    // ── Static ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn static_ability_30_percent_paralysis_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::Static, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let para_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Paralysis))) { *p } else { 0.0 }
+        ).sum();
+        assert!((para_prob - 0.30).abs() < 0.05, "Static should paralyse ~30%; got {para_prob}");
+    }
+
+    // ── Poison Point ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn poison_point_30_percent_poison_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::PoisonPoint, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let poison_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Poison))) { *p } else { 0.0 }
+        ).sum();
+        assert!((poison_prob - 0.30).abs() < 0.05, "Poison Point should poison ~30%; got {poison_prob}");
+    }
+
+    // ── Spicy Spray ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn spicy_spray_100_percent_burn_on_non_contact_special() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Flamethrower), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Blissey, [Some(PokemonMove::Splash), None, None, None], Ability::SpicySpray, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let burn_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Burn))) { *p } else { 0.0 }
+        ).sum();
+        assert!((burn_prob - 1.0).abs() < 1e-9, "Spicy Spray should always burn attacker; got {burn_prob}");
+    }
+
+    // ── Gooey ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn gooey_lowers_attacker_speed_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::Gooey, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[4] == -1)),
+            "Gooey should drop attacker Speed by 1");
+    }
+
+    #[test]
+    fn gooey_no_drop_on_non_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Garchomp, [Some(PokemonMove::Earthquake), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::Gooey, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[4] == 0)),
+            "Gooey should not fire on non-contact move");
+    }
+
+    // ── Weak Armor ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn weak_armor_lowers_def_raises_spe_on_physical_hit() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Earthquake), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::WeakArmor, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].boosts[1] == -1 && bs.p2_active_mons[0].boosts[4] == 2)),
+            "Weak Armor: −1 Def / +2 Spe on physical hit");
+    }
+
+    #[test]
+    fn weak_armor_no_effect_on_special_move() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Flamethrower), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::WeakArmor, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].boosts == [0i8;7])),
+            "Weak Armor should not fire on special moves");
+    }
+
+    // ── Mummy ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mummy_replaces_attacker_ability_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::Gooey, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::Mummy, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].ability == Ability::Mummy)),
+            "Attacker's ability should become Mummy after contact");
+    }
+
+    #[test]
+    fn mummy_reverts_on_switch_out() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::Gooey, None,
+        );
+        attacker.stats[5] = 200;
+        let back_bench = make_mon(
+            Species::Blissey, [Some(PokemonMove::Splash), None, None, None], Ability::None, None,
+        );
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::Mummy, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![back_bench], vec![target], vec![]);
+        let t1 = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let (mummy_state, _) = t1.into_iter()
+            .find(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].ability == Ability::Mummy))
+            .expect("Mummy should be applied turn 1");
+
+        let t2 = simulate_turn(&mummy_state,
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let reverted = t2.iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_back_mons.iter().any(|m| m.ability == Ability::Gooey)));
+        assert!(reverted, "Mummy should revert when affected Pokémon switches out");
+    }
+
+    // ── Cursed Body ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn cursed_body_30_percent_disable_on_damaging_hit() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Flamethrower), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Blissey, [Some(PokemonMove::Splash), None, None, None], Ability::CursedBody, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let disable_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if
+                simulator_helpers::has_status_volatile(&bs.p1_active_mons[0], &VolatileStatus::Disable(PokemonMove::Struggle))
+            ) { *p } else { 0.0 }
+        ).sum();
+        assert!((disable_prob - 0.30).abs() < 0.05, "Cursed Body should Disable ~30%; got {disable_prob}");
+    }
+
+    // ── Cute Charm ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cute_charm_30_percent_attract_on_opposite_gender() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None],
+            Ability::None, Some(crate::pokemon::PokemonGender::Male),
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None],
+            Ability::CuteCharm, Some(crate::pokemon::PokemonGender::Female),
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let attract_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if
+                simulator_helpers::has_status_volatile(&bs.p1_active_mons[0], &VolatileStatus::Attract)
+            ) { *p } else { 0.0 }
+        ).sum();
+        assert!((attract_prob - 0.30).abs() < 0.05, "Cute Charm should Attract ~30% opposite-gender; got {attract_prob}");
+    }
+
+    #[test]
+    fn cute_charm_no_attract_on_same_gender() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None],
+            Ability::None, Some(crate::pokemon::PokemonGender::Male),
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None],
+            Ability::CuteCharm, Some(crate::pokemon::PokemonGender::Male),
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let attract_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if
+                simulator_helpers::has_status_volatile(&bs.p1_active_mons[0], &VolatileStatus::Attract)
+            ) { *p } else { 0.0 }
+        ).sum();
+        assert!(attract_prob < 1e-9, "Cute Charm should not attract same-gender attacker; got {attract_prob}");
+    }
+
+    // ── Attract move ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn attract_move_inflicts_infatuation_on_opposite_gender() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut user = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Attract), None, None, None],
+            Ability::None, Some(crate::pokemon::PokemonGender::Female),
+        );
+        user.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None],
+            Ability::None, Some(crate::pokemon::PokemonGender::Male),
+        );
+        let state = battle_state_from_lists(vec![user], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if
+            simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::Attract)
+        )), "Attract move should infatuate opposite-gender target");
+    }
+
+    #[test]
+    fn attract_move_fails_on_same_gender() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut user = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Attract), None, None, None],
+            Ability::None, Some(crate::pokemon::PokemonGender::Female),
+        );
+        user.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None],
+            Ability::None, Some(crate::pokemon::PokemonGender::Female),
+        );
+        let state = battle_state_from_lists(vec![user], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if
+            !simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::Attract)
+        )), "Attract should fail vs same-gender target");
+    }
+
+    #[test]
+    fn attract_volatile_causes_50_percent_fail_to_act() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        // P1 (female, fast) uses Attract turn 1, then Splash turn 2.
+        // P2 (male, faster than P1 in turn 2 so it acts after we re-assign speeds) uses Tackle.
+        // We set P2 faster so P2 moves first in turn 2 and hits P1 if not fail-to-acted.
+        let mut user = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Attract), Some(PokemonMove::Splash), None, None],
+            Ability::None, Some(crate::pokemon::PokemonGender::Female),
+        );
+        user.stats[5] = 200; // fast in turn 1 to use Attract first
+        let mut target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None],
+            Ability::None, Some(crate::pokemon::PokemonGender::Male),
+        );
+        target.stats[5] = 1;
+        // Turn 1: P1 uses Attract on P2 (P1 faster).
+        let state = battle_state_from_lists(vec![user], vec![], vec![target], vec![]);
+        let t1 = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let (attracted_state, _) = t1.into_iter()
+            .find(|(s, _)| matches!(s, MatchState::BattleState(bs) if
+                simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::Attract)))
+            .expect("Attract should have been applied turn 1");
+
+        // Capture P1's HP at the start of turn 2 (P2 couldn't hit in turn 1 — P1 was faster).
+        let p1_hp_before_t2 = if let MatchState::BattleState(ref bs) = attracted_state {
+            bs.p1_active_mons[0].hp
+        } else { panic!("expected BattleState") };
+
+        // Boost P2's speed so it moves first in turn 2 and hits P1 when not failed.
+        let attracted_state2 = if let MatchState::BattleState(mut bs) = attracted_state {
+            bs.p2_active_mons[0].stats[5] = 400;
+            MatchState::BattleState(bs)
+        } else { panic!() };
+
+        // Turn 2: P2 (attracted, now faster) tries Tackle; P1 uses Splash.
+        let outcomes2 = simulate_turn(&attracted_state2,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        // If P2 acts: P1's HP decreases. If P2 fails: P1's HP unchanged.
+        let act_prob: f64 = outcomes2.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp < p1_hp_before_t2) { *p } else { 0.0 }
+        ).sum();
+        let fail_prob: f64 = outcomes2.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == p1_hp_before_t2) { *p } else { 0.0 }
+        ).sum();
+        assert!((act_prob - 0.50).abs() < 0.05, "Attracted Pokémon should act ~50%; got {act_prob}");
+        assert!((fail_prob - 0.50).abs() < 0.05, "Attracted Pokémon should fail ~50%; got {fail_prob}");
+    }
+
+    // ── Disable move ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn disable_makes_last_used_move_unselectable() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let p1 = make_mon(
+            Species::Blissey, [Some(PokemonMove::Disable), None, None, None], Ability::None, None,
+        );
+        let mut p2 = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None],
+            Ability::None, None,
+        );
+        p2.stats[5] = 200; // P2 moves first (to set last_used_move via Tackle)
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let t1 = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let (t1_state, _) = t1.into_iter().next().expect("turn 1 outcome");
+
+        // Turn 2: P1 uses Disable.
+        let t2 = simulate_turn(&t1_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let (disabled_state, _) = t2.into_iter()
+            .find(|(s, _)| matches!(s, MatchState::BattleState(bs) if
+                simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::Disable(PokemonMove::Struggle))
+            ))
+            .expect("Disable volatile should be on P2 after turn 2");
+
+        if let MatchState::BattleState(ref bs) = disabled_state {
+            let cmds = get_possible_commands_for_active_slot(bs, Player::P2, 0, mdex, pdex);
+            let has_tackle = cmds.iter().any(|c| matches!(c,
+                BattleCommand::Attack(a) if bs.p2_active_mons[0].moves[a.move_slot] == Some(PokemonMove::Tackle)
+            ));
+            assert!(!has_tackle, "Disabled Tackle should not be selectable; cmds={:?}", cmds);
+            let has_splash = cmds.iter().any(|c| matches!(c,
+                BattleCommand::Attack(a) if bs.p2_active_mons[0].moves[a.move_slot] == Some(PokemonMove::Splash)
+            ));
+            assert!(has_splash, "Non-disabled Splash should still be selectable");
+        } else { panic!("Expected BattleState"); }
+    }
+
+    #[test]
+    fn disable_plus_choice_forces_struggle() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let p1 = make_mon(
+            Species::Blissey, [Some(PokemonMove::Disable), None, None, None], Ability::None, None,
+        );
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, pdex, mdex, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None, Some(Item::ChoiceBand),
+            None, None, None, false,
+        );
+        p2.stats[5] = 200;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let t1 = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let (t1_state, _) = t1.into_iter().next().expect("turn 1");
+
+        let t2 = simulate_turn(&t1_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let (disabled_state, _) = t2.into_iter()
+            .find(|(s, _)| matches!(s, MatchState::BattleState(bs) if
+                simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::Disable(PokemonMove::Struggle))
+            ))
+            .expect("Disable volatile should be present");
+
+        if let MatchState::BattleState(ref bs) = disabled_state {
+            let cmds = get_possible_commands_for_active_slot(bs, Player::P2, 0, mdex, pdex);
+            let has_struggle = cmds.iter().any(|c| matches!(c, BattleCommand::Struggle { .. }));
+            let has_tackle = cmds.iter().any(|c| matches!(c,
+                BattleCommand::Attack(a) if bs.p2_active_mons[0].moves.get(a.move_slot) == Some(&Some(PokemonMove::Tackle))
+            ));
+            assert!(has_struggle, "Disable + Choice → Struggle; cmds={:?}", cmds);
+            assert!(!has_tackle, "Tackle should be unavailable (disabled + locked)");
+        } else { panic!("Expected BattleState"); }
+    }
+
+    // ── Wandering Spirit ──────────────────────────────────────────────────────
+
+    #[test]
+    fn wandering_spirit_swaps_abilities_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::Gooey, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::WanderingSpirit, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if
+            bs.p1_active_mons[0].ability == Ability::WanderingSpirit
+            && bs.p2_active_mons[0].ability == Ability::Gooey
+        )), "Wandering Spirit should swap attacker ↔ holder abilities");
+    }
+
+    #[test]
+    fn wandering_spirit_on_gain_activates_drought() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::Drought, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::WanderingSpirit, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.weather == Some(Weather::Sun))),
+            "Holder gains Drought via Wandering Spirit → Sun should be set immediately");
+    }
 }
 

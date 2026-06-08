@@ -7,28 +7,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Abilities
 
-### On-contact reactive abilities — damage and status
-Fire when the holder is struck by a contact move. Requires a post-contact-hit hook.
-**HP damage to attacker:**
-- Aftermath — attacker loses ¼ max HP
-- Rough Skin — attacker loses 1/8 max HP
-
-**Status infliction (chance-based):**
-- Flame Body — 30% burn
-- Poison Point — 30% poison
-- Spicy Spray — burn (guaranteed)
-- Static — 30% paralysis
-
-**Stat / volatile changes:**
-- Cute Charm — 30% Infatuated (opposite gender only)
-- Cursed Body — 30% Disable the attacker's move
-- Gooey — lower attacker's Speed by 1 stage
-- Weak Armor — holder: −1 Defense, +2 Speed
-
-**Ability replacement:**
-- Mummy — overwrite attacker's ability with Mummy
-- Wandering Spirit — swap abilities with the attacker
-
 ### Priority manipulation abilities
 Modify when a move is queued relative to others at the same priority.
 - Armor Tail / Queenly Majesty — opponents can't use priority moves against holder's side
@@ -247,7 +225,6 @@ Moves that change HP without a turn-based volatile.
 ### Volatile status — move restriction
 Give the target a volatile that limits which moves it can use. Each requires a
 new VolatileStatus variant and end-of-turn countdown.
-- Disable — disable the last move used (4 turns)
 - Encore — force target to repeat last move (3 turns)
 - Taunt — only damaging moves allowed (3 turns)
 - Throat Chop — can't use sound-based moves (2 turns)
@@ -255,7 +232,6 @@ new VolatileStatus variant and end-of-turn countdown.
 
 ### Volatile status — ongoing debuffs
 Volatiles that apply recurring damage, debuffs, or delayed effects each turn.
-- Attract — 50% chance to not act; opposite gender only
 - Perish Song — all on-field Pokémon faint after 3 turns
 - Psychic Noise — Healing Prevented (2 turns)
 - Salt Cure — 1/8 HP per turn; ×2 for Water- and Steel-types

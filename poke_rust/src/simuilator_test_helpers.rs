@@ -169,6 +169,32 @@ pub fn confusion_turns(mon: &PokemonState) -> Option<u8> {
     })
 }
 
+/// Strip transient tracking fields (`last_used_move`, `original_ability`) from every
+/// Pokémon in every outcome state so that existing tests can compare states without
+/// caring about fields that were added for Disable/Mummy mechanics.
+pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(MatchState, f64)> {
+    fn strip(mon: &mut PokemonState) {
+        mon.last_used_move = None;
+        mon.original_ability = None;
+    }
+    outcomes.into_iter().map(|(state, prob)| {
+        let state = match state {
+            MatchState::BattleState(mut bs) => {
+                for mon in bs.p1_active_mons.iter_mut()
+                    .chain(bs.p2_active_mons.iter_mut())
+                    .chain(bs.p1_back_mons.iter_mut())
+                    .chain(bs.p2_back_mons.iter_mut())
+                {
+                    strip(mon);
+                }
+                MatchState::BattleState(bs)
+            }
+            other => other,
+        };
+        (state, prob)
+    }).collect()
+}
+
 pub fn run_single_turn(
     state: &MatchState,
     p1_cmd: &crate::battle::PlayerCommand,
@@ -177,6 +203,15 @@ pub fn run_single_turn(
     pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>,
 ) -> Vec<(MatchState, f64)> {
     simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1)
+}
+
+/// Compare two outcome vectors for permutation-equality after stripping transient tracking
+/// fields (`last_used_move`, `original_ability`) from all states in both sides.
+/// Use this instead of `is_permutation` whenever comparing `Vec<(MatchState, f64)>`.
+pub fn outcomes_permutation(actual: &[(MatchState, f64)], expected: &[(MatchState, f64)]) -> bool {
+    let norm_a = normalize_battle_outcomes(actual.to_vec());
+    let norm_e = normalize_battle_outcomes(expected.to_vec());
+    is_permutation(&norm_a, &norm_e)
 }
 
 pub fn damage_distribution(outcomes: &[(MatchState, f64)], initial_hp: u16) -> HashMap<u16, f64> {

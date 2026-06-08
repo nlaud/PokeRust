@@ -110,6 +110,10 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
                     VolatileStatus::ChoiceLock(move_name.clone()), 0,
                 ));
             }
+            // Track the last move used (for Disable targeting); Struggle is excluded.
+            if *move_name != PokemonMove::Struggle {
+                mon.last_used_move = Some(move_name.clone());
+            }
         }
     }
 }
@@ -495,6 +499,11 @@ fn apply_single_hit_branch(
             outcomes.push((sec_bs, branch_probability * endure_prob * sec_prob));
         }
     }
+
+    // Fire reactive-ability effects on the holder (target_slot) caused by the attacker's hit.
+    outcomes = simulator_helpers::apply_contact_hit_reactions(
+        outcomes, target_slot, attack_slot, move_name, move_data, damage,
+    );
 
     outcomes
 }
@@ -1005,6 +1014,40 @@ fn possible_damage_outcomes_for_move(
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
     }
 
+    // Attract move: apply infatuation to the target.
+    if move_name == PokemonMove::Attract {
+        let target_slot = target_slots[0];
+        let applied = simulator_helpers::try_apply_attract(&mut next_state, action.user_slot, target_slot);
+        if applied {
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+            let has_confusion = confusion_self_hit_outcomes.is_some();
+            let mut result = Vec::new();
+            if let Some(ref c) = confusion_self_hit_outcomes {
+                for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+            }
+            result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+            return simulator_helpers::coalesce_branches(result);
+        }
+        return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+    }
+
+    // Disable move: disable the target's last-used move for 4 turns.
+    if move_name == PokemonMove::Disable {
+        let target_slot = target_slots[0];
+        let applied = simulator_helpers::try_apply_disable(&mut next_state, action.user_slot, target_slot);
+        if applied {
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+            let has_confusion = confusion_self_hit_outcomes.is_some();
+            let mut result = Vec::new();
+            if let Some(ref c) = confusion_self_hit_outcomes {
+                for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+            }
+            result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+            return simulator_helpers::coalesce_branches(result);
+        }
+        return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+    }
+
     // Calculate targets multiplier (0.75x for 2+ targets, 1.0x for 1 target)
     let targets_mult = simulator_helpers::damage_targets_multiplier(target_slots.len());
 
@@ -1028,7 +1071,7 @@ fn possible_damage_outcomes_for_move(
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
 
-        let mut all_outcomes: Vec<(MatchState, f64)> = resolve_multihit_move_for_target(
+        let all_outcomes: Vec<(MatchState, f64)> = resolve_multihit_move_for_target(
             &next_state,
             &attacker,
             target_slot,
@@ -1104,6 +1147,15 @@ fn possible_damage_outcomes_for_move(
     if matches!(attacker.status, Some(Status::Paralysis)) && attacker.ability != Ability::Limber {
         par_fail_prob = 0.125;
     }
+
+    // Attract: 50% chance to fail to act when infatuated.
+    let attract_fail_prob: f64 = if simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::Attract)
+        && attacker.ability != Ability::Oblivious
+    {
+        0.50
+    } else {
+        0.0
+    };
 
     // Calculate hit/miss and damage outcomes for each target independently.
     // For spread moves this creates independent miss branches per target.
@@ -1378,8 +1430,19 @@ fn possible_damage_outcomes_for_move(
         final_outcomes.push((MatchState::BattleState(status_fail_state), status_fail_prob));
     }
 
+    // Attract fail branch (infatuated; consumes PP, does nothing)
+    if attract_fail_prob > 0.0 {
+        let mut fail_state = pre_move_state.clone();
+        if let Some(idx) = pp_index {
+            if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                if let Some(pp) = mon.move_pp.get_mut(idx) { *pp = pp.saturating_sub(1); }
+            }
+        }
+        final_outcomes.push((MatchState::BattleState(fail_state), attract_fail_prob));
+    }
+
     // Scale normal outcomes by success probability (1 - combined_fail_prob)
-    let combined_fail_prob = par_fail_prob + status_fail_prob;
+    let combined_fail_prob = par_fail_prob + status_fail_prob + attract_fail_prob;
     let mut success_scale = (1.0 - combined_fail_prob).max(0.0);
     if confusion_self_hit_outcomes.is_some() {
         success_scale *= 0.5;
@@ -1609,6 +1672,13 @@ fn generate_commands_for_active(
 
         // Moves with 0 PP are not selectable.
         if mon.move_pp.get(i).copied().unwrap_or(0) == 0 { continue; }
+
+        // Disabled moves are not selectable (Disable volatile carries the blocked move name).
+        let is_disabled = mon.volatiles.iter().any(|v| matches!(
+            v,
+            crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Disable(m), _) if m == move_name
+        ));
+        if is_disabled { continue; }
 
         let target_type = move_dex.get(move_name).map(|d| &d.target).unwrap_or(&MoveTarget::Normal);
 

@@ -119,6 +119,9 @@ pub struct PokemonState{
 
     pub last_move_failed: bool,//For stomping tantrum
 
+    pub original_ability: Option<Ability>,
+    pub last_used_move: Option<PokemonMove>,
+
     pub evs: [u8; 6],
     pub ivs: [u8; 6],
 }
@@ -398,7 +401,7 @@ pub fn build_pokemon_state(
         status: None, volatiles: Vec::new(),
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,
-        last_move_failed: false, evs, ivs,
+        last_move_failed: false, original_ability: None, last_used_move: None, evs, ivs,
     }
 }
 
