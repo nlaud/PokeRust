@@ -57,8 +57,10 @@ pub struct MoveAction{
     pub priority: i8,
     pub user_slot: FieldSlot,
     pub target_slot: Option<FieldSlot>,
-    /// True when Quick Claw activated this turn for this action (20% chance, decided at turn start).
-    pub quick_claw_active: bool,
+    /// True when Quick Claw (20%) or Quick Draw (30%) activated this turn.
+    /// Probability is combined as 1 − (1−p_qc)(1−p_qd) per holder; decided at turn start.
+    /// A mon with only Quick Claw retains the same 20% chance as before.
+    pub moves_first: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

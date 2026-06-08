@@ -7123,14 +7123,14 @@ mod tests {
                     priority: 0,
                     user_slot: FieldSlot { player: Player::P1, slot_index: 0 },
                     target_slot: None,
-                    quick_claw_active: false,
+                    moves_first: false,
                 });
                 let action_p2 = Action::MoveAction(MoveAction {
                     move_name: PokemonMove::Splash,
                     priority: 0,
                     user_slot: FieldSlot { player: Player::P2, slot_index: 0 },
                     target_slot: None,
-                    quick_claw_active: false,
+                    moves_first: false,
                 });
 
                 let base_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &state, &move_dex);
@@ -8379,7 +8379,7 @@ mod tests {
                 priority,
                 user_slot: FieldSlot { player, slot_index: 0 },
                 target_slot: None,
-                quick_claw_active: false,
+                moves_first: false,
             })
         }
 
@@ -14391,6 +14391,476 @@ mod contact_reactive_abilities {
             mdex, pdex, false, 1);
         assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.weather == Some(Weather::Sun))),
             "Holder gains Drought via Wandering Spirit → Sun should be set immediately");
+    }
+}
+
+// ── Priority manipulation abilities ────────────────────────────────────────────
+//
+// Turn-order probe pattern: both mons at hp=1/stats[0]=1 with Tackle.
+// Whoever goes first KOs the other → observable as GameOverState { winner }.
+// Paralysis-fail probe: P1 at high HP with Thunder Wave, P2 at high HP with Tackle;
+// if Prankster fires → Thunder Wave goes first → P2 paralyzed → 12.5% fail → P1 undamaged.
+mod priority_abilities {
+    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::pokemon::{build_pokemon_state, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    /// Build a minimal test Pokémon. Speed defaults to 1; override with mon.stats[5] = N.
+    fn make_mon(
+        species: Species,
+        ability: Ability,
+        moves: [Option<PokemonMove>; 4],
+        item: Option<Item>,
+    ) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut m = build_pokemon_state(
+            species, pdex, mdex, Some(50), Some(moves), None,
+            Some(ability), None, item, None, None, None, false,
+        );
+        m.stats[5] = 1; // very slow by default; override for fast mons
+        m
+    }
+
+    /// Sum probability of branches where P1 wins.
+    fn p1_win_prob(outcomes: &[(MatchState, f64)]) -> f64 {
+        outcomes.iter().filter_map(|(s, p)| {
+            if let MatchState::GameOverState { winner: Player::P1 } = s { Some(p) } else { None }
+        }).sum()
+    }
+
+    /// Sum probability of branches where P2 wins.
+    fn p2_win_prob(outcomes: &[(MatchState, f64)]) -> f64 {
+        outcomes.iter().filter_map(|(s, p)| {
+            if let MatchState::GameOverState { winner: Player::P2 } = s { Some(p) } else { None }
+        }).sum()
+    }
+
+    /// Probability that P1's current HP equals `initial_hp` across all branches.
+    fn p1_undamaged_prob(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes.iter().filter_map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p1_active_mons[0].hp == initial_hp { Some(p) } else { None }
+            } else { None }
+        }).sum()
+    }
+
+    fn run(p1: PokemonState, p2: PokemonState) -> Vec<(MatchState, f64)> {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        )
+    }
+
+    // ── Prankster ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn prankster_boosts_status_move_priority() {
+        // Slow Prankster Snorlax with Thunder Wave vs fast Normal-type Snorlax with Tackle.
+        // Thunder Wave (status) gets +1 priority → fires before Tackle → P2 paralyzed.
+        // P2's Tackle then fails 12.5% of the time due to paralysis → P1 survives (undamaged).
+        // Without Prankster boost: P2 goes first → Tackle always lands → P1 always damaged.
+        // Note: P2 must NOT be Electric-type (Electric-types are immune to Thunder Wave).
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+
+        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+            [Some(PokemonMove::ThunderWave), None, None, None], None);
+        // Keep p1 at full HP (high enough to survive a Tackle from P2)
+        let p1_initial_hp = p1.hp;
+
+        let mut p2 = make_mon(Species::Snorlax, Ability::None,   // Normal-type, not Electric
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.stats[5] = 999; // very fast
+
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        // Some branches where P1 is undamaged (P2's paralysis caused a fail).
+        // This is ONLY possible if Thunder Wave fired first (Prankster +1 priority),
+        // then P2 rolled a paralysis fail (12.5%).
+        let undamaged = p1_undamaged_prob(&outcomes, p1_initial_hp);
+        assert!(
+            undamaged > 0.05,
+            "Prankster should give Thunder Wave +1 priority so it fires before Tackle; \
+             some branches should have P2 paralysis-failing (12.5%). Got undamaged prob = {undamaged:.3}"
+        );
+    }
+
+    #[test]
+    fn prankster_does_not_boost_damaging_moves() {
+        // Slow Prankster Snorlax uses Tackle (NOT a status move) vs fast Electrode.
+        // Tackle gets NO priority boost → P2 (faster) always goes first → P1 always damaged.
+        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        let p1_initial_hp = p1.hp;
+
+        let mut p2 = make_mon(Species::Electrode, Ability::None,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.stats[5] = 999;
+
+        let outcomes = run(p1, p2);
+
+        let undamaged = p1_undamaged_prob(&outcomes, p1_initial_hp);
+        assert!(
+            undamaged < 0.01,
+            "Prankster must not boost Tackle (damaging); P2 should always go first. \
+             Undamaged prob = {undamaged:.3}"
+        );
+    }
+
+    #[test]
+    fn prankster_thunder_wave_blocked_by_dark_type() {
+        // Prankster Thunder Wave fires first (+1 priority) but the target is Dark-type —
+        // Dark-types are immune to Prankster-boosted status moves (Gen VII+).
+        // P2 is never paralyzed → P2's Tackle always lands → P1 always damaged.
+        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+            [Some(PokemonMove::ThunderWave), None, None, None], None);
+        let p1_initial_hp = p1.hp;
+
+        let mut p2 = make_mon(Species::Umbreon, Ability::None, // Umbreon is Dark-type
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.stats[5] = 999;
+
+        let outcomes = run(p1, p2);
+
+        let undamaged = p1_undamaged_prob(&outcomes, p1_initial_hp);
+        assert!(
+            undamaged < 0.01,
+            "Dark-type should be immune to Prankster Thunder Wave; P2 should never be \
+             paralyzed so P1 is always damaged. Undamaged prob = {undamaged:.3}"
+        );
+    }
+
+    #[test]
+    fn prankster_thunder_wave_hits_non_dark_type() {
+        // Control test: P2 is Normal-type (neither Dark nor Electric).
+        // Prankster Thunder Wave fires first (+1 priority) → P2 paralyzed →
+        // some branches where P2's paralysis fails (12.5%) → P1 undamaged.
+        // Note: P2 must NOT be Electric (immune to TW) or Dark (immune to Prankster).
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+
+        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+            [Some(PokemonMove::ThunderWave), None, None, None], None);
+        let p1_initial_hp = p1.hp;
+
+        let mut p2 = make_mon(Species::Snorlax, Ability::None,  // Normal-type: not Dark, not Electric
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.stats[5] = 999;
+
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        let undamaged = p1_undamaged_prob(&outcomes, p1_initial_hp);
+        assert!(
+            undamaged > 0.05,
+            "Non-Dark-type should NOT be immune to Prankster Thunder Wave; \
+             some paralysis-fail branches expected. Got undamaged prob = {undamaged:.3}"
+        );
+    }
+
+    // ── Gale Wings ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn gale_wings_gives_flying_moves_priority_at_full_hp() {
+        // Slow Gale Wings mon at FULL HP (hp = stats[0] = 1) uses Gust (Flying).
+        // Gust gets +1 priority → fires first → KOs P2 (also at 1 HP) → P1 wins 100%.
+        let mut p1 = make_mon(Species::Snorlax, Ability::GaleWings,
+            [Some(PokemonMove::Gust), None, None, None], None);
+        p1.hp = 1;
+        p1.stats[0] = 1; // max HP = 1, so p1 is at "full HP"
+
+        let mut p2 = make_mon(Species::Electrode, Ability::None,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.hp = 1;
+        p2.stats[0] = 1;
+        p2.stats[5] = 999; // fast, so it wins without Gale Wings
+
+        let outcomes = run(p1, p2);
+
+        let p1_wins = p1_win_prob(&outcomes);
+        assert!(
+            (p1_wins - 1.0).abs() < 0.01,
+            "Gale Wings at full HP should give Gust +1 priority → P1 always goes first. \
+             P1 win prob = {p1_wins:.3}"
+        );
+    }
+
+    #[test]
+    fn gale_wings_inactive_when_not_at_full_hp() {
+        // Same setup but P1 is at 1 HP with max HP = 100 → NOT full HP → no Gale Wings.
+        // P2 (faster) goes first → KOs P1 → P2 wins 100%.
+        let mut p1 = make_mon(Species::Snorlax, Ability::GaleWings,
+            [Some(PokemonMove::Gust), None, None, None], None);
+        p1.hp = 1;
+        p1.stats[0] = 100; // max HP 100, current 1 → NOT full HP
+
+        let mut p2 = make_mon(Species::Electrode, Ability::None,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.hp = 1;
+        p2.stats[0] = 1;
+        p2.stats[5] = 999;
+
+        let outcomes = run(p1, p2);
+
+        let p2_wins = p2_win_prob(&outcomes);
+        assert!(
+            (p2_wins - 1.0).abs() < 0.01,
+            "Gale Wings should be inactive below full HP; P2 should always go first. \
+             P2 win prob = {p2_wins:.3}"
+        );
+    }
+
+    #[test]
+    fn gale_wings_does_not_boost_non_flying_moves() {
+        // Slow Gale Wings mon at full HP uses Tackle (Normal type, not Flying).
+        // No priority boost → P2 (faster) goes first → P2 wins 100%.
+        let mut p1 = make_mon(Species::Snorlax, Ability::GaleWings,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p1.hp = 1;
+        p1.stats[0] = 1;
+
+        let mut p2 = make_mon(Species::Electrode, Ability::None,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.hp = 1;
+        p2.stats[0] = 1;
+        p2.stats[5] = 999;
+
+        let outcomes = run(p1, p2);
+
+        let p2_wins = p2_win_prob(&outcomes);
+        assert!(
+            (p2_wins - 1.0).abs() < 0.01,
+            "Gale Wings must only boost Flying-type moves; Tackle should get no boost. \
+             P2 win prob = {p2_wins:.3}"
+        );
+    }
+
+    // ── Queenly Majesty / Armor Tail / Dazzling ────────────────────────────
+
+    #[test]
+    fn queenly_majesty_blocks_priority_moves() {
+        // P1 uses Quick Attack (+1 priority) into a P2 with Queenly Majesty.
+        // The move should be blocked entirely — P2 takes no damage.
+        let mut p1 = make_mon(Species::Electrode, Ability::None,
+            [Some(PokemonMove::QuickAttack), None, None, None], None);
+        p1.stats[5] = 999;
+        let p2 = make_mon(Species::Snorlax, Ability::QueenlyMajesty,
+            [Some(PokemonMove::Splash), None, None, None], None);
+        let p2_initial_hp = p2.hp;
+
+        let outcomes = run(p1, p2);
+
+        let p2_always_undamaged = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].hp == p2_initial_hp
+            } else { true }
+        });
+        assert!(p2_always_undamaged, "Queenly Majesty should block Quick Attack (+1 priority) entirely");
+    }
+
+    #[test]
+    fn queenly_majesty_does_not_block_normal_priority() {
+        // P1 uses Tackle (priority 0) into P2 with Queenly Majesty.
+        // Normal-priority moves are NOT blocked → P2 takes damage in all branches.
+        let mut p1 = make_mon(Species::Electrode, Ability::None,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p1.stats[5] = 999;
+        let p2 = make_mon(Species::Snorlax, Ability::QueenlyMajesty,
+            [Some(PokemonMove::Splash), None, None, None], None);
+        let p2_initial_hp = p2.hp;
+
+        let outcomes = run(p1, p2);
+
+        let p2_always_damaged = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].hp < p2_initial_hp
+            } else { true }
+        });
+        assert!(p2_always_damaged,
+            "Queenly Majesty must not block priority-0 moves; P2 should always take damage");
+    }
+
+    #[test]
+    fn queenly_majesty_blocks_prankster_boosted_move() {
+        // P1 slow Prankster uses Growl (status → effective priority +1 via Prankster).
+        // P2 has Queenly Majesty → the boosted status move is blocked (effective priority > 0).
+        // Result: P2's Defense is NOT lowered in any branch.
+        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+            [Some(PokemonMove::Growl), None, None, None], None);
+        // Slow, so without Prankster Growl priority 0 → P2 goes first anyway (doesn't matter here)
+        let p2 = make_mon(Species::Snorlax, Ability::QueenlyMajesty,
+            [Some(PokemonMove::Splash), None, None, None], None);
+
+        let outcomes = run(p1, p2);
+
+        // Growl lowers Attack by 1 stage. If QM blocked it, P2's Attack boosts stay at 0.
+        let p2_never_debuffed = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].boosts[0] == 0 // Attack boost index 0, should be 0 (not -1)
+            } else { true }
+        });
+        assert!(p2_never_debuffed,
+            "Queenly Majesty should block Prankster-boosted Growl (effective priority +1); \
+             P2's Attack should not be lowered");
+    }
+
+    // ── Quick Draw ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn quick_draw_activates_30_percent() {
+        // Slow Quick Draw mon (P1, speed=1) vs fast mon (P2, speed=999), both at 1 HP.
+        // Quick Draw fires 30% → P1 goes first → KOs P2 → P1 wins.
+        // P1-win probability should be ≈ 0.30.
+        let mut p1 = make_mon(Species::Snorlax, Ability::QuickDraw,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p1.hp = 1;
+        p1.stats[0] = 1;
+
+        let mut p2 = make_mon(Species::Electrode, Ability::None,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.hp = 1;
+        p2.stats[0] = 1;
+        p2.stats[5] = 999;
+
+        let outcomes = run(p1, p2);
+
+        let p1_wins = p1_win_prob(&outcomes);
+        assert!(
+            (p1_wins - 0.30).abs() < 0.01,
+            "Quick Draw should give slow mon a 30% chance to act first. Got {p1_wins:.3}"
+        );
+    }
+
+    #[test]
+    fn quick_draw_does_not_boost_status_moves() {
+        // Quick Draw applies only to damaging moves. Thunder Wave (status) should not
+        // trigger Quick Draw → slow P1 never goes first → P2 (faster) always wins.
+        let mut p1 = make_mon(Species::Snorlax, Ability::QuickDraw,
+            [Some(PokemonMove::ThunderWave), None, None, None], None);
+        p1.hp = 1;
+        p1.stats[0] = 1;
+
+        let mut p2 = make_mon(Species::Electrode, Ability::None,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.hp = 1;
+        p2.stats[0] = 1;
+        p2.stats[5] = 999;
+
+        let outcomes = run(p1, p2);
+
+        // Thunder Wave can't KO, so P2 (faster with Tackle) should always KO P1.
+        let p2_wins = p2_win_prob(&outcomes);
+        assert!(
+            (p2_wins - 1.0).abs() < 0.01,
+            "Quick Draw must not activate for status moves; P2 should always go first. \
+             P2 win prob = {p2_wins:.3}"
+        );
+    }
+
+    #[test]
+    fn quick_draw_does_not_cross_priority_brackets() {
+        // Slow Quick Draw mon with Tackle (priority 0) vs fast mon with Quick Attack (+1).
+        // Even if Quick Draw activates, it cannot beat a +1 priority move → P2 always first.
+        let mut p1 = make_mon(Species::Snorlax, Ability::QuickDraw,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p1.hp = 1;
+        p1.stats[0] = 1;
+
+        let mut p2 = make_mon(Species::Pikachu, Ability::None,
+            [Some(PokemonMove::QuickAttack), None, None, None], None);
+        p2.hp = 1;
+        p2.stats[0] = 1;
+        p2.stats[5] = 999;
+
+        let outcomes = run(p1, p2);
+
+        let p2_wins = p2_win_prob(&outcomes);
+        assert!(
+            (p2_wins - 1.0).abs() < 0.01,
+            "Quick Draw cannot reorder across priority brackets; +1 Quick Attack should \
+             always beat priority-0 Tackle. P2 win prob = {p2_wins:.3}"
+        );
+    }
+
+    // ── Stall ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stall_forces_holder_to_move_last() {
+        // Fast Stall mon (P1, speed=999) vs slow mon (P2, speed=1), both at 1 HP.
+        // Without Stall: P1 (faster) would go first → P1 wins.
+        // With Stall: P1 goes LAST within its priority bracket → P2 (slower) goes first
+        //             → P2's Tackle KOs P1 → P2 wins 100%.
+        let mut p1 = make_mon(Species::Snorlax, Ability::Stall,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p1.hp = 1;
+        p1.stats[0] = 1;
+        p1.stats[5] = 999; // fast, but Stall forces last
+
+        let mut p2 = make_mon(Species::Snorlax, Ability::None,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.hp = 1;
+        p2.stats[0] = 1;
+        // p2.stats[5] = 1 (default, very slow)
+
+        let outcomes = run(p1, p2);
+
+        let p2_wins = p2_win_prob(&outcomes);
+        assert!(
+            (p2_wins - 1.0).abs() < 0.01,
+            "Stall should force the faster holder to move last; slow P2 should always go \
+             first and win. P2 win prob = {p2_wins:.3}"
+        );
+    }
+
+    #[test]
+    fn two_stall_users_fall_back_to_speed() {
+        // Both mons have Stall, both at 1 HP. The Stall-last tie-break is a wash (both
+        // Stall), so turn order falls back to normal Speed comparison → P1 (faster) wins.
+        let mut p1 = make_mon(Species::Snorlax, Ability::Stall,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p1.hp = 1;
+        p1.stats[0] = 1;
+        p1.stats[5] = 999; // faster
+
+        let mut p2 = make_mon(Species::Snorlax, Ability::Stall,
+            [Some(PokemonMove::Tackle), None, None, None], None);
+        p2.hp = 1;
+        p2.stats[0] = 1;
+        // p2.stats[5] = 1 (default, slower)
+
+        let outcomes = run(p1, p2);
+
+        let p1_wins = p1_win_prob(&outcomes);
+        assert!(
+            (p1_wins - 1.0).abs() < 0.01,
+            "Two Stall users should fall back to Speed; faster P1 should always win. \
+             P1 win prob = {p1_wins:.3}"
+        );
     }
 }
 
