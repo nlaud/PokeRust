@@ -122,6 +122,15 @@ pub struct PokemonState{
     pub original_ability: Option<Ability>,
     pub last_used_move: Option<PokemonMove>,
 
+    /// Generic once-per-battle flag for abilities that fire only on first entry
+    /// (e.g. Supersweet Syrup, Intrepid Sword). Persists across switch-outs — a volatile
+    /// would be wiped by `clear_pokemon_for_switch_out`.
+    pub one_time_ability_used: bool,
+
+    /// Saved pre-transform snapshot for Imposter / Transform revert. Boxed to avoid
+    /// an infinite-size struct (recursive types require indirection in Rust).
+    pub pre_transform: Option<Box<PokemonState>>,
+
     pub evs: [u8; 6],
     pub ivs: [u8; 6],
 }
@@ -401,7 +410,8 @@ pub fn build_pokemon_state(
         status: None, volatiles: Vec::new(),
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,
-        last_move_failed: false, original_ability: None, last_used_move: None, evs, ivs,
+        last_move_failed: false, original_ability: None, last_used_move: None,
+        one_time_ability_used: false, pre_transform: None, evs, ivs,
     }
 }
 

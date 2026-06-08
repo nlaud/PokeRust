@@ -365,4 +365,3 @@ More architecturally significant; each likely needs its own research pass.
 - Shell Side Arm — use whichever calculation (physical or special) deals more damage; 20% poison
 - Smack Down — hits airborne targets; give them Landed status (grounded, loses Flying immunity)
 - Substitute — lose ¼ max HP to create a substitute that absorbs incoming damage
-- Transform — become an exact copy of the target (all stats, moves, and type except HP)
