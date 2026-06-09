@@ -1173,6 +1173,32 @@ fn possible_damage_outcomes_for_move(
         0.0
     };
 
+    // Damp: any active Pokémon on either side with unsuppressed Damp causes explosive
+    // moves to fail entirely. The user does NOT faint or take damage.
+    // Blast Burn / Powder / Pollen Puff / Shell Trap are NOT explosive and are unaffected.
+    // Mold Breaker: TODO
+    let is_explosive_move = matches!(
+        move_name,
+        PokemonMove::SelfDestruct
+            | PokemonMove::Explosion
+            | PokemonMove::MindBlown
+            | PokemonMove::MistyExplosion
+    );
+    if is_explosive_move {
+        let damp_on_field = next_state
+            .p1_active_mons
+            .iter()
+            .chain(next_state.p2_active_mons.iter())
+            .filter(|mon| !mon.fainted)
+            .any(|mon| {
+                !simulator_helpers::pokemon_ability_is_suppressed(&next_state, mon)
+                    && mon.ability == Ability::Damp
+            });
+        if damp_on_field {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
     // Calculate hit/miss and damage outcomes for each target independently.
     // For spread moves this creates independent miss branches per target.
     let mut per_target_outcomes: Vec<(FieldSlot, Vec<(u16, bool, bool, f64)>)> = Vec::new();
@@ -1243,7 +1269,62 @@ fn possible_damage_outcomes_for_move(
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
         }
-        
+
+        // Bulletproof: immune to all ball and bomb moves (MoveFlag::Bullet).
+        // Blocks even an ally's Pollen Puff — no ally exemption.
+        // Mold Breaker: TODO
+        if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Bullet)
+            && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+            && target.ability == Ability::Bulletproof
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
+        // Soundproof: immune to sound-based moves (MoveFlag::Sound).
+        // The holder is NOT immune to its own sound moves (Gen VIII+ / Champions behaviour).
+        // Mold Breaker: TODO
+        if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Sound)
+            && action.user_slot != *target_slot
+            && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+            && target.ability == Ability::Soundproof
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
+        // Overcoat: immune to powder/spore moves (MoveFlag::Powder).
+        // is_immune_to_powder also covers Grass-type and Safety Goggles, which is correct
+        // for a general powder-immunity gate (mirrors the Rage Powder redirect logic).
+        // Weather-damage immunity is handled separately in apply_weather_residual.
+        // Mold Breaker: TODO
+        if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Powder)
+            && simulator_helpers::is_immune_to_powder(&next_state, &target)
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
+        // Telepathy: holder dodges damaging moves used by its own allies (doubles/triples).
+        // Ally status moves are NOT dodged. No effect in singles (no ally slots exist).
+        // Mold Breaker does not bypass Telepathy.
+        if action.user_slot.player == target_slot.player
+            && action.user_slot.slot_index != target_slot.slot_index
+            && matches!(
+                move_data.category,
+                MoveCategory::Physical | MoveCategory::Special
+            )
+            && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+            && target.ability == Ability::Telepathy
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
         if !should_continue {
             // Move is blocked by invulnerability
             decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
