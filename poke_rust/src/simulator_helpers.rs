@@ -4,7 +4,7 @@ use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::dex_data::{AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonType, PseudoWeather, SideCondition, SelfSwitchType, Terrain, Weather, HitEffect, MoveFlag, PokemonStat, Status};
-use crate::pokemon::{PokemonState, VolatileStatusState};
+use crate::pokemon::{Nature, PokemonState, VolatileStatusState};
 use crate::dex_data::VolatileStatus;
 use rand::{thread_rng, Rng};
 use std::sync::atomic::Ordering;
@@ -1035,8 +1035,24 @@ fn resist_berry_multiplier(
 /// If `mon` holds a status-cure berry matching its current status or confusion,
 /// cure the condition and consume the berry (set item to None).
 /// Must be called with the current item-suppression state.
-pub(crate) fn try_consume_status_cure_berry(mon: &mut PokemonState, items_suppressed: bool) {
-    if items_suppressed {
+/// Called after any successful berry consumption. Centralises post-eat side-effects.
+pub(crate) fn on_berry_eaten(mon: &mut PokemonState, _eaten: &Item, env: &BerryEnv) {
+    // Cheek Pouch: heal ⅓ max HP on top of the berry effect, suppressed by Heal Block.
+    if env.ability_active
+        && mon.ability == Ability::CheekPouch
+        && !has_status_volatile(mon, &VolatileStatus::HealBlock)
+    {
+        let max_hp = mon.stats[0].max(1);
+        heal_mon(mon, max_hp / 3);
+    }
+    // Cud Chew: arm the delayed re-eat for the following EOT.
+    if env.ability_active && mon.ability == Ability::CudChew {
+        mon.cud_chew_pending = Some((_eaten.clone(), false));
+    }
+}
+
+pub(crate) fn try_consume_status_cure_berry(mon: &mut PokemonState, env: &BerryEnv) {
+    if env.suppressed {
         return;
     }
     let cures_status = matches!(
@@ -1065,8 +1081,8 @@ pub(crate) fn try_consume_status_cure_berry(mon: &mut PokemonState, items_suppre
 /// Call this whenever a Pokémon gains or re-enables a held item (e.g. Trick/Switcheroo,
 /// Magic Room lifting). Triggers any immediate item effects such as status-cure berries.
 /// Future item-gain moves (Recycle, Symbiosis, Pickup) should route through here too.
-pub(crate) fn on_item_obtained_or_enabled(mon: &mut PokemonState, items_suppressed: bool) {
-    try_consume_status_cure_berry(mon, items_suppressed);
+pub(crate) fn on_item_obtained_or_enabled(mon: &mut PokemonState, env: &BerryEnv) {
+    try_consume_status_cure_berry(mon, env);
 }
 
 /// The canonical `(2L/5+2)*BP*Atk/Def/50+2` formula with floor after each step.
@@ -1168,7 +1184,14 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let type_boost_mult = if items_are_suppressed(_state) { 1.0 }
         else { type_boost_item_multiplier(attacker, &attack_type) };
     let resist_berry_mult = if items_are_suppressed(_state) { 1.0 }
-        else { resist_berry_multiplier(target, &attack_type, effectiveness) };
+        else {
+            let base = resist_berry_multiplier(target, &attack_type, effectiveness);
+            // Ripen halves the resist-berry multiplier again (½ → ¼).
+            if base < 1.0
+                && !pokemon_ability_is_suppressed(_state, target)
+                && target.ability == Ability::Ripen
+            { base / 2.0 } else { base }
+        };
     let screen_mult   = screen_damage_multiplier(_state, _target_slot, move_data, false); // overridden per-crit below
 
     // Analytic: ×1.3 when the attacker is the very last mover this turn.
@@ -1443,37 +1466,143 @@ pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
 
 /// Consume an HP-threshold berry (Oran, Sitrus) if the holder is at ≤ 50% HP.
 /// Uses bare `heal_mon` (not `gain_hp`) to avoid re-entrancy into `on_hp_change`.
-pub(crate) fn try_consume_hp_berry(mon: &mut PokemonState, items_suppressed: bool) {
-    if items_suppressed || mon.fainted { return; }
+/// Phase 1 will expand this to handle ≤ 25% pinch/flavor berries.
+/// Returns true if the holder's nature reduces the stat at `stat_idx`
+/// (0=Atk, 1=Def, 2=SpA, 3=SpD, 4=Spe). Used for flavor-berry confusion.
+fn nature_lowers_stat(nature: &Nature, stat_idx: usize) -> bool {
+    matches!((nature, stat_idx),
+        (Nature::Bold   | Nature::Modest  | Nature::Calm    | Nature::Timid,   0)
+      | (Nature::Lonely | Nature::Mild    | Nature::Gentle  | Nature::Hasty,   1)
+      | (Nature::Adamant| Nature::Impish  | Nature::Jolly   | Nature::Careful, 2)
+      | (Nature::Naughty| Nature::Lax     | Nature::Rash    | Nature::Naive,   3)
+      | (Nature::Brave  | Nature::Relaxed | Nature::Quiet   | Nature::Sassy,   4)
+    )
+}
+
+fn maybe_apply_berry_confusion(mon: &mut PokemonState, env: &BerryEnv) {
+    if env.misty_terrain { return; }
+    if env.ability_active && mon.ability == Ability::OwnTempo { return; }
+    if !is_confused(mon) {
+        let duration = thread_rng().gen_range(2..=5);
+        mon.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Confusion, duration));
+    }
+}
+
+/// Apply the effect of a consumed berry to its holder.
+/// This is decoupled from item-clearing so Cud Chew can re-invoke it without
+/// re-consuming the item.
+pub(crate) fn apply_berry_effect(mon: &mut PokemonState, berry: &Item, env: &BerryEnv) {
+    let ripen = env.ability_active && mon.ability == Ability::Ripen;
     let max_hp = mon.stats[0].max(1);
-    if mon.hp == 0 || mon.hp > max_hp / 2 { return; }
-    let heal: u16 = match mon.item {
-        Item::SitrusBerry => max_hp / 4,
-        Item::OranBerry   => 10,
+    match berry {
+        Item::OranBerry => {
+            heal_mon(mon, if ripen { 20 } else { 10 });
+        }
+        Item::SitrusBerry => {
+            heal_mon(mon, if ripen { max_hp / 2 } else { max_hp / 4 });
+        }
+        Item::FigyBerry => {
+            heal_mon(mon, if ripen { max_hp * 2 / 3 } else { max_hp / 3 });
+            if nature_lowers_stat(&mon.nature, 0) { maybe_apply_berry_confusion(mon, env); }
+        }
+        Item::WikiBerry => {
+            heal_mon(mon, if ripen { max_hp * 2 / 3 } else { max_hp / 3 });
+            if nature_lowers_stat(&mon.nature, 2) { maybe_apply_berry_confusion(mon, env); }
+        }
+        Item::MagoBerry => {
+            heal_mon(mon, if ripen { max_hp * 2 / 3 } else { max_hp / 3 });
+            if nature_lowers_stat(&mon.nature, 4) { maybe_apply_berry_confusion(mon, env); }
+        }
+        Item::AguavBerry => {
+            heal_mon(mon, if ripen { max_hp * 2 / 3 } else { max_hp / 3 });
+            if nature_lowers_stat(&mon.nature, 3) { maybe_apply_berry_confusion(mon, env); }
+        }
+        Item::IapapaBerry => {
+            heal_mon(mon, if ripen { max_hp * 2 / 3 } else { max_hp / 3 });
+            if nature_lowers_stat(&mon.nature, 1) { maybe_apply_berry_confusion(mon, env); }
+        }
+        Item::LiechiBerry => {
+            let s = if ripen { 2 } else { 1 };
+            apply_stat_boosts_to_pokemon(mon, &[s, 0, 0, 0, 0, 0, 0], env.suppressed);
+        }
+        Item::GanlonBerry => {
+            let s = if ripen { 2 } else { 1 };
+            apply_stat_boosts_to_pokemon(mon, &[0, s, 0, 0, 0, 0, 0], env.suppressed);
+        }
+        Item::PetayaBerry => {
+            let s = if ripen { 2 } else { 1 };
+            apply_stat_boosts_to_pokemon(mon, &[0, 0, s, 0, 0, 0, 0], env.suppressed);
+        }
+        Item::ApicotBerry => {
+            let s = if ripen { 2 } else { 1 };
+            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, s, 0, 0, 0], env.suppressed);
+        }
+        Item::SalacBerry => {
+            let s = if ripen { 2 } else { 1 };
+            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, s, 0, 0], env.suppressed);
+        }
+        Item::StarfBerry => {
+            // Picks one of 5 stats at random (non-branching, same pattern as Confusion duration).
+            let s = if ripen { 4 } else { 2 };
+            let idx = thread_rng().gen_range(0..5usize);
+            let mut boosts = [0i8; 7];
+            boosts[idx] = s;
+            apply_stat_boosts_to_pokemon(mon, &boosts, env.suppressed);
+        }
+        Item::LansatBerry => {
+            if !has_status_volatile(mon, &VolatileStatus::FocusEnergy) {
+                mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, 0));
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn try_consume_hp_berry(mon: &mut PokemonState, env: &BerryEnv) {
+    if env.suppressed || mon.fainted { return; }
+    let max_hp = mon.stats[0].max(1);
+    // Oran/Sitrus fire at ≤50%; pinch/flavor berries fire at ≤25%, or ≤50% with Gluttony.
+    let pinch_threshold = if env.ability_active && mon.ability == Ability::Gluttony {
+        max_hp / 2
+    } else {
+        max_hp / 4
+    };
+    let threshold = match mon.item {
+        Item::OranBerry | Item::SitrusBerry => max_hp / 2,
+        Item::FigyBerry | Item::WikiBerry | Item::MagoBerry
+        | Item::AguavBerry | Item::IapapaBerry
+        | Item::LiechiBerry | Item::GanlonBerry | Item::PetayaBerry
+        | Item::ApicotBerry | Item::SalacBerry
+        | Item::StarfBerry | Item::LansatBerry => pinch_threshold,
         _ => return,
     };
-    mon.consumed_item = Some(mon.item.clone());
+    if mon.hp == 0 || mon.hp > threshold { return; }
+    let eaten = mon.item.clone();
+    mon.consumed_item = Some(eaten.clone());
     mon.item = Item::None;
-    heal_mon(mon, heal);
+    apply_berry_effect(mon, &eaten, env);
+    on_berry_eaten(mon, &eaten, env);
 }
 
 /// Hook called after any HP change (damage or healing).
 /// Future HP-threshold triggers (pinch berries, Berserk ability, etc.) slot in here.
-pub(crate) fn on_hp_change(mon: &mut PokemonState, items_suppressed: bool) {
-    try_consume_hp_berry(mon, items_suppressed);
+pub(crate) fn on_hp_change(mon: &mut PokemonState, env: &BerryEnv) {
+    try_consume_hp_berry(mon, env);
 }
 
 /// Consume a Leppa Berry if the holder has any move at 0 PP.
 /// Restores 10 PP (capped at the move's max) to the first 0-PP move in slot order.
 /// Only considers slots with an actual move assigned (max_pp > 0 — empty slots have max_pp 0).
-pub(crate) fn try_consume_leppa_berry(mon: &mut PokemonState, items_suppressed: bool) {
-    if items_suppressed || mon.item != Item::LeppaBerry { return; }
+pub(crate) fn try_consume_leppa_berry(mon: &mut PokemonState, env: &BerryEnv) {
+    if env.suppressed || mon.item != Item::LeppaBerry { return; }
     if let Some(i) = mon.move_pp.iter().zip(mon.max_pp.iter())
         .position(|(&pp, &max)| pp == 0 && max > 0)
     {
         mon.move_pp[i] = mon.max_pp[i].min(10);
-        mon.consumed_item = Some(mon.item.clone());
+        let eaten = mon.item.clone();
+        mon.consumed_item = Some(eaten.clone());
         mon.item = Item::None;
+        on_berry_eaten(mon, &eaten, env);
     }
 }
 
@@ -1550,20 +1679,20 @@ pub(crate) fn compute_endure_outcomes(
 
 /// Apply damage and trigger the HP-change hook. Use this instead of bare `apply_damage`
 /// at any call site where item-triggered effects should fire (direct hits, recoil, residual).
-pub(crate) fn take_damage(mon: &mut PokemonState, damage: u16, items_suppressed: bool) {
+pub(crate) fn take_damage(mon: &mut PokemonState, damage: u16, env: BerryEnv) {
     if damage == 0 { return; }
     apply_damage(mon, damage);
     if !mon.fainted {
-        on_hp_change(mon, items_suppressed);
+        on_hp_change(mon, &env);
     }
 }
 
 /// Heal a Pokémon and trigger the HP-change hook. Use this instead of bare `heal_mon`
 /// at any call site where item-triggered effects should fire (drain, weather, moves).
-pub(crate) fn gain_hp(mon: &mut PokemonState, amount: u16, items_suppressed: bool) {
+pub(crate) fn gain_hp(mon: &mut PokemonState, amount: u16, env: BerryEnv) {
     if amount == 0 { return; }
     heal_mon(mon, amount);
-    on_hp_change(mon, items_suppressed);
+    on_hp_change(mon, &env);
 }
 
 pub fn team_has_remaining_pokemon(state: &BattleState, player: Player) -> bool {
@@ -1579,12 +1708,13 @@ pub fn apply_damage_and_check_game_over(
     damage: u16,
 ) -> Option<crate::battle::MatchState> {
     let items_suppressed = items_are_suppressed(state);
+    let target_env = berry_env(state, target_slot);
     let target_mon = match target_slot.player {
         Player::P1 => state.p1_active_mons.get_mut(target_slot.slot_index as usize),
         Player::P2 => state.p2_active_mons.get_mut(target_slot.slot_index as usize),
     }?;
 
-    take_damage(target_mon, damage, items_suppressed);
+    take_damage(target_mon, damage, target_env);
 
     if damage > 0 && !items_suppressed && matches!(target_mon.item, Item::AirBalloon) {
         target_mon.item = Item::None;
@@ -1705,6 +1835,61 @@ pub fn items_are_suppressed(state: &BattleState) -> bool {
         .pseudo_weathers
         .iter()
         .any(|pseudo_weather| matches!(pseudo_weather, PseudoWeather::MagicDeluge))
+}
+
+// ── Berry consumption context ─────────────────────────────────────────────────
+
+/// Context for berry consumption at a specific field slot. Pre-computed (via
+/// [`berry_env`]) before any mutable borrow to avoid split-borrow issues.
+///
+/// - `suppressed`: items are globally suppressed (Magic Room), OR the opposing
+///   side has an active, non-suppressed Unnerve user. Either prevents the holder
+///   from eating a berry.
+/// - `ability_active`: the holder's *own* ability is not suppressed (gates
+///   Gluttony / Ripen / Cheek Pouch / Cud Chew).
+/// - `misty_terrain`: Misty Terrain is active (blocks flavor-berry confusion).
+#[derive(Clone, Copy)]
+pub(crate) struct BerryEnv {
+    pub suppressed: bool,
+    pub ability_active: bool,
+    pub misty_terrain: bool,
+}
+
+impl BerryEnv {
+    /// Construct with only items_suppressed context; ability effects won't fire.
+    /// Use for switch-out healing and other contexts without per-slot ability info.
+    pub fn simple(items_suppressed: bool) -> Self {
+        BerryEnv { suppressed: items_suppressed, ability_active: false, misty_terrain: false }
+    }
+}
+
+/// Whether any active, non-suppressed Pokémon on the *opposing* side has Unnerve.
+fn opposing_unnerve_active(state: &BattleState, slot: FieldSlot) -> bool {
+    let opposing_mons = match slot.player {
+        Player::P1 => &state.p2_active_mons,
+        Player::P2 => &state.p1_active_mons,
+    };
+    opposing_mons.iter().any(|mon| {
+        !mon.fainted
+            && mon.ability == Ability::Unnerve
+            && !pokemon_ability_is_suppressed(state, mon)
+    })
+}
+
+/// Build the [`BerryEnv`] for a field slot from the current battle state.
+/// Call this before any mutable borrow of `state`.
+pub(crate) fn berry_env(state: &BattleState, slot: FieldSlot) -> BerryEnv {
+    let items_suppressed = items_are_suppressed(state);
+    let unnerve = if items_suppressed { false } else { opposing_unnerve_active(state, slot) };
+    let ability_active = get_pokemon_at_slot(state, slot)
+        .map(|mon| !pokemon_ability_is_suppressed(state, mon))
+        .unwrap_or(false);
+    let misty_terrain = matches!(state.terrain, Some(Terrain::MistyTerrain));
+    BerryEnv {
+        suppressed: items_suppressed || unnerve,
+        ability_active,
+        misty_terrain,
+    }
 }
 
 pub fn any_pokemon_has_neutralizing_gas(state: &BattleState) -> bool {
@@ -2464,9 +2649,10 @@ fn apply_send_out_only_ability_effects(state: &mut BattleState, slot: FieldSlot,
                 let heal = get_pokemon_at_slot(state, ally_slot)
                     .map(|m| (m.stats[0] / 4).max(1))
                     .unwrap_or(0);
+                let ally_env = berry_env(state, ally_slot);
                 if heal > 0 {
                     if let Some(mon) = get_pokemon_at_slot_mut(state, ally_slot) {
-                        gain_hp(mon, heal, items_suppressed);
+                        gain_hp(mon, heal, ally_env);
                     }
                 }
             }
@@ -2663,7 +2849,7 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
         };
         let ability = departed.ability.clone();
         if !abilities_suppressed {
-            apply_switch_out_ability_effects(departed, items_suppressed);
+            apply_switch_out_ability_effects(departed, BerryEnv::simple(items_suppressed));
         }
         ability
     };
@@ -2721,7 +2907,7 @@ fn handle_gas_primal_weather_suppression(state: &mut BattleState) {
 /// Apply on-switch-out ability effects for `mon` (Natural Cure curing status,
 /// Regenerator restoring up to 1/3 of max HP). Callers must skip this while abilities
 /// are suppressed.
-fn apply_switch_out_ability_effects(mon: &mut PokemonState, items_suppressed: bool) {
+fn apply_switch_out_ability_effects(mon: &mut PokemonState, env: BerryEnv) {
     if mon.fainted {
         return;
     }
@@ -2750,7 +2936,7 @@ fn apply_switch_out_ability_effects(mon: &mut PokemonState, items_suppressed: bo
         }
         Ability::Regenerator => {
             let heal = (mon.stats[0] / 3).max(1);
-            gain_hp(mon, heal, items_suppressed);
+            gain_hp(mon, heal, env);
         }
         _ => {}
     }
@@ -2972,8 +3158,11 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
     prune_timed_effects(&mut state.pseudo_weathers, &mut state.pseudo_weather_turns);
     if was_items_suppressed && !items_are_suppressed(state) {
         // Items are now re-enabled — trigger immediate on-enable effects (e.g. status-cure berries).
+        // ability_active is unknown here (no per-slot state); use simple env so
+        // Cheek Pouch / Cud Chew don't fire on Magic Room expiry (corner case).
+        let env = BerryEnv::simple(false);
         for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
-            on_item_obtained_or_enabled(mon, false);
+            on_item_obtained_or_enabled(mon, &env);
         }
     }
 
@@ -3152,9 +3341,9 @@ fn heal_mon(mon: &mut PokemonState, amount: u16) {
 }
 
 /// Deal `amount` residual damage, clearing on faint. Returns true if the mon fainted.
-fn deal_residual_damage(mon: &mut PokemonState, amount: u16, items_suppressed: bool) -> bool {
+fn deal_residual_damage(mon: &mut PokemonState, amount: u16, env: BerryEnv) -> bool {
     if amount == 0 { return false; }
-    take_damage(mon, amount, items_suppressed);
+    take_damage(mon, amount, env);
     if mon.fainted {
         clear_pokemon_on_faint(mon);
         true
@@ -3172,22 +3361,22 @@ struct WeatherResidualCtx {
     items_suppressed: bool,
 }
 
-fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx) {
+fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx, env: BerryEnv) {
     if mon.fainted { return; }
     let max_hp = mon.stats[0].max(1);
 
     if ctx.rain && !ctx.abilities_suppressed {
-        if mon.ability == Ability::RainDish { gain_hp(mon, (max_hp as u32 / 16) as u16, ctx.items_suppressed); }
-        if mon.ability == Ability::DrySkin  { gain_hp(mon, (max_hp as u32 / 8)  as u16, ctx.items_suppressed); }
+        if mon.ability == Ability::RainDish { gain_hp(mon, (max_hp as u32 / 16) as u16, env); }
+        if mon.ability == Ability::DrySkin  { gain_hp(mon, (max_hp as u32 / 8)  as u16, env); }
     }
 
     if ctx.snow && !ctx.abilities_suppressed && mon.ability == Ability::IceBody {
-        gain_hp(mon, (max_hp as u32 / 16) as u16, ctx.items_suppressed);
+        gain_hp(mon, (max_hp as u32 / 16) as u16, env);
     }
 
     if ctx.sun && !ctx.abilities_suppressed {
-        if mon.ability == Ability::DrySkin  && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, ctx.items_suppressed) { return; }
-        if mon.ability == Ability::SolarPower && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, ctx.items_suppressed) { return; }
+        if mon.ability == Ability::DrySkin   && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, env) { return; }
+        if mon.ability == Ability::SolarPower && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, env) { return; }
     }
 
     if !ctx.sandstorm { return; }
@@ -3200,11 +3389,11 @@ fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx) {
         || (!ctx.items_suppressed && matches!(mon.item, Item::SafetyGoggles));
 
     if !sandstorm_immune {
-        deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16, ctx.items_suppressed);
+        deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16, env);
     }
 }
 
-fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, items_suppressed: bool) {
+fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, env: BerryEnv) {
     if mon.fainted { return; }
 
     // Hydration is now handled in apply_status_cure_abilities (before damage), not here.
@@ -3216,16 +3405,16 @@ fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, ite
             if !magic_guard {
                 // Heatproof halves burn residual damage (from 1/16 to 1/32 max HP).
                 let divisor = if !abilities_suppressed && mon.ability == Ability::Heatproof { 32 } else { 16 };
-                deal_residual_damage(mon, (mon.stats[0] as u32 / divisor) as u16, items_suppressed);
+                deal_residual_damage(mon, (mon.stats[0] as u32 / divisor) as u16, env);
             }
         }
         Some(Status::Poison) => {
-            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 8) as u16, items_suppressed); }
+            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 8) as u16, env); }
         }
         Some(Status::ToxicPoison(n)) => {
             let new_n = n.saturating_add(1);
             mon.status = Some(Status::ToxicPoison(new_n));
-            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 * new_n as u32 / 16) as u16, items_suppressed); }
+            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 * new_n as u32 / 16) as u16, env); }
         }
         _ => {}
     }
@@ -3243,16 +3432,30 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
         items_suppressed: items_are_suppressed(state),
     };
 
-    for mon in state.p1_active_mons.iter_mut() { apply_weather_residual(mon, &ctx); }
-    for mon in state.p2_active_mons.iter_mut() { apply_weather_residual(mon, &ctx); }
+    // Pre-compute BerryEnv per slot (shared borrows) before any mutable iteration.
+    let p1_envs: Vec<BerryEnv> = (0..state.p1_active_mons.len())
+        .map(|i| berry_env(state, FieldSlot { player: Player::P1, slot_index: i as u8 }))
+        .collect();
+    let p2_envs: Vec<BerryEnv> = (0..state.p2_active_mons.len())
+        .map(|i| berry_env(state, FieldSlot { player: Player::P2, slot_index: i as u8 }))
+        .collect();
+
+    for (i, mon) in state.p1_active_mons.iter_mut().enumerate() { apply_weather_residual(mon, &ctx, p1_envs[i]); }
+    for (i, mon) in state.p2_active_mons.iter_mut().enumerate() { apply_weather_residual(mon, &ctx, p2_envs[i]); }
 
     // Grassy Terrain healing
     let terrain_snapshot = state.clone();
     if matches!(current_terrain(&terrain_snapshot), Some(Terrain::GrassyTerrain)) {
-        for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+        for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
             if !mon.fainted && pokemon_is_grounded(&terrain_snapshot, mon) {
                 let max_hp = mon.stats[0].max(1);
-                gain_hp(mon, (max_hp as u32 / 16) as u16, ctx.items_suppressed);
+                gain_hp(mon, (max_hp as u32 / 16) as u16, p1_envs[i]);
+            }
+        }
+        for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
+            if !mon.fainted && pokemon_is_grounded(&terrain_snapshot, mon) {
+                let max_hp = mon.stats[0].max(1);
+                gain_hp(mon, (max_hp as u32 / 16) as u16, p2_envs[i]);
             }
         }
     }
@@ -3260,10 +3463,16 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
     // Leftovers: restore 1/16 max HP (rounded down, min 1) at end of turn.
     // Does not consume the item. Capped at max HP by gain_hp.
     // TODO: gate on Heal Block when that mechanic is implemented.
-    for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+    for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
         if !mon.fainted && !ctx.items_suppressed && mon.item == Item::Leftovers {
             let max_hp = mon.stats[0].max(1);
-            gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, ctx.items_suppressed);
+            gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p1_envs[i]);
+        }
+    }
+    for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
+        if !mon.fainted && !ctx.items_suppressed && mon.item == Item::Leftovers {
+            let max_hp = mon.stats[0].max(1);
+            gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p2_envs[i]);
         }
     }
 }
@@ -3272,9 +3481,14 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
 /// Called after the status-cure phase so that cured statuses take no damage.
 fn apply_status_damage(state: &mut BattleState) {
     let abilities_suppressed = abilities_are_suppressed(state);
-    let items_suppressed = items_are_suppressed(state);
-    for mon in state.p1_active_mons.iter_mut() { apply_status_residual(mon, abilities_suppressed, items_suppressed); }
-    for mon in state.p2_active_mons.iter_mut() { apply_status_residual(mon, abilities_suppressed, items_suppressed); }
+    let p1_envs: Vec<BerryEnv> = (0..state.p1_active_mons.len())
+        .map(|i| berry_env(state, FieldSlot { player: Player::P1, slot_index: i as u8 }))
+        .collect();
+    let p2_envs: Vec<BerryEnv> = (0..state.p2_active_mons.len())
+        .map(|i| berry_env(state, FieldSlot { player: Player::P2, slot_index: i as u8 }))
+        .collect();
+    for (i, mon) in state.p1_active_mons.iter_mut().enumerate() { apply_status_residual(mon, abilities_suppressed, p1_envs[i]); }
+    for (i, mon) in state.p2_active_mons.iter_mut().enumerate() { apply_status_residual(mon, abilities_suppressed, p2_envs[i]); }
 }
 
 /// Public wrapper that combines all three deterministic EoT phases (pre-residuals + cure + damage).
@@ -3518,6 +3732,39 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                         // The item is simply restored here; pinch-berry logic runs on next HP change.
                     }
                 });
+            }
+            // Cud Chew: re-apply a consumed berry's effect at the end of the turn
+            // *after* it was eaten. `armed=false` means this is the first EOT; flip to
+            // `armed=true`. On the second EOT (`armed=true`) fire the re-eat and clear.
+            Ability::CudChew => {
+                let pending = result.first()
+                    .and_then(|(bs, _)| get_pokemon_at_slot(bs, *slot))
+                    .and_then(|m| m.cud_chew_pending.clone());
+
+                match pending {
+                    Some((_, false)) => {
+                        for (bs, _) in result.iter_mut() {
+                            if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
+                                if let Some((_, ref mut armed)) = mon.cud_chew_pending {
+                                    *armed = true;
+                                }
+                            }
+                        }
+                    }
+                    Some((berry, true)) => {
+                        for (bs, _) in result.iter_mut() {
+                            let env = berry_env(bs, *slot);
+                            if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
+                                if !mon.fainted {
+                                    mon.cud_chew_pending = None;
+                                    apply_berry_effect(mon, &berry, &env);
+                                    on_berry_eaten(mon, &berry, &env);
+                                }
+                            }
+                        }
+                    }
+                    None => {}
+                }
             }
             // Hunger Switch: toggle Morpeko between Full Belly and Hangry form each turn.
             // Does not toggle while Terastallized.
@@ -3795,6 +4042,7 @@ fn apply_effect_to_target(
         .unwrap_or(false);
     let sun_blocks_freeze = weather_is_sunlight(state);
     let items_suppressed = items_are_suppressed(state);
+    let target_berry_env = berry_env(state, target_slot);
     let terrain_snapshot = state.clone();
 
     // Pre-compute veil protections before taking the mutable borrow.
@@ -3861,7 +4109,7 @@ fn apply_effect_to_target(
 
         // After both status and volatile are applied, check status-cure berries.
         // A single call handles Aspear/Cheri/etc. (status just set) and Persim/Lum (confusion just pushed).
-        try_consume_status_cure_berry(target_mon, items_suppressed);
+        try_consume_status_cure_berry(target_mon, &target_berry_env);
 
         if effect.boosts != [0; 7] {
             // Filter out stat drops that the target's ability blocks when caused by another
@@ -3902,6 +4150,7 @@ fn apply_effect_to_attacker(
 ) {
     let sun_blocks_freeze = weather_is_sunlight(state);
     let items_suppressed = items_are_suppressed(state);
+    let attacker_berry_env = berry_env(state, attacker_slot);
     let terrain_snapshot = state.clone();
     if let Some(attacker_mon) = get_pokemon_at_slot_mut(state, attacker_slot) {
         if let Some(status) = &effect.status {
@@ -3914,7 +4163,7 @@ fn apply_effect_to_attacker(
 
         // After both status and volatile are applied, check status-cure berries.
         // Covers self-inflicted confusion (e.g. Outrage rampaging) and self-status moves.
-        try_consume_status_cure_berry(attacker_mon, items_suppressed);
+        try_consume_status_cure_berry(attacker_mon, &attacker_berry_env);
 
         if effect.boosts != [0; 7] {
             apply_stat_boosts_to_pokemon(attacker_mon, &effect.boosts, items_suppressed);
@@ -3973,7 +4222,7 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
     let branch_weather = current_weather(bs);
     let branch_harsh_sun = matches!(branch_weather, Some(Weather::ExtremeSunlight));
     let branch_sandstorm = matches!(branch_weather, Some(Weather::Sandstorm));
-    let items_suppressed = items_are_suppressed(bs); // compute before the mutable borrow below
+    let env = berry_env(bs, attacker_slot); // compute before the mutable borrow below
 
     let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) else { return false; };
 
@@ -3986,7 +4235,7 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
             attacker_mon.status = Some(Status::Sleep(0));
             let max_hp = attacker_mon.stats[0].max(1);
             let heal = max_hp.saturating_sub(attacker_mon.hp);
-            gain_hp(attacker_mon, heal, items_suppressed);
+            gain_hp(attacker_mon, heal, env);
         }
         PokemonMove::Synthesis | PokemonMove::MorningSun | PokemonMove::Moonlight => {
             let (num, den) = if branch_harsh_sun { (2u32, 3u32) }
@@ -3994,13 +4243,13 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
                              else { (1u32, 4u32) };
             let max_hp = attacker_mon.stats[0].max(1);
             let heal = ((max_hp as u32 * num) / den) as u16;
-            gain_hp(attacker_mon, heal, items_suppressed);
+            gain_hp(attacker_mon, heal, env);
         }
         PokemonMove::ShoreUp => {
             let (num, den) = if branch_sandstorm { (2u32, 3u32) } else { (1u32, 4u32) };
             let max_hp = attacker_mon.stats[0].max(1);
             let heal = ((max_hp as u32 * num) / den) as u16;
-            gain_hp(attacker_mon, heal, items_suppressed);
+            gain_hp(attacker_mon, heal, env);
         }
         _ => return false,
     }
@@ -4149,7 +4398,6 @@ pub fn try_apply_disable(state: &mut BattleState, source_slot: FieldSlot, target
 ///   - Entry hazard switch-in damage (Spikes, Stealth Rock, Toxic Spikes) — Magic Guard: TODO
 fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSlot, numer: u32, denom: u32) {
     let abilities_suppressed = abilities_are_suppressed(bs);
-    let items_suppressed = items_are_suppressed(bs);
     let (max_hp, magic_guard) = {
         let Some(m) = get_pokemon_at_slot(bs, attacker_slot) else { return };
         if m.fainted { return; }
@@ -4157,10 +4405,11 @@ fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSlot, n
         (m.stats[0].max(1), mg)
     };
     if magic_guard { return; }
+    let env = berry_env(bs, attacker_slot);
     let damage = ((max_hp as u32 * numer) / denom).max(1) as u16;
     let mut fainted = false;
     if let Some(atk) = get_pokemon_at_slot_mut(bs, attacker_slot) {
-        take_damage(atk, damage, items_suppressed);
+        take_damage(atk, damage, env);
         if atk.fainted {
             clear_pokemon_on_faint(atk);
             fainted = true;
@@ -4372,6 +4621,7 @@ pub(crate) fn try_absorb_move(
 
     // Use the canonical move type (respects -ate abilities, Liquid Voice, etc.).
     let move_type = effective_move_type(state, attacker, move_data);
+    let target_env = berry_env(state, target_slot);
 
     let absorbs = match (&move_type, &target_ability) {
         (PokemonType::Electric, Ability::VoltAbsorb)
@@ -4380,7 +4630,7 @@ pub(crate) fn try_absorb_move(
         | (PokemonType::Ground,  Ability::EarthEater) => {
             if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
                 let heal = (mon.stats[0].max(1) as u32 / 4) as u16;
-                gain_hp(mon, heal, items_suppressed);
+                gain_hp(mon, heal, target_env);
             }
             true
         }
@@ -4466,7 +4716,7 @@ pub fn apply_secondary_effects(
         MoveTarget::AllySide | MoveTarget::Allies | MoveTarget::AllyTeam => attacker_slot.player,
         _ => target_slot.player,
     };
-    let items_suppressed = items_are_suppressed(state);
+    let attacker_env = berry_env(state, attacker_slot);
 
     let mut branches: Vec<(BattleState, f64)> = vec![(state.clone(), 1.0)];
 
@@ -4499,7 +4749,7 @@ pub fn apply_secondary_effects(
                 if let Some(m) = get_pokemon_at_slot_mut(bs, attacker_slot) {
                     let max_hp = m.stats[0].max(1);
                     let cost = (max_hp + 1) / 2;
-                    take_damage(m, cost, items_suppressed);
+                    take_damage(m, cost, attacker_env);
                 }
             }
         }

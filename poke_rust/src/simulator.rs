@@ -89,6 +89,7 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
 
     if let Some(move_index) = move_index {
         let items_suppressed = simulator_helpers::items_are_suppressed(next_state);
+        let leppa_env = simulator_helpers::berry_env(next_state, user_slot);
         if let Some(mon) = match user_slot.player {
             Player::P1 => next_state.p1_active_mons.get_mut(user_slot.slot_index as usize),
             Player::P2 => next_state.p2_active_mons.get_mut(user_slot.slot_index as usize),
@@ -96,7 +97,7 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             if let Some(pp) = mon.move_pp.get_mut(move_index) {
                 *pp = pp.saturating_sub(1);
             }
-            simulator_helpers::try_consume_leppa_berry(mon, items_suppressed);
+            simulator_helpers::try_consume_leppa_berry(mon, &leppa_env);
 
             // Choice items: lock the holder into the first move it uses.
             // Struggle is excluded — a PP-depleted mon shouldn't be locked into Struggle.
@@ -431,12 +432,13 @@ fn apply_single_hit_branch(
         let mut sand_spit_triggered = false;
         let mut seed_sower_triggered = false;
         let mut target_fainted = false;
+        let target_env = simulator_helpers::berry_env(&bs, target_slot);
 
         if let Some(target_mon) = match target_slot.player {
             Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
             Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
         } {
-            simulator_helpers::take_damage(target_mon, eff_damage, items_suppressed);
+            simulator_helpers::take_damage(target_mon, eff_damage, target_env);
 
             // Focus Sash was spent to survive this hit.
             if consume_sash {
@@ -1999,6 +2001,7 @@ fn apply_post_damage_move_effects(
     let total_dmg = total_damage_to_opponent(baseline, &bs, opposing_player);
     let opponent_wiped = !simulator_helpers::team_has_remaining_pokemon(&bs, opposing_player) && total_dmg > 0;
     let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
+    let attacker_env = simulator_helpers::berry_env(&bs, attacker_slot);
     let mut forced_winner: Option<Player> = None;
     let mut attacker_fainted = false;
 
@@ -2008,13 +2011,13 @@ fn apply_post_damage_move_effects(
         // Unconditional self-heal
         if move_data.heal_fraction[0] > 0 && move_data.heal_fraction[1] > 0 {
             let heal = ((max_hp as u32 * move_data.heal_fraction[0] as u32) / move_data.heal_fraction[1] as u32) as u16;
-            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, items_suppressed); }
+            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
 
         // Drain heal
         if move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
             let heal = ((total_dmg * move_data.drain_fraction[0] as u32) / move_data.drain_fraction[1] as u32) as u16;
-            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, items_suppressed); }
+            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
 
         // Shell Bell: restore 1/8 of damage dealt (rounded down) to the attacker.
@@ -2022,7 +2025,7 @@ fn apply_post_damage_move_effects(
         // TODO: gate on Heal Block when that mechanic is implemented.
         if !items_suppressed && attacker_mon.item == crate::data::item::Item::ShellBell {
             let heal = (total_dmg / 8) as u16;
-            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, items_suppressed); }
+            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
 
         // Recoil
@@ -2039,7 +2042,7 @@ fn apply_post_damage_move_effects(
             } else { 0 };
 
             if recoil > 0 {
-                simulator_helpers::take_damage(attacker_mon, recoil, items_suppressed);
+                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env);
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
@@ -2390,6 +2393,7 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     }
     // Clear the entry flag so it doesn't persist on the bench.
     mon.entered_this_turn = false;
+    mon.cud_chew_pending = None;
 }
 
 fn perform_switch_out_in(next_state: &mut BattleState, user_slot: FieldSlot, bench_index: usize) {
