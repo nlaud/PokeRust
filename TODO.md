@@ -12,18 +12,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Abilities
 
-### Berry-interaction abilities
-Modify how Berries are triggered or consumed. Depends on the Oran/Sitrus/Leppa
-framework already in place; these extend it.
-- Cheek Pouch — restore extra 1/3 max HP when eating any Berry
-- Cud Chew — eat the same Berry again at the end of the following turn
-- Gluttony — trigger HP-threshold Berries at ≤50% HP instead of ≤25%
-- Ripen — double the effect of any Berry the holder eats
-- Unnerve — opponents cannot eat held Berries
-
-### Immunity and move-blocking abilities
-*(All 13 abilities in this section are implemented.)*
-
 ### Stat-change reaction abilities
 Trigger when a stat is raised, lowered, or an HP threshold is crossed.
 **On any stat lowered by opponent:**

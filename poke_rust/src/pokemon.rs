@@ -102,6 +102,10 @@ pub struct PokemonState{
     /// Used by Harvest to restore a Berry, and Recycle to recover any consumed item.
     /// Not set for items lost via Knock Off, theft, or other non-consumption means.
     pub consumed_item: Option<Item>,
+    /// Cud Chew delayed re-eat: `Some((berry, armed))`.
+    /// `armed=false` means one EOT has not yet passed; `armed=true` means the re-eat fires
+    /// this EOT. Cleared on switch-out or when the re-eat fires.
+    pub cud_chew_pending: Option<(Item, bool)>,
     pub nature: Nature,
 
     pub boosts: PokemonBoostTable,
@@ -422,7 +426,7 @@ pub fn build_pokemon_state(
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,
         last_move_failed: false, original_ability: None, last_used_move: None,
-        one_time_ability_used: false, entered_this_turn: false, consumed_item: None,
+        one_time_ability_used: false, entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
         pre_transform: None, evs, ivs,
     }
 }

@@ -12685,6 +12685,372 @@ mod tests {
                 "Light Ball should double Pikachu's SpA: {spa_no_ball} → {spa_with_ball}");
         }
 
+        // ─── Berry-interaction abilities ───────────────────────────────────
+
+        fn snorlax_with(item: Item, ability: Ability, nature: Nature, move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>, pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>) -> crate::pokemon::PokemonState {
+            build_pokemon_state(
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(ability), Some(nature), Some(item),
+                None, None, None, false,
+            )
+        }
+
+        fn splash_mon(pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>, move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>) -> crate::pokemon::PokemonState {
+            build_pokemon_state(
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            )
+        }
+
+        #[test]
+        fn liechi_berry_fires_at_quarter_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::None, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            // Start just above the ≤25% threshold, then let poison drop below it.
+            p1.hp = max_hp / 4 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Liechi Berry should give +1 Atk at ≤25% HP");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Liechi Berry should be consumed");
+        }
+
+        #[test]
+        fn liechi_berry_does_not_fire_above_quarter_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::None, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            // At 50% HP, poison drops us to ~43% — still above the 25% threshold.
+            p1.hp = max_hp / 2;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 0, "Liechi Berry should NOT fire above 25% threshold");
+            assert_eq!(bs.p1_active_mons[0].item, Item::LiechiBerry, "Liechi Berry should still be held");
+        }
+
+        #[test]
+        fn figy_berry_heals_third_and_confuses_disliked_nature() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Bold lowers Atk — Figy Berry dislikes lowered Atk → confusion.
+            let mut p1 = snorlax_with(Item::FigyBerry, Ability::None, Nature::Bold, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 4 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Figy Berry should be consumed");
+            // Should have healed ⅓ max HP.
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_before_heal = (max_hp / 4 + 1).saturating_sub(poison_dmg);
+            let expected_hp = (hp_before_heal + max_hp / 3).min(max_hp);
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Figy Berry should heal ⅓ max HP");
+            // Bold nature dislikes Figy's Atk flavor → confusion.
+            assert!(simulator_helpers::is_confused(&bs.p1_active_mons[0]), "Bold nature should cause Figy Berry confusion");
+        }
+
+        #[test]
+        fn figy_berry_does_not_confuse_neutral_nature() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Hardy is neutral — no confusion.
+            let mut p1 = snorlax_with(Item::FigyBerry, Ability::None, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 4 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Figy Berry should still be consumed");
+            assert!(!simulator_helpers::is_confused(&bs.p1_active_mons[0]), "Hardy nature should NOT cause Figy Berry confusion");
+        }
+
+        #[test]
+        fn gluttony_fires_pinch_berry_at_half_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::Gluttony, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            // Start just above 50% so poison residual (max_hp/8) drops us into the Gluttony window
+            // (between 25% and 50%). Without Gluttony the ≤25% threshold would not be reached.
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_after = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            // Verify the test setup actually lands in the Gluttony window.
+            assert!(hp_after <= max_hp / 2, "Sanity: HP should be ≤50% after poison");
+            assert!(hp_after > max_hp / 4, "Sanity: HP should still be >25% (not pinch threshold)");
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Gluttony should lift threshold to ≤50% for Liechi Berry");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Liechi Berry should be consumed with Gluttony");
+        }
+
+        #[test]
+        fn ripen_doubles_oran_berry_heal() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p1 = snorlax_with(Item::OranBerry, Ability::Ripen, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_before_heal = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            // Ripen doubles Oran: heal 20 instead of 10.
+            let expected_hp = (hp_before_heal + 20).min(max_hp);
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Ripen should double Oran Berry heal to 20 HP");
+        }
+
+        #[test]
+        fn ripen_doubles_liechi_berry_stages() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::Ripen, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 4 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 2, "Ripen should double Liechi Berry to +2 Atk");
+        }
+
+        #[test]
+        fn ripen_doubles_flavor_berry_heal() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Hardy is neutral → no confusion; Ripen should double heal to ⅔.
+            let mut p1 = snorlax_with(Item::FigyBerry, Ability::Ripen, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 4 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_before_heal = (max_hp / 4 + 1).saturating_sub(poison_dmg);
+            let expected_hp = (hp_before_heal + max_hp * 2 / 3).min(max_hp);
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Ripen should double Figy Berry heal to ⅔ max HP");
+        }
+
+        #[test]
+        fn cheek_pouch_adds_third_heal_on_top_of_berry() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CheekPouch, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 4 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            // Liechi gives +1 Atk (its effect); Cheek Pouch adds ⅓ max HP heal on top.
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Liechi Berry should still give +1 Atk with Cheek Pouch");
+            let poison_dmg = (max_hp / 8).max(1);
+            let hp_after_poison = (max_hp / 4 + 1).saturating_sub(poison_dmg);
+            let expected_hp = (hp_after_poison + max_hp / 3).min(max_hp);
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp, "Cheek Pouch should add ⅓ max HP heal");
+        }
+
+        #[test]
+        fn unnerve_prevents_opponent_eating_oran_berry() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // P1 holds Oran Berry and is at ≤50% HP, but P2 has Unnerve → berry must not fire.
+            let mut p1 = snorlax_with(Item::OranBerry, Ability::None, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::Unnerve), None, None, None, None, None, false,
+            );
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            let poison_dmg = (max_hp / 8).max(1);
+            let expected_hp = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            assert_eq!(bs.p1_active_mons[0].item, Item::OranBerry,
+                "Unnerve should prevent opponent from eating Oran Berry");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp,
+                "HP should only reflect poison damage when Unnerve suppresses berry");
+        }
+
+        #[test]
+        fn unnerve_does_not_prevent_holder_eating_own_berry() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // P1 has Unnerve and holds Oran Berry — Unnerve only affects the *opponent*.
+            let mut p1 = snorlax_with(Item::OranBerry, Ability::Unnerve, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            // Berry should fire normally.
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Unnerve should NOT prevent the holder's own Oran Berry from firing");
+        }
+
+        #[test]
+        fn cud_chew_re_applies_berry_after_following_turn() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Turn 1: Liechi Berry fires (P1 at ≤25% HP via poison). Cud Chew arms the re-eat.
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CudChew, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 4 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            let turn1_outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (mut bs1, _) = extract_battle_state(turn1_outcomes);
+            // After turn 1: berry consumed, +1 Atk, Cud Chew armed for next EOT.
+            assert_eq!(bs1.p1_active_mons[0].boosts[0], 1, "Liechi Berry should give +1 Atk on consumption turn");
+            assert_eq!(bs1.p1_active_mons[0].item, Item::None, "Berry should be consumed after turn 1");
+
+            // Clear poison so P1 doesn't faint on turn 2 before Cud Chew fires.
+            bs1.p1_active_mons[0].status = None;
+
+            // Turn 2: Cud Chew fires the re-eat at EOT → another +1 Atk.
+            let turn2_outcomes = run_single_turn(
+                &MatchState::BattleState(bs1),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs2, _) = extract_battle_state(turn2_outcomes);
+            assert_eq!(bs2.p1_active_mons[0].boosts[0], 2, "Cud Chew should add another +1 Atk on the following turn");
+        }
+
+        #[test]
+        fn cud_chew_pending_cleared_on_switch_out() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CudChew, Nature::Hardy, &move_dex, &pokemon_dex);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 4;
+            // Bench mon to switch to.
+            let bench = build_pokemon_state(
+                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let p2 = splash_mon(&pokemon_dex, &move_dex);
+
+            // Turn 1: berry fires, Cud Chew arms re-eat.
+            let turn1_outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![bench], vec![p2], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (mut bs1, _) = extract_battle_state(turn1_outcomes);
+
+            // Switch out P1 before the second turn — clears cud_chew_pending.
+            let _ = &mut bs1; // suppress unused-mut lint
+            let turn2_outcomes = run_single_turn(
+                &MatchState::BattleState(bs1.clone()),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            let (bs2, _) = extract_battle_state(turn2_outcomes);
+            // P1's original Snorlax is now on bench. Its boost should still be +1 (the Liechi
+            // effect) but no additional +1 from Cud Chew, since we switched out.
+            let snorlax_on_bench = bs2.p1_back_mons.iter().find(|m| m.species == Species::Snorlax);
+            assert!(snorlax_on_bench.is_some(), "Snorlax should be on bench");
+            if let Some(snorlax) = snorlax_on_bench {
+                assert_eq!(snorlax.cud_chew_pending, None,
+                    "cud_chew_pending should be cleared on switch-out");
+            }
+        }
+
         #[test]
         fn light_ball_does_not_boost_raichu() {
             let pokemon_dex = pokemon_dex();
