@@ -15795,4 +15795,704 @@ mod priority_abilities {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Immunity / Move-blocking / Veil abilities
+    // ─────────────────────────────────────────────────────────────────────────
+    #[cfg(test)]
+    mod immunity_and_veil_abilities {
+        use super::*;
+        use crate::pokemon::Nature;
+        use crate::simuilator_test_helpers::extract_battle_state;
+
+        fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(mv), None, None, None]),
+                None, Some(ability), Some(Nature::Hardy),
+                None, None, Some([0; 6]), None, false,
+            )
+        }
+
+        // ── Bulletproof ──────────────────────────────────────────────────────
+
+        #[test]
+        fn bulletproof_blocks_shadow_ball() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Komala, Ability::Bulletproof, PokemonMove::Splash);
+            let max_hp = target.stats[0];
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Gengar, Ability::CursedBody, PokemonMove::ShadowBall)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].hp == max_hp)),
+                "Bulletproof: Shadow Ball (bullet) should deal 0 damage",
+            );
+        }
+
+        #[test]
+        fn bulletproof_blocks_sludge_bomb() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Komala, Ability::Bulletproof, PokemonMove::Splash);
+            let max_hp = target.stats[0];
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Gengar, Ability::CursedBody, PokemonMove::SludgeBomb)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].hp == max_hp)),
+                "Bulletproof: Sludge Bomb (bomb) should deal 0 damage",
+            );
+        }
+
+        #[test]
+        fn bulletproof_does_not_block_non_bullet_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Komala, Ability::Bulletproof, PokemonMove::Splash);
+            let max_hp = target.stats[0];
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Gengar, Ability::CursedBody, PokemonMove::Tackle)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].hp < max_hp)),
+                "Bulletproof: Tackle (non-bullet) should still deal damage",
+            );
+        }
+
+        // ── Soundproof ───────────────────────────────────────────────────────
+
+        #[test]
+        fn soundproof_blocks_boomburst() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Komala, Ability::Soundproof, PokemonMove::Splash);
+            let max_hp = target.stats[0];
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Exploud, Ability::Scrappy, PokemonMove::Boomburst)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].hp == max_hp)),
+                "Soundproof: Boomburst should deal 0 damage to Soundproof holder",
+            );
+        }
+
+        #[test]
+        fn soundproof_does_not_block_own_sound_moves() {
+            // Champions behaviour: the holder is NOT immune to its OWN sound moves.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut attacker = mon(Species::Exploud, Ability::Soundproof, PokemonMove::Boomburst);
+            attacker.stats[5] = 200; // faster, so it moves first
+            let target = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let max_hp = target.stats[0];
+            let state = battle_state_from_lists(
+                vec![attacker], vec![],
+                vec![target], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p2_active_mons[0].hp < max_hp)),
+                "Soundproof: a Soundproof Exploud should still deal damage with Boomburst",
+            );
+        }
+
+        // ── Overcoat ─────────────────────────────────────────────────────────
+
+        #[test]
+        fn overcoat_blocks_spore() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Komala, Ability::Overcoat, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Amoonguss, Ability::Regenerator, PokemonMove::Spore)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert!(
+                        bs.p1_active_mons[0].status.is_none(),
+                        "Overcoat: Spore should not inflict sleep",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn overcoat_blocks_sandstorm_damage() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut target = mon(Species::Komala, Ability::Overcoat, PokemonMove::Splash);
+            let max_hp = target.stats[0];
+            target.hp = max_hp;
+            let opponent = mon(Species::Komala, Ability::None, PokemonMove::Splash);
+            let mut state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![opponent], vec![],
+            );
+            state.weather = Some(crate::dex_data::Weather::Sandstorm);
+            state.weather_turns = Some(5);
+            let (bs, _) = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            ));
+            assert_eq!(
+                bs.p1_active_mons[0].hp, max_hp,
+                "Overcoat: should take 0 sandstorm damage",
+            );
+        }
+
+        // ── Damp ─────────────────────────────────────────────────────────────
+
+        #[test]
+        fn damp_blocks_explosion() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            // Damp on the target's side blocks Explosion on P1.
+            let mut attacker = mon(Species::Snorlax, Ability::None, PokemonMove::Explosion);
+            attacker.stats[5] = 1; // slow, so P2 Splashes first (doesn't matter here)
+            let attacker_max_hp = attacker.stats[0];
+            let target = mon(Species::Golduck, Ability::Damp, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![attacker], vec![],
+                vec![target], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    // Attacker should NOT faint (Explosion does not KO user when blocked).
+                    assert!(!bs.p1_active_mons[0].fainted, "Damp: attacker should not faint");
+                    assert_eq!(bs.p1_active_mons[0].hp, attacker_max_hp, "Damp: attacker HP should be unchanged");
+                    // Target should also be unharmed.
+                    let target_max_hp = bs.p2_active_mons[0].stats[0];
+                    assert_eq!(bs.p2_active_mons[0].hp, target_max_hp, "Damp: target should take 0 damage");
+                }
+            }
+        }
+
+        #[test]
+        fn damp_on_attacker_side_blocks_explosion() {
+            // Damp on the *attacker's* side also prevents the move.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut attacker = mon(Species::Golduck, Ability::Damp, PokemonMove::Explosion);
+            attacker.stats[5] = 200;
+            let attacker_max_hp = attacker.stats[0];
+            let target = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![attacker], vec![],
+                vec![target], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert!(!bs.p1_active_mons[0].fainted, "Damp self: attacker should not faint");
+                    assert_eq!(bs.p1_active_mons[0].hp, attacker_max_hp, "Damp self: attacker HP unchanged");
+                    let target_max_hp = bs.p2_active_mons[0].stats[0];
+                    assert_eq!(bs.p2_active_mons[0].hp, target_max_hp, "Damp self: target unharmed");
+                }
+            }
+        }
+
+        // ── Levitate ─────────────────────────────────────────────────────────
+
+        #[test]
+        fn levitate_is_immune_to_earthquake() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Gengar, Ability::Levitate, PokemonMove::Splash);
+            let max_hp = target.stats[0];
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Garchomp, Ability::RoughSkin, PokemonMove::Earthquake)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].hp == max_hp)),
+                "Levitate: Earthquake should deal 0 damage",
+            );
+        }
+
+        // ── Shield Dust ──────────────────────────────────────────────────────
+
+        #[test]
+        fn shield_dust_blocks_secondary_status() {
+            // Sludge Bomb has a 30% chance to poison. Shield Dust should eliminate that chance.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Beautifly, Ability::ShieldDust, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Gengar, Ability::CursedBody, PokemonMove::SludgeBomb)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // No branch should have the target poisoned.
+            let poison_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status == Some(crate::dex_data::Status::Poison)) { *p } else { 0.0 }
+            }).sum();
+            assert!(
+                poison_prob < 1e-9,
+                "Shield Dust: Sludge Bomb secondary poison should be blocked (got prob={poison_prob})",
+            );
+        }
+
+        #[test]
+        fn shield_dust_does_not_block_attacker_self_boost() {
+            // Charge Beam has a 70% chance to raise the attacker's SpA (+1).
+            // Shield Dust on the target must NOT block that self-boost.
+            // Attacker = P1 (Raichu); target = P2 (Beautifly with Shield Dust).
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut attacker = mon(Species::Raichu, Ability::Static, PokemonMove::ChargeBeam);
+            attacker.stats[5] = 200; // move first
+            let target = mon(Species::Beautifly, Ability::ShieldDust, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![attacker], vec![],
+                vec![target], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // Self-boost is on the ATTACKER (P1 = p1_active_mons[0], boosts[2] = SpA).
+            let attacker_spa_boost_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].boosts[2] >= 1) { *p } else { 0.0 }
+            }).sum();
+            assert!(
+                attacker_spa_boost_prob > 0.60,
+                "Shield Dust: Charge Beam self-SpA boost on attacker should still fire (~70%, got={attacker_spa_boost_prob:.2})",
+            );
+        }
+
+        // ── Keen Eye / Illuminate ────────────────────────────────────────────
+
+        #[test]
+        fn keen_eye_blocks_accuracy_drop() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut target = mon(Species::Pidgeot, Ability::KeenEye, PokemonMove::Splash);
+            target.stats[5] = 1; // slow, attacked first by Sand Attack
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Sandslash, Ability::SandVeil, PokemonMove::SandAttack)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(
+                        bs.p1_active_mons[0].boosts[5], 0,
+                        "Keen Eye: accuracy should not be lowered by Sand Attack",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn illuminate_blocks_accuracy_drop() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut target = mon(Species::Starmie, Ability::Illuminate, PokemonMove::Splash);
+            target.stats[5] = 1;
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Sandslash, Ability::SandVeil, PokemonMove::SandAttack)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(
+                        bs.p1_active_mons[0].boosts[5], 0,
+                        "Illuminate: accuracy should not be lowered by Sand Attack",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn keen_eye_ignores_target_evasion() {
+            // A Pokémon with Keen Eye attacking an evasion-boosted opponent should land
+            // the hit as if evasion = 0.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut attacker = mon(Species::Pidgeot, Ability::KeenEye, PokemonMove::Tackle);
+            attacker.stats[5] = 200; // moves first
+            let mut target = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            target.boosts[6] = 6; // max evasion
+            let max_hp = target.stats[0];
+            let state = battle_state_from_lists(
+                vec![attacker], vec![],
+                vec![target], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // With evasion ignored, Tackle (100% acc) should hit every branch.
+            let hit_prob: f64 = outcomes.iter().map(|(s, p)| {
+                let hit = matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < max_hp)
+                    || matches!(s, MatchState::GameOverState { .. });
+                if hit { *p } else { 0.0 }
+            }).sum();
+            assert!(
+                hit_prob > 0.99,
+                "Keen Eye: should ignore +6 evasion and always hit (hit_prob={hit_prob:.3})",
+            );
+        }
+
+        // ── Magic Guard ──────────────────────────────────────────────────────
+
+        #[test]
+        fn magic_guard_blocks_burn_residual() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut target = mon(Species::Clefable, Ability::MagicGuard, PokemonMove::Splash);
+            target.status = Some(crate::dex_data::Status::Burn);
+            let max_hp = target.stats[0];
+            target.hp = max_hp;
+            let opponent = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![opponent], vec![],
+            );
+            let (bs, _) = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            ));
+            assert_eq!(
+                bs.p1_active_mons[0].hp, max_hp,
+                "Magic Guard: burn residual should deal 0 damage",
+            );
+        }
+
+        #[test]
+        fn magic_guard_blocks_poison_residual() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut target = mon(Species::Clefable, Ability::MagicGuard, PokemonMove::Splash);
+            target.status = Some(crate::dex_data::Status::Poison);
+            let max_hp = target.stats[0];
+            target.hp = max_hp;
+            let opponent = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![opponent], vec![],
+            );
+            let (bs, _) = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            ));
+            assert_eq!(
+                bs.p1_active_mons[0].hp, max_hp,
+                "Magic Guard: poison residual should deal 0 damage",
+            );
+        }
+
+        #[test]
+        fn magic_guard_does_not_block_direct_damage() {
+            // Magic Guard does NOT block direct attack damage.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Clefable, Ability::MagicGuard, PokemonMove::Splash);
+            let max_hp = target.stats[0];
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Tackle)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].hp < max_hp)),
+                "Magic Guard: direct attack damage should still apply",
+            );
+        }
+
+        // ── Sweet Veil ───────────────────────────────────────────────────────
+
+        #[test]
+        fn sweet_veil_blocks_sleep_powder() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let target = mon(Species::Slurpuff, Ability::SweetVeil, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Amoonguss, Ability::Regenerator, PokemonMove::SleepPowder)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert!(
+                        !matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Sleep(_))),
+                        "Sweet Veil: Sleep Powder should not inflict sleep",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn sweet_veil_blocks_yawn() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut target = mon(Species::Slurpuff, Ability::SweetVeil, PokemonMove::Splash);
+            target.stats[5] = 1; // let Yawn user go first
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Yawn)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    let has_yawn = bs.p1_active_mons[0].volatiles.iter().any(|v|
+                        matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(crate::dex_data::VolatileStatus::Yawn, _))
+                    );
+                    assert!(!has_yawn, "Sweet Veil: Yawn volatile should not be applied");
+                }
+            }
+        }
+
+        // ── Flower Veil ──────────────────────────────────────────────────────
+
+        #[test]
+        fn flower_veil_blocks_status_on_grass_holder() {
+            // Roserade is Grass-type and has Flower Veil itself — it protects itself.
+            // (In doubles the holder protects Grass-type allies; in singles the Grass-type
+            // holder covers the self-protection case.)
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let grass_target = mon(Species::Roserade, Ability::FlowerVeil, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![grass_target], vec![],
+                vec![mon(Species::Gardevoir, Ability::None, PokemonMove::WillOWisp)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert!(
+                        bs.p1_active_mons[0].status.is_none(),
+                        "Flower Veil: Will-O-Wisp should not burn a Grass-type with Flower Veil",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn flower_veil_does_not_block_non_grass_status() {
+            // Snorlax (Normal-type, no Flower Veil) should still be burned by Will-O-Wisp.
+            // Will-O-Wisp has 85% accuracy so burn_prob ≈ 0.85, not 1.0.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let normal_target = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![normal_target], vec![],
+                vec![mon(Species::Gardevoir, Ability::None, PokemonMove::WillOWisp)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let burn_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status == Some(crate::dex_data::Status::Burn)) { *p } else { 0.0 }
+            }).sum();
+            assert!(
+                burn_prob > 0.80,
+                "Flower Veil: Will-O-Wisp should burn a non-Grass-type (burn_prob={burn_prob:.2})",
+            );
+        }
+
+        #[test]
+        fn flower_veil_blocks_stat_drop_on_grass() {
+            // Roserade has Flower Veil (Grass-type) and Charm should not lower its Attack.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut grass_target = mon(Species::Roserade, Ability::FlowerVeil, PokemonMove::Splash);
+            grass_target.stats[5] = 1; // slow, hit first by Charm
+            let state = battle_state_from_lists(
+                vec![grass_target], vec![],
+                vec![mon(Species::Gardevoir, Ability::None, PokemonMove::Charm)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(
+                        bs.p1_active_mons[0].boosts[0], 0,
+                        "Flower Veil: Charm Atk drop should be blocked on Grass-type with FlowerVeil",
+                    );
+                }
+            }
+        }
+
+        // ── Aroma Veil ───────────────────────────────────────────────────────
+
+        #[test]
+        fn aroma_veil_blocks_taunt() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut target = mon(Species::Aromatisse, Ability::AromaVeil, PokemonMove::Splash);
+            target.stats[5] = 1; // slow, gets Taunted first
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Gengar, Ability::CursedBody, PokemonMove::Taunt)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    let taunted = bs.p1_active_mons[0].volatiles.iter().any(|v|
+                        matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::Taunt, _))
+                    );
+                    assert!(!taunted, "Aroma Veil: Taunt should not apply to the holder");
+                }
+            }
+        }
+
+        #[test]
+        fn aroma_veil_blocks_encore() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut target = mon(Species::Aromatisse, Ability::AromaVeil, PokemonMove::Splash);
+            target.stats[5] = 1;
+            // Give the target a last_used_move so Encore has a valid target.
+            target.last_used_move = Some(PokemonMove::Splash);
+            let state = battle_state_from_lists(
+                vec![target], vec![],
+                vec![mon(Species::Gengar, Ability::CursedBody, PokemonMove::Encore)], vec![],
+            );
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    let encored = bs.p1_active_mons[0].volatiles.iter().any(|v|
+                        matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::Encore, _))
+                    );
+                    assert!(!encored, "Aroma Veil: Encore should not apply to the holder");
+                }
+            }
+        }
+
+    }
+
 }

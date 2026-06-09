@@ -2013,9 +2013,19 @@ fn compute_accuracy_modifier_fp(
     modifier.max(0)
 }
 
-fn adjusted_accuracy_stage(attacker: &PokemonState, target: &PokemonState) -> i8 {
+fn adjusted_accuracy_stage(state: &BattleState, attacker: &PokemonState, target: &PokemonState) -> i8 {
     let attacker_accuracy = attacker.boosts[5];
-    let target_evasion = target.boosts[6];
+    // Keen Eye / Illuminate: when the attacker has either ability (unsuppressed), the
+    // target's evasiveness stages are ignored entirely.  Non-stage accuracy modifiers
+    // (Sand Veil, Wonder Skin, etc.) are NOT ignored — this only zeroes the stage term.
+    // Mold Breaker does not apply here (this protects the attacker's own accuracy calc).
+    let target_evasion = if !pokemon_ability_is_suppressed(state, attacker)
+        && matches!(attacker.ability, Ability::KeenEye | Ability::Illuminate)
+    {
+        0
+    } else {
+        target.boosts[6]
+    };
     (attacker_accuracy - target_evasion).clamp(-6, 6)
 }
 
@@ -2086,7 +2096,7 @@ pub fn accuracy_hit_probability(
 
             let accuracy_after_modifiers = round_div_half_down(base.saturating_mul(modifier_fp), 4096);
 
-            let stage = adjusted_accuracy_stage(attacker, target);
+            let stage = adjusted_accuracy_stage(state, attacker, target);
             let stage_adjusted = (accuracy_after_modifiers as f64 * accuracy_stage_multiplier(stage)).floor() as i32;
 
             let micle_adjusted = round_div_half_down(
@@ -3067,6 +3077,17 @@ fn apply_status_to_pokemon(state: &BattleState, sun_blocks_freeze: bool, mon: &m
         return;
     }
 
+    // Sweet Veil: the holder cannot fall asleep (including self-induced sleep from Rest).
+    // Ally protection (Sweet Veil protecting teammates) is handled at the apply_effect_to_target
+    // call site where side context is available.
+    // Mold Breaker: TODO
+    if matches!(status, Status::Sleep(_))
+        && !pokemon_ability_is_suppressed(state, mon)
+        && mon.ability == Ability::SweetVeil
+    {
+        return;
+    }
+
     if matches!(status, Status::Frozen(_)) && sun_blocks_freeze {
         return;
     }
@@ -3626,6 +3647,17 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             return;
         }
 
+        // Sweet Veil: the holder cannot receive Yawn.
+        // Ally protection (Sweet Veil protecting teammates' Yawn) is handled at the
+        // apply_effect_to_target call site where side context is available.
+        // Mold Breaker: TODO
+        if matches!(volatile, VolatileStatus::Yawn)
+            && !pokemon_ability_is_suppressed(state, mon)
+            && mon.ability == Ability::SweetVeil
+        {
+            return;
+        }
+
             let is_move_status = matches!(
                 volatile,
                 VolatileStatus::Disable(_)
@@ -3669,12 +3701,27 @@ fn apply_stat_boosts_to_pokemon(mon: &mut PokemonState, boosts: &[i8; 7], items_
     }
 }
 
+/// Returns `true` if any non-fainted, unsuppressed Pokémon on `player`'s side carries
+/// `veil_ability`.  Used by Sweet Veil, Flower Veil, and Aroma Veil to protect both the
+/// holder and all active allies.
+fn side_has_veil(state: &BattleState, player: Player, veil_ability: Ability) -> bool {
+    let mons = match player {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    };
+    mons.iter()
+        .filter(|mon| !mon.fainted)
+        .any(|mon| !pokemon_ability_is_suppressed(state, mon) && mon.ability == veil_ability)
+}
+
 /// Zero out stat-drop entries in `boosts` that the target's ability blocks when the
 /// stat change originates from another Pokémon (i.e. not self-inflicted).
 ///
 /// - `ClearBody | WhiteSmoke | FullMetalBody` — block all external stat drops.
-/// - `HyperCutter` — block only Attack (index 0) being lowered.
-/// - `BigPecks`    — block only Defense (index 1) being lowered.
+/// - `HyperCutter`         — block only Attack (index 0) being lowered.
+/// - `BigPecks`            — block only Defense (index 1) being lowered.
+/// - `KeenEye | Illuminate`— block only accuracy (index 5) being lowered.
+///   (Mold Breaker: TODO)
 ///
 /// Positive entries and self-inflicted drops (those going through the attacker/self_boost
 /// paths) are never touched.  Callers must pass the pre-computed suppression flag so that
@@ -3695,6 +3742,11 @@ fn filter_opponent_stat_drops(mon: &PokemonState, boosts: &[i8; 7], ability_supp
         }
         Ability::BigPecks => {
             if filtered[1] < 0 { filtered[1] = 0; }
+        }
+        // Keen Eye / Illuminate: the holder's accuracy stage cannot be lowered by opponents.
+        // Mold Breaker: TODO
+        Ability::KeenEye | Ability::Illuminate => {
+            if filtered[5] < 0 { filtered[5] = 0; }
         }
         _ => {}
     }
@@ -3744,25 +3796,67 @@ fn apply_effect_to_target(
     let sun_blocks_freeze = weather_is_sunlight(state);
     let items_suppressed = items_are_suppressed(state);
     let terrain_snapshot = state.clone();
+
+    // Pre-compute veil protections before taking the mutable borrow.
+    // Sweet Veil: block sleep for the target's entire side (Mold Breaker: TODO).
+    let sweet_veil_on_side = side_has_veil(state, target_slot.player, Ability::SweetVeil);
+    // Flower Veil: block all non-volatile status and opponent stat drops on Grass-type targets
+    // on the protected side (Mold Breaker: TODO).
+    let flower_veil_on_side = side_has_veil(state, target_slot.player, Ability::FlowerVeil);
+    // Aroma Veil: block mental volatile statuses for the target's entire side (Mold Breaker: TODO).
+    let aroma_veil_on_side = side_has_veil(state, target_slot.player, Ability::AromaVeil);
+    // Snapshot target type for Flower Veil (Grass-only protection) before the mutable borrow.
+    let target_is_grass = get_pokemon_at_slot(state, target_slot)
+        .map_or(false, |mon| pokemon_has_type(mon, &PokemonType::Grass));
+
     if let Some(target_mon) = get_pokemon_at_slot_mut(state, target_slot) {
         if let Some(status) = &effect.status {
-            // If attacker has Corrosion, allow poisoning of Poison/Steel types,
-            // but do not overwrite an existing non-volatile status on the target.
-            if attacker_ability == Some(Ability::Corrosion) {
-                if target_mon.status.is_none() {
-                    match status {
-                        Status::Poison => { target_mon.status = Some(Status::Poison); }
-                        Status::ToxicPoison(_) => { target_mon.status = Some(Status::ToxicPoison(0)); }
-                        other => { apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, target_mon, other); }
+            // Sweet Veil: block sleep on the entire side (including Rest).
+            let sleep_blocked_by_sweet_veil =
+                matches!(status, Status::Sleep(_)) && sweet_veil_on_side;
+            // Flower Veil: block all non-volatile status on Grass-type targets.
+            // Rest / Flame Orb / Toxic Orb are not blocked (those go through separate paths).
+            let status_blocked_by_flower_veil =
+                flower_veil_on_side && target_is_grass;
+
+            if !sleep_blocked_by_sweet_veil && !status_blocked_by_flower_veil {
+                // If attacker has Corrosion, allow poisoning of Poison/Steel types,
+                // but do not overwrite an existing non-volatile status on the target.
+                if attacker_ability == Some(Ability::Corrosion) {
+                    if target_mon.status.is_none() {
+                        match status {
+                            Status::Poison => { target_mon.status = Some(Status::Poison); }
+                            Status::ToxicPoison(_) => { target_mon.status = Some(Status::ToxicPoison(0)); }
+                            other => { apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, target_mon, other); }
+                        }
                     }
+                } else {
+                    apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, target_mon, status);
                 }
-            } else {
-                apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, target_mon, status);
             }
         }
 
         if let Some(volatile) = &effect.volatile_status {
-            apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile);
+            // Sweet Veil: block Yawn on the target's side.
+            // Mold Breaker: TODO
+            let yawn_blocked_by_sweet_veil =
+                matches!(volatile, VolatileStatus::Yawn) && sweet_veil_on_side;
+            // Aroma Veil: block mental volatile statuses for the target's entire side.
+            // Protects against Taunt, Torment, Encore, Disable, Attract, Heal Block.
+            // Does NOT block Imprison (Bulbapedia explicitly excludes it).
+            // Mold Breaker: TODO
+            let aroma_veil_blocked = aroma_veil_on_side && matches!(
+                volatile,
+                VolatileStatus::Taunt
+                    | VolatileStatus::Torment
+                    | VolatileStatus::Encore
+                    | VolatileStatus::Disable(_)
+                    | VolatileStatus::Attract
+                    | VolatileStatus::HealBlock
+            );
+            if !yawn_blocked_by_sweet_veil && !aroma_veil_blocked {
+                apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile);
+            }
         }
 
         // After both status and volatile are applied, check status-cure berries.
@@ -3771,8 +3865,18 @@ fn apply_effect_to_target(
 
         if effect.boosts != [0; 7] {
             // Filter out stat drops that the target's ability blocks when caused by another
-            // Pokémon (Clear Body / White Smoke / Full Metal Body / Hyper Cutter / Big Pecks).
-            let filtered = filter_opponent_stat_drops(target_mon, &effect.boosts, target_ability_suppressed);
+            // Pokémon (Clear Body / White Smoke / Full Metal Body / Hyper Cutter / Big Pecks /
+            // Keen Eye / Illuminate).
+            let mut filtered = filter_opponent_stat_drops(target_mon, &effect.boosts, target_ability_suppressed);
+            // Flower Veil: zero all opponent-sourced stat drops on Grass-type targets.
+            // Self-inflicted drops (Leaf Storm, Weak Armor, etc.) go through apply_self_boosts,
+            // not this path, so they are correctly unaffected.
+            // Mold Breaker: TODO
+            if flower_veil_on_side && target_is_grass {
+                for b in &mut filtered {
+                    if *b < 0 { *b = 0; }
+                }
+            }
             if filtered != [0; 7] {
                 apply_stat_boosts_to_pokemon(target_mon, &filtered, items_suppressed);
             }
@@ -4035,7 +4139,14 @@ pub fn try_apply_disable(state: &mut BattleState, source_slot: FieldSlot, target
 }
 
 /// Damage the attacker by `numer/denom` of its max HP (Rough Skin / Aftermath pattern).
-/// Blocked by Magic Guard. Handles faint bookkeeping.
+/// Indirect HP damage paid by the attacker after using a move: Rough Skin / Iron Barbs recoil,
+/// Rocky Helmet, etc.  Blocked by Magic Guard.  Handles faint bookkeeping.
+///
+/// Future indirect-damage sources that must also be blocked by Magic Guard:
+///   - Life Orb recoil (1/10 max HP after each damaging hit) — Magic Guard: TODO
+///   - Crash damage (High Jump Kick / Jump Kick miss — 1/2 max HP) — Magic Guard: TODO
+///   - Leech Seed end-of-turn drain — Magic Guard: TODO (see apply_status_residual)
+///   - Entry hazard switch-in damage (Spikes, Stealth Rock, Toxic Spikes) — Magic Guard: TODO
 fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSlot, numer: u32, denom: u32) {
     let abilities_suppressed = abilities_are_suppressed(bs);
     let items_suppressed = items_are_suppressed(bs);
@@ -4397,24 +4508,35 @@ pub fn apply_secondary_effects(
         false
     };
 
+    // Shield Dust: block all additional (secondary) effects that would be applied to the
+    // target — status riders, stat-drop chances, flinch, King's Rock / Razor Fang flinch,
+    // Poison Touch / Toxic Chain procs, etc.  Self-effects on the attacker (self_boost,
+    // self_secondaries) are intentionally NOT blocked; those are applied further below.
+    // Mold Breaker: TODO
+    let target_has_shield_dust = get_pokemon_at_slot(state, target_slot).map_or(false, |mon| {
+        !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::ShieldDust
+    });
+
     // Branch target secondaries
-    for secondary in &move_data.secondaries {
-        // Shed Tail: skip the auto-added Substitute secondary when the move fails its HP check.
-        if shed_tail_failed
-            && secondary.random_choices.is_empty()
-            && secondary.effect.volatile_status == Some(VolatileStatus::Substitute)
-        {
-            continue;
+    if !target_has_shield_dust {
+        for secondary in &move_data.secondaries {
+            // Shed Tail: skip the auto-added Substitute secondary when the move fails its HP check.
+            if shed_tail_failed
+                && secondary.random_choices.is_empty()
+                && secondary.effect.volatile_status == Some(VolatileStatus::Substitute)
+            {
+                continue;
+            }
+            let chance = secondary.chance as f64 / 100.0;
+            let choices = if secondary.random_choices.is_empty() {
+                std::slice::from_ref(&secondary.effect)
+            } else {
+                &secondary.random_choices
+            };
+            branches = branch_on_secondary_effects(branches, chance, choices, |bs, eff| {
+                apply_effect_to_target(bs, attacker_slot, target_slot, eff, side_condition_target);
+            });
         }
-        let chance = secondary.chance as f64 / 100.0;
-        let choices = if secondary.random_choices.is_empty() {
-            std::slice::from_ref(&secondary.effect)
-        } else {
-            &secondary.random_choices
-        };
-        branches = branch_on_secondary_effects(branches, chance, choices, |bs, eff| {
-            apply_effect_to_target(bs, attacker_slot, target_slot, eff, side_condition_target);
-        });
     }
 
     // Unconditional self-boosts

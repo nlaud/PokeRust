@@ -22,24 +22,7 @@ framework already in place; these extend it.
 - Unnerve — opponents cannot eat held Berries
 
 ### Immunity and move-blocking abilities
-Block categories of moves, secondary effects, or field-side damage.
-**Full move-type / source immunity:**
-- Bulletproof — immune to ball and bomb moves
-- Levitate — immune to Ground moves, and Spikes / Toxic Spikes / Sticky Web
-- Magic Guard — take damage only from direct attacks (no residual, recoil, or hazards)
-- Overcoat — immune to sandstorm damage and to powder/spore moves
-- Soundproof — immune to sound-based moves
-- Telepathy — dodge moves used by allies
-
-**Secondary-effect and indirect blocking:**
-- Damp — all Pokémon unable to use explosive moves; explosive abilities fail
-- Illuminate / Keen Eye — evasiveness cannot be lowered; ignore evasion changes
-- Shield Dust — immune to secondary effects from moves
-
-**Team-wide protection:**
-- Aroma Veil — holder and allies cannot gain mental volatile statuses
-- Flower Veil — Grass-type allies immune to status conditions and stat drops
-- Sweet Veil — holder and allies cannot become drowsy or be put to sleep
+*(All 13 abilities in this section are implemented.)*
 
 ### Stat-change reaction abilities
 Trigger when a stat is raised, lowered, or an HP threshold is crossed.
