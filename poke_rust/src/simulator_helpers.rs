@@ -802,6 +802,17 @@ fn effective_base_power(
             }
         }
 
+        // Charge / Electromorphosis / Wind Power: ×2 for the next Electric-type move.
+        // The volatile is consumed (removed from the attacker's list) after the hit in
+        // apply_contact_hit_reactions so that the doubling only applies to the first hit.
+        // Does not stack: multiple Charge instances have no additional effect.
+        if has_status_volatile(attacker, &VolatileStatus::Charge) {
+            let eff_type = effective_move_type(state, attacker, move_data);
+            if matches!(eff_type, PokemonType::Electric) {
+                bp = (bp * 2.0).floor();
+            }
+        }
+
         // Technician: ×1.5 for moves with variable base power ≤ 60 (inclusive).
         // The gate uses the snapshot taken before terrain/Helping-Hand modifiers.
         if attacker.ability == Ability::Technician && technician_bp_snapshot <= 60.0 {
@@ -1460,8 +1471,24 @@ pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus)
 }
 
 pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
-    mon.hp = mon.hp.saturating_sub(damage);
+    let hp_before = mon.hp;
+    mon.hp = hp_before.saturating_sub(damage);
     mon.fainted = mon.hp == 0;
+
+    // Berserk (project divergence): +1 Sp. Atk when HP crosses from above 50% to ≤ 50%.
+    // Triggers on ANY HP loss — move damage, burn, sandstorm, Leech Seed, recoil, etc.
+    // (Canon Gen 9 restricts this to direct move damage; this simulator intentionally
+    // broadens the trigger per user request.)
+    // Skip if the holder fainted from this hit; skip if ability is suppressed via Gastro Acid.
+    // Field-level Neutralizing Gas suppression cannot be checked here (no state access) — TODO.
+    if !mon.fainted
+        && mon.ability == Ability::Berserk
+        && !has_status_volatile(mon, &VolatileStatus::GastroAcid)
+        && (hp_before as u32) * 2 > (mon.stats[0] as u32)
+        && (mon.hp as u32) * 2 <= (mon.stats[0] as u32)
+    {
+        mon.boosts[2] = (mon.boosts[2] + 1).min(6);
+    }
 }
 
 /// Consume an HP-threshold berry (Oran, Sitrus) if the holder is at ≤ 50% HP.
@@ -1523,23 +1550,23 @@ pub(crate) fn apply_berry_effect(mon: &mut PokemonState, berry: &Item, env: &Ber
         }
         Item::LiechiBerry => {
             let s = if ripen { 2 } else { 1 };
-            apply_stat_boosts_to_pokemon(mon, &[s, 0, 0, 0, 0, 0, 0], env.suppressed);
+            apply_stat_boosts_to_pokemon(mon, &[s, 0, 0, 0, 0, 0, 0], env.suppressed, false);
         }
         Item::GanlonBerry => {
             let s = if ripen { 2 } else { 1 };
-            apply_stat_boosts_to_pokemon(mon, &[0, s, 0, 0, 0, 0, 0], env.suppressed);
+            apply_stat_boosts_to_pokemon(mon, &[0, s, 0, 0, 0, 0, 0], env.suppressed, false);
         }
         Item::PetayaBerry => {
             let s = if ripen { 2 } else { 1 };
-            apply_stat_boosts_to_pokemon(mon, &[0, 0, s, 0, 0, 0, 0], env.suppressed);
+            apply_stat_boosts_to_pokemon(mon, &[0, 0, s, 0, 0, 0, 0], env.suppressed, false);
         }
         Item::ApicotBerry => {
             let s = if ripen { 2 } else { 1 };
-            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, s, 0, 0, 0], env.suppressed);
+            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, s, 0, 0, 0], env.suppressed, false);
         }
         Item::SalacBerry => {
             let s = if ripen { 2 } else { 1 };
-            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, s, 0, 0], env.suppressed);
+            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, s, 0, 0], env.suppressed, false);
         }
         Item::StarfBerry => {
             // Picks one of 5 stats at random (non-branching, same pattern as Confusion duration).
@@ -1547,7 +1574,7 @@ pub(crate) fn apply_berry_effect(mon: &mut PokemonState, berry: &Item, env: &Ber
             let idx = thread_rng().gen_range(0..5usize);
             let mut boosts = [0i8; 7];
             boosts[idx] = s;
-            apply_stat_boosts_to_pokemon(mon, &boosts, env.suppressed);
+            apply_stat_boosts_to_pokemon(mon, &boosts, env.suppressed, false);
         }
         Item::LansatBerry => {
             if !has_status_volatile(mon, &VolatileStatus::FocusEnergy) {
@@ -2608,16 +2635,9 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
         };
         let items_suppressed = items_are_suppressed(state);
         for target in collect_active_slots(state, opposing_player, None) {
-            // Compute suppression via immutable borrow before the mutable borrow below.
-            let ability_suppressed = get_pokemon_at_slot(state, target)
-                .map(|m| pokemon_ability_is_suppressed(state, m))
-                .unwrap_or(false);
-            if let Some(mon) = get_pokemon_at_slot_mut(state, target) {
-                let delta = filter_opponent_stat_drops(mon, &[-1, 0, 0, 0, 0, 0, 0], ability_suppressed);
-                if delta != [0; 7] {
-                    apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed);
-                }
-            }
+            // apply_opponent_stat_drop handles immunity (Clear Body / Hyper Cutter / …),
+            // Mirror Armor reflection, and Defiant / Competitive reactions.
+            apply_opponent_stat_drop(state, target, slot, [-1, 0, 0, 0, 0, 0, 0], items_suppressed, false);
         }
     }
 }
@@ -2680,16 +2700,9 @@ fn apply_send_out_only_ability_effects(state: &mut BattleState, slot: FieldSlot,
                     mon.one_time_ability_used = true;
                 }
                 for target in collect_active_slots(state, opp_player, None) {
-                    let ability_suppressed = get_pokemon_at_slot(state, target)
-                        .map(|m| pokemon_ability_is_suppressed(state, m))
-                        .unwrap_or(false);
-                    if let Some(mon) = get_pokemon_at_slot_mut(state, target) {
-                        // Index 6 = Evasiveness.
-                        let delta = filter_opponent_stat_drops(mon, &[0, 0, 0, 0, 0, 0, -1], ability_suppressed);
-                        if delta != [0; 7] {
-                            apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed);
-                        }
-                    }
+                    // apply_opponent_stat_drop handles immunity, Mirror Armor, and reactions.
+                    // Index 6 = Evasiveness.
+                    apply_opponent_stat_drop(state, target, slot, [0, 0, 0, 0, 0, 0, -1], items_suppressed, false);
                 }
             }
         }
@@ -3629,7 +3642,7 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                 for (bs, _) in result.iter_mut() {
                     let items_suppressed = items_are_suppressed(bs);
                     if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
-                        if !mon.fainted && !mon.entered_this_turn { apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed); }
+                        if !mon.fainted && !mon.entered_this_turn { apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false); }
                     }
                 }
             }
@@ -3694,12 +3707,12 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                             if let Some(i) = raise_idx {
                                 let mut delta = [0i8; 7];
                                 delta[i] = 2;
-                                apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed);
+                                apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed, false);
                             }
                             if let Some(j) = lower_idx {
                                 let mut delta = [0i8; 7];
                                 delta[j] = -1;
-                                apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed);
+                                apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed, false);
                             }
                         }
                         new_result.push((branch, prob * outcome_prob));
@@ -3939,13 +3952,46 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
 
 /// Apply stat boosts to a pokemon. If any entry of `boosts` is negative (a stat drop was
 /// applied), also try to trigger a White Herb.
-fn apply_stat_boosts_to_pokemon(mon: &mut PokemonState, boosts: &[i8; 7], items_suppressed: bool) {
+/// Public thin wrapper around `apply_stat_boosts_to_pokemon` for callers outside this module
+/// (primarily `simulator.rs`).  Passes `defer_white_herb: false` so White Herb fires
+/// immediately — appropriate for all self-boost paths (Moxie, post-KO boosts, etc.).
+pub(crate) fn apply_stat_boost_external(mon: &mut PokemonState, boosts: &[i8; 7], items_suppressed: bool) {
+    apply_stat_boosts_to_pokemon(mon, boosts, items_suppressed, false);
+}
+
+/// Apply a stat boost delta to `mon`, clamping each stage to `[-6, 6]`.
+/// If `defer_white_herb` is false (the default for all self-boost paths), White Herb
+/// is checked immediately after the apply.  Pass `true` only from
+/// `apply_opponent_stat_drop`, which calls `try_consume_white_herb` manually *after*
+/// Defiant / Competitive have had a chance to run — ensuring a Defiant +2 that cancels
+/// the only negative stage suppresses the herb.
+fn apply_stat_boosts_to_pokemon(
+    mon: &mut PokemonState,
+    boosts: &[i8; 7],
+    items_suppressed: bool,
+    defer_white_herb: bool,
+) {
     for i in 0..7 {
         mon.boosts[i] = (mon.boosts[i] + boosts[i]).clamp(-6, 6);
     }
-    if boosts.iter().any(|&b| b < 0) {
+    if !defer_white_herb && boosts.iter().any(|&b| b < 0) {
         try_consume_white_herb(mon, items_suppressed);
     }
+}
+
+/// Apply a stat boost delta and return the *actual* per-stat change after clamping.
+/// A stat already at −6 will report delta 0 even if the incoming value was negative.
+/// Used by `apply_opponent_stat_drop` to count how many stats were truly lowered
+/// (for Defiant / Competitive triggers) and what was truly raised (for Opportunist).
+fn apply_boosts_returning_delta(mon: &mut PokemonState, boosts: &[i8; 7]) -> [i8; 7] {
+    let mut delta = [0i8; 7];
+    for i in 0..7 {
+        let before = mon.boosts[i];
+        let after = (before + boosts[i]).clamp(-6, 6);
+        delta[i] = after - before;
+        mon.boosts[i] = after;
+    }
+    delta
 }
 
 /// Returns `true` if any non-fainted, unsuppressed Pokémon on `player`'s side carries
@@ -4000,6 +4046,118 @@ fn filter_opponent_stat_drops(mon: &PokemonState, boosts: &[i8; 7], ability_supp
     filtered
 }
 
+/// Unified entry point for every opponent-sourced stat drop.
+///
+/// Order of operations:
+/// 1. **Mirror Armor** (if holder is unsuppressed and `!already_reflected`): split off the
+///    negative portion, bounce it back to `source_slot` (recursive call with
+///    `already_reflected = true` to prevent an infinite Armor↔Armor loop), then apply any
+///    non-negative remainder directly to the holder and return.
+/// 2. **Immunity filter** via `filter_opponent_stat_drops` (Clear Body / Hyper Cutter / …).
+/// 3. Apply the filtered delta via `apply_boosts_returning_delta`, deferring White Herb.
+/// 4. **Defiant / Competitive**: +2 per stat actually lowered (after clamping).
+/// 5. White Herb (`try_consume_white_herb`), now that Defiant/Competitive have run.
+///
+/// `already_reflected = true` is passed only for the Mirror Armor recursive bounce so that
+/// the source's own Mirror Armor cannot reflect it a second time.
+/// Flower Veil zeroing (if applicable) must be applied to `raw_boosts` by the caller
+/// *before* calling this function.
+/// Sticky Web and Octolock are not yet implemented; add Mirror Armor interactions when they are.
+/// Mold Breaker: TODO (consistent with existing abilities — all currently ignore it).
+fn apply_opponent_stat_drop(
+    state: &mut BattleState,
+    target_slot: FieldSlot,
+    source_slot: FieldSlot,
+    raw_boosts: [i8; 7],
+    items_suppressed: bool,
+    already_reflected: bool,
+) {
+    if raw_boosts == [0; 7] { return; }
+
+    // Snapshot the target's ability and suppression before taking any mutable borrow.
+    let (target_ability, target_suppressed) = match get_pokemon_at_slot(state, target_slot) {
+        Some(m) => (m.ability.clone(), pokemon_ability_is_suppressed(state, m)),
+        None => return,
+    };
+
+    // ── 1. Mirror Armor ────────────────────────────────────────────────────────────────────
+    // Bounce the negative portion back to the source.  Only the holder's portion bounces;
+    // positive entries (if any) are applied directly.  A previously-reflected drop cannot be
+    // re-reflected (loop / infinite-recursion guard).
+    if !already_reflected && !target_suppressed && target_ability == Ability::MirrorArmor {
+        let mut bounced = [0i8; 7];
+        let mut kept    = [0i8; 7];
+        for i in 0..7 {
+            if raw_boosts[i] < 0 { bounced[i] = raw_boosts[i]; }
+            else                  { kept[i]    = raw_boosts[i]; }
+        }
+        // Bounce: the drop now originates from the holder (target_slot) targeting the source.
+        // already_reflected = true prevents the source's Mirror Armor from sending it back.
+        if bounced != [0; 7] {
+            apply_opponent_stat_drop(state, source_slot, target_slot, bounced, items_suppressed, true);
+        }
+        // Apply any positive boosts (e.g. from Decorate) directly to the holder.
+        if kept != [0; 7] {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                apply_stat_boosts_to_pokemon(mon, &kept, items_suppressed, false);
+            }
+        }
+        return;
+    }
+
+    // ── 2. Immunity filter (Clear Body / Hyper Cutter / Big Pecks / Keen Eye / …) ─────────
+    let filtered = {
+        let Some(mon) = get_pokemon_at_slot(state, target_slot) else { return; };
+        filter_opponent_stat_drops(mon, &raw_boosts, target_suppressed)
+    };
+    if filtered == [0; 7] { return; }
+
+    // ── 3. Apply with clamping, defer White Herb ────────────────────────────────────────────
+    let delta = {
+        let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) else { return; };
+        apply_boosts_returning_delta(mon, &filtered)
+    };
+
+    // ── 4a. Opportunist: mirror any positive raise to opponents of target_slot ──────────────
+    // Covers moves that raise the TARGET's stats (e.g. Decorate, target-boosting secondaries).
+    // Uses the actual clamped delta so opponents mirror what truly landed.
+    {
+        let positive: [i8; 7] = {
+            let mut p = [0i8; 7];
+            for i in 0..7 { if delta[i] > 0 { p[i] = delta[i]; } }
+            p
+        };
+        if positive != [0; 7] {
+            mirror_opportunist_raises(state, target_slot, &positive, items_suppressed);
+        }
+    }
+
+    // ── 4b. Defiant / Competitive: +2 per stat actually lowered ────────────────────────────
+    // Each *distinct* stat that moved lower (after clamping) triggers once regardless of the
+    // stage amount (e.g. Charm −2 Atk → one trigger; Memento −1 Atk −1 SpA → two triggers).
+    let stats_lowered = delta.iter().filter(|&&d| d < 0).count() as i8;
+    if stats_lowered > 0 && !target_suppressed {
+        let reaction_idx: Option<usize> = match target_ability {
+            Ability::Defiant     => Some(0), // +2 Attack per stat lowered
+            Ability::Competitive => Some(2), // +2 Sp. Atk per stat lowered
+            _ => None,
+        };
+        if let Some(idx) = reaction_idx {
+            let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) else { return; };
+            let mut boost = [0i8; 7];
+            boost[idx] = 2 * stats_lowered;
+            // Self-boost from Defiant/Competitive — use the non-deferring path (no White Herb
+            // on a pure positive delta).
+            apply_stat_boosts_to_pokemon(mon, &boost, items_suppressed, false);
+        }
+    }
+
+    // ── 5. White Herb (after Defiant/Competitive have potentially cancelled the negative) ───
+    if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+        try_consume_white_herb(mon, items_suppressed);
+    }
+}
+
 /// Apply weather or pseudo-weather effects.
 fn apply_weather_effects(state: &mut BattleState, effect: &HitEffect) {
     if let Some(weather) = &effect.weather {
@@ -4023,6 +4181,51 @@ fn apply_weather_effects(state: &mut BattleState, effect: &HitEffect) {
 fn apply_terrain_effects(state: &mut BattleState, effect: &HitEffect) {
     if let Some(terrain) = &effect.terrain {
         set_terrain(state, terrain.clone(), 5);
+    }
+}
+
+/// Opportunist: when an opposing Pokémon raises its stats, the holder copies those same
+/// positive stage changes.
+///
+/// `raiser_slot` is the Pokémon whose stats just went up.  `raised_boosts` should be the
+/// nominal intended boost (the delta applied to the raiser) so that Opportunist copies
+/// the same stage count regardless of whether the raiser's stat was already capped.
+/// Only positive entries are mirrored; negative entries (drops in the same array) are ignored.
+/// Does NOT re-trigger Opportunist (no recursive call) — the copy is applied via a direct
+/// `apply_stat_boosts_to_pokemon` call.
+/// Opportunist does not activate on the holder's own boosts or on ally boosts (not called for
+/// those paths).
+fn mirror_opportunist_raises(
+    state: &mut BattleState,
+    raiser_slot: FieldSlot,
+    raised_boosts: &[i8; 7],
+    items_suppressed: bool,
+) {
+    // Extract positive portion only.
+    let mut positive = [0i8; 7];
+    if raised_boosts.iter().all(|&b| b <= 0) { return; }
+    for i in 0..7 {
+        if raised_boosts[i] > 0 { positive[i] = raised_boosts[i]; }
+    }
+
+    let opp_player = match raiser_slot.player {
+        Player::P1 => Player::P2,
+        Player::P2 => Player::P1,
+    };
+    let opp_slots: Vec<FieldSlot> = collect_active_slots(state, opp_player, None);
+    for slot in opp_slots {
+        let has_opportunist = get_pokemon_at_slot(state, slot)
+            .map(|m| {
+                !m.fainted
+                    && !pokemon_ability_is_suppressed(state, m)
+                    && m.ability == Ability::Opportunist
+            })
+            .unwrap_or(false);
+        if has_opportunist {
+            if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+                apply_stat_boosts_to_pokemon(mon, &positive, items_suppressed, false);
+            }
+        }
     }
 }
 
@@ -4104,6 +4307,18 @@ fn apply_effect_to_target(
             );
             if !yawn_blocked_by_sweet_veil && !aroma_veil_blocked {
                 apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile);
+
+                // Steadfast: +1 Speed when the holder flinches.
+                // The flinch volatile has just been pushed; fire immediately so the boost
+                // lands in the same "apply flinch" moment (consistent with how the ability
+                // resolves in-game before the flinched Pokémon would move).
+                // Suppressed abilities are skipped; Inner Focus prevents flinching (separate TODO).
+                if matches!(volatile, VolatileStatus::Flinch)
+                    && target_mon.ability == Ability::Steadfast
+                    && !has_status_volatile(target_mon, &VolatileStatus::GastroAcid)
+                {
+                    apply_stat_boosts_to_pokemon(target_mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false);
+                }
             }
         }
 
@@ -4111,23 +4326,23 @@ fn apply_effect_to_target(
         // A single call handles Aspear/Cheri/etc. (status just set) and Persim/Lum (confusion just pushed).
         try_consume_status_cure_berry(target_mon, &target_berry_env);
 
-        if effect.boosts != [0; 7] {
-            // Filter out stat drops that the target's ability blocks when caused by another
-            // Pokémon (Clear Body / White Smoke / Full Metal Body / Hyper Cutter / Big Pecks /
-            // Keen Eye / Illuminate).
-            let mut filtered = filter_opponent_stat_drops(target_mon, &effect.boosts, target_ability_suppressed);
-            // Flower Veil: zero all opponent-sourced stat drops on Grass-type targets.
-            // Self-inflicted drops (Leaf Storm, Weak Armor, etc.) go through apply_self_boosts,
-            // not this path, so they are correctly unaffected.
-            // Mold Breaker: TODO
-            if flower_veil_on_side && target_is_grass {
-                for b in &mut filtered {
-                    if *b < 0 { *b = 0; }
-                }
-            }
-            if filtered != [0; 7] {
-                apply_stat_boosts_to_pokemon(target_mon, &filtered, items_suppressed);
-            }
+    }
+
+    // Handle opponent-sourced stat changes OUTSIDE the target_mon mutable borrow so that
+    // apply_opponent_stat_drop can take &mut BattleState freely (needed for Mirror Armor
+    // recursion onto source_slot and for Defiant/Competitive self-boost application).
+    // attacker_slot is already a parameter and all needed locals were snapshotted above.
+    if effect.boosts != [0; 7] {
+        let mut incoming = effect.boosts;
+        // Flower Veil: zero all opponent-sourced stat drops on Grass-type targets.
+        // Self-inflicted drops (Leaf Storm, Weak Armor, etc.) go through apply_effect_to_attacker,
+        // not this path, so they are correctly unaffected.
+        // Mold Breaker: TODO
+        if flower_veil_on_side && target_is_grass {
+            for b in &mut incoming { if *b < 0 { *b = 0; } }
+        }
+        if incoming != [0; 7] {
+            apply_opponent_stat_drop(state, target_slot, attacker_slot, incoming, items_suppressed, false);
         }
     }
 
@@ -4166,8 +4381,14 @@ fn apply_effect_to_attacker(
         try_consume_status_cure_berry(attacker_mon, &attacker_berry_env);
 
         if effect.boosts != [0; 7] {
-            apply_stat_boosts_to_pokemon(attacker_mon, &effect.boosts, items_suppressed);
+            apply_stat_boosts_to_pokemon(attacker_mon, &effect.boosts, items_suppressed, false);
         }
+    }
+
+    // Opportunist: mirror any positive self-boost the attacker just applied to opponents
+    // who hold Opportunist.  Negative drops (Leaf Storm −2 SpA, etc.) are ignored.
+    if effect.boosts.iter().any(|&b| b > 0) {
+        mirror_opportunist_raises(state, attacker_slot, &effect.boosts, items_suppressed);
     }
 
     if let Some(side_condition) = &effect.side_condition {
@@ -4432,6 +4653,7 @@ pub fn apply_contact_hit_reactions(
     move_name: &PokemonMove,
     move_data: &MoveData,
     damage_dealt: u16,
+    is_crit: bool,
 ) -> Vec<(BattleState, f64)> {
     if damage_dealt == 0 || branches.is_empty() { return branches; }
 
@@ -4451,7 +4673,7 @@ pub fn apply_contact_hit_reactions(
     let is_contact = move_has_flag(move_data, &MoveFlag::Contact);
     let is_physical = matches!(move_data.category, MoveCategory::Physical);
 
-    match holder_ability {
+    let mut branches = match holder_ability {
         Ability::RoughSkin => {
             if !is_contact { return branches; }
             branches.into_iter().map(|(mut bs, prob)| {
@@ -4534,7 +4756,62 @@ pub fn apply_contact_hit_reactions(
                 if !alive { return (bs, prob); }
                 let items_suppressed = items_are_suppressed(&bs);
                 if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
-                    apply_stat_boosts_to_pokemon(mon, &boosts, items_suppressed);
+                    apply_stat_boosts_to_pokemon(mon, &boosts, items_suppressed, false);
+                }
+                (bs, prob)
+            }).collect()
+        }
+        // ── Stat-change reaction abilities (Subgroup B) ───────────────────────────────
+
+        // Stamina: +1 Defense on any damaging hit; fires per hit of multi-hit moves.
+        Ability::Stamina => {
+            branches.into_iter().map(|(mut bs, prob)| {
+                let alive = get_pokemon_at_slot(&bs, holder_slot).map(|m| !m.fainted).unwrap_or(false);
+                if !alive { return (bs, prob); }
+                let items_suppressed = items_are_suppressed(&bs);
+                if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
+                    apply_stat_boosts_to_pokemon(mon, &[0, 1, 0, 0, 0, 0, 0], items_suppressed, false);
+                }
+                (bs, prob)
+            }).collect()
+        }
+        // Justified: +1 Attack when hit by a Dark-type damaging move; fires per hit.
+        Ability::Justified => {
+            if move_data.pokemon_type != PokemonType::Dark { return branches; }
+            branches.into_iter().map(|(mut bs, prob)| {
+                let alive = get_pokemon_at_slot(&bs, holder_slot).map(|m| !m.fainted).unwrap_or(false);
+                if !alive { return (bs, prob); }
+                let items_suppressed = items_are_suppressed(&bs);
+                if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
+                    apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false);
+                }
+                (bs, prob)
+            }).collect()
+        }
+        // Anger Point: on a critical hit, maximise Attack to +6 (set, not add).
+        // Does not activate if the hit goes into a Substitute.
+        Ability::AngerPoint => {
+            if !is_crit { return branches; }
+            branches.into_iter().map(|(mut bs, prob)| {
+                let alive = get_pokemon_at_slot(&bs, holder_slot).map(|m| !m.fainted).unwrap_or(false);
+                if !alive { return (bs, prob); }
+                if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
+                    mon.boosts[0] = 6; // maximise Attack regardless of current stage
+                }
+                (bs, prob)
+            }).collect()
+        }
+        // Electromorphosis: gain the Charge status (×2 next Electric move) when hit.
+        // Charge does not stack; re-hitting a charged Pokémon just refreshes it.
+        Ability::Electromorphosis => {
+            branches.into_iter().map(|(mut bs, prob)| {
+                let alive = get_pokemon_at_slot(&bs, holder_slot).map(|m| !m.fainted).unwrap_or(false);
+                if !alive { return (bs, prob); }
+                if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
+                    // Remove any existing Charge volatile first (no stacking),
+                    // then push a fresh one.
+                    remove_status_volatile(mon, &VolatileStatus::Charge);
+                    mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Charge, 0));
                 }
                 (bs, prob)
             }).collect()
@@ -4585,7 +4862,22 @@ pub fn apply_contact_hit_reactions(
             }).collect()
         }
         _ => branches,
+    };
+
+    // ── Charge consumer (attacker-side, outside the holder-ability match) ─────────────────
+    // If the attacker used a damaging Electric-type move and holds the Charge volatile,
+    // consume it now.  The doubling already happened inside effective_base_power.
+    // Runs per-hit; on the first hit Charge is consumed, subsequent hits see it gone.
+    if move_data.pokemon_type == PokemonType::Electric {
+        branches = branches.into_iter().map(|(mut bs, prob)| {
+            if let Some(atk) = get_pokemon_at_slot_mut(&mut bs, attacker_slot) {
+                remove_status_volatile(atk, &VolatileStatus::Charge);
+            }
+            (bs, prob)
+        }).collect();
     }
+
+    branches
 }
 
 // ── Type-immunity / absorption abilities ──────────────────────────────────────
@@ -4636,13 +4928,13 @@ pub(crate) fn try_absorb_move(
         }
         (PokemonType::Grass, Ability::SapSipper) => {
             if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed);
+                apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false);
             }
             true
         }
         (PokemonType::Electric, Ability::MotorDrive) => {
             if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed);
+                apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false);
             }
             true
         }
@@ -4691,7 +4983,7 @@ pub(crate) fn try_drawin_negate(
         (PokemonType::Electric, Ability::LightningRod)
         | (PokemonType::Water,   Ability::StormDrain) => {
             if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[0, 0, 1, 0, 0, 0, 0], items_suppressed);
+                apply_stat_boosts_to_pokemon(mon, &[0, 0, 1, 0, 0, 0, 0], items_suppressed, false);
             }
             true
         }
@@ -4794,13 +5086,17 @@ pub fn apply_secondary_effects(
         for (bs, _) in branches.iter_mut() {
             let growth_in_sun = move_data.name == PokemonMove::Growth && weather_is_sunlight(bs);
             let items_suppressed = items_are_suppressed(bs);
+            let mut boosts = move_data.self_boost;
+            if growth_in_sun {
+                boosts[0] = boosts[0].saturating_add(1);
+                boosts[2] = boosts[2].saturating_add(1);
+            }
             if let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
-                let mut boosts = move_data.self_boost;
-                if growth_in_sun {
-                    boosts[0] = boosts[0].saturating_add(1);
-                    boosts[2] = boosts[2].saturating_add(1);
-                }
-                apply_stat_boosts_to_pokemon(attacker_mon, &boosts, items_suppressed);
+                apply_stat_boosts_to_pokemon(attacker_mon, &boosts, items_suppressed, false);
+            }
+            // Opportunist: mirror any positive raise to opponents holding the ability.
+            if boosts.iter().any(|&b| b > 0) {
+                mirror_opportunist_raises(bs, attacker_slot, &boosts, items_suppressed);
             }
         }
     }

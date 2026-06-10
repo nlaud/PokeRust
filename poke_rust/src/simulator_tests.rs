@@ -13727,6 +13727,676 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════════
+    // Stat-change reaction abilities:
+    //   Subgroup A — Competitive, Defiant, Mirror Armor
+    //   Trigger: a stat is lowered by an opponent.
+    // ════════════════════════════════════════════════════════════════════
+    mod stat_change_reaction_abilities {
+        use super::*;
+
+        /// Build a level-50 Snorlax with a forced ability and one move.
+        fn mon(ability: Ability, first_move: PokemonMove) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(first_move), None, None, None]),
+                None, Some(ability), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            )
+        }
+
+        // ── Defiant ────────────────────────────────────────────────────
+
+        // Intimidate lowers Atk by 1; Defiant reacts with +2 → net +1.
+        #[test]
+        fn defiant_on_intimidate_net_plus_one() {
+            let p1 = mon(Ability::Intimidate, PokemonMove::Splash);
+            let p2 = mon(Ability::Defiant, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            assert_eq!(state.p2_active_mons[0].boosts[0], 1,
+                "Defiant: Intimidate -1 Atk + Defiant +2 Atk = net +1");
+        }
+
+        // Charm lowers Atk by 2; that is ONE stat → one Defiant trigger (+2).
+        // Net result: −2 + 2 = 0.
+        #[test]
+        fn defiant_once_for_multistage_single_stat_drop() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = mon(Ability::Defiant, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Charm);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
+                "Defiant: Charm drops Atk by 2 (one stat) → one +2 trigger → net 0");
+        }
+
+        // Tickle lowers Atk AND Def by 1 each — two distinct stats → two triggers → +4 Atk.
+        // Net on Atk: −1 + 4 = +3.  Def stays at −1.
+        #[test]
+        fn defiant_twice_for_two_distinct_stat_drops() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = mon(Ability::Defiant, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Tickle);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 3,
+                "Defiant: Tickle drops Atk+Def (2 stats) → +4 total, net Atk = -1+4 = +3");
+            assert_eq!(bs.p1_active_mons[0].boosts[1], -1,
+                "Def drop still lands (only Atk gets the reaction, not Def)");
+        }
+
+        // Defiant fires before White Herb: −1 Atk +2 Defiant = +1 Atk → no negative stage →
+        // White Herb should NOT be consumed.
+        #[test]
+        fn defiant_fires_before_white_herb_suppresses_it() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut p1 = mon(Ability::Defiant, PokemonMove::Splash);
+            p1.item = crate::data::item::Item::WhiteHerb;
+            let p2 = mon(Ability::None, PokemonMove::Growl); // Growl: −1 Atk
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 1,
+                "Defiant +2 after −1 → net +1 Atk");
+            assert_eq!(bs.p1_active_mons[0].item, crate::data::item::Item::WhiteHerb,
+                "White Herb should NOT fire when no negative stage remains after Defiant");
+        }
+
+        // ── Competitive ────────────────────────────────────────────────
+
+        // Intimidate (−1 Atk) into Competitive: Atk stays at −1, SpA rises +2.
+        #[test]
+        fn competitive_on_intimidate() {
+            let p1 = mon(Ability::Intimidate, PokemonMove::Splash);
+            let p2 = mon(Ability::Competitive, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            assert_eq!(state.p2_active_mons[0].boosts[0], -1,
+                "Competitive: Atk drop still applied");
+            assert_eq!(state.p2_active_mons[0].boosts[2], 2,
+                "Competitive: +2 SpA from Intimidate trigger");
+        }
+
+        // Competitive: White Herb fires AFTER the SpA boost when a different stat is still
+        // negative (−1 Atk not cancelled by the SpA boost).
+        #[test]
+        fn competitive_white_herb_fires_on_other_stat() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut p1 = mon(Ability::Competitive, PokemonMove::Splash);
+            p1.item = crate::data::item::Item::WhiteHerb;
+            let p2 = mon(Ability::None, PokemonMove::Growl); // −1 Atk
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            // The Atk drop stays (Competitive raises SpA, not Atk).
+            // White Herb sees the remaining −1 Atk and fires → restores Atk to 0, consumed.
+            assert_eq!(bs.p1_active_mons[0].boosts[2], 2,
+                "Competitive: +2 SpA from the drop");
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
+                "White Herb restores the −1 Atk after Competitive ran");
+            assert_eq!(bs.p1_active_mons[0].item, crate::data::item::Item::None,
+                "White Herb consumed");
+        }
+
+        // ── Mirror Armor ───────────────────────────────────────────────
+
+        // Mirror Armor bounces Intimidate back: holder keeps Atk=0, source loses Atk −1.
+        #[test]
+        fn mirror_armor_reflects_intimidate() {
+            let p1 = mon(Ability::Intimidate, PokemonMove::Splash);
+            let p2 = mon(Ability::MirrorArmor, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            assert_eq!(state.p2_active_mons[0].boosts[0], 0,
+                "Mirror Armor: holder's Atk unchanged");
+            assert_eq!(state.p1_active_mons[0].boosts[0], -1,
+                "Mirror Armor: Intimidate bounced back to the Intimidator");
+        }
+
+        // Mirror Armor reflects Growl via a move, not just entry abilities.
+        #[test]
+        fn mirror_armor_reflects_growl() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = mon(Ability::MirrorArmor, PokemonMove::Splash);
+            let p2 = mon(Ability::None, PokemonMove::Growl);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
+                "Mirror Armor: holder's Atk unchanged from Growl");
+            assert_eq!(bs.p2_active_mons[0].boosts[0], -1,
+                "Mirror Armor: Growl reflected back to the user");
+        }
+
+        // Bounce triggers the source's Defiant: P1 has Intimidate+Defiant, P2 has Mirror
+        // Armor.  Intimidate fires → P2 bounces it back → P1 takes −1 Atk → P1's Defiant
+        // reacts with +2 → net P1.Atk = +1, P2.Atk = 0.
+        #[test]
+        fn mirror_armor_bounce_triggers_source_defiant() {
+            let p1 = mon(Ability::Defiant, PokemonMove::Splash);
+            let p2 = mon(Ability::MirrorArmor, PokemonMove::Splash);
+            // P1 enters with Defiant (no Intimidate here: we just set up the Intimidate
+            // separately to avoid needing two abilities).  Instead use a move-based drop.
+            // Simplest: use Growl from P2 to trigger Defiant on P1 via Mirror Armor reflection.
+            // Actually: P2 uses Growl targeting P1 (Defiant); no Mirror Armor here.
+            // For the Intimidate+Mirror Armor case we need an Intimidate user.
+            // Build: P1 = Intimidate (not Defiant), P2 = Mirror Armor.
+            // But we want to trigger Defiant on P1 after the bounce.
+            // Use: P1=Intimidate, P2=Mirror Armor, and separately test Defiant.
+            // Better: P1 uses Growl (drops P2 Atk), P2 has Mirror Armor (bounces to P1),
+            // and P1 also has Defiant → P1 Atk: −1 from bounce + 2 from Defiant = +1.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = mon(Ability::Defiant, PokemonMove::Growl);  // P1 Growl → P2
+            let p2 = mon(Ability::MirrorArmor, PokemonMove::Splash); // P2 bounces back
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            // P2 Atk unchanged (Mirror Armor bounced it)
+            assert_eq!(bs.p2_active_mons[0].boosts[0], 0,
+                "Mirror Armor holder takes no Atk drop");
+            // P1 took −1 from the bounce; P1's own Defiant fires → net +1
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 1,
+                "Defiant reacts to the reflected drop: -1+2 = +1");
+        }
+
+        // Mirror Armor vs Mirror Armor: P1 uses Growl against P2 (Mirror Armor).
+        // P2 bounces back to P1 (also Mirror Armor, but already_reflected=true → no re-bounce).
+        // P1 takes the −1 Atk.
+        #[test]
+        fn mirror_armor_vs_mirror_armor_no_infinite_loop() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = mon(Ability::MirrorArmor, PokemonMove::Growl);
+            let p2 = mon(Ability::MirrorArmor, PokemonMove::Splash);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            // P2 bounced the Growl drop back to P1; P1 has Mirror Armor but already_reflected=true
+            assert_eq!(bs.p2_active_mons[0].boosts[0], 0, "P2 Mirror Armor: no drop taken");
+            assert_eq!(bs.p1_active_mons[0].boosts[0], -1, "P1 receives the reflected drop");
+        }
+
+        // Suppressed Mirror Armor (Gastro Acid volatile) takes the drop normally.
+        #[test]
+        fn mirror_armor_suppressed_takes_drop() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut p1 = mon(Ability::MirrorArmor, PokemonMove::Splash);
+            // Manually apply Gastro Acid volatile to suppress the ability.
+            p1.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(
+                crate::dex_data::VolatileStatus::GastroAcid, 0,
+            ));
+            let p2 = mon(Ability::None, PokemonMove::Growl);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], -1,
+                "Mirror Armor suppressed: drop lands on the holder");
+            assert_eq!(bs.p2_active_mons[0].boosts[0], 0,
+                "Suppressed Mirror Armor: nothing reflected to user");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Stat-change reaction abilities:
+    //   Subgroup B — Anger Point, Berserk, Electromorphosis, Justified,
+    //                Moxie, Opportunist, Stamina, Steadfast
+    //   Trigger: taking damage / a battle event.
+    // ════════════════════════════════════════════════════════════════════
+    mod damage_reaction_abilities {
+        use super::*;
+        use crate::battle::AttackCommand;
+
+        fn make_mon(species: Species, ability: Ability, first_move: PokemonMove) -> PokemonState {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &pdex, &mdex, Some(50),
+                Some([Some(first_move), None, None, None]),
+                None, Some(ability), Some(Nature::Hardy),
+                None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
+            )
+        }
+
+        // ── Stamina ────────────────────────────────────────────────────
+
+        #[test]
+        fn stamina_raises_defense_on_hit() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = make_mon(Species::Snorlax, Ability::Stamina, PokemonMove::Splash);
+            let p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[1], 1, "Stamina: +1 Def on hit");
+        }
+
+        #[test]
+        fn stamina_does_not_trigger_on_status_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = make_mon(Species::Snorlax, Ability::Stamina, PokemonMove::Splash);
+            let p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Growl);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[1], 0, "Stamina: no trigger on status-only move");
+        }
+
+        // ── Justified ──────────────────────────────────────────────────
+
+        #[test]
+        fn justified_on_dark_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            // Sucker Punch is Dark-type
+            let p1 = make_mon(Species::Snorlax, Ability::Justified, PokemonMove::Splash);
+            let mut p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::SuckerPunch);
+            p2.stats[4] = 300; // ensure P2 moves first
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // Note: Sucker Punch fails unless target is using a damaging move, so use a
+            // different Dark move. Use Bite instead.
+            // Retry with Bite:
+            let p1 = make_mon(Species::Snorlax, Ability::Justified, PokemonMove::Splash);
+            let mut p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Bite);
+            p2.stats[4] = 300;
+            let initial2 = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes2 = run_single_turn(
+                &MatchState::BattleState(initial2),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // Check on the hit branches
+            let _ = outcomes;
+            for (s, _) in &outcomes2 {
+                if let MatchState::BattleState(bs) = s {
+                    if bs.p1_active_mons[0].hp < bs.p1_active_mons[0].stats[0] {
+                        // was hit
+                        assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Justified: +1 Atk on Dark hit");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn justified_not_triggered_by_normal_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = make_mon(Species::Snorlax, Ability::Justified, PokemonMove::Splash);
+            let p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(bs.p1_active_mons[0].boosts[0], 0, "Justified: no trigger on Normal hit");
+                }
+            }
+        }
+
+        // ── Anger Point ────────────────────────────────────────────────
+
+        #[test]
+        fn anger_point_maxes_attack_on_crit() {
+            // Give P2 LaserFocus volatile → crit_is_guaranteed → every P2 hit crits.
+            // Must call simulate_turn directly with consider_crit=true; run_single_turn
+            // forces consider_crit=false which skips all crit branches entirely.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let p1 = make_mon(Species::Snorlax, Ability::AngerPoint, PokemonMove::Splash);
+            let mut p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+            // LaserFocus is checked by crit_is_guaranteed → always crits
+            p2.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+                crate::dex_data::VolatileStatus::LaserFocus, 0,
+            ));
+            p2.stats[4] = 300;
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+                true, // consider_crit — required for crit_is_guaranteed to fire
+                1,
+            );
+            // P2 always crits → Anger Point fires → P1 Atk should be maxed at +6
+            let all_maxed = outcomes.iter().all(|(s, _)| {
+                matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[0] == 6)
+            });
+            assert!(all_maxed, "Anger Point: guaranteed-crit should maximise Atk to +6 on all branches");
+        }
+
+        // ── Berserk ────────────────────────────────────────────────────
+
+        #[test]
+        fn berserk_triggers_when_move_crosses_half_hp() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut p1 = make_mon(Species::Snorlax, Ability::Berserk, PokemonMove::Splash);
+            let max_hp = p1.stats[0];
+            // Set HP to just above 50% so one hit from Seismic Toss or a calibrated move drops it.
+            p1.hp = max_hp / 2 + 1;
+            let mut p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+            p2.stats[4] = 300;
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // Some branches should cross 50% → Berserk fires → SpA == +1
+            let any_berserk = outcomes.iter().any(|(s, _)| {
+                matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] == 1)
+            });
+            assert!(any_berserk, "Berserk: should fire on at least one branch that crosses 50%");
+        }
+
+        #[test]
+        fn berserk_no_trigger_if_already_below_half() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut p1 = make_mon(Species::Snorlax, Ability::Berserk, PokemonMove::Splash);
+            let max_hp = p1.stats[0];
+            // Already below 50%
+            p1.hp = max_hp / 4;
+            let mut p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+            p2.stats[4] = 300;
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(bs.p1_active_mons[0].boosts[2], 0,
+                        "Berserk: should not trigger if already at or below 50% HP");
+                }
+            }
+        }
+
+        #[test]
+        fn berserk_triggers_on_burn_damage() {
+            // Berserk fires on indirect damage (burn); set HP to just above 50%.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let mut p1 = make_mon(Species::Snorlax, Ability::Berserk, PokemonMove::Splash);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(crate::dex_data::Status::Burn);
+            let p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            // Both use Splash so no move damage; only burn damage at end of turn.
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let any_berserk = outcomes.iter().any(|(s, _)| {
+                matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] == 1)
+            });
+            assert!(any_berserk, "Berserk: should fire when burn damage crosses 50%");
+        }
+
+        // ── Steadfast ──────────────────────────────────────────────────
+
+        #[test]
+        fn steadfast_raises_speed_on_flinch() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            // Air Slash has 30% flinch chance
+            let p1 = make_mon(Species::Snorlax, Ability::Steadfast, PokemonMove::Splash);
+            let mut p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::AirSlash);
+            p2.stats[4] = 300;
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // Some branches: flinch → +1 Spe; others: no flinch → +0 Spe
+            let any_steadfast = outcomes.iter().any(|(s, _)| {
+                matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[4] == 1)
+            });
+            let any_no_flinch = outcomes.iter().any(|(s, _)| {
+                matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[4] == 0)
+            });
+            assert!(any_steadfast, "Steadfast: flinch branch should give +1 Spe");
+            assert!(any_no_flinch, "Steadfast: non-flinch branch should leave Spe unchanged");
+        }
+
+        // ── Moxie ──────────────────────────────────────────────────────
+
+        #[test]
+        fn moxie_raises_attack_on_ko() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            // P1: Moxie + Tackle (100% accurate, no secondary → single deterministic branch).
+            let p1 = make_mon(Species::Snorlax, Ability::Moxie, PokemonMove::Tackle);
+            // P2 active: 1 HP so any hit OHKOs.
+            let mut p2_active = make_mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            p2_active.hp = 1;
+            p2_active.stats[4] = 1; // slow → P1 moves first
+            // P2 backup prevents GameOver so we can inspect P1's boosts after the KO.
+            // Without a backup, P2's last-mon faint produces GameOverState (no boosts accessible).
+            let p2_backup = make_mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2_active], vec![p2_backup]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // P2's active faints; game continues (backup in back_mons) → BattleState.
+            // P1 should have +1 Atk from Moxie on every branch.
+            let all_boosted = outcomes.iter().all(|(s, _)| {
+                matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[0] == 1)
+            });
+            assert!(all_boosted, "Moxie: +1 Atk on every branch after KO (backup keeps game alive)");
+        }
+
+        // ── Electromorphosis + Charge consumer ─────────────────────────
+
+        #[test]
+        fn electromorphosis_grants_charge_on_hit() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = make_mon(Species::Snorlax, Ability::Electromorphosis, PokemonMove::Splash);
+            let p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            let has_charge = bs.p1_active_mons[0].volatiles.iter().any(|v| {
+                matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(crate::dex_data::VolatileStatus::Charge, _))
+            });
+            assert!(has_charge, "Electromorphosis: Charge volatile should be added on hit");
+        }
+
+        #[test]
+        fn charge_doubles_next_electric_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            // Thunderbolt has a 10% paralysis secondary → two outcome branches per run.
+            // Use expected (probability-weighted) damage to compare; avoids extract_battle_state.
+            let p2_target = make_mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let initial_hp = p2_target.stats[0];
+
+            let avg_damage = |outcomes: &[(MatchState, f64)]| -> f64 {
+                outcomes.iter().map(|(s, p)| {
+                    let dmg = match s {
+                        MatchState::BattleState(bs) =>
+                            initial_hp.saturating_sub(bs.p2_active_mons[0].hp) as f64,
+                        MatchState::GameOverState { .. } => initial_hp as f64,
+                        _ => 0.0,
+                    };
+                    dmg * p
+                }).sum()
+            };
+
+            // Baseline: no Charge volatile
+            let mut p1_base = make_mon(Species::Snorlax, Ability::None, PokemonMove::Thunderbolt);
+            p1_base.stats[4] = 300;
+            let base_outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(
+                    vec![p1_base], vec![], vec![p2_target.clone()], vec![],
+                )),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let base_avg = avg_damage(&base_outcomes);
+
+            // With Charge volatile: effective BP doubles → ~2× damage
+            let mut p1_charged = make_mon(Species::Snorlax, Ability::None, PokemonMove::Thunderbolt);
+            p1_charged.stats[4] = 300;
+            p1_charged.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(
+                crate::dex_data::VolatileStatus::Charge, 0,
+            ));
+            let charged_outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(
+                    vec![p1_charged], vec![], vec![p2_target.clone()], vec![],
+                )),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let charged_avg = avg_damage(&charged_outcomes);
+
+            assert!(charged_avg > base_avg * 1.5,
+                "Charge: charged Thunderbolt avg {charged_avg:.1} should be >1.5× uncharged {base_avg:.1}");
+
+            // Charge volatile should be consumed on every BattleState branch
+            let still_charged = charged_outcomes.iter().any(|(s, _)| {
+                matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].volatiles.iter().any(|v| matches!(v,
+                        crate::pokemon::VolatileStatusState::TurnStatus(
+                            crate::dex_data::VolatileStatus::Charge, _))))
+            });
+            assert!(!still_charged, "Charge volatile should be consumed after an Electric move");
+        }
+
+        // ── Opportunist ────────────────────────────────────────────────
+
+        #[test]
+        fn opportunist_copies_swords_dance() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            // P1 uses Swords Dance (+2 Atk); P2 has Opportunist → P2 should also get +2 Atk.
+            let mut p1 = make_mon(Species::Snorlax, Ability::None, PokemonMove::SwordsDance);
+            p1.stats[4] = 300; // P1 moves first
+            let p2 = make_mon(Species::Snorlax, Ability::Opportunist, PokemonMove::Splash);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p1_active_mons[0].boosts[0], 2, "P1 Swords Dance: +2 Atk");
+            assert_eq!(bs.p2_active_mons[0].boosts[0], 2, "Opportunist: P2 also gets +2 Atk");
+        }
+
+        #[test]
+        fn opportunist_does_not_copy_own_boost() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            // P2 with Opportunist uses Swords Dance on itself; should NOT copy its own boost.
+            let p1 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let mut p2 = make_mon(Species::Snorlax, Ability::Opportunist, PokemonMove::SwordsDance);
+            p2.stats[4] = 1; // P2 moves last
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            assert_eq!(bs.p2_active_mons[0].boosts[0], 2,
+                "P2 Opportunist using Swords Dance: just +2 (own boost, no copy)");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     // Damage-reduction abilities
     // ════════════════════════════════════════════════════════════════════
     mod damage_reduction_abilities {
