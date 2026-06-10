@@ -373,6 +373,7 @@ fn apply_single_hit_branch(
     damage: u16,
     attack_slot: FieldSlot,
     branch_probability: f64,
+    is_crit: bool,
 ) -> Vec<(BattleState, f64)> {
     let mut outcomes = Vec::new();
     let items_suppressed = simulator_helpers::items_are_suppressed(&branch_state);
@@ -482,6 +483,21 @@ fn apply_single_hit_branch(
 
         if target_fainted {
             simulator_helpers::handle_pokemon_faint(&mut bs, target_slot.player, target_slot.slot_index);
+
+            // Moxie: +1 Attack when the attacker directly KOs a target with a damaging move.
+            // Only fires if the attacker is still alive (doesn't trigger on recoil-KO).
+            // Stacks naturally across multi-target / multi-hit KOs.
+            // (Future: Chilling Neigh / Beast Boost belong here too.)
+            let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
+            let attacker_alive = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
+                .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(&bs, m)
+                    && m.ability == Ability::Moxie)
+                .unwrap_or(false);
+            if attacker_alive {
+                if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, attack_slot) {
+                    simulator_helpers::apply_stat_boost_external(atk, &[1, 0, 0, 0, 0, 0, 0], items_suppressed);
+                }
+            }
         }
 
         if sand_spit_triggered {
@@ -504,7 +520,7 @@ fn apply_single_hit_branch(
 
     // Fire reactive-ability effects on the holder (target_slot) caused by the attacker's hit.
     outcomes = simulator_helpers::apply_contact_hit_reactions(
-        outcomes, target_slot, attack_slot, move_name, move_data, damage,
+        outcomes, target_slot, attack_slot, move_name, move_data, damage, is_crit,
     );
 
     outcomes
@@ -602,7 +618,7 @@ fn resolve_multihit_move_for_target(
                             Some(roll),
                         );
 
-                        for (damage, _is_crit, damage_probability) in hit_outcomes {
+                        for (damage, is_crit, damage_probability) in hit_outcomes {
                             for (next_state, next_probability) in apply_single_hit_branch(
                                 branch_state.clone(),
                                 target_slot,
@@ -611,6 +627,7 @@ fn resolve_multihit_move_for_target(
                                 damage,
                                 attack_slot,
                                 branch_probability * hit_accuracy_probability * damage_probability * roll_probability,
+                                is_crit,
                             ) {
                                 // Count only damaging hits toward King's Rock combined chance.
                                 let new_hits = if damage > 0 { hits_landed + 1 } else { hits_landed };
@@ -634,7 +651,7 @@ fn resolve_multihit_move_for_target(
                         forced_roll,
                     );
 
-                    for (damage, _is_crit, damage_probability) in hit_outcomes {
+                    for (damage, is_crit, damage_probability) in hit_outcomes {
                         for (next_state, next_probability) in apply_single_hit_branch(
                             branch_state.clone(),
                             target_slot,
@@ -643,6 +660,7 @@ fn resolve_multihit_move_for_target(
                             damage,
                             attack_slot,
                             branch_probability * hit_accuracy_probability * damage_probability,
+                            is_crit,
                         ) {
                             // Count only damaging hits toward King's Rock combined chance.
                             let new_hits = if damage > 0 { hits_landed + 1 } else { hits_landed };
@@ -1441,7 +1459,7 @@ fn possible_damage_outcomes_for_move(
         let mut new_all_outcomes = Vec::new();
 
         for (existing_state, existing_prob) in all_outcomes {
-            for (damage, _is_crit, hit, outcome_prob) in target_outcomes {
+            for (damage, is_crit, hit, outcome_prob) in target_outcomes {
                 let branch_state = match existing_state.clone() {
                     MatchState::BattleState(bs) => bs,
                     _ => continue,
@@ -1450,7 +1468,7 @@ fn possible_damage_outcomes_for_move(
 
                 if *hit {
                     // Delegate to the already-extracted single-hit helper.
-                    let hit_branches = apply_single_hit_branch(branch_state, *target_slot, &move_name, move_data, *damage, action.user_slot, combined_prob);
+                    let hit_branches = apply_single_hit_branch(branch_state, *target_slot, &move_name, move_data, *damage, action.user_slot, combined_prob, *is_crit);
                     // King's Rock: 10% flinch on damaging hits (combined chance = 1 - 0.9^hits).
                     let hit_branches = if *damage > 0 {
                         simulator_helpers::apply_kings_rock_flinch(hit_branches, action.user_slot, *target_slot, move_data, 1)

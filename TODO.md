@@ -12,23 +12,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Abilities
 
-### Stat-change reaction abilities
-Trigger when a stat is raised, lowered, or an HP threshold is crossed.
-**On any stat lowered by opponent:**
-- Competitive — +2 Sp. Atk
-- Defiant — +2 Attack
-- Mirror Armor — bounce stat-lowering effects back to the source
-
-**On taking damage from a move:**
-- Anger Point — take a critical hit → Attack to +6
-- Berserk — HP drops to ≤50% from a hit → +1 Sp. Atk
-- Electromorphosis — take any move damage → gain Electric Boost status
-- Justified — take Dark-type damage → +1 Attack
-- Moxie — knock out a target → +1 Attack
-- Opportunist — opponent boosts stats → mirror those same boosts
-- Stamina — take any move damage → +1 Defense
-- Steadfast — flinch → +1 Speed
-
 ### Complex abilities — mechanics modifiers
 Each has significant individual complexity. Research all edge cases carefully.
 - Contrary — all stat stage changes are inverted
