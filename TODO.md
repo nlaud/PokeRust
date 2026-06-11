@@ -40,55 +40,9 @@ Each has significant individual complexity. Research all edge cases carefully.
 - Toxic Debris — set Toxic Spikes on opponent's side when holder is hit by a physical move
 - Unaware — ignore target's stat changes when attacking; ignore attacker's when defending
 
-### Form-change abilities
-Change the Pokémon's in-battle form under specific triggers.
-- Disguise — absorb first hit (lose 1/8 HP) → switch to Busted Form
-- Forecast — type changes to match weather (Water / Fire / Ice / Normal)
-- Stance Change — Blade Forme when using an attack; Shield Forme when using King's Shield
-- Zero To Hero — switch out of battle → permanently become Hero Form
-
-### Ability copying and spreading
-Overwrite, swap, or inherit abilities mid-battle.
-- Mummy — overwrite attacker's ability (see also on-contact section)
-- Receiver — inherit the ability of a knocked-out ally
-- Wandering Spirit — swap abilities with attacker (see also on-contact section)
-
-### Item-interaction abilities
-Affect item theft, loss, or activation for the holder or opponents.
-- Klutz — held items have no effect on the holder
-- Magician — steal target's item when dealing damage (if empty-handed)
-- Pickpocket — steal attacker's item when hit by a contact move (if empty-handed)
-- Pickup — pick up an item consumed by any Pokémon that turn (if empty-handed)
-- Sticky Hold — held item cannot be stolen or knocked off
-- Symbiosis — give own item to an ally that just consumed theirs
-- Unburden — ×2 Speed when the held item is consumed or lost
-
 ---
 
 ## Moves
-
-### Conditionally scaled power
-Base power is multiplied based on a battle condition. Hook into the base-power computation step.
-- Acrobatics — ×2 if user holds no item
-- Assurance — ×2 if target already took damage this turn
-- Avalanche — ×2 if target dealt damage to user this turn
-- Burning Jealousy — ×2 if target had a stat raised this turn
-- Hex / Infernal Parade — ×2 if target has a status condition
-- Lash Out — ×2 if user's stats were lowered this turn
-- Last Respects — base 50 + 50 per fainted party member
-- Payback — ×2 if user acts after the target
-- Power Trip / Stored Power — base 20 + 20 per +1 boost stage the user has
-- Stomping Tantrum / Temper Flare — ×2 if user's last move failed or missed
-
-### Variable power (formula-based)
-Power is determined by a stat or HP formula. Hook into base-power computation.
-- Electro Ball — user Spe vs target Spe → 40–150
-- Eruption / Water Spout — user HP% → 1–150
-- Flail / Reversal — user HP% → 20–200
-- Grass Knot / Low Kick — target weight → 20–120
-- Gyro Ball — target Spe vs user Spe → 1–150
-- Hard Press — target HP% → 1–100
-- Heat Crash / Heavy Slam — weight ratio (user/target) → 40–120
 
 ### Entry hazards — setters and removal
 Major architectural feature: side condition layers on the field, evaluated when

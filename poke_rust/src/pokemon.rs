@@ -106,6 +106,25 @@ pub struct PokemonState{
     /// `armed=false` means one EOT has not yet passed; `armed=true` means the re-eat fires
     /// this EOT. Cleared on switch-out or when the re-eat fires.
     pub cud_chew_pending: Option<(Item, bool)>,
+    /// True once this Pokémon's held item has been consumed or removed while it was on the
+    /// field, and no replacement item has been gained since. Powers Unburden's ×2 Speed.
+    /// Cleared on switch-out and whenever an item is gained.
+    pub item_lost: bool,
+
+    // ── Per-turn event flags (cleared in end_turn Phase 5 and on switch-out) ────────
+    /// Took any damage this turn — direct hits, recoil, confusion self-hits, etc.
+    /// Read by Assurance's ×2 condition.
+    pub damaged_this_turn: bool,
+    /// Slots whose direct move hits damaged this Pokémon this turn. Read by Avalanche
+    /// ("the target damaged the user this turn").
+    pub damaged_by_this_turn: Vec<crate::battle::FieldSlot>,
+    /// Any stat stage actually rose this turn (post-clamp). Gates Burning Jealousy's burn.
+    pub stats_raised_this_turn: bool,
+    /// Any stat stage actually fell this turn (post-clamp). Read by Lash Out's ×2.
+    pub stats_lowered_this_turn: bool,
+    /// Entered the field via a switch THIS turn (not battle-start leads — those only set
+    /// `entered_this_turn`). Payback does not double against a Pokémon that switched in.
+    pub switched_in_this_turn: bool,
     pub nature: Nature,
 
     pub boosts: PokemonBoostTable,
@@ -427,6 +446,9 @@ pub fn build_pokemon_state(
         gender, weight_hg, tera_type, mega_species, mega_ability,
         last_move_failed: false, original_ability: None, last_used_move: None,
         one_time_ability_used: false, entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
+        item_lost: false, damaged_this_turn: false, damaged_by_this_turn: Vec::new(),
+        stats_raised_this_turn: false, stats_lowered_this_turn: false,
+        switched_in_this_turn: false,
         pre_transform: None, evs, ivs,
     }
 }

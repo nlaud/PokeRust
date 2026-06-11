@@ -16832,6 +16832,1201 @@ mod priority_abilities {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Item-interaction abilities (Klutz / Unburden / Sticky Hold / Magician /
+    // Pickpocket / Pickup / Symbiosis)
+    // ─────────────────────────────────────────────────────────────────────────
+    #[cfg(test)]
+    mod item_interaction_abilities {
+        use crate::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand};
+        use crate::data::ability::Ability;
+        use crate::data::item::Item;
+        use crate::data::pokemon_move::PokemonMove;
+        use crate::data::species::Species;
+        use crate::dex_data::{Status, VolatileStatus};
+        use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+        use crate::simulator_helpers;
+        use crate::simuilator_test_helpers::{
+            battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
+            run_single_turn, simple_attack,
+        };
+
+        fn splash_mon(species: Species, ability: Ability, item: Option<Item>) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(ability), None, item, None, Some([0; 6]), None, false,
+            )
+        }
+
+        fn tackle_mon(species: Species, ability: Ability, item: Option<Item>) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(ability), None, item, None, Some([0; 6]), None, false,
+            )
+        }
+
+        fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )
+        }
+
+        fn p1_speed(bs: &BattleState) -> f32 {
+            simulator_helpers::effective_speed_for_slot(
+                bs,
+                FieldSlot { player: Player::P1, slot_index: 0 },
+                &bs.p1_active_mons[0],
+            )
+        }
+
+        // ─── Klutz ──────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn klutz_negates_choice_scarf_speed() {
+            let p1 = splash_mon(Species::Snorlax, Ability::Klutz, Some(Item::ChoiceScarf));
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let raw = state.p1_active_mons[0].stats[5] as f32;
+            assert_eq!(p1_speed(&state), raw, "Klutz holder's Choice Scarf should be inert");
+        }
+
+        #[test]
+        fn klutz_prevents_berry_consumption() {
+            // Mirrors the Sitrus test: poison drops the holder below 50%, but with Klutz
+            // the berry must never be eaten (no heal, item retained).
+            let mut p1 = splash_mon(Species::Snorlax, Ability::Klutz, Some(Item::SitrusBerry));
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(Species::Shuckle, Ability::None, None);
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(initial));
+
+            let poison_dmg = (max_hp / 8).max(1);
+            let expected_hp = (max_hp / 2 + 1).saturating_sub(poison_dmg);
+            assert_eq!(bs.p1_active_mons[0].item, Item::SitrusBerry,
+                "Klutz must prevent the berry from being eaten");
+            assert_eq!(bs.p1_active_mons[0].hp, expected_hp,
+                "no berry heal should have been applied");
+        }
+
+        #[test]
+        fn klutz_suppressed_by_gastro_acid_reenables_item() {
+            let p1 = splash_mon(Species::Snorlax, Ability::Klutz, Some(Item::ChoiceScarf));
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None);
+            let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            state.p1_active_mons[0].volatiles.push(
+                VolatileStatusState::TurnStatus(VolatileStatus::GastroAcid, 0));
+            let raw = state.p1_active_mons[0].stats[5] as f32;
+            assert_eq!(p1_speed(&state), raw * 1.5,
+                "Gastro Acid suppresses Klutz, so the Scarf works again");
+        }
+
+        // ─── Unburden ───────────────────────────────────────────────────────────────
+
+        #[test]
+        fn unburden_doubles_speed_after_berry_consumed() {
+            let mut p1 = splash_mon(Species::Snorlax, Ability::Unburden, Some(Item::SitrusBerry));
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(Species::Shuckle, Ability::None, None);
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(initial));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "berry should be consumed");
+            assert!(bs.p1_active_mons[0].item_lost, "item-loss flag should be set");
+            let raw = bs.p1_active_mons[0].stats[5] as f32;
+            assert_eq!(p1_speed(&bs), raw * 2.0, "Unburden should double Speed");
+        }
+
+        #[test]
+        fn unburden_boost_lost_on_switch_out() {
+            let mut p1 = splash_mon(Species::Snorlax, Ability::Unburden, Some(Item::SitrusBerry));
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+            let bench = splash_mon(Species::Clefable, Ability::None, None);
+            let p2 = splash_mon(Species::Shuckle, Ability::None, None);
+
+            let initial = battle_state_from_lists(vec![p1], vec![bench], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(initial));
+            assert!(bs.p1_active_mons[0].item_lost, "precondition: Unburden armed");
+
+            // Switch the Unburden holder out: the boost condition must be cleared.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(bs),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            let (bs2, _) = extract_battle_state(outcomes);
+            assert!(!bs2.p1_back_mons[0].item_lost,
+                "Unburden's item-loss flag must be cleared on switch-out");
+        }
+
+        #[test]
+        fn unburden_inactive_when_entering_without_item() {
+            let p1 = splash_mon(Species::Snorlax, Ability::Unburden, None);
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let raw = state.p1_active_mons[0].stats[5] as f32;
+            assert_eq!(p1_speed(&state), raw,
+                "entering battle without an item must not activate Unburden");
+        }
+
+        // ─── Magician ───────────────────────────────────────────────────────────────
+
+        #[test]
+        fn magician_steals_item_from_damaged_target() {
+            let p1 = tackle_mon(Species::Snorlax, Ability::Magician, None);
+            let p2 = splash_mon(Species::Shuckle, Ability::None, Some(Item::Leftovers));
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers,
+                "Magician should steal the damaged target's item");
+            assert_eq!(bs.p2_active_mons[0].item, Item::None,
+                "the target should have lost its item");
+            assert!(bs.p2_active_mons[0].item_lost,
+                "theft should arm the victim's Unburden flag");
+        }
+
+        #[test]
+        fn magician_does_not_steal_while_holding_an_item() {
+            let p1 = tackle_mon(Species::Snorlax, Ability::Magician, Some(Item::SafetyGoggles));
+            let p2 = splash_mon(Species::Shuckle, Ability::None, Some(Item::Leftovers));
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::SafetyGoggles);
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers,
+                "Magician must not steal while already holding an item");
+        }
+
+        #[test]
+        fn magician_blocked_by_sticky_hold() {
+            let p1 = tackle_mon(Species::Snorlax, Ability::Magician, None);
+            let p2 = splash_mon(Species::Shuckle, Ability::StickyHold, Some(Item::Leftovers));
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Sticky Hold must block Magician");
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers,
+                "the Sticky Hold holder keeps its item");
+        }
+
+        // ─── Pickpocket ─────────────────────────────────────────────────────────────
+
+        #[test]
+        fn pickpocket_steals_attackers_item_on_contact() {
+            let p1 = splash_mon(Species::Shuckle, Ability::Pickpocket, None);
+            let p2 = tackle_mon(Species::Snorlax, Ability::None, Some(Item::Leftovers));
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers,
+                "Pickpocket should steal the contact attacker's item");
+            assert_eq!(bs.p2_active_mons[0].item, Item::None);
+            assert!(bs.p2_active_mons[0].item_lost,
+                "theft should arm the attacker's Unburden flag");
+        }
+
+        #[test]
+        fn pickpocket_ignores_non_contact_moves() {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            let p1 = splash_mon(Species::Shuckle, Ability::Pickpocket, None);
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &dex, &mdex, Some(50),
+                Some([Some(PokemonMove::Swift), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::Leftovers),
+                None, Some([0; 6]), None, false,
+            );
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Pickpocket must not trigger on non-contact damage");
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers);
+        }
+
+        #[test]
+        fn pickpocket_does_not_trigger_while_holding_an_item() {
+            let p1 = splash_mon(Species::Shuckle, Ability::Pickpocket, Some(Item::SafetyGoggles));
+            let p2 = tackle_mon(Species::Snorlax, Ability::None, Some(Item::Leftovers));
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::SafetyGoggles);
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers,
+                "Pickpocket must not trigger while already holding an item");
+        }
+
+        // ─── Pickup ─────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn pickup_retrieves_item_consumed_by_opponent() {
+            let p1 = splash_mon(Species::Snorlax, Ability::Pickup, None);
+            let mut p2 = splash_mon(Species::Snorlax, Ability::None, Some(Item::SitrusBerry));
+            let max_hp = p2.stats[0];
+            p2.hp = max_hp / 2 + 1;
+            p2.status = Some(Status::Poison);
+
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p2_active_mons[0].item, Item::None, "P2 should have eaten its berry");
+            assert_eq!(bs.p1_active_mons[0].item, Item::SitrusBerry,
+                "Pickup should retrieve the berry the opponent consumed this turn");
+            assert!(bs.items_consumed_this_turn.is_empty(),
+                "the per-turn consumed pool must be cleared after end of turn");
+        }
+
+        #[test]
+        fn pickup_does_not_retrieve_own_consumed_item() {
+            let mut p1 = splash_mon(Species::Snorlax, Ability::Pickup, Some(Item::SitrusBerry));
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1;
+            p1.status = Some(Status::Poison);
+            let p2 = splash_mon(Species::Snorlax, Ability::None, None);
+
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Pickup must not retrieve the holder's own consumed item");
+        }
+
+        #[test]
+        fn pickup_inactive_while_holding_an_item() {
+            let p1 = splash_mon(Species::Snorlax, Ability::Pickup, Some(Item::Leftovers));
+            let mut p2 = splash_mon(Species::Snorlax, Ability::None, Some(Item::SitrusBerry));
+            let max_hp = p2.stats[0];
+            p2.hp = max_hp / 2 + 1;
+            p2.status = Some(Status::Poison);
+
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers,
+                "Pickup must not fire while the holder already has an item");
+        }
+
+        // ─── Symbiosis (doubles) ────────────────────────────────────────────────────
+
+        #[test]
+        fn symbiosis_passes_item_to_ally_after_consumption() {
+            let mut eater = splash_mon(Species::Snorlax, Ability::None, Some(Item::SitrusBerry));
+            let max_hp = eater.stats[0];
+            eater.hp = max_hp / 2 + 1;
+            eater.status = Some(Status::Poison);
+            let donor = splash_mon(Species::Shuckle, Ability::Symbiosis, Some(Item::Leftovers));
+            let foe1 = splash_mon(Species::Shuckle, Ability::None, None);
+            let foe2 = splash_mon(Species::Shuckle, Ability::None, None);
+
+            let state = battle_state_from_lists(vec![eater, donor], vec![], vec![foe1, foe2], vec![]);
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers,
+                "the ally that consumed its berry should receive the Symbiosis holder's item");
+            assert_eq!(bs.p1_active_mons[1].item, Item::None,
+                "the Symbiosis holder should have given its item away");
+            assert!(bs.p1_active_mons[1].item_lost,
+                "donating via Symbiosis counts as losing the item (arms Unburden)");
+        }
+
+        #[test]
+        fn symbiosis_does_not_trigger_on_theft() {
+            let victim = splash_mon(Species::Shuckle, Ability::None, Some(Item::Leftovers));
+            let donor = splash_mon(Species::Shuckle, Ability::Symbiosis, Some(Item::SafetyGoggles));
+            let thief = tackle_mon(Species::Snorlax, Ability::Magician, None);
+            let filler = splash_mon(Species::Shuckle, Ability::None, None);
+
+            let state = battle_state_from_lists(vec![victim, donor], vec![], vec![thief, filler], vec![]);
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers,
+                "Magician should have stolen the victim's item");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "stolen items are not replaced by Symbiosis");
+            assert_eq!(bs.p1_active_mons[1].item, Item::SafetyGoggles,
+                "Symbiosis must not fire when the ally's item was stolen");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Form-change abilities (Zero to Hero / Stance Change / Disguise / Forecast)
+    // ─────────────────────────────────────────────────────────────────────────
+    #[cfg(test)]
+    mod form_change_abilities {
+        use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand, SwitchCommand};
+        use crate::data::ability::Ability;
+        use crate::data::pokemon_move::PokemonMove;
+        use crate::data::species::Species;
+        use crate::dex_data::Status;
+        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::simuilator_test_helpers::{
+            battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
+            run_single_turn, simple_attack,
+        };
+
+        fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(mv), None, None, None]),
+                None, Some(ability), None, None, None, Some([0; 6]), None, false,
+            )
+        }
+
+        fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )
+        }
+
+        fn switch_p1(state: BattleState) -> BattleState {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            extract_battle_state(outcomes).0
+        }
+
+        // ─── Zero to Hero ───────────────────────────────────────────────────────────
+
+        #[test]
+        fn zero_to_hero_transforms_on_switch_out_and_persists() {
+            let palafin = mon(Species::Palafin, Ability::ZerotoHero, PokemonMove::Splash);
+            let zero_atk = palafin.stats[1];
+            let bench = mon(Species::Clefable, Ability::None, PokemonMove::Splash);
+            let foe = mon(Species::Shuckle, Ability::None, PokemonMove::Splash);
+
+            let state = battle_state_from_lists(vec![palafin], vec![bench], vec![foe], vec![]);
+            let bs = switch_p1(state);
+
+            assert_eq!(bs.p1_back_mons[0].species, Species::PalafinHero,
+                "Palafin must become Hero Form when it switches out");
+            assert!(bs.p1_back_mons[0].stats[1] > zero_atk,
+                "Hero Form should have a much higher Attack stat");
+
+            // Switch back in: the Hero Form persists (it never reverts).
+            let bs2 = switch_p1(bs);
+            assert_eq!(bs2.p1_active_mons[0].species, Species::PalafinHero,
+                "Hero Form persists when re-entering the field");
+        }
+
+        #[test]
+        fn zero_to_hero_requires_the_ability() {
+            let palafin = mon(Species::Palafin, Ability::None, PokemonMove::Splash);
+            let bench = mon(Species::Clefable, Ability::None, PokemonMove::Splash);
+            let foe = mon(Species::Shuckle, Ability::None, PokemonMove::Splash);
+
+            let state = battle_state_from_lists(vec![palafin], vec![bench], vec![foe], vec![]);
+            let bs = switch_p1(state);
+            assert_eq!(bs.p1_back_mons[0].species, Species::Palafin,
+                "without Zero to Hero, Palafin stays in Zero Form");
+        }
+
+        // ─── Stance Change ──────────────────────────────────────────────────────────
+
+        #[test]
+        fn stance_change_blade_forme_on_attack_with_blade_stats() {
+            let foe_hp = mon(Species::Snorlax, Ability::None, PokemonMove::Splash).stats[0];
+
+            // Control: no Stance Change — damage comes from Shield Forme's low Attack.
+            let control = battle_state_from_lists(
+                vec![mon(Species::Aegislash, Ability::None, PokemonMove::Tackle)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let (control_bs, _) = extract_battle_state(run(control));
+            let control_dmg = foe_hp - control_bs.p2_active_mons[0].hp;
+
+            let state = battle_state_from_lists(
+                vec![mon(Species::Aegislash, Ability::StanceChange, PokemonMove::Tackle)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let (bs, _) = extract_battle_state(run(state));
+            let blade_dmg = foe_hp - bs.p2_active_mons[0].hp;
+
+            assert_eq!(bs.p1_active_mons[0].species, Species::AegislashBlade,
+                "Aegislash must be in Blade Forme after using a damaging move");
+            assert!(blade_dmg > control_dmg,
+                "the triggering move itself must already use Blade Forme's Attack \
+                 (blade {blade_dmg} vs shield {control_dmg})");
+        }
+
+        #[test]
+        fn stance_change_does_not_trigger_while_asleep() {
+            let mut aegi = mon(Species::Aegislash, Ability::StanceChange, PokemonMove::Tackle);
+            aegi.status = Some(Status::Sleep(0)); // first sleep turn: move always fails
+            let state = battle_state_from_lists(
+                vec![aegi], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let outcomes = run(state);
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].species == Species::Aegislash)),
+                "a move prevented by sleep must not trigger Stance Change"
+            );
+        }
+
+        #[test]
+        fn stance_change_reverts_to_shield_forme_on_switch_out() {
+            let shield_atk = mon(Species::Aegislash, Ability::StanceChange, PokemonMove::Tackle).stats[1];
+            let state = battle_state_from_lists(
+                vec![mon(Species::Aegislash, Ability::StanceChange, PokemonMove::Tackle)],
+                vec![mon(Species::Clefable, Ability::None, PokemonMove::Splash)],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let (bs, _) = extract_battle_state(run(state));
+            assert_eq!(bs.p1_active_mons[0].species, Species::AegislashBlade, "precondition");
+
+            let bs2 = switch_p1(bs);
+            assert_eq!(bs2.p1_back_mons[0].species, Species::Aegislash,
+                "Aegislash reverts to Shield Forme on switch-out");
+            assert_eq!(bs2.p1_back_mons[0].stats[1], shield_atk,
+                "Shield Forme stats must be restored");
+        }
+
+        #[test]
+        fn stance_change_kings_shield_returns_to_shield_forme() {
+            // Enter Blade Forme on turn 1, then King's Shield on turn 2 → Shield Forme.
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            let aegi = build_pokemon_state(
+                Species::Aegislash, &dex, &mdex, Some(50),
+                Some([Some(PokemonMove::Tackle), Some(PokemonMove::KingsShield), None, None]),
+                None, Some(Ability::StanceChange), None, None, None, Some([0; 6]), None, false,
+            );
+            let state = battle_state_from_lists(
+                vec![aegi], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let (bs, _) = extract_battle_state(run(state));
+            assert_eq!(bs.p1_active_mons[0].species, Species::AegislashBlade, "precondition");
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(bs),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &dex,
+            );
+            let (bs2, _) = extract_battle_state(outcomes);
+            assert_eq!(bs2.p1_active_mons[0].species, Species::Aegislash,
+                "King's Shield returns Aegislash to Shield Forme");
+        }
+
+        // ─── Disguise ───────────────────────────────────────────────────────────────
+
+        #[test]
+        fn disguise_blocks_first_hit_busts_and_chips() {
+            // Aerial Ace: hits Ghost/Fairy Mimikyu neutrally and never misses.
+            let mimikyu = mon(Species::Mimikyu, Ability::Disguise, PokemonMove::Splash);
+            let max_hp = mimikyu.stats[0];
+            let state = battle_state_from_lists(
+                vec![mimikyu], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::AerialAce)], vec![],
+            );
+            let (bs, _) = extract_battle_state(run(state));
+
+            let chip = (max_hp / 8).max(1);
+            assert_eq!(bs.p1_active_mons[0].species, Species::MimikyuBusted,
+                "the blocked hit must bust the disguise");
+            assert_eq!(bs.p1_active_mons[0].hp, max_hp - chip,
+                "Mimikyu loses exactly 1/8 max HP instead of the move's damage");
+
+            // Second turn: the disguise is busted, so Tackle now damages normally.
+            let outcomes = run(bs);
+            let (bs2, _) = extract_battle_state(outcomes);
+            assert!(bs2.p1_active_mons[0].hp < max_hp - chip,
+                "once busted, hits deal full damage");
+        }
+
+        #[test]
+        fn disguise_ignores_status_moves() {
+            let mimikyu = mon(Species::Mimikyu, Ability::Disguise, PokemonMove::Splash);
+            let max_hp = mimikyu.stats[0];
+            let state = battle_state_from_lists(
+                vec![mimikyu], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::ThunderWave)], vec![],
+            );
+            let outcomes = run(state);
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    assert_eq!(bs.p1_active_mons[0].species, Species::Mimikyu,
+                        "status moves must not bust the disguise");
+                    assert_eq!(bs.p1_active_mons[0].hp, max_hp,
+                        "no HP chip without a blocked damaging hit");
+                }
+            }
+        }
+
+        #[test]
+        fn disguise_blocks_only_first_strike_of_multi_hit() {
+            let mimikyu = mon(Species::Mimikyu, Ability::Disguise, PokemonMove::Splash);
+            let max_hp = mimikyu.stats[0];
+            let chip = (max_hp / 8).max(1);
+            let state = battle_state_from_lists(
+                vec![mimikyu], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::DualWingbeat)], vec![],
+            );
+            let outcomes = run(state);
+
+            // At least one branch must show the second strike dealing real damage on
+            // top of the 1/8 chip (only the first strike is absorbed). If Disguise
+            // wrongly blocked every strike, all busted branches would sit at exactly
+            // max_hp - chip.
+            let second_strike_damaged = outcomes.iter().any(|(s, _)| matches!(
+                s,
+                MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].species == Species::MimikyuBusted
+                        && bs.p1_active_mons[0].hp < max_hp - chip
+            ));
+            assert!(second_strike_damaged,
+                "later strikes of a multi-hit move must damage normally after the bust");
+        }
+
+        // ─── Forecast ───────────────────────────────────────────────────────────────
+
+        #[test]
+        fn forecast_matches_weather_set_by_entry_ability() {
+            let castform = mon(Species::Castform, Ability::Forecast, PokemonMove::Splash);
+            let drizzler = mon(Species::Pelipper, Ability::Drizzle, PokemonMove::Splash);
+            // Drizzle fires during the opening send-out; Forecast must follow immediately.
+            let state = battle_state_from_lists(vec![castform], vec![], vec![drizzler], vec![]);
+
+            assert_eq!(state.p1_active_mons[0].species, Species::CastformRainy,
+                "Castform should take Rainy Form as soon as rain starts");
+            assert_eq!(state.p1_active_mons[0].types, vec![crate::dex_data::PokemonType::Water],
+                "Rainy Form is pure Water-type");
+        }
+
+        #[test]
+        fn forecast_reverts_when_weather_expires() {
+            use crate::dex_data::Weather;
+            let castform = mon(Species::Castform, Ability::Forecast, PokemonMove::Splash);
+            let foe = mon(Species::Shuckle, Ability::None, PokemonMove::Splash);
+            let mut state = battle_state_from_lists(vec![castform], vec![], vec![foe], vec![]);
+            // Rain with 2 turns left: survives the first end_turn, expires on the second.
+            state.weather = Some(Weather::Rain);
+            state.weather_turns = Some(2);
+
+            let (bs, _) = extract_battle_state(run(state));
+            assert_eq!(bs.p1_active_mons[0].species, Species::CastformRainy,
+                "Castform stays Rainy while rain lasts");
+
+            let (bs2, _) = extract_battle_state(run(bs));
+            assert_eq!(bs2.p1_active_mons[0].species, Species::Castform,
+                "Castform reverts to base form when the weather ends");
+            assert_eq!(bs2.p1_active_mons[0].types, vec![crate::dex_data::PokemonType::Normal]);
+        }
+
+        #[test]
+        fn forecast_requires_the_ability() {
+            use crate::dex_data::Weather;
+            let castform = mon(Species::Castform, Ability::None, PokemonMove::Splash);
+            let foe = mon(Species::Shuckle, Ability::None, PokemonMove::Splash);
+            let mut state = battle_state_from_lists(vec![castform], vec![], vec![foe], vec![]);
+            state.weather = Some(Weather::Rain);
+            state.weather_turns = Some(5);
+
+            let (bs, _) = extract_battle_state(run(state));
+            assert_eq!(bs.p1_active_mons[0].species, Species::Castform,
+                "without Forecast, Castform never changes form");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Receiver (doubles): inherit a fainted ally's ability
+    // ─────────────────────────────────────────────────────────────────────────
+    #[cfg(test)]
+    mod receiver_ability {
+        use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+        use crate::data::ability::Ability;
+        use crate::data::pokemon_move::PokemonMove;
+        use crate::data::species::Species;
+        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::simuilator_test_helpers::{
+            battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
+            run_single_turn, simple_attack,
+        };
+
+        fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(mv), None, None, None]),
+                None, Some(ability), None, None, None, Some([0; 6]), None, false,
+            )
+        }
+
+        /// Doubles battle: P1 = [frail donor, Receiver Snorlax]; P2's first slot KOs the donor.
+        fn run_donor_faint(donor_ability: Ability) -> BattleState {
+            let mut donor = mon(Species::Shuckle, donor_ability, PokemonMove::Splash);
+            donor.hp = 1;
+            let receiver = mon(Species::Snorlax, Ability::Receiver, PokemonMove::Splash);
+            let attacker = mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+            let filler = mon(Species::Shuckle, Ability::None, PokemonMove::Splash);
+
+            let state = battle_state_from_lists(
+                vec![donor, receiver], vec![],
+                vec![attacker, filler], vec![],
+            );
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+                &mdex, &pdex,
+            );
+            extract_battle_state(outcomes).0
+        }
+
+        #[test]
+        fn receiver_inherits_fainted_ally_ability() {
+            let bs = run_donor_faint(Ability::SpeedBoost);
+            assert!(bs.p1_active_mons[0].fainted, "precondition: the donor must be KO'd");
+            assert_eq!(bs.p1_active_mons[1].ability, Ability::SpeedBoost,
+                "Receiver should inherit the fainted ally's ability");
+            assert_eq!(bs.p1_active_mons[1].original_ability, Some(Ability::Receiver),
+                "the original ability is stashed for the switch-out revert");
+        }
+
+        #[test]
+        fn receiver_skips_blocklisted_abilities() {
+            let bs = run_donor_faint(Ability::Disguise);
+            assert!(bs.p1_active_mons[0].fainted, "precondition: the donor must be KO'd");
+            assert_eq!(bs.p1_active_mons[1].ability, Ability::Receiver,
+                "blocklisted abilities (Disguise) cannot be received");
+        }
+
+        #[test]
+        fn receiver_fires_on_gain_effects_of_inherited_ability() {
+            // Intimidate at team send-out drops both P2 actives to -1; when the Receiver
+            // inherits Intimidate mid-turn, the on-gain effects fire again → -2.
+            let bs = run_donor_faint(Ability::Intimidate);
+            assert_eq!(bs.p1_active_mons[1].ability, Ability::Intimidate, "precondition");
+            assert_eq!(bs.p2_active_mons[0].boosts[0], -2,
+                "inherited Intimidate must fire its entry effect");
+            assert_eq!(bs.p2_active_mons[1].boosts[0], -2,
+                "inherited Intimidate must hit every opposing active");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Variable-base-power moves (formula-based + conditionally scaled)
+    // ─────────────────────────────────────────────────────────────────────────
+    #[cfg(test)]
+    mod variable_power_moves {
+        use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+        use crate::data::ability::Ability;
+        use crate::data::item::Item;
+        use crate::data::pokemon_move::PokemonMove;
+        use crate::data::species::Species;
+        use crate::dex_data::Status;
+        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::simuilator_test_helpers::{
+            battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
+            run_single_turn, simple_attack,
+        };
+
+        fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &dex, &mdex, Some(50),
+                Some([Some(mv), None, None, None]),
+                None, Some(ability), None, None, None, Some([0; 6]), None, false,
+            )
+        }
+
+        fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )
+        }
+
+        /// Run one deterministic turn (both sides use move slot 0) and return the damage
+        /// dealt to P2's active Pokémon.
+        fn dmg_to_p2(state: BattleState) -> u16 {
+            let initial = state.p2_active_mons[0].hp;
+            let (bs, _) = extract_battle_state(run(state));
+            initial - bs.p2_active_mons[0].hp
+        }
+
+        fn ratio(a: u16, b: u16) -> f64 {
+            a as f64 / b.max(1) as f64
+        }
+
+        // ─── Formula-based ──────────────────────────────────────────────────────────
+
+        #[test]
+        fn electro_ball_power_scales_with_speed_ratio() {
+            // 4× the target's Speed → 150 BP; equal Speed → 60 BP. Ratio 2.5.
+            let mut fast = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::ElectroBall)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            fast.p1_active_mons[0].stats[5] = 400;
+            fast.p2_active_mons[0].stats[5] = 100;
+            let mut equal = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::ElectroBall)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            equal.p1_active_mons[0].stats[5] = 400;
+            equal.p2_active_mons[0].stats[5] = 400;
+
+            let r = ratio(dmg_to_p2(fast), dmg_to_p2(equal));
+            assert!((r - 2.5).abs() < 0.25, "150 BP vs 60 BP should be ~2.5×, got {r}");
+        }
+
+        #[test]
+        fn gyro_ball_rewards_slow_user() {
+            let mut slow_user = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::GyroBall)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            slow_user.p1_active_mons[0].stats[5] = 10;
+            slow_user.p2_active_mons[0].stats[5] = 400; // 25×400/10 → capped at 150 BP
+            let mut fast_user = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::GyroBall)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            fast_user.p1_active_mons[0].stats[5] = 400;
+            fast_user.p2_active_mons[0].stats[5] = 10; // floor(25×10/400)+1 = 1 BP
+
+            let slow_dmg = dmg_to_p2(slow_user);
+            let fast_dmg = dmg_to_p2(fast_user);
+            assert!(slow_dmg > fast_dmg * 10,
+                "150 BP (slow user) must vastly out-damage 1 BP (fast user): {slow_dmg} vs {fast_dmg}");
+        }
+
+        #[test]
+        fn eruption_power_scales_with_user_hp() {
+            let full = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Eruption)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let mut half = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Eruption)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let max_hp = half.p1_active_mons[0].stats[0];
+            half.p1_active_mons[0].hp = max_hp / 2;
+
+            let r = ratio(dmg_to_p2(full), dmg_to_p2(half));
+            assert!((r - 2.0).abs() < 0.15, "Eruption at full HP should be ~2× half HP, got {r}");
+        }
+
+        #[test]
+        fn flail_power_rises_as_hp_falls() {
+            let full = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Flail)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let mut clutch = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Flail)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            clutch.p1_active_mons[0].hp = 1; // 48×1/maxHP = 0 → 200 BP vs 20 BP at full
+
+            let r = ratio(dmg_to_p2(clutch), dmg_to_p2(full));
+            assert!((r - 10.0).abs() < 1.5, "Flail at 1 HP should be ~10× full HP, got {r}");
+        }
+
+        #[test]
+        fn low_kick_power_scales_with_target_weight() {
+            let mut heavy = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::LowKick)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            heavy.p2_active_mons[0].weight_hg = 4600; // ≥200 kg → 120 BP
+            let mut light = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::LowKick)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            light.p2_active_mons[0].weight_hg = 50; // < 10 kg → 20 BP
+
+            let r = ratio(dmg_to_p2(heavy), dmg_to_p2(light));
+            assert!((r - 6.0).abs() < 0.7, "120 BP vs 20 BP should be ~6×, got {r}");
+        }
+
+        #[test]
+        fn hard_press_power_scales_with_target_hp() {
+            let full = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::HardPress)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let mut weakened = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::HardPress)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let max_hp = weakened.p2_active_mons[0].stats[0];
+            weakened.p2_active_mons[0].hp = max_hp / 4; // ~25 BP vs 100 BP
+
+            let r = ratio(dmg_to_p2(full), dmg_to_p2(weakened));
+            assert!((r - 4.0).abs() < 0.4, "Hard Press full vs quarter HP should be ~4×, got {r}");
+        }
+
+        #[test]
+        fn heat_crash_power_scales_with_weight_ratio() {
+            let mut crusher = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::HeatCrash)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            crusher.p1_active_mons[0].weight_hg = 5000;
+            crusher.p2_active_mons[0].weight_hg = 1000; // 5× → 120 BP
+            let mut even = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::HeatCrash)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            even.p1_active_mons[0].weight_hg = 1000;
+            even.p2_active_mons[0].weight_hg = 1000; // <2× → 40 BP
+
+            let r = ratio(dmg_to_p2(crusher), dmg_to_p2(even));
+            assert!((r - 3.0).abs() < 0.3, "120 BP vs 40 BP should be ~3×, got {r}");
+        }
+
+        // ─── Conditionally scaled ───────────────────────────────────────────────────
+
+        #[test]
+        fn acrobatics_doubles_without_an_item() {
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            let unburdened = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Acrobatics)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let holder = build_pokemon_state(
+                Species::Snorlax, &dex, &mdex, Some(50),
+                Some([Some(PokemonMove::Acrobatics), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::SafetyGoggles),
+                None, Some([0; 6]), None, false,
+            );
+            let held = battle_state_from_lists(
+                vec![holder], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+
+            let r = ratio(dmg_to_p2(unburdened), dmg_to_p2(held));
+            assert!((r - 2.0).abs() < 0.1, "itemless Acrobatics should be 2×, got {r}");
+        }
+
+        #[test]
+        fn hex_doubles_against_statused_target() {
+            // Magic Guard target: no burn residual to pollute the damage diff; burn
+            // doesn't reduce special damage either.
+            let healthy = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Hex)], vec![],
+                vec![mon(Species::Clefable, Ability::MagicGuard, PokemonMove::Splash)], vec![],
+            );
+            let mut burned = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Hex)], vec![],
+                vec![mon(Species::Clefable, Ability::MagicGuard, PokemonMove::Splash)], vec![],
+            );
+            burned.p2_active_mons[0].status = Some(Status::Burn);
+
+            let r = ratio(dmg_to_p2(burned), dmg_to_p2(healthy));
+            assert!((r - 2.0).abs() < 0.1, "Hex vs statused target should be 2×, got {r}");
+        }
+
+        #[test]
+        fn assurance_doubles_after_target_was_damaged() {
+            // Doubles: a faster ally Tackles the shared target first, then Assurance hits
+            // the already-damaged target for double power.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let run_doubles = |slot0_move: PokemonMove, slot1_move: PokemonMove| -> u16 {
+                let mut slot0 = mon(Species::Snorlax, Ability::None, slot0_move);
+                slot0.stats[5] = 200; // acts first
+                let mut slot1 = mon(Species::Snorlax, Ability::None, slot1_move);
+                slot1.stats[5] = 50;
+                let state = battle_state_from_lists(
+                    vec![slot0, slot1], vec![],
+                    vec![
+                        mon(Species::Snorlax, Ability::None, PokemonMove::Splash),
+                        mon(Species::Shuckle, Ability::None, PokemonMove::Splash),
+                    ], vec![],
+                );
+                let initial = state.p2_active_mons[0].hp;
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+                    &mdex, &pdex,
+                );
+                let (bs, _) = extract_battle_state(outcomes);
+                initial - bs.p2_active_mons[0].hp
+            };
+
+            let tackle_plus_assurance = run_doubles(PokemonMove::Tackle, PokemonMove::Assurance);
+            let tackle_only = run_doubles(PokemonMove::Tackle, PokemonMove::Splash);
+            let assurance_only = run_doubles(PokemonMove::Splash, PokemonMove::Assurance);
+
+            let boosted_assurance = tackle_plus_assurance - tackle_only;
+            let r = ratio(boosted_assurance, assurance_only);
+            assert!((r - 2.0).abs() < 0.15,
+                "Assurance after the target took damage should be 2×, got {r}");
+        }
+
+        #[test]
+        fn avalanche_doubles_when_damaged_by_target() {
+            // Avalanche's −4 priority guarantees it moves after the target's Tackle.
+            let hit_first = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Avalanche)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Tackle)], vec![],
+            );
+            let unharmed = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Avalanche)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+
+            let r = ratio(dmg_to_p2(hit_first), dmg_to_p2(unharmed));
+            assert!((r - 2.0).abs() < 0.1,
+                "Avalanche after being damaged by the target should be 2×, got {r}");
+        }
+
+        #[test]
+        fn payback_doubles_when_moving_after_the_target() {
+            let mut slow = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Payback)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Tackle)], vec![],
+            );
+            slow.p1_active_mons[0].stats[5] = 1;
+            slow.p2_active_mons[0].stats[5] = 200;
+            let mut fast = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Payback)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Tackle)], vec![],
+            );
+            fast.p1_active_mons[0].stats[5] = 200;
+            fast.p2_active_mons[0].stats[5] = 1;
+
+            let r = ratio(dmg_to_p2(slow), dmg_to_p2(fast));
+            assert!((r - 2.0).abs() < 0.1, "Payback moving second should be 2×, got {r}");
+        }
+
+        #[test]
+        fn payback_does_not_double_against_a_switch_in() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            // P2's active and bench are identical builds so damage is comparable.
+            let p2_mon = || mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+
+            // Target switches: Payback user moves "after" it, but it's a fresh switch-in.
+            let mut switch_state = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Payback)], vec![],
+                vec![p2_mon()], vec![p2_mon()],
+            );
+            switch_state.p1_active_mons[0].stats[5] = 1;
+            let initial = switch_state.p2_back_mons[0].hp;
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(switch_state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(vec![crate::battle::BattleCommand::Switch(
+                    crate::battle::SwitchCommand { party_index: 0 })]),
+                &mdex, &pdex,
+            );
+            let (bs, _) = extract_battle_state(outcomes);
+            let switch_dmg = initial - bs.p2_active_mons[0].hp;
+
+            // Control: target attacks instead → doubled.
+            let mut attack_state = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Payback)], vec![],
+                vec![p2_mon()], vec![p2_mon()],
+            );
+            attack_state.p1_active_mons[0].stats[5] = 1;
+            attack_state.p2_active_mons[0].stats[5] = 200;
+            let attack_dmg = dmg_to_p2(attack_state);
+
+            let r = ratio(attack_dmg, switch_dmg);
+            assert!((r - 2.0).abs() < 0.15,
+                "Payback must not double against a Pokémon that switched in, got ratio {r}");
+        }
+
+        #[test]
+        fn lash_out_doubles_after_user_stats_lowered() {
+            // Tail Whip lowers the user's Defense — irrelevant to its outgoing damage.
+            let mut dropped = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::LashOut)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::TailWhip)], vec![],
+            );
+            dropped.p1_active_mons[0].stats[5] = 1;
+            dropped.p2_active_mons[0].stats[5] = 200;
+            let mut calm = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::LashOut)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            calm.p1_active_mons[0].stats[5] = 1;
+            calm.p2_active_mons[0].stats[5] = 200;
+
+            let r = ratio(dmg_to_p2(dropped), dmg_to_p2(calm));
+            assert!((r - 2.0).abs() < 0.1,
+                "Lash Out after a stat drop this turn should be 2×, got {r}");
+        }
+
+        #[test]
+        fn stored_power_scales_with_positive_boosts() {
+            // +2 Def / +2 SpD: four positive stages → 100 BP vs the 20 BP baseline,
+            // without touching the offensive stat used by the move.
+            let baseline = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::StoredPower)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let mut boosted = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::StoredPower)], vec![],
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            boosted.p1_active_mons[0].boosts[1] = 2;
+            boosted.p1_active_mons[0].boosts[3] = 2;
+
+            // The 20 BP baseline deals single-digit damage, so the formula's +2 constant
+            // and floors skew the ratio noticeably — allow generous tolerance.
+            let r = ratio(dmg_to_p2(boosted), dmg_to_p2(baseline));
+            assert!((r - 5.0).abs() < 0.8,
+                "Stored Power at +4 total stages (100 BP) vs none (20 BP) should be ~5×, got {r}");
+        }
+
+        #[test]
+        fn last_respects_scales_with_fainted_allies() {
+            let no_faints = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::LastRespects)],
+                vec![mon(Species::Clefable, Ability::None, PokemonMove::Splash)],
+                vec![mon(Species::Clefable, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            let mut one_faint = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::LastRespects)],
+                vec![mon(Species::Clefable, Ability::None, PokemonMove::Splash)],
+                vec![mon(Species::Clefable, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            one_faint.p1_back_mons[0].fainted = true;
+            one_faint.p1_back_mons[0].hp = 0;
+
+            let r = ratio(dmg_to_p2(one_faint), dmg_to_p2(no_faints));
+            assert!((r - 2.0).abs() < 0.1,
+                "Last Respects with one fainted ally (100 BP) vs none (50 BP) should be 2×, got {r}");
+        }
+
+        #[test]
+        fn stomping_tantrum_doubles_after_a_failed_move() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let two_turns = |first_move: PokemonMove| -> (u16, bool) {
+                let dex = pokemon_dex();
+                let p1 = build_pokemon_state(
+                    Species::Snorlax, &dex, &mdex, Some(50),
+                    Some([Some(first_move), Some(PokemonMove::StompingTantrum), None, None]),
+                    None, Some(Ability::None), None, None, None, Some([0; 6]), None, false,
+                );
+                let state = battle_state_from_lists(
+                    vec![p1], vec![],
+                    vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
+                );
+                // Turn 1: use the first move (Aura Wheel from a non-Morpeko fails).
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(state),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &mdex, &pdex,
+                );
+                let (bs, _) = extract_battle_state(outcomes);
+                let hp_before = bs.p2_active_mons[0].hp;
+                // Turn 2: Stomping Tantrum.
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(bs),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &mdex, &pdex,
+                );
+                let (bs2, _) = extract_battle_state(outcomes);
+                (hp_before - bs2.p2_active_mons[0].hp, bs2.p1_active_mons[0].last_move_failed)
+            };
+
+            let (after_fail, flag_after) = two_turns(PokemonMove::AuraWheel);
+            let (after_success, _) = two_turns(PokemonMove::Splash);
+
+            let r = ratio(after_fail, after_success);
+            assert!((r - 2.0).abs() < 0.1,
+                "Stomping Tantrum after a failed move should be 2×, got {r}");
+            assert!(!flag_after,
+                "a successful Stomping Tantrum must reset last_move_failed");
+        }
+
+        #[test]
+        fn burning_jealousy_burns_only_freshly_boosted_targets() {
+            let mut boosting = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::BurningJealousy)], vec![],
+                vec![mon(Species::Shuckle, Ability::None, PokemonMove::SwordsDance)], vec![],
+            );
+            boosting.p1_active_mons[0].stats[5] = 1;
+            boosting.p2_active_mons[0].stats[5] = 200; // boosts before the hit lands
+            let (bs, _) = extract_battle_state(run(boosting));
+            assert_eq!(bs.p2_active_mons[0].status, Some(Status::Burn),
+                "a target that raised stats this turn must be burned");
+
+            let mut idle = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::BurningJealousy)], vec![],
+                vec![mon(Species::Shuckle, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            idle.p1_active_mons[0].stats[5] = 1;
+            idle.p2_active_mons[0].stats[5] = 200;
+            let (bs2, _) = extract_battle_state(run(idle));
+            assert_eq!(bs2.p2_active_mons[0].status, None,
+                "a target that didn't boost this turn must not be burned");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Immunity / Move-blocking / Veil abilities
     // ─────────────────────────────────────────────────────────────────────────
     #[cfg(test)]
