@@ -1,4 +1,5 @@
 use crate::pokemon::PokemonState;
+use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::dex_data::{PokemonData, PseudoWeather, SideCondition, SelfSwitchType, SlotCondition, Terrain, Weather};
@@ -130,6 +131,13 @@ pub struct BattleState{
     /// caller so the player can choose a replacement; only the pending slot may switch, every
     /// other active slot must Pass.  Cleared once the replacement is sent in.
     pub self_switch_pending: Option<(FieldSlot, SelfSwitchType)>,
+
+    /// One-time-use items consumed this turn, as `(consumer slot, item)` in consumption
+    /// order. Pickup takes the most recent entry consumed by *another* Pokémon at end of
+    /// turn; Harvest removes its restored berry from this pool. Cleared at the end of
+    /// every `end_turn`. Items removed by theft (and, in future, Knock Off / Incinerate)
+    /// are deliberately NOT recorded.
+    pub items_consumed_this_turn: Vec<(FieldSlot, Item)>,
 }
 
 /// Format a single Pokémon's state as a multi-line string for display.
@@ -394,6 +402,35 @@ impl std::fmt::Debug for PlayerCommand {
     }
 }
 
+/// Change a Pokémon's in-battle form to `new_species`, recomputing types, stats, and
+/// weight from the dex entry. Current HP is preserved as a fraction of max HP (a no-op
+/// for forms sharing an HP base, e.g. Aegislash and Palafin). The ability is NOT
+/// touched — form-change abilities (Stance Change, Zero to Hero, …) keep their ability;
+/// Mega Evolution overrides it separately. Returns false if the dex has no entry.
+pub fn change_form(
+    mon: &mut PokemonState,
+    new_species: Species,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> bool {
+    let Some(form_data) = pokemon_dex.get(&new_species) else {
+        return false;
+    };
+
+    let old_max_hp = mon.stats[0].max(1);
+    let hp_ratio = mon.hp.min(old_max_hp) as f32 / old_max_hp as f32;
+    let stats = crate::pokemon::calc_stats_for_level(form_data.base_stats, mon.ivs, mon.evs, mon.level, &mon.nature);
+    let new_max_hp = stats[0].max(1);
+    let scaled_hp = (hp_ratio * new_max_hp as f32).floor() as u16;
+    let hp = if mon.hp == 0 { 0 } else { scaled_hp.clamp(1, new_max_hp) };
+
+    mon.species = new_species;
+    mon.types = form_data.types.clone();
+    mon.stats = stats;
+    mon.hp = hp;
+    mon.weight_hg = form_data.weight;
+    true
+}
+
 /// Applies Mega Evolution to a Pokemon if it is eligible.
 /// Returns true if Mega Evolution was applied.
 pub fn try_mega_evolution(mon: &mut PokemonState, pokemon_dex: &HashMap<Species, PokemonData>) -> bool {
@@ -406,26 +443,17 @@ pub fn try_mega_evolution(mon: &mut PokemonState, pokemon_dex: &HashMap<Species,
         None => return false,
     };
 
-    let mega_data = match pokemon_dex.get(&mega_species_key) {
-        Some(data) => data,
-        None => return false,
-    };
+    let mega_ability = pokemon_dex
+        .get(&mega_species_key)
+        .and_then(|d| d.primary_ability.clone());
 
-    let old_max_hp = mon.stats[0].max(1);
-    let hp_ratio = mon.hp.min(old_max_hp) as f32 / old_max_hp as f32;
-    let stats = crate::pokemon::calc_stats_for_level(mega_data.base_stats, mon.ivs, mon.evs, mon.level, &mon.nature);
-    let new_max_hp = stats[0].max(1);
-    let scaled_hp = (hp_ratio * new_max_hp as f32).floor() as u16;
-    let hp = if mon.hp == 0 { 0 } else { scaled_hp.clamp(1, new_max_hp) };
+    if !change_form(mon, mega_species_key, pokemon_dex) {
+        return false;
+    }
 
-    mon.species = mega_species_key;
-    mon.types = mega_data.types.clone();
-    mon.stats = stats;
-    mon.hp = hp;
-    mon.weight_hg = mega_data.weight;
-    if let Some(ability) = mega_data.primary_ability.as_ref() {
+    if let Some(ability) = mega_ability {
         mon.ability = ability.clone();
-    mon.base_ability = ability.clone();
+        mon.base_ability = ability;
     }
     mon.is_mega = true;
     mon.has_mega_form = false;

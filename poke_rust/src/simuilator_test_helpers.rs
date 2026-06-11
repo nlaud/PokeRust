@@ -57,6 +57,7 @@ pub fn battle_state_from_lists(
         p1_slot_conditions: vec![Vec::new(); active_per_side as usize],
         p2_slot_conditions: vec![Vec::new(); active_per_side as usize],
         self_switch_pending: None,
+        items_consumed_this_turn: vec![],
     };
 
     for slot_idx in 0..state.p1_active_mons.len() {
@@ -177,6 +178,9 @@ pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(Match
         mon.last_used_move = None;
         mon.original_ability = None;
         mon.entered_this_turn = false;
+        // Persists across turns by design (Stomping Tantrum / Micle Berry), but is
+        // transient bookkeeping for state-equality purposes.
+        mon.last_move_failed = false;
     }
     outcomes.into_iter().map(|(state, prob)| {
         let state = match state {

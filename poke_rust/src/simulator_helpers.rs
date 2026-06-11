@@ -139,7 +139,7 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
     let val = apply_ability_stat_boost(state, mon, stat, PokemonStat::Atk, Ability::Hustle, true, 1.5, val);
 
     // Light Ball: doubles Pikachu's Attack and Special Attack.
-    let val = if !items_are_suppressed(state)
+    let val = if item_is_active(state, mon)
         && mon.item == Item::LightBall
         && matches!(mon.species,
             Species::Pikachu | Species::PikachuAlola | Species::PikachuBelle
@@ -152,13 +152,13 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
     { val * 2.0 } else { val };
 
     // Choice Band: 1.5× Attack.
-    let val = if !items_are_suppressed(state)
+    let val = if item_is_active(state, mon)
         && mon.item == Item::ChoiceBand
         && stat == PokemonStat::Atk
     { val * 1.5 } else { val };
 
     // Choice Specs: 1.5× Special Attack.
-    let val = if !items_are_suppressed(state)
+    let val = if item_is_active(state, mon)
         && mon.item == Item::ChoiceSpecs
         && stat == PokemonStat::SpA
     { val * 1.5 } else { val };
@@ -309,7 +309,7 @@ pub fn crit_is_guaranteed(attacker: &PokemonState, target: &PokemonState, move_n
 
 /// Returns the effective crit ratio after applying held-item boosts (e.g. Scope Lens).
 fn effective_crit_ratio(state: &BattleState, attacker: &PokemonState, base: u8) -> u8 {
-    if !items_are_suppressed(state) && attacker.item == Item::ScopeLens {
+    if item_is_active(state, attacker) && attacker.item == Item::ScopeLens {
         base.saturating_add(1)
     } else {
         base
@@ -665,6 +665,132 @@ fn move_terrain_bp_modifier(state: &BattleState, attacker: &PokemonState, target
         PokemonMove::Bulldoze | PokemonMove::Earthquake | PokemonMove::Magnitude
             if matches!(current_terrain(state), Some(Terrain::GrassyTerrain)) => 0.5,
         _ => 1.0,
+    }
+}
+
+/// Variable base power for formula-based and conditionally scaled moves. Returns
+/// `Some(bp)` to override `move_data.base_power` for this calculation, `None` for every
+/// other move. Merged into `base_power_override` in
+/// `calculate_damage_outcomes_for_target_with_options`; multi-hit overrides keep
+/// precedence (the move sets are disjoint).
+fn variable_move_base_power(
+    state: &BattleState,
+    attacker: &PokemonState,
+    target: &PokemonState,
+    user_slot: FieldSlot,
+    target_slot: FieldSlot,
+    move_data: &MoveData,
+) -> Option<u16> {
+    use crate::data::pokemon_move::PokemonMove as M;
+    let bp = move_data.base_power;
+    match move_data.name {
+        // ── Formula-based ──────────────────────────────────────────────────────────
+        // Speed-ratio moves use fully modified Speed (stages, paralysis, items,
+        // weather abilities, Tailwind); Trick Room does not apply.
+        M::ElectroBall => {
+            let user_spe = effective_speed_for_slot(state, user_slot, attacker);
+            let target_spe = effective_speed_for_slot(state, target_slot, target);
+            // Documented quirk: a 0-Speed target yields the minimum 40 BP.
+            Some(if target_spe <= 0.0 {
+                40
+            } else {
+                let r = user_spe / target_spe;
+                if r >= 4.0 { 150 } else if r >= 3.0 { 120 } else if r >= 2.0 { 80 } else if r >= 1.0 { 60 } else { 40 }
+            })
+        }
+        M::GyroBall => {
+            let user_spe = effective_speed_for_slot(state, user_slot, attacker);
+            let target_spe = effective_speed_for_slot(state, target_slot, target);
+            // Gen VI+: a user Speed of 0 sets the power to 1 outright.
+            Some(if user_spe <= 0.0 {
+                1
+            } else {
+                (((25.0 * target_spe / user_spe).floor() as u16) + 1).min(150)
+            })
+        }
+        M::Eruption | M::WaterSpout => {
+            let max_hp = attacker.stats[0].max(1) as u32;
+            Some(((150 * attacker.hp as u32 / max_hp) as u16).max(1))
+        }
+        M::Flail | M::Reversal => {
+            let max_hp = attacker.stats[0].max(1) as u32;
+            let p = 48 * attacker.hp as u32 / max_hp;
+            Some(match p {
+                0..=1 => 200,
+                2..=4 => 150,
+                5..=9 => 100,
+                10..=16 => 80,
+                17..=32 => 40,
+                _ => 20,
+            })
+        }
+        // Target-weight table (weight_hg = kg × 10).
+        // TODO: respect Heavy Metal / Light Metal / Float Stone once implemented.
+        M::GrassKnot | M::LowKick => {
+            let hg = target.weight_hg;
+            Some(if hg >= 2000 { 120 }
+                else if hg >= 1000 { 100 }
+                else if hg >= 500 { 80 }
+                else if hg >= 250 { 60 }
+                else if hg >= 100 { 40 }
+                else { 20 })
+        }
+        M::HardPress => {
+            let max_hp = target.stats[0].max(1) as u32;
+            Some(((100 * target.hp as u32 / max_hp) as u16).max(1))
+        }
+        // Weight-ratio table. TODO: ×2 damage + bypass accuracy vs Minimized targets
+        // once Minimize exists (Protect-variants TODO group).
+        M::HeatCrash | M::HeavySlam => {
+            let user_w = attacker.weight_hg as u32;
+            let target_w = target.weight_hg.max(1) as u32;
+            Some(if user_w >= 5 * target_w { 120 }
+                else if user_w >= 4 * target_w { 100 }
+                else if user_w >= 3 * target_w { 80 }
+                else if user_w >= 2 * target_w { 60 }
+                else { 40 })
+        }
+        // ── Conditionally scaled (×2 of the dex base power) ────────────────────────
+        // A consumed Flying Gem etc. counts naturally: the item is already None here.
+        M::Acrobatics => Some(if attacker.item == Item::None { bp * 2 } else { bp }),
+        // Non-volatile status on the target.
+        M::Hex | M::InfernalParade => Some(if target.status.is_some() { bp * 2 } else { bp }),
+        // Target took any damage earlier this turn (direct or indirect).
+        M::Assurance => Some(if target.damaged_this_turn { bp * 2 } else { bp }),
+        // This specific target damaged the user earlier this turn.
+        M::Avalanche => Some(if attacker.damaged_by_this_turn.contains(&target_slot) { bp * 2 } else { bp }),
+        // Any of the user's stats actually fell this turn.
+        M::LashOut => Some(if attacker.stats_lowered_this_turn { bp * 2 } else { bp }),
+        // Doubled when the target has already taken its action this turn and didn't
+        // just switch in (mirrors Showdown's `newlyActive || willMove` check). A switch
+        // consumes the target's queued action, so the switched_in flag is what separates
+        // "moved already" from "replaced its action with a switch".
+        M::Payback => {
+            let doubled = target_has_acted_this_turn(state, target_slot) && !target.switched_in_this_turn;
+            Some(if doubled { bp * 2 } else { bp })
+        }
+        // 50 + 50 per fainted ally in the user's party. Revival doesn't exist in this
+        // simulator, so "times fainted" equals "currently fainted" (cartridge cap of
+        // 5050 is unreachable with 6-mon parties).
+        M::LastRespects => {
+            let (active, back) = match user_slot.player {
+                Player::P1 => (&state.p1_active_mons, &state.p1_back_mons),
+                Player::P2 => (&state.p2_active_mons, &state.p2_back_mons),
+            };
+            let fainted = active.iter().chain(back.iter()).filter(|m| m.fainted).count() as u16;
+            Some(50 + 50 * fainted)
+        }
+        // 20 + 20 per positive boost stage across all seven stats (max 860).
+        M::StoredPower | M::PowerTrip => {
+            let stages: u16 = attacker.boosts.iter().map(|&b| b.max(0) as u16).sum();
+            Some(20 + 20 * stages)
+        }
+        // Doubled when the user's previous move missed, had no effect, or was
+        // prevented (paralysis / sleep / flinch). Recharging does not count.
+        M::StompingTantrum | M::TemperFlare => {
+            Some(if attacker.last_move_failed { bp * 2 } else { bp })
+        }
+        _ => None,
     }
 }
 
@@ -1182,6 +1308,10 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let is_struggle = move_data.name == crate::data::pokemon_move::PokemonMove::Struggle;
     let effectiveness = if is_struggle { 1.0 } else { effectiveness };
     let stab = if is_struggle { 1.0 } else { stab_multiplier(attacker, &attack_type) };
+    // Variable-BP moves (Electro Ball, Flail, Assurance, …) compute their power here;
+    // explicit overrides (multi-hit per-hit powers) take precedence.
+    let base_power_override = base_power_override.or_else(||
+        variable_move_base_power(_state, attacker, target, _user_slot, _target_slot, move_data));
     let bp            = effective_base_power(_state, attacker, target, move_data, base_power_override);
 
     // A genuinely 0-BP hit deals 0 damage — no phantom +2 from the formula,
@@ -1192,9 +1322,9 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let weather_mult  = weather_damage_multiplier(_state, move_data, &attack_type);
     let burn_mult     = burn_damage_multiplier(attacker, move_data);
     let dry_skin_mult = dry_skin_fire_multiplier(target, &attack_type);
-    let type_boost_mult = if items_are_suppressed(_state) { 1.0 }
+    let type_boost_mult = if !item_is_active(_state, attacker) { 1.0 }
         else { type_boost_item_multiplier(attacker, &attack_type) };
-    let resist_berry_mult = if items_are_suppressed(_state) { 1.0 }
+    let resist_berry_mult = if !item_is_active(_state, target) { 1.0 }
         else {
             let base = resist_berry_multiplier(target, &attack_type, effectiveness);
             // Ripen halves the resist-berry multiplier again (½ → ¼).
@@ -1334,7 +1464,7 @@ fn move_can_hit_sky_drop_target(attacker: &PokemonState, target: &PokemonState, 
 
 pub fn sky_drop_first_turn_fails(state: &BattleState, target: &PokemonState) -> bool {
     is_gravity_active(state)
-        || matches!(target.item, Item::IronBall)
+        || (item_is_active(state, target) && matches!(target.item, Item::IronBall))
         || has_status_volatile(target, &VolatileStatus::Substitute)
 }
 
@@ -1487,6 +1617,7 @@ pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
         && (hp_before as u32) * 2 > (mon.stats[0] as u32)
         && (mon.hp as u32) * 2 <= (mon.stats[0] as u32)
     {
+        if mon.boosts[2] < 6 { mon.stats_raised_this_turn = true; }
         mon.boosts[2] = (mon.boosts[2] + 1).min(6);
     }
 }
@@ -1637,7 +1768,7 @@ pub(crate) fn try_consume_leppa_berry(mon: &mut PokemonState, env: &BerryEnv) {
 /// stages to 0. Called from `apply_stat_boosts_to_pokemon` whenever the incoming delta
 /// contains a negative entry, so it fires from all sources (moves, Intimidate, etc.).
 pub(crate) fn try_consume_white_herb(mon: &mut PokemonState, items_suppressed: bool) {
-    if items_suppressed || mon.item != Item::WhiteHerb { return; }
+    if items_suppressed || klutz_disables_item(mon) || mon.item != Item::WhiteHerb { return; }
     if !mon.boosts.iter().any(|&b| b < 0) { return; }
     for b in mon.boosts.iter_mut() {
         if *b < 0 { *b = 0; }
@@ -1650,7 +1781,7 @@ pub(crate) fn try_consume_white_herb(mon: &mut PokemonState, items_suppressed: b
 /// that are present. Called from `apply_volatile_to_pokemon` after each push, so it fires
 /// from all sources (move effects on target or attacker, Cursed Body, etc.).
 pub(crate) fn try_consume_mental_herb(mon: &mut PokemonState, items_suppressed: bool) {
-    if items_suppressed || mon.item != Item::MentalHerb { return; }
+    if items_suppressed || klutz_disables_item(mon) || mon.item != Item::MentalHerb { return; }
     let mental_volatiles = [
         VolatileStatus::Attract,
         VolatileStatus::Taunt,
@@ -1686,7 +1817,7 @@ pub(crate) fn compute_endure_outcomes(
     damage: u16,
     items_suppressed: bool,
 ) -> Vec<(u16, bool, f64)> {
-    if items_suppressed || damage == 0 || target.fainted || damage < target.hp {
+    if items_suppressed || klutz_disables_item(target) || damage == 0 || target.fainted || damage < target.hp {
         return vec![(damage, false, 1.0)];
     }
     // damage >= target.hp: this hit would KO the target
@@ -1734,7 +1865,9 @@ pub fn apply_damage_and_check_game_over(
     target_slot: FieldSlot,
     damage: u16,
 ) -> Option<crate::battle::MatchState> {
-    let items_suppressed = items_are_suppressed(state);
+    let item_active = get_pokemon_at_slot(state, target_slot)
+        .map(|m| item_is_active(state, m))
+        .unwrap_or(false);
     let target_env = berry_env(state, target_slot);
     let target_mon = match target_slot.player {
         Player::P1 => state.p1_active_mons.get_mut(target_slot.slot_index as usize),
@@ -1743,7 +1876,7 @@ pub fn apply_damage_and_check_game_over(
 
     take_damage(target_mon, damage, target_env);
 
-    if damage > 0 && !items_suppressed && matches!(target_mon.item, Item::AirBalloon) {
+    if damage > 0 && item_active && matches!(target_mon.item, Item::AirBalloon) {
         target_mon.item = Item::None;
     }
 
@@ -1864,6 +1997,21 @@ pub fn items_are_suppressed(state: &BattleState) -> bool {
         .any(|pseudo_weather| matches!(pseudo_weather, PseudoWeather::MagicDeluge))
 }
 
+/// Whether `mon`'s held item currently has any effect. Combines the global Magic Room
+/// gate with the per-Pokémon Klutz gate (Klutz itself can be suppressed by Gastro Acid /
+/// Neutralizing Gas, which re-enables the item).
+pub fn item_is_active(state: &BattleState, mon: &PokemonState) -> bool {
+    !items_are_suppressed(state)
+        && !(mon.ability == Ability::Klutz && !pokemon_ability_is_suppressed(state, mon))
+}
+
+/// Mon-level Klutz check for call sites that only have the `PokemonState` (no
+/// `BattleState`). Gastro Acid suppression of Klutz re-enables the item. (Neutralizing
+/// Gas would also re-enable it, but field state is not visible here — corner case.)
+pub(crate) fn klutz_disables_item(mon: &PokemonState) -> bool {
+    mon.ability == Ability::Klutz && !has_status_volatile(mon, &VolatileStatus::GastroAcid)
+}
+
 // ── Berry consumption context ─────────────────────────────────────────────────
 
 /// Context for berry consumption at a specific field slot. Pre-computed (via
@@ -1906,17 +2054,163 @@ fn opposing_unnerve_active(state: &BattleState, slot: FieldSlot) -> bool {
 /// Build the [`BerryEnv`] for a field slot from the current battle state.
 /// Call this before any mutable borrow of `state`.
 pub(crate) fn berry_env(state: &BattleState, slot: FieldSlot) -> BerryEnv {
-    let items_suppressed = items_are_suppressed(state);
-    let unnerve = if items_suppressed { false } else { opposing_unnerve_active(state, slot) };
+    // Per-mon gate: Magic Room, or the holder's own (unsuppressed) Klutz.
+    let item_inactive = get_pokemon_at_slot(state, slot)
+        .map(|mon| !item_is_active(state, mon))
+        .unwrap_or_else(|| items_are_suppressed(state));
+    let unnerve = if item_inactive { false } else { opposing_unnerve_active(state, slot) };
     let ability_active = get_pokemon_at_slot(state, slot)
         .map(|mon| !pokemon_ability_is_suppressed(state, mon))
         .unwrap_or(false);
     let misty_terrain = matches!(state.terrain, Some(Terrain::MistyTerrain));
     BerryEnv {
-        suppressed: items_suppressed || unnerve,
+        suppressed: item_inactive || unnerve,
         ability_active,
         misty_terrain,
     }
+}
+
+// ── Item-loss ledger (Unburden / Pickup / Symbiosis) ──────────────────────────
+//
+// Berry consumption happens inside mon-level functions (`take_damage`, `gain_hp`,
+// `try_consume_*`) that have no `BattleState` access, so item-loss reactions are
+// driven by a snapshot-diff sweep instead of call-site hooks: snapshot held items
+// before an action resolves, then diff afterwards. Theft (`try_steal_item`) handles
+// its own bookkeeping and is skipped by the sweep via the `item_lost` flag.
+
+/// Snapshot the held item and HP of every active Pokémon, for `process_item_loss_events`.
+/// Species is recorded so slots whose occupant changed mid-action (switches) are skipped.
+pub(crate) fn snapshot_active_items(state: &BattleState) -> Vec<(FieldSlot, Species, Item, u16)> {
+    let mut v = Vec::new();
+    for (i, mon) in state.p1_active_mons.iter().enumerate() {
+        v.push((FieldSlot { player: Player::P1, slot_index: i as u8 }, mon.species.clone(), mon.item.clone(), mon.hp));
+    }
+    for (i, mon) in state.p2_active_mons.iter().enumerate() {
+        v.push((FieldSlot { player: Player::P2, slot_index: i as u8 }, mon.species.clone(), mon.item.clone(), mon.hp));
+    }
+    v
+}
+
+/// Diff current held items against a `snapshot_active_items` snapshot and fire item-loss
+/// reactions: set `item_lost` (Unburden), record the item for Pickup (popped Air Balloons
+/// excluded), and run Symbiosis. Mons whose `item_lost` flag is already set (theft) and
+/// slots whose occupant changed (switches) are skipped.
+///
+/// Also diffs HP: any decrease marks `damaged_this_turn` (Assurance), catching indirect
+/// damage (recoil, crash, confusion self-hits) that bypasses `apply_single_hit_branch`.
+pub(crate) fn process_item_loss_events(state: &mut BattleState, before: &[(FieldSlot, Species, Item, u16)]) {
+    for (slot, prev_species, prev_item, prev_hp) in before {
+        // HP diff → per-turn damage flag (occupant must be unchanged).
+        let hp_dropped = get_pokemon_at_slot(state, *slot)
+            .is_some_and(|m| m.species == *prev_species && m.hp < *prev_hp);
+        if hp_dropped {
+            if let Some(m) = get_pokemon_at_slot_mut(state, *slot) {
+                m.damaged_this_turn = true;
+            }
+        }
+
+        if *prev_item == Item::None { continue; }
+        let lost_now = match get_pokemon_at_slot(state, *slot) {
+            Some(m) => m.species == *prev_species && m.item == Item::None && !m.item_lost,
+            None => false,
+        };
+        if !lost_now { continue; }
+        if let Some(m) = get_pokemon_at_slot_mut(state, *slot) {
+            m.item_lost = true;
+        }
+        // Popped Air Balloons are destroyed, not used — Pickup cannot retrieve them.
+        if *prev_item != Item::AirBalloon {
+            state.items_consumed_this_turn.push((*slot, prev_item.clone()));
+        }
+        try_symbiosis_pass(state, *slot);
+    }
+}
+
+/// Symbiosis: the Pokémon at `receiver_slot` just used up its held item — an ally with
+/// (unsuppressed) Symbiosis immediately passes its own held item over. With several
+/// eligible allies, slot order decides (cartridge uses speed order — simplification).
+fn try_symbiosis_pass(state: &mut BattleState, receiver_slot: FieldSlot) {
+    let receiver_ok = get_pokemon_at_slot(state, receiver_slot)
+        .map(|m| !m.fainted && m.item == Item::None)
+        .unwrap_or(false);
+    if !receiver_ok { return; }
+
+    let donor_slot = collect_active_slots(state, receiver_slot.player, Some(receiver_slot.slot_index))
+        .into_iter()
+        .find(|s| {
+            get_pokemon_at_slot(state, *s).is_some_and(|m| {
+                !m.fainted
+                    && m.ability == Ability::Symbiosis
+                    && !pokemon_ability_is_suppressed(state, m)
+                    && m.item != Item::None
+                    && !item_cannot_be_transferred(&m.item, m)
+            })
+        });
+    let Some(donor_slot) = donor_slot else { return };
+
+    let item = match get_pokemon_at_slot_mut(state, donor_slot) {
+        Some(d) => {
+            let item = d.item.clone();
+            d.item = Item::None;
+            // Giving the item away counts as losing it (triggers the donor's Unburden).
+            d.item_lost = true;
+            item
+        }
+        None => return,
+    };
+    let env = berry_env(state, receiver_slot);
+    if let Some(r) = get_pokemon_at_slot_mut(state, receiver_slot) {
+        r.item = item;
+        r.item_lost = false;
+        // A freshly received berry may activate immediately (e.g. status-cure berries).
+        on_item_obtained_or_enabled(r, &env);
+    }
+}
+
+/// Items that can never change holder mid-battle: species-locked items and the
+/// holder's own Mega Stone (`has_mega_form` / `is_mega` imply the held item is it).
+pub(crate) fn item_cannot_be_transferred(item: &Item, holder: &PokemonState) -> bool {
+    matches!(item, Item::BoosterEnergy) || holder.has_mega_form || holder.is_mega
+}
+
+/// Move the victim's held item to the (empty-handed, alive) thief, respecting Sticky Hold
+/// and untransferable items. Shared by Magician / Pickpocket and, in future, Knock Off /
+/// Thief / Covet. Returns `true` if an item changed hands.
+pub(crate) fn try_steal_item(state: &mut BattleState, thief_slot: FieldSlot, victim_slot: FieldSlot) -> bool {
+    let thief_ok = get_pokemon_at_slot(state, thief_slot)
+        .map(|m| !m.fainted && m.item == Item::None)
+        .unwrap_or(false);
+    if !thief_ok { return false; }
+
+    let blocked = match get_pokemon_at_slot(state, victim_slot) {
+        Some(v) => {
+            v.item == Item::None
+                || item_cannot_be_transferred(&v.item, v)
+                // Sticky Hold protects the item — but not once the holder has fainted.
+                || (!v.fainted
+                    && v.ability == Ability::StickyHold
+                    && !pokemon_ability_is_suppressed(state, v))
+        }
+        None => true,
+    };
+    if blocked { return false; }
+
+    let item = match get_pokemon_at_slot_mut(state, victim_slot) {
+        Some(v) => {
+            let item = v.item.clone();
+            v.item = Item::None;
+            v.item_lost = true; // theft triggers the victim's Unburden
+            item
+        }
+        None => return false,
+    };
+    let env = berry_env(state, thief_slot);
+    if let Some(t) = get_pokemon_at_slot_mut(state, thief_slot) {
+        t.item = item;
+        t.item_lost = false; // gaining an item ends a previous Unburden boost
+        on_item_obtained_or_enabled(t, &env);
+    }
+    true
 }
 
 pub fn any_pokemon_has_neutralizing_gas(state: &BattleState) -> bool {
@@ -1955,7 +2249,7 @@ pub fn pokemon_is_grounded(state: &BattleState, mon: &PokemonState) -> bool {
 
     !pokemon_has_type(mon, &PokemonType::Flying)
         && mon.ability != Ability::Levitate
-        && (!matches!(mon.item, Item::AirBalloon) || items_are_suppressed(state))
+        && (!matches!(mon.item, Item::AirBalloon) || !item_is_active(state, mon))
         && !has_status_volatile(mon, &VolatileStatus::MagnetRise)
         && !has_status_volatile(mon, &VolatileStatus::Telekinesis)
         && !mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _) | VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)))
@@ -1994,18 +2288,38 @@ fn trigger_terrain_seed_items(state: &mut BattleState) {
     let Some((seed_item, boost_stat)) = terrain_seed_for_current_terrain(state) else {
         return;
     };
+    if items_are_suppressed(state) {
+        return;
+    }
 
-    for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
-        if mon.item != seed_item {
+    let mut slots = collect_active_slots(state, Player::P1, None);
+    slots.extend(collect_active_slots(state, Player::P2, None));
+    for slot in slots {
+        let eligible = get_pokemon_at_slot(state, slot)
+            .map(|m| m.item == seed_item && !klutz_disables_item(m))
+            .unwrap_or(false);
+        if !eligible {
             continue;
         }
 
-        mon.item = Item::None;
-        match boost_stat {
-            PokemonStat::Def => mon.boosts[1] = (mon.boosts[1] + 1).clamp(-6, 6),
-            PokemonStat::SpD => mon.boosts[3] = (mon.boosts[3] + 1).clamp(-6, 6),
-            _ => {}
+        if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+            mon.item = Item::None;
+            mon.item_lost = true;
+            match boost_stat {
+                PokemonStat::Def => {
+                    if mon.boosts[1] < 6 { mon.stats_raised_this_turn = true; }
+                    mon.boosts[1] = (mon.boosts[1] + 1).clamp(-6, 6);
+                }
+                PokemonStat::SpD => {
+                    if mon.boosts[3] < 6 { mon.stats_raised_this_turn = true; }
+                    mon.boosts[3] = (mon.boosts[3] + 1).clamp(-6, 6);
+                }
+                _ => {}
+            }
         }
+        // Seeds are used up — eligible for Pickup and trigger Symbiosis.
+        state.items_consumed_this_turn.push((slot, seed_item.clone()));
+        try_symbiosis_pass(state, slot);
     }
 }
 
@@ -2206,19 +2520,19 @@ fn compute_accuracy_modifier_fp(
         modifier = apply_modifier_fp(modifier, 5325);
     }
 
-    if !items_are_suppressed(state) && matches!(target.item, Item::BrightPowder) {
+    if item_is_active(state, target) && matches!(target.item, Item::BrightPowder) {
         modifier = apply_modifier_fp(modifier, 3686);
     }
 
-    if !items_are_suppressed(state) && matches!(target.item, Item::LaxIncense) {
+    if item_is_active(state, target) && matches!(target.item, Item::LaxIncense) {
         modifier = apply_modifier_fp(modifier, 3686);
     }
 
-    if !items_are_suppressed(state) && matches!(attacker.item, Item::WideLens) {
+    if item_is_active(state, attacker) && matches!(attacker.item, Item::WideLens) {
         modifier = apply_modifier_fp(modifier, 4505);
     }
 
-    if !items_are_suppressed(state) && matches!(attacker.item, Item::ZoomLens) && target_has_acted_this_turn(state, target_slot) {
+    if item_is_active(state, attacker) && matches!(attacker.item, Item::ZoomLens) && target_has_acted_this_turn(state, target_slot) {
         modifier = apply_modifier_fp(modifier, 4915);
     }
 
@@ -2252,7 +2566,7 @@ fn accuracy_stage_multiplier(stage: i8) -> f64 {
 }
 
 fn micle_berry_multiplier_fp(attacker: &PokemonState) -> i32 {
-    if matches!(attacker.item, Item::MicleBerry) && attacker.last_move_failed {
+    if matches!(attacker.item, Item::MicleBerry) && !klutz_disables_item(attacker) && attacker.last_move_failed {
         4915
     } else {
         4096
@@ -2351,7 +2665,7 @@ fn get_effective_speed(state: &BattleState, mon: &PokemonState) -> f32 {
     }
 
     // Choice Scarf: 1.5× Speed.
-    if !items_are_suppressed(state) && mon.item == Item::ChoiceScarf {
+    if item_is_active(state, mon) && mon.item == Item::ChoiceScarf {
         speed *= 1.5;
     }
 
@@ -2382,6 +2696,13 @@ pub fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &Poke
         speed *= 2.0;
     }
     if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SlushRush && weather_is_snow(state) {
+        speed *= 2.0;
+    }
+    // Unburden: ×2 Speed once the held item has been consumed or lost (and no new item
+    // gained). The `item_lost` flag is cleared on switch-out / item gain; while the
+    // ability is suppressed the boost is dormant and returns when suppression ends.
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::Unburden
+        && mon.item == Item::None && mon.item_lost {
         speed *= 2.0;
     }
 
@@ -2555,6 +2876,9 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     // A Pokémon entering may bring Neutralizing Gas, which suppresses primal-weather
     // abilities and so ends the extreme weather they were maintaining.
     handle_gas_primal_weather_suppression(state);
+
+    // The entrant may be a Castform, set new weather, or bring Cloud Nine / Air Lock.
+    update_forecast_forms(state);
 }
 
 /// Transform `transformer` into `target`, following the rules for both the Transform move
@@ -2835,6 +3159,7 @@ pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
     apply_entry_ability_field_effects(state, &ability);
     apply_entry_ability_target_effects(state, slot, &ability);
     trigger_terrain_seed_items(state);
+    update_forecast_forms(state);
 }
 
 /// Handle every effect triggered when a Pokémon switches out. Call this *after* the
@@ -2874,6 +3199,9 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
 
     // Primal weather ends when its source leaves, unless another holder remains.
     handle_primal_weather_departure(state, &departed_ability);
+
+    // Departing weather sources / Cloud Nine users may change Castform's form.
+    update_forecast_forms(state);
 }
 
 /// Handle field effects when the Pokémon at `slot_index` (for `player`) faints:
@@ -2900,6 +3228,31 @@ pub fn handle_pokemon_faint(state: &mut BattleState, player: Player, slot_index:
 
     // Primal weather ends when its source faints, unless another holder remains.
     handle_primal_weather_departure(state, &fainted_ability);
+
+    // Receiver: an ally with (unsuppressed) Receiver inherits the fainted Pokémon's
+    // ability. The original is stashed so the usual switch-out revert applies.
+    if !ability_cannot_be_received(&fainted_ability) {
+        let receiver_slot = collect_active_slots(state, player, Some(slot_index))
+            .into_iter()
+            .find(|s| get_pokemon_at_slot(state, *s).is_some_and(|m| {
+                !m.fainted
+                    && m.ability == Ability::Receiver
+                    && !pokemon_ability_is_suppressed(state, m)
+            }));
+        if let Some(receiver_slot) = receiver_slot {
+            if let Some(receiver) = get_pokemon_at_slot_mut(state, receiver_slot) {
+                if receiver.original_ability.is_none() {
+                    receiver.original_ability = Some(receiver.ability.clone());
+                }
+                receiver.ability = fainted_ability.clone();
+            }
+            // Fire on-gain effects (weather setters, Intimidate, …) for the new ability.
+            process_pokemon_gain_ability(state, receiver_slot);
+        }
+    }
+
+    // A fainting weather source / Cloud Nine user may change Castform's form.
+    update_forecast_forms(state);
 }
 
 /// While Neutralizing Gas is active it suppresses primal-weather abilities, so any
@@ -2963,6 +3316,57 @@ fn handle_neutralizing_gas_lift(state: &mut BattleState) {
     slots.extend(collect_active_slots(state, Player::P2, None));
     for slot in slots {
         process_pokemon_gain_ability(state, slot);
+    }
+}
+
+/// Forecast: keep every active Castform's form and type in sync with the current weather.
+/// Sun → Sunny (Fire), rain → Rainy (Water), snow → Snowy (Ice); anything else, no
+/// weather, Cloud Nine / Air Lock on the field, or a suppressed/absent Forecast ability
+/// reverts to base Castform (Normal). All forms share stats, so no dex lookup is needed.
+/// Call after anything that can alter weather, ability, or the active roster.
+pub fn update_forecast_forms(state: &mut BattleState) {
+    let weather_negated = active_mons_have_ability(state, &Ability::CloudNine)
+        || active_mons_have_ability(state, &Ability::AirLock);
+    let mut slots = collect_active_slots(state, Player::P1, None);
+    slots.extend(collect_active_slots(state, Player::P2, None));
+    for slot in slots {
+        let (is_castform, forecast_inactive, current) = match get_pokemon_at_slot(state, slot) {
+            Some(m) => (
+                matches!(m.species,
+                    Species::Castform | Species::CastformRainy
+                    | Species::CastformSnowy | Species::CastformSunny),
+                m.ability != Ability::Forecast || pokemon_ability_is_suppressed(state, m),
+                m.species.clone(),
+            ),
+            None => continue,
+        };
+        if !is_castform {
+            continue;
+        }
+        let target = if forecast_inactive || weather_negated {
+            Species::Castform
+        } else if weather_is_sunlight(state) {
+            Species::CastformSunny
+        } else if weather_is_rain(state) {
+            Species::CastformRainy
+        } else if weather_is_snow(state) {
+            Species::CastformSnowy
+        } else {
+            Species::Castform
+        };
+        if target == current {
+            continue;
+        }
+        let types = match target {
+            Species::CastformSunny => vec![PokemonType::Fire],
+            Species::CastformRainy => vec![PokemonType::Water],
+            Species::CastformSnowy => vec![PokemonType::Ice],
+            _ => vec![PokemonType::Normal],
+        };
+        if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+            m.species = target;
+            m.types = types;
+        }
     }
 }
 
@@ -3175,6 +3579,7 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
         // Cheek Pouch / Cud Chew don't fire on Magic Room expiry (corner case).
         let env = BerryEnv::simple(false);
         for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+            if klutz_disables_item(mon) { continue; }
             on_item_obtained_or_enabled(mon, &env);
         }
     }
@@ -3201,8 +3606,16 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
 ///   4. `apply_late_eot_abilities` — Speed Boost/Moody/Harvest/Hunger Switch (may branch)
 ///   5. Clear `entered_this_turn` so Speed Boost fires normally next turn.
 pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
+    // Item-loss ledger snapshot: residual damage in Phases 1–3 can consume berries
+    // (e.g. Sitrus after burn chip); the diff after Phase 3 fires Unburden / Pickup /
+    // Symbiosis reactions before Pickup resolves in Phase 4.
+    let item_snapshot = snapshot_active_items(state);
+
     // Decrement effect timers (weather, pseudo-weather, side conditions).
     decrement_effect_timers(state);
+
+    // Weather may have just expired — re-evaluate Castform's Forecast form.
+    update_forecast_forms(state);
 
     // Advance the battle turn counter.
     state.turn_number = state.turn_number.saturating_add(1);
@@ -3217,16 +3630,25 @@ pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
     // Phase 3: burn/poison/toxic damage (deterministic per branch).
     for (bs, _) in branches.iter_mut() {
         apply_status_damage(bs);
+        process_item_loss_events(bs, &item_snapshot);
     }
 
     // Phase 4: late ability effects (Speed Boost, Moody, Harvest, Hunger Switch).
     branches = apply_late_eot_abilities(branches);
 
-    // Phase 5: clear the entry-turn flag so Speed Boost fires normally next turn.
+    // Phase 5: clear the entry-turn flag so Speed Boost fires normally next turn,
+    // the per-turn event flags (Assurance / Avalanche / Lash Out / Burning Jealousy),
+    // and empty the per-turn consumed-item pool (Pickup has already run in Phase 4).
     for (bs, _) in branches.iter_mut() {
         for mon in bs.p1_active_mons.iter_mut().chain(bs.p2_active_mons.iter_mut()) {
             mon.entered_this_turn = false;
+            mon.damaged_this_turn = false;
+            mon.damaged_by_this_turn.clear();
+            mon.stats_raised_this_turn = false;
+            mon.stats_lowered_this_turn = false;
+            mon.switched_in_this_turn = false;
         }
+        bs.items_consumed_this_turn.clear();
     }
 
     coalesce_branches(branches)
@@ -3399,7 +3821,7 @@ fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx, env:
         || pokemon_has_type(mon, &PokemonType::Ground)
         || (!ctx.abilities_suppressed && matches!(mon.ability,
             Ability::SandForce | Ability::SandRush | Ability::SandVeil | Ability::MagicGuard | Ability::Overcoat))
-        || (!ctx.items_suppressed && matches!(mon.item, Item::SafetyGoggles));
+        || (!ctx.items_suppressed && !klutz_disables_item(mon) && matches!(mon.item, Item::SafetyGoggles));
 
     if !sandstorm_immune {
         deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16, env);
@@ -3477,13 +3899,13 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
     // Does not consume the item. Capped at max HP by gain_hp.
     // TODO: gate on Heal Block when that mechanic is implemented.
     for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
-        if !mon.fainted && !ctx.items_suppressed && mon.item == Item::Leftovers {
+        if !mon.fainted && !ctx.items_suppressed && !klutz_disables_item(mon) && mon.item == Item::Leftovers {
             let max_hp = mon.stats[0].max(1);
             gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p1_envs[i]);
         }
     }
     for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
-        if !mon.fainted && !ctx.items_suppressed && mon.item == Item::Leftovers {
+        if !mon.fainted && !ctx.items_suppressed && !klutz_disables_item(mon) && mon.item == Item::Leftovers {
             let max_hp = mon.stats[0].max(1);
             gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p2_envs[i]);
         }
@@ -3724,27 +4146,64 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
             // Requires: item slot empty, last consumed item was a Berry.
             Ability::Harvest => {
                 // Check conditions from the first branch (same for all branches at this point).
-                let (has_consumed_berry, in_sun) = if let Some((bs, _)) = result.first() {
+                let (restorable_berry, in_sun) = if let Some((bs, _)) = result.first() {
                     if let Some(mon) = get_pokemon_at_slot(bs, *slot) {
                         let berry = mon.consumed_item.as_ref()
-                            .map(|it| format!("{:?}", it).ends_with("Berry"))
-                            .unwrap_or(false);
+                            .filter(|it| format!("{:?}", it).ends_with("Berry"))
+                            .cloned();
                         let empty = mon.item == Item::None;
-                        (berry && empty && !mon.fainted, weather_is_sunlight(bs))
-                    } else { (false, false) }
-                } else { (false, false) };
+                        (if empty && !mon.fainted { berry } else { None }, weather_is_sunlight(bs))
+                    } else { (None, false) }
+                } else { (None, false) };
 
-                if !has_consumed_berry { continue; }
+                let Some(berry_item) = restorable_berry else { continue; };
                 let chance = if in_sun { 1.0 } else { 0.5 };
 
                 result = eot_fork_per_slot(result, *slot, chance, |mon| {
                     if let Some(berry) = mon.consumed_item.take() {
                         mon.item = berry;
+                        mon.item_lost = false;
                         // consumed_item is now None; on_item_obtained_or_enabled would fire
                         // pinch-berry re-triggers, but those require items_suppressed context.
                         // The item is simply restored here; pinch-berry logic runs on next HP change.
                     }
                 });
+
+                // A Harvest-restored berry no longer counts as "used this turn" — remove it
+                // from the Pickup pool in the branches where the restore fired.
+                for (bs, _) in result.iter_mut() {
+                    let restored = get_pokemon_at_slot(bs, *slot)
+                        .map(|m| m.item == berry_item && m.consumed_item.is_none())
+                        .unwrap_or(false);
+                    if restored {
+                        if let Some(pos) = bs.items_consumed_this_turn.iter()
+                            .position(|(_, it)| *it == berry_item)
+                        {
+                            bs.items_consumed_this_turn.remove(pos);
+                        }
+                    }
+                }
+            }
+            // Pickup: at end of turn, an empty-handed holder retrieves the most recently
+            // consumed one-time item used by *another* Pokémon this turn. Multiple Pickup
+            // users resolve in slot order (cartridge: speed order — simplification).
+            Ability::Pickup => {
+                for (bs, _) in result.iter_mut() {
+                    let can_pick = get_pokemon_at_slot(bs, *slot)
+                        .map(|m| !m.fainted && m.item == Item::None)
+                        .unwrap_or(false);
+                    if !can_pick { continue; }
+                    let Some(pos) = bs.items_consumed_this_turn.iter()
+                        .rposition(|(consumer, _)| consumer != slot)
+                    else { continue; };
+                    let (_, item) = bs.items_consumed_this_turn.remove(pos);
+                    let env = berry_env(bs, *slot);
+                    if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
+                        mon.item = item;
+                        mon.item_lost = false;
+                        on_item_obtained_or_enabled(mon, &env);
+                    }
+                }
             }
             // Cud Chew: re-apply a consumed berry's effect at the end of the turn
             // *after* it was eaten. `armed=false` means this is the first EOT; flip to
@@ -3972,7 +4431,12 @@ fn apply_stat_boosts_to_pokemon(
     defer_white_herb: bool,
 ) {
     for i in 0..7 {
-        mon.boosts[i] = (mon.boosts[i] + boosts[i]).clamp(-6, 6);
+        let before = mon.boosts[i];
+        mon.boosts[i] = (before + boosts[i]).clamp(-6, 6);
+        // Per-turn stat-change flags use the post-clamp delta: a stat pinned at ±6
+        // doesn't count as raised/lowered (Burning Jealousy / Lash Out conditions).
+        if mon.boosts[i] > before { mon.stats_raised_this_turn = true; }
+        if mon.boosts[i] < before { mon.stats_lowered_this_turn = true; }
     }
     if !defer_white_herb && boosts.iter().any(|&b| b < 0) {
         try_consume_white_herb(mon, items_suppressed);
@@ -3990,6 +4454,9 @@ fn apply_boosts_returning_delta(mon: &mut PokemonState, boosts: &[i8; 7]) -> [i8
         let after = (before + boosts[i]).clamp(-6, 6);
         delta[i] = after - before;
         mon.boosts[i] = after;
+        // Per-turn stat-change flags (post-clamp), as in apply_stat_boosts_to_pokemon.
+        if after > before { mon.stats_raised_this_turn = true; }
+        if after < before { mon.stats_lowered_this_turn = true; }
     }
     delta
 }
@@ -4504,11 +4971,10 @@ pub fn apply_kings_rock_flinch(
     });
     if move_already_flinches { return branches; }
 
-    // Check that the attacker holds King's Rock and items are not suppressed.
+    // Check that the attacker holds King's Rock and its item is active (Magic Room / Klutz).
     let eligible = branches.first().map_or(false, |(bs, _)| {
-        !items_are_suppressed(bs)
-            && get_pokemon_at_slot(bs, attacker_slot)
-                .map_or(false, |m| m.item == Item::KingsRock)
+        get_pokemon_at_slot(bs, attacker_slot)
+            .map_or(false, |m| item_is_active(bs, m) && m.item == Item::KingsRock)
     });
     if !eligible { return branches; }
 
@@ -4534,6 +5000,21 @@ fn ability_excluded_from_mummy(ability: &Ability) -> bool {
         | Ability::PowerConstruct | Ability::RKSSystem | Ability::Schooling
         | Ability::ShieldsDown | Ability::StanceChange | Ability::ZenMode
         | Ability::ZerotoHero | Ability::Mummy
+    )
+}
+
+/// Blocklist for Receiver — abilities that cannot be inherited from a fainted ally.
+fn ability_cannot_be_received(ability: &Ability) -> bool {
+    matches!(ability,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::BattleBond
+        | Ability::Comatose | Ability::Commander | Ability::Disguise | Ability::FlowerGift
+        | Ability::Forecast | Ability::GulpMissile | Ability::HungerSwitch | Ability::IceFace
+        | Ability::Illusion | Ability::Imposter | Ability::Multitype
+        | Ability::PowerConstruct | Ability::PowerofAlchemy | Ability::Protosynthesis
+        | Ability::QuarkDrive | Ability::Receiver | Ability::RKSSystem | Ability::Schooling
+        | Ability::ShieldsDown | Ability::StanceChange | Ability::Trace
+        | Ability::WanderingSpirit | Ability::WonderGuard | Ability::ZenMode
+        | Ability::ZerotoHero
     )
 }
 
@@ -4796,6 +5277,7 @@ pub fn apply_contact_hit_reactions(
                 let alive = get_pokemon_at_slot(&bs, holder_slot).map(|m| !m.fainted).unwrap_or(false);
                 if !alive { return (bs, prob); }
                 if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
+                    if mon.boosts[0] < 6 { mon.stats_raised_this_turn = true; }
                     mon.boosts[0] = 6; // maximise Attack regardless of current stage
                 }
                 (bs, prob)
@@ -4812,6 +5294,22 @@ pub fn apply_contact_hit_reactions(
                     // then push a fresh one.
                     remove_status_volatile(mon, &VolatileStatus::Charge);
                     mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Charge, 0));
+                }
+                (bs, prob)
+            }).collect()
+        }
+        // Pickpocket: steal the attacker's item when hit by a contact move while
+        // empty-handed. Doesn't trigger if the holder is KO'd by the hit. Fires on the
+        // first contact hit rather than the cartridge's last strike — equivalent outcome,
+        // since the attacker's item is gone either way.
+        Ability::Pickpocket => {
+            if !is_contact { return branches; }
+            branches.into_iter().map(|(mut bs, prob)| {
+                let holder_alive = get_pokemon_at_slot(&bs, holder_slot)
+                    .map(|m| !m.fainted)
+                    .unwrap_or(false);
+                if holder_alive {
+                    try_steal_item(&mut bs, holder_slot, attacker_slot);
                 }
                 (bs, prob)
             }).collect()
@@ -5059,6 +5557,12 @@ pub fn apply_secondary_effects(
         !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::ShieldDust
     });
 
+    // Burning Jealousy: the burn applies only to targets whose stats were actually raised
+    // earlier this turn. The Showdown source stores this as an `onHit` callback, so the
+    // parsed `secondaries` carry no status — apply it explicitly. The 70 BP is unconditional.
+    let burning_jealousy_burn = move_data.name == PokemonMove::BurningJealousy
+        && get_pokemon_at_slot(state, target_slot).is_some_and(|m| m.stats_raised_this_turn);
+
     // Branch target secondaries
     if !target_has_shield_dust {
         for secondary in &move_data.secondaries {
@@ -5078,6 +5582,13 @@ pub fn apply_secondary_effects(
             branches = branch_on_secondary_effects(branches, chance, choices, |bs, eff| {
                 apply_effect_to_target(bs, attacker_slot, target_slot, eff, side_condition_target);
             });
+        }
+
+        if burning_jealousy_burn {
+            let burn = HitEffect { status: Some(Status::Burn), ..Default::default() };
+            for (bs, _) in branches.iter_mut() {
+                apply_effect_to_target(bs, attacker_slot, target_slot, &burn, side_condition_target);
+            }
         }
     }
 
@@ -5159,7 +5670,7 @@ pub fn clear_pokemon_on_faint(mon: &mut PokemonState) {
 pub fn is_immune_to_powder(state: &BattleState, mon: &PokemonState) -> bool {
     pokemon_has_type(mon, &PokemonType::Grass)
     || (!abilities_are_suppressed(state) && mon.ability == Ability::Overcoat)
-    || (!items_are_suppressed(state) && matches!(mon.item, Item::SafetyGoggles))
+    || (item_is_active(state, mon) && matches!(mon.item, Item::SafetyGoggles))
 }
 
 /// Check if a redirect target has both Sky Drop and a Follow Me/Rage Powder effect.
