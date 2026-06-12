@@ -783,6 +783,14 @@ fn possible_damage_outcomes_for_move(
     simulator_helpers::decrement_move_statuses(&mut attacker);
     write_back_volatiles(&mut next_state, action.user_slot, attacker.volatiles.clone());
 
+    // Using any non-stalling move ends a consecutive-protect streak (the stalling handler below
+    // manages the counter on its own success/fail branches).
+    if !move_data.stalling_move {
+        if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.stall_counter = 0;
+        }
+    }
+
     // Check Flinch
     if attacker.volatiles.iter().any(|v| matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Flinch, _))) {
         // Find and remove charging and semi-invulnerable volatiles
@@ -790,9 +798,11 @@ fn possible_damage_outcomes_for_move(
             attacker.volatiles.remove(pos);
             write_back_volatiles(&mut next_state, action.user_slot, attacker.volatiles.clone());
         }
-        // A move prevented by flinching counts as failed (Stomping Tantrum / Micle Berry).
+        // A move prevented by flinching counts as failed (Stomping Tantrum / Micle Berry), and a
+        // flinched stalling move couldn't execute, so its protect streak resets too.
         if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
             mon.last_move_failed = true;
+            mon.stall_counter = 0;
         }
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
@@ -1086,6 +1096,55 @@ fn possible_damage_outcomes_for_move(
 
     if move_name == PokemonMove::SteelRoller && simulator_helpers::current_terrain(&next_state).is_none() {
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+    }
+
+    // Stalling protect-family moves (Protect/Detect/Endure/King's Shield/Spiky Shield/Baneful
+    // Bunker). The shared "stall" counter makes consecutive uses succeed with probability
+    // 1/3^streak; the roll happens here. These moves are +4 priority, so they resolve before the
+    // attacks they block — once the volatile is set, blocking is deterministic for the turn.
+    // Resolving here (before target/effect processing) avoids double-adding the volatile via the
+    // generic self_secondary path.
+    if move_data.stalling_move {
+        if let Some(vol) = simulator_helpers::protect_volatile_for_move(&move_name) {
+            let counter = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| m.stall_counter)
+                .unwrap_or(0);
+            let p_success = 1.0 / 3f64.powi(counter as i32);
+
+            let mut result: Vec<(MatchState, f64)> = Vec::new();
+
+            // Success: set the protect volatile and grow the streak.
+            let mut succ = next_state.clone();
+            decrement_move_pp(&mut succ, action.user_slot, &action.move_name);
+            if let Some(mon) = mon_at_slot_mut(&mut succ, action.user_slot) {
+                mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(vol.clone(), 1));
+                mon.stall_counter = mon.stall_counter.saturating_add(1);
+                mon.last_move_failed = false;
+            }
+            result.push((MatchState::BattleState(succ), p_success));
+
+            // Failure (only possible once the streak has decayed): the move does nothing and the
+            // streak resets.
+            if p_success < 1.0 {
+                let mut fail = next_state.clone();
+                decrement_move_pp(&mut fail, action.user_slot, &action.move_name);
+                if let Some(mon) = mon_at_slot_mut(&mut fail, action.user_slot) {
+                    mon.stall_counter = 0;
+                    mon.last_move_failed = true;
+                }
+                result.push((MatchState::BattleState(fail), 1.0 - p_success));
+            }
+
+            // Fold in the confusion self-hit branches, mirroring Attract/Disable.
+            if let Some(c) = &confusion_self_hit_outcomes {
+                let mut folded: Vec<(MatchState, f64)> =
+                    c.iter().map(|(s, p)| (s.clone(), p * 0.5)).collect();
+                folded.extend(result.into_iter().map(|(s, p)| (s, p * 0.5)));
+                return simulator_helpers::coalesce_branches(folded);
+            }
+            return simulator_helpers::coalesce_branches(result);
+        }
+        // Out-of-scope stalling move (e.g. Max Guard) — fall through to generic handling.
     }
 
     // Resolve target list based on move's targeting type
@@ -1426,6 +1485,27 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Telepathy
         {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
+        // Protect-family blocking: self-protect volatiles (Protect/Detect/King's Shield/Spiky
+        // Shield/Baneful Bunker) and the Quick Guard / Wide Guard side conditions. The stall-success
+        // roll already happened when the protection was raised (those moves are +4/+3 priority), so
+        // blocking here is deterministic.
+        let is_spread = simulator_helpers::move_is_spread_target(&move_data.target);
+        if let Some(kind) = simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, *target_slot, &target, move_data, is_spread,
+        ) {
+            // Punish a blocked CONTACT move (Spiky Shield chip / Baneful Bunker poison / King's
+            // Shield −1 Atk). Deterministic, so applied once to the shared next_state per blocked
+            // target. TODO: Long Reach / Protective Pads should make these moves non-contact.
+            if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Contact) {
+                simulator_helpers::apply_protect_contact_punishment(
+                    &mut next_state, action.user_slot, *target_slot, kind,
+                );
+            }
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -2572,6 +2652,8 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     mon.stats_raised_this_turn = false;
     mon.stats_lowered_this_turn = false;
     mon.switched_in_this_turn = false;
+    // The consecutive-protect streak ends when the Pokémon leaves the field.
+    mon.stall_counter = 0;
 }
 
 fn perform_switch_out_in(

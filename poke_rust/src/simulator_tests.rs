@@ -18726,4 +18726,716 @@ mod priority_abilities {
 
     }
 
+    mod entry_hazards {
+        use crate::battle::{
+            BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand,
+        };
+        use crate::data::ability::Ability;
+        use crate::data::item::Item;
+        use crate::data::pokemon_move::PokemonMove;
+        use crate::data::species::Species;
+        use crate::dex_data::{SideCondition, Status};
+        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::simulator_helpers;
+        use crate::simuilator_test_helpers::{
+            battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+            simple_attack,
+        };
+
+        fn build(species: Species, ability: Ability, item: Option<Item>) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            build_pokemon_state(
+                species, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(ability), None, item, None, None, None, false,
+            )
+        }
+
+        fn build_move(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            build_pokemon_state(
+                species, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(mv), Some(PokemonMove::Splash), None, None]),
+                None, Some(ability), None, None, None, None, None, false,
+            )
+        }
+
+        /// Build a battle whose P1 back mon `incoming` switches into `p1_hazards` (set on P1's
+        /// side), with `p2_active` standing across using Splash. Returns the resolved state.
+        fn switch_into(
+            incoming: PokemonState,
+            p1_hazards: Vec<SideCondition>,
+            p2_active: PokemonState,
+        ) -> BattleState {
+            let lead = build(Species::Clefable, Ability::Pressure, None);
+            let mut state = battle_state_from_lists(vec![lead], vec![incoming], vec![p2_active], vec![]);
+            for c in p1_hazards {
+                state.p1_side_conditions.push(c);
+                state.p1_side_condition_turns.push(0);
+            }
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+            extract_battle_state(outcomes).0
+        }
+
+        // ── Spikes ──────────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn spikes_one_layer_damages_grounded() {
+            let after = switch_into(
+                build(Species::Snorlax, Ability::Pressure, None),
+                vec![SideCondition::Spikes(1)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0] - m.stats[0] / 8);
+        }
+
+        #[test]
+        fn spikes_three_layers_quarter() {
+            let after = switch_into(
+                build(Species::Snorlax, Ability::Pressure, None),
+                vec![SideCondition::Spikes(3)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0] - m.stats[0] / 4);
+        }
+
+        #[test]
+        fn spikes_do_not_affect_flying() {
+            let after = switch_into(
+                build(Species::Talonflame, Ability::Pressure, None),
+                vec![SideCondition::Spikes(3)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0], "airborne mon should take no Spikes damage");
+        }
+
+        // ── Stealth Rock ────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn stealth_rock_neutral_eighth() {
+            let after = switch_into(
+                build(Species::Snorlax, Ability::Pressure, None),
+                vec![SideCondition::StealthRock],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0] - m.stats[0] / 8);
+        }
+
+        #[test]
+        fn stealth_rock_quad_hits_airborne() {
+            // Charizard (Fire/Flying) is airborne but Stealth Rock ignores grounding, and Rock is
+            // 4× effective → half max HP.
+            let after = switch_into(
+                build(Species::Charizard, Ability::Pressure, None),
+                vec![SideCondition::StealthRock],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            let m = &after.p1_active_mons[0];
+            let expected = ((m.stats[0] as f64) * 4.0 / 8.0).floor() as u16;
+            assert_eq!(m.hp, m.stats[0] - expected);
+        }
+
+        // ── Toxic Spikes ────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn toxic_spikes_one_layer_poisons() {
+            let after = switch_into(
+                build(Species::Snorlax, Ability::Pressure, None),
+                vec![SideCondition::ToxicSpikes(1)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            assert_eq!(after.p1_active_mons[0].status, Some(Status::Poison));
+        }
+
+        #[test]
+        fn toxic_spikes_two_layers_badly_poison() {
+            let after = switch_into(
+                build(Species::Snorlax, Ability::Pressure, None),
+                vec![SideCondition::ToxicSpikes(2)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            assert!(matches!(after.p1_active_mons[0].status, Some(Status::ToxicPoison(_))));
+        }
+
+        #[test]
+        fn toxic_spikes_absorbed_by_grounded_poison_type() {
+            let after = switch_into(
+                build(Species::Muk, Ability::Pressure, None),
+                vec![SideCondition::ToxicSpikes(2)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            assert_eq!(after.p1_active_mons[0].status, None, "Poison-type is not poisoned");
+            assert!(
+                !after.p1_side_conditions.iter().any(|c| matches!(c, SideCondition::ToxicSpikes(_))),
+                "grounded Poison-type absorbs Toxic Spikes"
+            );
+        }
+
+        #[test]
+        fn toxic_spikes_steel_immune_but_keeps_layers() {
+            // Excadrill (Ground/Steel) is grounded and immune to poison, but does not absorb.
+            let after = switch_into(
+                build(Species::Excadrill, Ability::Pressure, None),
+                vec![SideCondition::ToxicSpikes(2)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            assert_eq!(after.p1_active_mons[0].status, None);
+            assert!(
+                after.p1_side_conditions.iter().any(|c| matches!(c, SideCondition::ToxicSpikes(_))),
+                "Steel-type does not absorb Toxic Spikes"
+            );
+        }
+
+        // ── Sticky Web ──────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn sticky_web_lowers_speed_of_grounded() {
+            let after = switch_into(
+                build(Species::Snorlax, Ability::Pressure, None),
+                vec![SideCondition::StickyWeb(None)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            assert_eq!(after.p1_active_mons[0].boosts[4], -1);
+        }
+
+        #[test]
+        fn sticky_web_does_not_affect_flying() {
+            let after = switch_into(
+                build(Species::Talonflame, Ability::Pressure, None),
+                vec![SideCondition::StickyWeb(None)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            assert_eq!(after.p1_active_mons[0].boosts[4], 0);
+        }
+
+        #[test]
+        fn sticky_web_triggers_defiant() {
+            let after = switch_into(
+                build(Species::Bisharp, Ability::Defiant, None),
+                vec![SideCondition::StickyWeb(None)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.boosts[4], -1, "Speed still drops");
+            assert_eq!(m.boosts[0], 2, "Defiant grants +2 Attack");
+        }
+
+        #[test]
+        fn sticky_web_blocked_by_clear_body() {
+            let after = switch_into(
+                build(Species::Metagross, Ability::ClearBody, None),
+                vec![SideCondition::StickyWeb(None)],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            assert_eq!(after.p1_active_mons[0].boosts[4], 0);
+        }
+
+        // ── Immunity item / ability ─────────────────────────────────────────────────────────
+
+        #[test]
+        fn heavy_duty_boots_ignores_every_hazard() {
+            let after = switch_into(
+                build(Species::Snorlax, Ability::Pressure, Some(Item::HeavyDutyBoots)),
+                vec![
+                    SideCondition::StealthRock,
+                    SideCondition::Spikes(3),
+                    SideCondition::StickyWeb(None),
+                    SideCondition::ToxicSpikes(2),
+                ],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0], "no hazard damage");
+            assert_eq!(m.status, None, "no Toxic Spikes poison");
+            assert_eq!(m.boosts[4], 0, "no Sticky Web speed drop");
+        }
+
+        #[test]
+        fn magic_guard_blocks_damage_but_not_web_or_poison() {
+            let after = switch_into(
+                build(Species::Clefable, Ability::MagicGuard, None),
+                vec![
+                    SideCondition::StealthRock,
+                    SideCondition::Spikes(3),
+                    SideCondition::StickyWeb(None),
+                    SideCondition::ToxicSpikes(1),
+                ],
+                build(Species::Snorlax, Ability::Pressure, None),
+            );
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0], "Magic Guard blocks Stealth Rock + Spikes damage");
+            assert_eq!(m.boosts[4], -1, "Sticky Web still lowers Speed");
+            assert_eq!(m.status, Some(Status::Poison), "Toxic Spikes still poisons");
+        }
+
+        // ── Sticky Web + Mirror Armor reflection ────────────────────────────────────────────
+
+        #[test]
+        fn mirror_armor_reflects_sticky_web_to_setter() {
+            let incoming = build(Species::Metagross, Ability::MirrorArmor, None);
+            let setter = build(Species::Snorlax, Ability::Pressure, None);
+            let lead = build(Species::Clefable, Ability::Pressure, None);
+            let mut state = battle_state_from_lists(vec![lead], vec![incoming], vec![setter], vec![]);
+            // Web on P1's side, set by the P2 active mon (matched later by its mon_id).
+            let setter_id = state.p2_active_mons[0].mon_id;
+            state.p1_side_conditions.push(SideCondition::StickyWeb(Some(setter_id)));
+            state.p1_side_condition_turns.push(0);
+
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            )).0;
+
+            assert_eq!(after.p1_active_mons[0].boosts[4], 0, "Mirror Armor holder is not lowered");
+            assert_eq!(after.p2_active_mons[0].boosts[4], -1, "drop is reflected to the setter");
+        }
+
+        #[test]
+        fn mirror_armor_sticky_web_no_drop_when_setter_absent() {
+            let incoming = build(Species::Metagross, Ability::MirrorArmor, None);
+            let foe = build(Species::Snorlax, Ability::Pressure, None);
+            let lead = build(Species::Clefable, Ability::Pressure, None);
+            let mut state = battle_state_from_lists(vec![lead], vec![incoming], vec![foe], vec![]);
+            // Web records a setter id that is not present among P2's actives.
+            state.p1_side_conditions.push(SideCondition::StickyWeb(Some(200)));
+            state.p1_side_condition_turns.push(0);
+
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            )).0;
+
+            assert_eq!(after.p1_active_mons[0].boosts[4], 0, "Mirror Armor holder unaffected");
+            assert_eq!(after.p2_active_mons[0].boosts[4], 0, "absent setter means nobody is lowered");
+        }
+
+        // ── Setter moves ────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn spikes_move_sets_a_layer_on_foe_side() {
+            let attacker = build_move(Species::Snorlax, Ability::Pressure, PokemonMove::Spikes);
+            let target = build(Species::Snorlax, Ability::Pressure, None);
+            let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            )).0;
+            assert!(after.p2_side_conditions.iter().any(|c| matches!(c, SideCondition::Spikes(1))));
+        }
+
+        /// Probability mass across outcomes where P2's side carries a hazard matching `pred`.
+        fn prob_foe_hazard(outcomes: &[(MatchState, f64)], pred: impl Fn(&SideCondition) -> bool) -> f64 {
+            outcomes.iter().map(|(s, p)| match s {
+                MatchState::BattleState(bs) if bs.p2_side_conditions.iter().any(&pred) => *p,
+                _ => 0.0,
+            }).sum()
+        }
+
+        #[test]
+        fn ceaseless_edge_sets_spikes_on_hit() {
+            let attacker = build_move(Species::Snorlax, Ability::Pressure, PokemonMove::CeaselessEdge);
+            let target = build(Species::Snorlax, Ability::Pressure, None);
+            let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+            // 90% accuracy → Spikes set in the hit branch only.
+            let p = prob_foe_hazard(&outcomes, |c| matches!(c, SideCondition::Spikes(_)));
+            assert!((p - 0.9).abs() < 0.02, "expected ~0.9 Spikes probability, got {p}");
+        }
+
+        #[test]
+        fn stone_axe_sets_stealth_rock_on_hit() {
+            let attacker = build_move(Species::Snorlax, Ability::Pressure, PokemonMove::StoneAxe);
+            let target = build(Species::Snorlax, Ability::Pressure, None);
+            let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+            let p = prob_foe_hazard(&outcomes, |c| matches!(c, SideCondition::StealthRock));
+            assert!((p - 0.9).abs() < 0.02, "expected ~0.9 Stealth Rock probability, got {p}");
+        }
+
+        // ── Removal moves ───────────────────────────────────────────────────────────────────
+
+        fn run_user_move(state: BattleState, mv_slot: usize) -> BattleState {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![mv_slot])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            )).0
+        }
+
+        fn has_any_hazard(conds: &[SideCondition]) -> bool {
+            conds.iter().any(|c| matches!(c,
+                SideCondition::Spikes(_) | SideCondition::StealthRock
+                | SideCondition::StickyWeb(_) | SideCondition::ToxicSpikes(_)))
+        }
+
+        #[test]
+        fn rapid_spin_clears_user_side_and_boosts_speed() {
+            let user = build_move(Species::Snorlax, Ability::Pressure, PokemonMove::RapidSpin);
+            let foe = build(Species::Snorlax, Ability::Pressure, None);
+            let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            state.p1_side_conditions.push(SideCondition::Spikes(2));
+            state.p1_side_condition_turns.push(0);
+            state.p1_side_conditions.push(SideCondition::StealthRock);
+            state.p1_side_condition_turns.push(0);
+
+            let after = run_user_move(state, 0);
+            assert!(!has_any_hazard(&after.p1_side_conditions), "user side hazards cleared");
+            assert_eq!(after.p1_active_mons[0].boosts[4], 1, "Rapid Spin raises Speed");
+        }
+
+        #[test]
+        fn defog_clears_hazards_on_both_sides() {
+            let user = build_move(Species::Snorlax, Ability::Pressure, PokemonMove::Defog);
+            let foe = build(Species::Snorlax, Ability::Pressure, None);
+            let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            for side in [Player::P1, Player::P2] {
+                let (conds, turns) = match side {
+                    Player::P1 => (&mut state.p1_side_conditions, &mut state.p1_side_condition_turns),
+                    Player::P2 => (&mut state.p2_side_conditions, &mut state.p2_side_condition_turns),
+                };
+                conds.push(SideCondition::Spikes(1));
+                turns.push(0);
+                conds.push(SideCondition::StealthRock);
+                turns.push(0);
+            }
+            let after = run_user_move(state, 0);
+            assert!(!has_any_hazard(&after.p1_side_conditions), "user side cleared");
+            assert!(!has_any_hazard(&after.p2_side_conditions), "foe side cleared");
+            assert_eq!(after.p2_active_mons[0].boosts[6], -1, "Defog lowers target evasion");
+        }
+
+        #[test]
+        fn tidy_up_clears_hazards_on_both_sides() {
+            let user = build_move(Species::Snorlax, Ability::Pressure, PokemonMove::TidyUp);
+            let foe = build(Species::Snorlax, Ability::Pressure, None);
+            let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            state.p1_side_conditions.push(SideCondition::StickyWeb(None));
+            state.p1_side_condition_turns.push(0);
+            state.p2_side_conditions.push(SideCondition::ToxicSpikes(2));
+            state.p2_side_condition_turns.push(0);
+            let after = run_user_move(state, 0);
+            assert!(!has_any_hazard(&after.p1_side_conditions));
+            assert!(!has_any_hazard(&after.p2_side_conditions));
+            assert_eq!(after.p1_active_mons[0].boosts[4], 1, "Tidy Up raises Speed");
+            assert_eq!(after.p1_active_mons[0].boosts[0], 1, "Tidy Up raises Attack");
+        }
+
+        // ── Layering caps (unit) ────────────────────────────────────────────────────────────
+
+        #[test]
+        fn add_side_condition_caps_spikes_at_three() {
+            let mut state = battle_state_from_lists(
+                vec![build(Species::Snorlax, Ability::Pressure, None)], vec![],
+                vec![build(Species::Snorlax, Ability::Pressure, None)], vec![],
+            );
+            for _ in 0..5 {
+                simulator_helpers::add_side_condition(&mut state, Player::P1, SideCondition::Spikes(1), 0);
+            }
+            let layers = state.p1_side_conditions.iter().find_map(|c| match c {
+                SideCondition::Spikes(n) => Some(*n), _ => None,
+            });
+            assert_eq!(layers, Some(3));
+        }
+
+        #[test]
+        fn add_side_condition_caps_toxic_spikes_at_two() {
+            let mut state = battle_state_from_lists(
+                vec![build(Species::Snorlax, Ability::Pressure, None)], vec![],
+                vec![build(Species::Snorlax, Ability::Pressure, None)], vec![],
+            );
+            for _ in 0..4 {
+                simulator_helpers::add_side_condition(&mut state, Player::P1, SideCondition::ToxicSpikes(1), 0);
+            }
+            let layers = state.p1_side_conditions.iter().find_map(|c| match c {
+                SideCondition::ToxicSpikes(n) => Some(*n), _ => None,
+            });
+            assert_eq!(layers, Some(2));
+        }
+
+        // ── Ordering: faint to hazards skips the entry ability ──────────────────────────────
+
+        #[test]
+        fn faint_to_stealth_rock_skips_entry_ability() {
+            let lead = build(Species::Clefable, Ability::Pressure, None);
+            let foe = build(Species::Snorlax, Ability::Pressure, None);
+            let mut state = battle_state_from_lists(vec![lead], vec![], vec![foe], vec![]);
+            state.p1_side_conditions.push(SideCondition::StealthRock);
+            state.p1_side_condition_turns.push(0);
+
+            // Drop a 1-HP Intimidate Gyarados directly into P1's active slot, then run its send-out.
+            let mut gyara = build(Species::Gyarados, Ability::Intimidate, None);
+            gyara.hp = 1;
+            gyara.mon_id = 9;
+            state.p1_active_mons[0] = gyara;
+            let foe_atk_before = state.p2_active_mons[0].boosts[0];
+
+            simulator_helpers::process_pokemon_send_out(
+                &mut state, FieldSlot { player: Player::P1, slot_index: 0 },
+            );
+
+            assert!(state.p1_active_mons[0].fainted, "Gyarados faints to Stealth Rock");
+            assert_eq!(
+                state.p2_active_mons[0].boosts[0], foe_atk_before,
+                "Intimidate must not fire when the entrant fainted to hazards"
+            );
+        }
+    }
+
+    mod protect_moves {
+        use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+        use crate::data::ability::Ability;
+        use crate::data::pokemon_move::PokemonMove;
+        use crate::data::species::Species;
+        use crate::dex_data::Status;
+        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::simuilator_test_helpers::{
+            battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+            simple_attack,
+        };
+
+        fn mon(species: Species, ability: Ability, m0: PokemonMove, m1: PokemonMove) -> PokemonState {
+            let pd = pokemon_dex();
+            let md = move_dex();
+            build_pokemon_state(
+                species, &pd, &md, Some(50),
+                Some([Some(m0), Some(m1), None, None]),
+                None, Some(ability), None, None, None, None, None, false,
+            )
+        }
+
+        /// Run one turn where P1's active uses move slot `s1` and P2's uses slot `s2`.
+        fn run_on(state: BattleState, s1: usize, s2: usize) -> Vec<(MatchState, f64)> {
+            run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![s1])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![s2])),
+                &move_dex(),
+                &pokemon_dex(),
+            )
+        }
+
+        fn run(p1: PokemonState, p2: PokemonState, s1: usize, s2: usize) -> Vec<(MatchState, f64)> {
+            run_on(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]), s1, s2)
+        }
+
+        // ── Basic blocking ──────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn protect_blocks_damaging_move() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            let m = &after.p1_active_mons[0];
+            assert_eq!(m.hp, m.stats[0], "Protect blocks the attack");
+            assert_eq!(m.stall_counter, 1, "successful Protect grows the streak");
+        }
+
+        #[test]
+        fn feint_bypasses_protect() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Feint, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            let m = &after.p1_active_mons[0];
+            assert!(m.hp < m.stats[0], "Feint (breaksProtect) bypasses Protect");
+        }
+
+        #[test]
+        fn protect_blocks_status_move() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Leer, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(after.p1_active_mons[0].boosts[1], 0, "Protect blocks the status move Leer");
+        }
+
+        // ── Contact punishments ─────────────────────────────────────────────────────────────
+
+        #[test]
+        fn spiky_shield_chips_contact_attacker() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::SpikyShield, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            let a = &after.p2_active_mons[0];
+            assert_eq!(a.hp, a.stats[0] - a.stats[0] / 8, "contact attacker loses 1/8 max HP");
+            assert_eq!(after.p1_active_mons[0].hp, after.p1_active_mons[0].stats[0], "still blocked");
+        }
+
+        #[test]
+        fn spiky_shield_no_chip_on_non_contact() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::SpikyShield, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::WaterGun, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].hp, after.p2_active_mons[0].stats[0], "no chip on a non-contact move");
+        }
+
+        #[test]
+        fn baneful_bunker_poisons_contact_attacker() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::BanefulBunker, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].status, Some(Status::Poison));
+        }
+
+        #[test]
+        fn baneful_bunker_does_not_poison_steel() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::BanefulBunker, PokemonMove::Splash);
+            let p2 = mon(Species::Metagross, Ability::Pressure, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].status, None, "Steel-type is immune to the poison");
+        }
+
+        #[test]
+        fn kings_shield_lowers_contact_attacker_attack() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::KingsShield, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].boosts[0], -1, "contact attacker loses 1 Attack stage");
+            assert_eq!(after.p1_active_mons[0].hp, after.p1_active_mons[0].stats[0], "damage blocked");
+        }
+
+        #[test]
+        fn kings_shield_does_not_block_status_move() {
+            // King's Shield blocks damaging moves only — Leer (status) lands through it.
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::KingsShield, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Leer, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(after.p1_active_mons[0].boosts[1], -1, "status move passes through King's Shield");
+        }
+
+        // ── Endure ──────────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn endure_survives_a_lethal_hit_at_one_hp() {
+            let mut p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Endure, PokemonMove::Splash);
+            p1.hp = 5; // a Tackle would otherwise KO
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(after.p1_active_mons[0].hp, 1, "Endure leaves the user at 1 HP");
+            assert!(!after.p1_active_mons[0].fainted);
+        }
+
+        // ── Quick Guard ─────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn quick_guard_blocks_priority_move() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::QuickGuard, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::QuickAttack, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(after.p1_active_mons[0].hp, after.p1_active_mons[0].stats[0], "Quick Guard blocks +priority");
+        }
+
+        #[test]
+        fn quick_guard_does_not_block_priority_zero() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::QuickGuard, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            let m = &after.p1_active_mons[0];
+            assert!(m.hp < m.stats[0], "Quick Guard does not block priority-0 moves");
+        }
+
+        // ── Wide Guard (doubles) ────────────────────────────────────────────────────────────
+
+        #[test]
+        fn wide_guard_blocks_spread_move_in_doubles() {
+            let p1a = mon(Species::Clefable, Ability::Pressure, PokemonMove::WideGuard, PokemonMove::Splash);
+            let p1b = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash, PokemonMove::Splash);
+            let p2a = mon(Species::Snorlax, Ability::Pressure, PokemonMove::RockSlide, PokemonMove::Splash);
+            let p2b = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1a, p1b], vec![], vec![p2a, p2b], vec![]);
+            // P1 slot0 = Wide Guard (move 0), slot1 = Splash (move 1); P2 slot0 = Rock Slide (move 0).
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 1])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+                &move_dex(),
+                &pokemon_dex(),
+            );
+            let after = extract_battle_state(outcomes).0;
+            assert_eq!(after.p1_active_mons[0].hp, after.p1_active_mons[0].stats[0]);
+            assert_eq!(after.p1_active_mons[1].hp, after.p1_active_mons[1].stats[0]);
+        }
+
+        // ── Stall counter lifecycle ─────────────────────────────────────────────────────────
+
+        #[test]
+        fn protect_decays_on_consecutive_use() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Tackle, PokemonMove::Splash);
+            // Turn 1: Protect succeeds at 100% (P2 idles), streak → 1.
+            let s1 = extract_battle_state(run(p1, p2, 0, 1)).0;
+            assert_eq!(s1.p1_active_mons[0].stall_counter, 1);
+            // Turn 2: Protect again vs Tackle. 1/3 succeeds (streak 2, no damage) / 2/3 fails (streak 0).
+            let outcomes = run_on(s1, 0, 0);
+            let p_success: f64 = outcomes.iter().filter_map(|(s, p)| match s {
+                MatchState::BattleState(bs) if bs.p1_active_mons[0].stall_counter == 2 => Some(*p),
+                _ => None,
+            }).sum();
+            assert!((p_success - 1.0 / 3.0).abs() < 0.02, "second Protect succeeds ~1/3 of the time, got {p_success}");
+        }
+
+        #[test]
+        fn streak_resets_after_a_non_protect_move() {
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect, PokemonMove::Tackle);
+            let p2 = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash, PokemonMove::Splash);
+            // Turn 1: Protect → streak 1.
+            let s1 = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(s1.p1_active_mons[0].stall_counter, 1);
+            // Turn 2: Tackle (non-stalling) → streak resets to 0.
+            let s2 = extract_battle_state(run_on(s1, 1, 0)).0;
+            assert_eq!(s2.p1_active_mons[0].stall_counter, 0);
+            // Turn 3: Protect succeeds again at 100% (single outcome).
+            let outcomes = run_on(s2, 0, 0);
+            assert_eq!(outcomes.len(), 1, "Protect at a reset streak cannot fail");
+            assert_eq!(extract_battle_state(outcomes).0.p1_active_mons[0].stall_counter, 1);
+        }
+    }
+
 }

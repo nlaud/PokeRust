@@ -71,6 +71,118 @@ pub fn move_has_flag(move_data: &MoveData, flag: &MoveFlag) -> bool {
     move_data.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(flag))
 }
 
+/// Which protection is blocking an incoming move. Carries the *kind* so callers can apply both
+/// the right coverage (King's Shield = damaging-only) and the right contact punishment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectKind {
+    Protect,
+    KingsShield,
+    SpikyShield,
+    BanefulBunker,
+    QuickGuard,
+    WideGuard,
+}
+
+/// Map a stalling protect-family move to the volatile it sets, or `None` if it isn't one.
+pub(crate) fn protect_volatile_for_move(m: &PokemonMove) -> Option<VolatileStatus> {
+    match m {
+        PokemonMove::Protect | PokemonMove::Detect => Some(VolatileStatus::Protect),
+        PokemonMove::KingsShield => Some(VolatileStatus::KingsShield),
+        PokemonMove::SpikyShield => Some(VolatileStatus::SpikyShield),
+        PokemonMove::BanefulBunker => Some(VolatileStatus::BanefulBunker),
+        PokemonMove::Endure => Some(VolatileStatus::Endure),
+        _ => None,
+    }
+}
+
+/// True for spread moves (gates Wide Guard) — matches Showdown's `allAdjacent`/`allAdjacentFoes`.
+pub(crate) fn move_is_spread_target(target: &MoveTarget) -> bool {
+    matches!(target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes)
+}
+
+/// Decide whether an incoming `move_data` from `attacker_slot` targeting `target` is blocked by an
+/// active protection on the target's side. Returns the blocking `ProtectKind` (so the caller can
+/// apply the correct contact punishment) or `None`. The stall-success roll already happened when the
+/// protection was set, so this check is deterministic.
+pub(crate) fn protect_blocks_move(
+    state: &BattleState,
+    attacker_slot: FieldSlot,
+    target_slot: FieldSlot,
+    target: &PokemonState,
+    move_data: &MoveData,
+    is_spread: bool,
+) -> Option<ProtectKind> {
+    // Never block the user's own move or an ally's move.
+    if attacker_slot.player == target_slot.player {
+        return None;
+    }
+    // Feint and similar moves ignore all protection.
+    if move_data.breaks_protect {
+        return None;
+    }
+
+    // Side-wide guards: independent of the protect flag and of the stall counter.
+    let side_conditions = match target_slot.player {
+        Player::P1 => &state.p1_side_conditions,
+        Player::P2 => &state.p2_side_conditions,
+    };
+    if side_conditions.iter().any(|c| matches!(c, SideCondition::QuickGuard)) {
+        if let Some(attacker) = get_pokemon_at_slot(state, attacker_slot) {
+            if effective_move_priority(state, attacker, move_data) > 0 {
+                return Some(ProtectKind::QuickGuard);
+            }
+        }
+    }
+    if is_spread && side_conditions.iter().any(|c| matches!(c, SideCondition::WideGuard)) {
+        return Some(ProtectKind::WideGuard);
+    }
+
+    // Single-target self-protects only block moves carrying the protect flag.
+    if !move_has_flag(move_data, &MoveFlag::Protect) {
+        return None;
+    }
+    let kind = target.volatiles.iter().find_map(|v| match v {
+        VolatileStatusState::TurnStatus(VolatileStatus::Protect, _) => Some(ProtectKind::Protect),
+        VolatileStatusState::TurnStatus(VolatileStatus::KingsShield, _) => Some(ProtectKind::KingsShield),
+        VolatileStatusState::TurnStatus(VolatileStatus::SpikyShield, _) => Some(ProtectKind::SpikyShield),
+        VolatileStatusState::TurnStatus(VolatileStatus::BanefulBunker, _) => Some(ProtectKind::BanefulBunker),
+        _ => None,
+    })?;
+    // King's Shield blocks damaging moves only — status moves land through it.
+    if kind == ProtectKind::KingsShield && matches!(move_data.category, MoveCategory::Status) {
+        return None;
+    }
+    Some(kind)
+}
+
+/// Apply the on-contact punishment a self-protect inflicts when it blocks a CONTACT move:
+/// Spiky Shield → 1/8 of the attacker's max HP, Baneful Bunker → poison, King's Shield → −1 Atk.
+/// No-op for Protect/Detect and the side guards. The caller has already confirmed the move makes
+/// contact. Deterministic (the protect roll happened when the shield was raised). The status / stat
+/// drop route through the normal helpers, so immunities (Steel/Poison, Clear Body) and reactions
+/// (Defiant) are respected.
+pub(crate) fn apply_protect_contact_punishment(
+    state: &mut BattleState,
+    attacker_slot: FieldSlot,
+    blocker_slot: FieldSlot,
+    kind: ProtectKind,
+) {
+    match kind {
+        ProtectKind::SpikyShield => {
+            apply_hp_damage_to_attacker(state, attacker_slot, 1, 8);
+        }
+        ProtectKind::BanefulBunker => {
+            let eff = HitEffect { status: Some(Status::Poison), ..Default::default() };
+            apply_effect_to_target(state, blocker_slot, attacker_slot, &eff, attacker_slot.player);
+        }
+        ProtectKind::KingsShield => {
+            let eff = HitEffect { boosts: [-1, 0, 0, 0, 0, 0, 0], ..Default::default() };
+            apply_effect_to_target(state, blocker_slot, attacker_slot, &eff, attacker_slot.player);
+        }
+        ProtectKind::Protect | ProtectKind::QuickGuard | ProtectKind::WideGuard => {}
+    }
+}
+
 // --- Damage Calculation Helpers ---
 
 pub fn stage_multiplier(stage: i8) -> f64 {
@@ -443,8 +555,14 @@ pub fn resolve_move_targets(
         MoveTarget::AllAdjacentFoes | MoveTarget::FoeSide => {
             collect_active_slots(state, foe, None)
         }
-        // All allies, excluding self
-        MoveTarget::Allies | MoveTarget::AllySide | MoveTarget::AllyTeam | MoveTarget::AdjacentAlly => {
+        // Whole-side effects (side conditions like Reflect / Tailwind / Quick Guard / Wide Guard):
+        // the user is on the protected side, so include self. Without this, these moves resolve to
+        // an empty target list in singles and silently do nothing.
+        MoveTarget::AllySide | MoveTarget::AllyTeam => {
+            collect_active_slots(state, user_slot.player, None)
+        }
+        // Partner-targeting moves: exclude the user itself.
+        MoveTarget::Allies | MoveTarget::AdjacentAlly => {
             collect_active_slots(state, user_slot.player, Some(user_slot.slot_index))
         }
         // All adjacent (exclude self) or all (include self)
@@ -1817,6 +1935,13 @@ pub(crate) fn compute_endure_outcomes(
     damage: u16,
     items_suppressed: bool,
 ) -> Vec<(u16, bool, f64)> {
+    // Endure (volatile): survive any lethal *move* damage at 1 HP, deterministically. It is not an
+    // item, so it ignores items_suppressed / Klutz and takes precedence over Focus Sash / Band.
+    let has_endure = target.volatiles.iter().any(|v|
+        matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Endure, _)));
+    if has_endure && damage > 0 && !target.fainted && damage >= target.hp {
+        return vec![(target.hp.saturating_sub(1), false, 1.0)];
+    }
     if items_suppressed || klutz_disables_item(target) || damage == 0 || target.fainted || damage < target.hp {
         return vec![(damage, false, 1.0)];
     }
@@ -2838,6 +2963,115 @@ pub fn set_weather(state: &mut BattleState, weather: Weather, duration: u8) {
     state.weather_turns = Some(duration);
 }
 
+/// Apply entry-hazard effects to the Pokémon that just entered `slot`.
+///
+/// Deterministic — entry hazards never branch the outcome tree. Effects resolve in the fixed
+/// order Sticky Web → Stealth Rock → Spikes → Toxic Spikes, short-circuiting as soon as the
+/// entrant faints (so a mon KO'd by Stealth Rock is not also poisoned by Toxic Spikes; the
+/// "skip the switch-in ability" half of that interaction lives in `process_pokemon_send_out`).
+fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
+    let Some(mon) = get_pokemon_at_slot(state, slot) else { return; };
+    if mon.fainted { return; }
+
+    // Heavy-Duty Boots makes the holder immune to every entry hazard.
+    if item_is_active(state, mon) && mon.item == Item::HeavyDutyBoots {
+        return;
+    }
+
+    // Snapshot entrant properties before taking any mutable borrow of `state`.
+    let grounded = pokemon_is_grounded(state, mon);
+    let ability_suppressed = pokemon_ability_is_suppressed(state, mon);
+    let entrant_ability = mon.ability.clone();
+    // Magic Guard blocks Stealth Rock / Spikes *damage* only (not the Sticky Web Speed drop or
+    // Toxic Spikes poison).
+    let magic_guard = !ability_suppressed && entrant_ability == Ability::MagicGuard;
+    let is_poison_type = pokemon_has_type(mon, &PokemonType::Poison);
+    let max_hp = mon.stats[0].max(1);
+    let rock_eff = move_type_effectiveness(state, &PokemonType::Rock, mon);
+
+    let conditions = match slot.player {
+        Player::P1 => state.p1_side_conditions.clone(),
+        Player::P2 => state.p2_side_conditions.clone(),
+    };
+
+    // ── 1. Sticky Web — −1 Speed, grounded only ─────────────────────────────────────────────
+    if grounded {
+        if let Some(SideCondition::StickyWeb(setter_id)) =
+            conditions.iter().find(|sc| matches!(sc, SideCondition::StickyWeb(_)))
+        {
+            let items_suppressed = items_are_suppressed(state);
+            let speed_drop = [0, 0, 0, 0, -1, 0, 0];
+            if !ability_suppressed && entrant_ability == Ability::MirrorArmor {
+                // Mirror Armor reflects the drop back to the *specific* Pokémon that set the web,
+                // matched by its `mon_id` among the opposing side's current actives. If that setter
+                // is no longer on the field, nobody's Speed is lowered.
+                let opp = match slot.player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+                let opp_actives = match opp {
+                    Player::P1 => &state.p1_active_mons,
+                    Player::P2 => &state.p2_active_mons,
+                };
+                let setter_slot = setter_id.and_then(|id| {
+                    opp_actives
+                        .iter()
+                        .position(|m| !m.fainted && m.mon_id == id)
+                        .map(|i| FieldSlot { player: opp, slot_index: i as u8 })
+                });
+                if let Some(src) = setter_slot {
+                    apply_opponent_stat_drop(state, slot, src, speed_drop, items_suppressed, false);
+                }
+            } else {
+                // No Mirror Armor: lower the entrant's Speed directly. `source_slot` is unused on the
+                // already-reflected path, so the entrant slot is a harmless placeholder.
+                apply_opponent_stat_drop(state, slot, slot, speed_drop, items_suppressed, true);
+            }
+        }
+    }
+    if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) { return; }
+
+    // ── 2. Stealth Rock — Rock-typed damage, affects every entrant (airborne included) ──────
+    if !magic_guard && conditions.iter().any(|sc| matches!(sc, SideCondition::StealthRock)) {
+        let dmg = (((max_hp as f64) * rock_eff / 8.0).floor() as u16).max(1);
+        let env = berry_env(state, slot);
+        if let Some(m) = get_pokemon_at_slot_mut(state, slot) { take_damage(m, dmg, env); }
+    }
+    if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) { return; }
+
+    // ── 3. Spikes — flat fraction by layer count, grounded only ─────────────────────────────
+    if grounded && !magic_guard {
+        if let Some(SideCondition::Spikes(layers)) =
+            conditions.iter().find(|sc| matches!(sc, SideCondition::Spikes(_)))
+        {
+            let denom: u16 = match layers { 1 => 8, 2 => 6, _ => 4 };
+            let dmg = (max_hp / denom).max(1);
+            let env = berry_env(state, slot);
+            if let Some(m) = get_pokemon_at_slot_mut(state, slot) { take_damage(m, dmg, env); }
+        }
+    }
+    if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) { return; }
+
+    // ── 4. Toxic Spikes — poison, or absorbed by a grounded Poison-type ─────────────────────
+    if grounded {
+        if let Some(SideCondition::ToxicSpikes(layers)) =
+            conditions.iter().find(|sc| matches!(sc, SideCondition::ToxicSpikes(_)))
+        {
+            if is_poison_type {
+                // A grounded Poison-type soaks up Toxic Spikes entirely (the layer payload is
+                // ignored by the discriminant-based removal).
+                remove_side_condition(state, slot.player, &SideCondition::ToxicSpikes(0));
+            } else {
+                let status = if *layers >= 2 { Status::ToxicPoison(0) } else { Status::Poison };
+                // `apply_status_to_pokemon` reads weather from an immutable `&BattleState` while we
+                // mutate the entrant, so hand it a snapshot (the established pattern in this module).
+                let snapshot = state.clone();
+                let sun_blocks_freeze = weather_is_sunlight(&snapshot);
+                if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+                    apply_status_to_pokemon(&snapshot, sun_blocks_freeze, m, &status);
+                }
+            }
+        }
+    }
+}
+
 pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     // Borrow scope: extract the info we need before taking a mutable borrow.
     let (is_fainted, is_replacement_turn) = match get_pokemon_at_slot(state, slot) {
@@ -2854,6 +3088,13 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
         if let Some(mon_mut) = get_pokemon_at_slot_mut(state, slot) {
             mon_mut.entered_this_turn = true;
         }
+    }
+
+    // Entry hazards resolve before the switch-in ability. A Pokémon that faints to hazards (e.g.
+    // Stealth Rock) never gets to trigger its entry ability (Intimidate, weather setters, …).
+    apply_entry_hazards(state, slot);
+    if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) {
+        return;
     }
 
     let ability = match get_pokemon_at_slot(state, slot) {
@@ -3440,30 +3681,42 @@ pub fn remove_pseudo_weather(state: &mut BattleState, pseudo_weather: &PseudoWea
 
 /// Add side condition for player, avoiding duplicates.
 pub fn add_side_condition(state: &mut BattleState, player: Player, condition: SideCondition, duration: u8) {
-    match player {
-        Player::P1 => {
-            if state
-                .p1_side_conditions
-                .iter()
-                .any(|sc| std::mem::discriminant(sc) == std::mem::discriminant(&condition))
-            {
-                return;
+    let (conditions, turns) = match player {
+        Player::P1 => (&mut state.p1_side_conditions, &mut state.p1_side_condition_turns),
+        Player::P2 => (&mut state.p2_side_conditions, &mut state.p2_side_condition_turns),
+    };
+
+    // Layered entry hazards (Spikes, Toxic Spikes): a repeat use adds a layer up to the cap
+    // rather than failing as a duplicate.
+    let layer_cap = match condition {
+        SideCondition::Spikes(_) => Some(3u8),
+        SideCondition::ToxicSpikes(_) => Some(2u8),
+        _ => None,
+    };
+    if let Some(cap) = layer_cap {
+        if let Some(existing) = conditions
+            .iter_mut()
+            .find(|sc| std::mem::discriminant(*sc) == std::mem::discriminant(&condition))
+        {
+            if let SideCondition::Spikes(n) | SideCondition::ToxicSpikes(n) = existing {
+                *n = (*n + 1).min(cap);
             }
-            state.p1_side_conditions.push(condition);
-            state.p1_side_condition_turns.push(duration);
+            return;
         }
-        Player::P2 => {
-            if state
-                .p2_side_conditions
-                .iter()
-                .any(|sc| std::mem::discriminant(sc) == std::mem::discriminant(&condition))
-            {
-                return;
-            }
-            state.p2_side_conditions.push(condition);
-            state.p2_side_condition_turns.push(duration);
-        }
+        conditions.push(condition);
+        turns.push(duration);
+        return;
     }
+
+    // Single-layer conditions: reject duplicates by discriminant (existing behaviour).
+    if conditions
+        .iter()
+        .any(|sc| std::mem::discriminant(sc) == std::mem::discriminant(&condition))
+    {
+        return;
+    }
+    conditions.push(condition);
+    turns.push(duration);
 }
 
 /// Remove side condition by discriminant.
@@ -3663,6 +3916,7 @@ fn get_volatile_duration(volatile: &VolatileStatus) -> u8 {
         | VolatileStatus::KingsShield
         | VolatileStatus::SpikyShield
         | VolatileStatus::BanefulBunker
+        | VolatileStatus::Endure
         | VolatileStatus::MaxGuard
         | VolatileStatus::HelpingHand
         | VolatileStatus::FollowMe
@@ -3683,8 +3937,11 @@ fn get_side_condition_duration(condition: &SideCondition) -> u8 {
         | SideCondition::QuickGuard
         | SideCondition::SafeGuard
         | SideCondition::WideGuard => 1,
-        // These last indefinitely
-        SideCondition::Spikes | SideCondition::StealthRock | SideCondition::ToxicSpikes => 0,
+        // Entry hazards last indefinitely (until removed by spin/Defog/Tidy Up/Court Change).
+        SideCondition::Spikes(_)
+        | SideCondition::StealthRock
+        | SideCondition::StickyWeb(_)
+        | SideCondition::ToxicSpikes(_) => 0,
         // Default duration
         _ => 5,
     }
@@ -4815,8 +5072,17 @@ fn apply_effect_to_target(
 
     if let Some(side_condition) = &effect.side_condition {
         if !(matches!(side_condition, SideCondition::AuroraVeil) && !weather_is_snow(state)) {
-            let duration = get_side_condition_duration(side_condition);
-            add_side_condition(state, side_condition_player, side_condition.clone(), duration);
+            // Sticky Web records the `mon_id` of its setter so Mirror Armor can later reflect the
+            // Speed drop back to that specific Pokémon (and to nobody if it has left the field).
+            let to_add = match side_condition {
+                SideCondition::StickyWeb(_) => {
+                    let setter_id = get_pokemon_at_slot(state, attacker_slot).map(|m| m.mon_id);
+                    SideCondition::StickyWeb(setter_id)
+                }
+                other => other.clone(),
+            };
+            let duration = get_side_condition_duration(&to_add);
+            add_side_condition(state, side_condition_player, to_add, duration);
         }
     }
 
@@ -4942,6 +5208,78 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
         _ => return false,
     }
     true
+}
+
+/// Remove all four entry hazards from one side of the field. Removal is by discriminant, so the
+/// payloads passed here (layer count / setter id) are placeholders and irrelevant.
+fn clear_entry_hazards(bs: &mut BattleState, player: Player) {
+    remove_side_condition(bs, player, &SideCondition::Spikes(0));
+    remove_side_condition(bs, player, &SideCondition::StealthRock);
+    remove_side_condition(bs, player, &SideCondition::StickyWeb(None));
+    remove_side_condition(bs, player, &SideCondition::ToxicSpikes(0));
+}
+
+/// Apply the hazard/substitute *clearing* side effects of the spin and Defog/Tidy Up moves.
+/// The accompanying stat changes (Rapid Spin +1 Spe, Tidy Up +1 Atk/Spe), Defog's −1 evasion,
+/// and Mortal Spin's poison are ordinary parsed effects handled elsewhere — this only clears.
+fn apply_hazard_removal_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name: &PokemonMove) {
+    let user = attacker_slot.player;
+    let foe = match user { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+    match move_name {
+        PokemonMove::RapidSpin | PokemonMove::MortalSpin => {
+            // Clear the user's own side and free the user from binding + Leech Seed.
+            clear_entry_hazards(bs, user);
+            if let Some(mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
+                remove_status_volatile(mon, &VolatileStatus::PartiallyTrapped);
+                remove_status_volatile(mon, &VolatileStatus::LeechSeed);
+            }
+        }
+        PokemonMove::Defog => {
+            // Defog's −1 evasion (target) lives in Showdown's onHit JS, so it isn't parsed —
+            // apply it here to the directly-opposing foe, unless that foe is behind a Substitute.
+            let foe_target = FieldSlot { player: foe, slot_index: attacker_slot.slot_index };
+            let blocked_by_sub = get_pokemon_at_slot(bs, foe_target)
+                .map(|m| has_status_volatile(m, &VolatileStatus::Substitute))
+                .unwrap_or(true);
+            if !blocked_by_sub {
+                let items_suppressed = items_are_suppressed(bs);
+                apply_opponent_stat_drop(bs, foe_target, attacker_slot, [0, 0, 0, 0, 0, 0, -1], items_suppressed, false);
+            }
+            // Hazards clear from both sides; screens clear from the target's (foe) side; terrain ends.
+            clear_entry_hazards(bs, user);
+            clear_entry_hazards(bs, foe);
+            for sc in [
+                SideCondition::Reflect,
+                SideCondition::LightScreen,
+                SideCondition::AuroraVeil,
+                SideCondition::SafeGuard,
+                SideCondition::Mist,
+            ] {
+                remove_side_condition(bs, foe, &sc);
+            }
+            bs.terrain = None;
+            bs.terrain_turns = None;
+        }
+        PokemonMove::TidyUp => {
+            // Hazards and Substitutes clear from both sides.
+            clear_entry_hazards(bs, user);
+            clear_entry_hazards(bs, foe);
+            for mon in bs.p1_active_mons.iter_mut()
+                .chain(bs.p1_back_mons.iter_mut())
+                .chain(bs.p2_active_mons.iter_mut())
+                .chain(bs.p2_back_mons.iter_mut())
+            {
+                remove_status_volatile(mon, &VolatileStatus::Substitute);
+            }
+            // Tidy Up's +1 Atk / +1 Spe live in Showdown's onHit JS, so they aren't parsed into
+            // `self_boost` — apply them here.
+            let items_suppressed = items_are_suppressed(bs);
+            if let Some(mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
+                apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 1, 0, 0], items_suppressed, false);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Apply a King's Rock (or Razor Fang) flinch once per move, using the combined
@@ -5629,6 +5967,11 @@ pub fn apply_secondary_effects(
     let terrain_snapshot = state.clone();
     for (bs, _) in branches.iter_mut() {
         apply_healing_move(bs, attacker_slot, &move_data.name, &terrain_snapshot);
+    }
+
+    // Hazard removal / clearing moves (Rapid Spin, Mortal Spin, Defog, Tidy Up).
+    for (bs, _) in branches.iter_mut() {
+        apply_hazard_removal_move(bs, attacker_slot, &move_data.name);
     }
 
     // Transform move: deterministic, no branching.
