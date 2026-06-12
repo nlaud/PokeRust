@@ -85,6 +85,11 @@ pub enum Nature{
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PokemonState{
+    /// Stable identity within this Pokémon's own party (party-order index, assigned at team
+    /// construction). Unlike a `FieldSlot` it is unaffected by switching, and unlike `species`
+    /// it survives forme changes/Mega/Tera and distinguishes duplicate species. Used to record
+    /// the setter of Sticky Web so Mirror Armor can reflect to the correct Pokémon.
+    pub mon_id: u8,
     pub fainted: bool,
     pub species: Species,
     pub types: Vec<PokemonType>,
@@ -125,6 +130,10 @@ pub struct PokemonState{
     /// Entered the field via a switch THIS turn (not battle-start leads — those only set
     /// `entered_this_turn`). Payback does not double against a Pokémon that switched in.
     pub switched_in_this_turn: bool,
+    /// Consecutive successful stalling-move (Protect/Detect/Endure/King's Shield/Spiky Shield/
+    /// Baneful Bunker) uses. Drives the 1/3^n success decay. Reset by any non-stalling move, a
+    /// failed stall, switch-out, and (best-effort) "couldn't act" cases.
+    pub stall_counter: u8,
     pub nature: Nature,
 
     pub boosts: PokemonBoostTable,
@@ -438,6 +447,8 @@ pub fn build_pokemon_state(
     let (is_mega, mega_species, mega_ability) = resolve_mega_info(&species, &item, dex_entry, pokemon_dex);
 
     PokemonState {
+        // Default identity; `parse_team_sheet` overwrites this with the party-order index.
+        mon_id: 0,
         fainted: false, species, types, is_tera: false, is_mega,
         has_mega_form: mega_species.is_some(), level, hp: stats[0],
         moves, move_pp, max_pp, item, nature, boosts: [0; 7], stats,
@@ -448,7 +459,7 @@ pub fn build_pokemon_state(
         one_time_ability_used: false, entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
         item_lost: false, damaged_this_turn: false, damaged_by_this_turn: Vec::new(),
         stats_raised_this_turn: false, stats_lowered_this_turn: false,
-        switched_in_this_turn: false,
+        switched_in_this_turn: false, stall_counter: 0,
         pre_transform: None, evs, ivs,
     }
 }
@@ -631,6 +642,11 @@ pub fn parse_team_sheet(
             header.species_key, pokemon_dex, move_dex, level, Some(moves),
             header.explicit_gender, ability, nature, item, tera_type, evs, ivs, use_stat_points,
         ));
+    }
+
+    // Assign each Pokémon a stable party-order id, unique within this team.
+    for (idx, mon) in team.iter_mut().enumerate() {
+        mon.mon_id = idx as u8;
     }
 
     team

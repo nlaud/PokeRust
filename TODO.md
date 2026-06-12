@@ -44,32 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Entry hazards — setters and removal
-Major architectural feature: side condition layers on the field, evaluated when
-a Pokémon switches in. Implement all setters and removers together.
-**Setters:**
-- Spikes — up to 3 layers; flat damage on switch-in
-- Stealth Rock — typed damage on switch-in
-- Sticky Web — −1 Speed on switch-in
-- Toxic Spikes — 1 layer: poison; 2 layers: badly poison on switch-in
-- Ceaseless Edge — lays a Spikes layer as a side effect on hit
-- Stone Axe — lays a Stealth Rock layer as a side effect on hit
-**Removal:**
-- Defog — −1 evasion + clear most side conditions and terrain
-- Mortal Spin — remove user's-side hazards + poison targets hit
-- Rapid Spin — remove user's-side hazards + +1 Speed to user
-- Tidy Up — remove all hazards and substitutes field-wide; +1 Atk/Spe to user
-
-### Protect variants
-All share the stalling-move mechanic and consecutive-use probability decay (×1/3 per use).
-- Protect / Detect — block all moves
-- Baneful Bunker — block + poison any contact attacker
-- Endure — holder survives this turn at 1 HP regardless
-- King's Shield — block + −1 Attack to contact attackers; triggers Stance Change
-- Quick Guard — block priority moves for the whole side this turn
-- Spiky Shield — block + deal 1/8 max HP to contact attackers
-- Wide Guard — block multi-target moves for the whole side this turn
-
 ### Forced-switch moves
 Force the target to switch out. Shares infrastructure with self-switch (already implemented).
 - Circle Throw / Dragon Tail — deal damage then force target to switch

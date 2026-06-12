@@ -230,11 +230,15 @@ pub enum SideCondition {
     Mist,
     QuickGuard,
     SafeGuard,
-    Spikes,
+    /// Entry hazard. Carries the current layer count (1..=3).
+    Spikes(u8),
     StealthRock,
-    StickyWeb,
+    /// Entry hazard. Carries the `mon_id` of the Pokémon that set it (for Mirror Armor
+    /// reflection), or `None` when the source is untracked.
+    StickyWeb(Option<u8>),
     TailWind,
-    ToxicSpikes,
+    /// Entry hazard. Carries the current layer count (1..=2).
+    ToxicSpikes(u8),
     WideGuard,
 }
 
@@ -569,11 +573,11 @@ fn parse_side_condition(s: &str) -> Option<SideCondition> {
         "mist" => Some(SideCondition::Mist),
         "quickguard" => Some(SideCondition::QuickGuard),
         "safeguard" => Some(SideCondition::SafeGuard),
-        "spikes" => Some(SideCondition::Spikes),
+        "spikes" => Some(SideCondition::Spikes(1)),
         "stealthrock" => Some(SideCondition::StealthRock),
-        "stickyweb" => Some(SideCondition::StickyWeb),
+        "stickyweb" => Some(SideCondition::StickyWeb(None)),
         "tailwind" => Some(SideCondition::TailWind),
-        "toxicspikes" => Some(SideCondition::ToxicSpikes),
+        "toxicspikes" => Some(SideCondition::ToxicSpikes(1)),
         "wideguard" => Some(SideCondition::WideGuard),
         _ => None,
     }
@@ -1620,6 +1624,23 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                 secondaries.push(PokemonSecondaryEffect::simple(100, e));
             }
         }
+
+    // Ceaseless Edge and Stone Axe set an entry hazard on hit via JS code the parser cannot read.
+    // Inject the equivalent always-on foe-side secondary so they flow through the normal
+    // side-condition pipeline (and stack with existing layers / record the Sticky Web setter).
+    match &name {
+        Some(PokemonMove::CeaselessEdge) => {
+            let mut e = empty_hit_effect();
+            e.side_condition = Some(SideCondition::Spikes(1));
+            secondaries.push(PokemonSecondaryEffect::simple(100, e));
+        }
+        Some(PokemonMove::StoneAxe) => {
+            let mut e = empty_hit_effect();
+            e.side_condition = Some(SideCondition::StealthRock);
+            secondaries.push(PokemonSecondaryEffect::simple(100, e));
+        }
+        _ => {}
+    }
 
     let n = name?;
     Some((n.clone(), MoveData {
