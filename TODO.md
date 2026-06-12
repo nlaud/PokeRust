@@ -44,14 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Volatile status — move restriction
-Give the target a volatile that limits which moves it can use. Each requires a
-new VolatileStatus variant and end-of-turn countdown.
-- Encore — force target to repeat last move (3 turns)
-- Taunt — only damaging moves allowed (3 turns)
-- Throat Chop — can't use sound-based moves (2 turns)
-- Torment — can't use the same move twice in a row
-
 ### Volatile status — ongoing debuffs
 Volatiles that apply recurring damage, debuffs, or delayed effects each turn.
 - Perish Song — all on-field Pokémon faint after 3 turns
