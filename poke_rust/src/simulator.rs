@@ -137,6 +137,11 @@ fn resolve_confusion_self_hit_outcomes(
     for (damage, probability) in damage_outcomes {
         let mut branch_state = state.clone();
         decrement_move_pp(&mut branch_state, user_slot, move_name);
+        // Hurting itself in confusion means the chosen move never executed — that counts as a failed
+        // move for Stomping Tantrum / Micle Berry (consistent with flinch/paralysis/sleep handling).
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, user_slot) {
+            mon.last_move_failed = true;
+        }
 
         if let Some(game_over_state) = simulator_helpers::apply_damage_and_check_game_over(&mut branch_state, user_slot, damage) {
             outcomes.push((game_over_state, probability));
@@ -1641,6 +1646,17 @@ fn possible_damage_outcomes_for_move(
                     } else {
                         hit_branches
                     };
+                    // Phazing moves (Roar/Whirlwind/Dragon Tail/Circle Throw): on a connecting hit,
+                    // force the target to switch to a random eligible bench mon. Gate on damage>0 for
+                    // damaging phazers (a type-immune Dragon Tail deals 0 → no switch) while letting
+                    // the no-damage status phazers through.
+                    let hit_branches = if move_data.force_switch
+                        && (*damage > 0 || matches!(move_data.category, MoveCategory::Status))
+                    {
+                        apply_forced_switch(hit_branches, *target_slot, move_data, pokemon_dex)
+                    } else {
+                        hit_branches
+                    };
                     for (bs, prob) in hit_branches {
                         new_all_outcomes.push((MatchState::BattleState(bs), prob));
                     }
@@ -1677,6 +1693,23 @@ fn possible_damage_outcomes_for_move(
         })
         .collect();
     let mut all_outcomes: Vec<(MatchState, f64)> = all_outcomes;
+
+    // Status moves: set `last_move_failed` (Stomping Tantrum / Micle Berry) via a state diff against
+    // the pre-move baseline — a status move "failed" if it changed nothing battle-meaningful. This
+    // also covers a phazing status move (Roar/Whirlwind) that found no legal switch target. Damaging
+    // moves are handled separately via `total_dmg == 0` in `apply_post_damage_move_effects`. Genuine
+    // no-op successes (Splash/Celebrate/Hold Hands) are whitelisted so they don't mis-flag.
+    if matches!(move_data.category, MoveCategory::Status) {
+        let always_ok = status_move_always_succeeds(&move_data.name);
+        for (state, _) in &mut all_outcomes {
+            if let MatchState::BattleState(bs) = state {
+                let failed = !always_ok && !status_move_changed_state(&next_state, bs);
+                if let Some(mon) = mon_at_slot_mut(bs, action.user_slot) {
+                    mon.last_move_failed = failed;
+                }
+            }
+        }
+    }
 
     // Apply recharge volatile if move has recharge flag
     if move_has_recharge {
@@ -2184,6 +2217,113 @@ fn slot_has_substitute(bs: &BattleState, slot: FieldSlot) -> bool {
             matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
         )
     })
+}
+
+/// The slot that owns an action (every `Action` variant carries a `user_slot`).
+fn action_user_slot(action: &Action) -> FieldSlot {
+    match action {
+        Action::MoveAction(a) => a.user_slot,
+        Action::SwitchAction(a) => a.user_slot,
+        Action::MegaAction(a) => a.user_slot,
+        Action::TeraAction(a) => a.user_slot,
+    }
+}
+
+/// Whether the Pokémon in `slot` can be forced out by a phazing move. Suction Cups / Guard Dog
+/// (unsuppressed) and Ingrain prevent it. TODO: Mold Breaker bypasses Suction Cups / Guard Dog.
+fn can_be_forced_out(bs: &BattleState, slot: FieldSlot) -> bool {
+    let Some(mon) = simulator_helpers::get_pokemon_at_slot(bs, slot) else { return false; };
+    if !simulator_helpers::pokemon_ability_is_suppressed(bs, mon)
+        && matches!(mon.ability, Ability::SuctionCups | Ability::GuardDog)
+    {
+        return false;
+    }
+    mon.volatiles.iter().all(|v| !matches!(v,
+        crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, _)
+            | crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Ingrain, _)))
+}
+
+/// Status moves that legitimately succeed without changing any battle state (so the success-by-diff
+/// heuristic below must not mis-flag them as failures).
+fn status_move_always_succeeds(name: &PokemonMove) -> bool {
+    matches!(name, PokemonMove::Splash | PokemonMove::Celebrate | PokemonMove::HoldHands)
+}
+
+/// Compare the battle-meaningful fields of two `PokemonState` lists (HP, status, boosts, volatiles,
+/// item, species, fainted), ignoring per-turn bookkeeping (PP, last-used move, the `*_this_turn`
+/// flags, stall counter, etc.).
+fn mons_meaningful_equal(a: &[PokemonState], b: &[PokemonState]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.hp == y.hp
+                && x.status == y.status
+                && x.boosts == y.boosts
+                && x.volatiles == y.volatiles
+                && x.item == y.item
+                && x.species == y.species
+                && x.fainted == y.fainted
+        })
+}
+
+/// Whether a status move changed anything battle-meaningful between the pre-move baseline and the
+/// resulting state. Used to set `last_move_failed` for status moves (Stomping Tantrum / Micle).
+fn status_move_changed_state(before: &BattleState, after: &BattleState) -> bool {
+    !(mons_meaningful_equal(&before.p1_active_mons, &after.p1_active_mons)
+        && mons_meaningful_equal(&before.p1_back_mons, &after.p1_back_mons)
+        && mons_meaningful_equal(&before.p2_active_mons, &after.p2_active_mons)
+        && mons_meaningful_equal(&before.p2_back_mons, &after.p2_back_mons)
+        && before.weather == after.weather
+        && before.weather_turns == after.weather_turns
+        && before.terrain == after.terrain
+        && before.terrain_turns == after.terrain_turns
+        && before.pseudo_weathers == after.pseudo_weathers
+        && before.pseudo_weather_turns == after.pseudo_weather_turns
+        && before.p1_side_conditions == after.p1_side_conditions
+        && before.p2_side_conditions == after.p2_side_conditions
+        && before.p1_slot_conditions == after.p1_slot_conditions
+        && before.p2_slot_conditions == after.p2_slot_conditions)
+}
+
+/// Apply a phazing move's forced switch to `target_slot`: branch over each eligible bench mon of the
+/// target's side at equal probability, swapping it in and running its send-out (entry hazards +
+/// abilities). Branches where the switch can't happen — target fainted, blocked by Suction
+/// Cups/Guard Dog/Ingrain, behind a Substitute (for non-`bypasssub` moves), or no eligible bench —
+/// pass through unchanged. Deterministic at this point: the move already connected.
+fn apply_forced_switch(
+    branches: Vec<(BattleState, f64)>,
+    target_slot: FieldSlot,
+    move_data: &MoveData,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> Vec<(BattleState, f64)> {
+    let bypasses_sub = simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::BypassSub);
+    let mut out = Vec::new();
+    for (bs, prob) in branches {
+        let target_fainted = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+            .map_or(true, |m| m.fainted);
+        let switches = !target_fainted
+            && can_be_forced_out(&bs, target_slot)
+            && (bypasses_sub || !slot_has_substitute(&bs, target_slot))
+            && has_healthy_bench(&bs, target_slot.player);
+        if !switches {
+            out.push((bs, prob));
+            continue;
+        }
+        let bench: Vec<usize> = match target_slot.player {
+            Player::P1 => bs.p1_back_mons.iter().enumerate().filter(|(_, m)| !m.fainted).map(|(i, _)| i).collect(),
+            Player::P2 => bs.p2_back_mons.iter().enumerate().filter(|(_, m)| !m.fainted).map(|(i, _)| i).collect(),
+        };
+        let n = bench.len() as f64;
+        for idx in bench {
+            let mut clone = bs.clone();
+            perform_switch_out_in(&mut clone, target_slot, idx, pokemon_dex);
+            simulator_helpers::process_pokemon_send_out(&mut clone, target_slot);
+            // The switched-out target's still-queued action (e.g. a slower −7 move) must not run for
+            // the replacement that just entered.
+            clone.action_queue.retain(|a| action_user_slot(a) != target_slot);
+            out.push((clone, prob / n));
+        }
+    }
+    out
 }
 
 fn apply_post_damage_move_effects(
