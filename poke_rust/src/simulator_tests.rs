@@ -19670,3 +19670,399 @@ mod priority_abilities {
     }
 
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Binding & trapping moves
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod binding_trapping {
+    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+    use crate::simulator;
+    use crate::simulator_helpers;
+
+    /// Build a test mon with overridden max HP for deterministic chip assertions.
+    fn mon(species: Species, ability: Ability, mv: PokemonMove) -> crate::pokemon::PokemonState {
+        let dex = pokemon_dex();
+        let mdex = move_dex();
+        let mut m = build_pokemon_state(
+            species, &dex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        m.stats[0] = 400;
+        m.hp = 400;
+        m
+    }
+
+    fn mon_with_item(species: Species, ability: Ability, mv: PokemonMove, item: Item) -> crate::pokemon::PokemonState {
+        let mut m = mon(species, ability, mv);
+        m.item = item;
+        m
+    }
+
+    // ── 1. Bind applies PartiallyTrapped with duration 4 or 5 ────────────────
+
+    #[test]
+    fn bind_applies_partially_trapped_volatile() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Bind);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        // Every hit branch must have PartiallyTrapped on the foe.
+        let has_trap_in_any = outcomes.iter().any(|(s, _)| matches!(s,
+            MatchState::BattleState(bs)
+            if bs.p2_active_mons[0].volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(_), _))
+            )
+        ));
+        assert!(has_trap_in_any, "Bind should apply PartiallyTrapped volatile on hit");
+    }
+
+    #[test]
+    fn bind_duration_is_4_or_5_turns() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Bind);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        // After a full turn (including EOT decrement), duration 4→3 or 5→4.
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                for v in &bs.p2_active_mons[0].volatiles {
+                    if let VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(_), turns) = v {
+                        assert!(
+                            *turns == 3 || *turns == 4,
+                            "PartiallyTrapped duration after EOT decrement should be 3 or 4, got {turns}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 2. Binding chip damage ────────────────────────────────────────────────
+
+    #[test]
+    fn binding_chip_is_one_eighth_max_hp() {
+        // Set up a state where P1 has PartiallyTrapped on it and call EOT.
+        // Source id = 1 (P2's first mon after the offset applied by battle_state_from_lists).
+        let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Splash);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+        let p2_id = state.p2_active_mons[0].mon_id;
+        state.p1_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p2_id), 3),
+        );
+        let hp_before = state.p1_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut state);
+        let hp_after = state.p1_active_mons[0].hp;
+        let chip = hp_before - hp_after;
+        // 400 / 8 = 50
+        assert_eq!(chip, 50, "Binding chip should be 1/8 max HP (50), got {chip}");
+    }
+
+    #[test]
+    fn binding_chip_with_binding_band_is_one_sixth_max_hp() {
+        let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Splash);
+        let mut foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        foe.item = Item::BindingBand;
+        let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+        let p2_id = state.p2_active_mons[0].mon_id;
+        state.p1_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p2_id), 3),
+        );
+        let hp_before = state.p1_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut state);
+        let hp_after = state.p1_active_mons[0].hp;
+        let chip = hp_before - hp_after;
+        // 400 / 6 = 66
+        assert_eq!(chip, 66, "Binding chip with Binding Band should be 1/6 max HP (66), got {chip}");
+    }
+
+    // ── 3. Grip Claw → 7-turn duration ───────────────────────────────────────
+
+    #[test]
+    fn grip_claw_gives_7_turn_duration() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon_with_item(Species::Onix, Ability::Pressure, PokemonMove::Bind, Item::GripClaw);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        // After a full turn (including EOT decrement), 7 becomes 6.
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                for v in &bs.p2_active_mons[0].volatiles {
+                    if let VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(_), turns) = v {
+                        assert_eq!(*turns, 6, "Grip Claw should give 7-turn duration (6 after first EOT decrement), got {turns}");
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 4. Trapped target cannot switch ──────────────────────────────────────
+
+    #[test]
+    fn partially_trapped_target_cannot_switch() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Splash);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let bench = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+        let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+        let p1_id = state.p1_active_mons[0].mon_id;
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p1_id), 3),
+        );
+        let cmds = simulator::get_possible_commands_for_active_slot(
+            &state, Player::P2, 0, &mdex, &pdex,
+        );
+        let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
+        assert!(!has_switch, "PartiallyTrapped target should not be able to switch");
+        // Must still have move commands available.
+        let has_move = cmds.iter().any(|c| matches!(c, BattleCommand::Attack { .. }));
+        assert!(has_move, "PartiallyTrapped target should still be able to use moves");
+    }
+
+    // ── 5. Ghost-type takes chip but can switch ───────────────────────────────
+
+    #[test]
+    fn ghost_type_takes_binding_chip_but_can_switch() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        // Gengar is Ghost-type.
+        let user = mon(Species::Gengar, Ability::CursedBody, PokemonMove::Splash);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let ghost_bench = mon(Species::Gastly, Ability::Levitate, PokemonMove::Splash);
+        let mut state = battle_state_from_lists(vec![user], vec![ghost_bench], vec![foe], vec![]);
+        let p2_id = state.p2_active_mons[0].mon_id;
+        // Ghost on P1 is partially trapped by P2's mon.
+        state.p1_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p2_id), 3),
+        );
+        // Chip should still apply.
+        let hp_before = state.p1_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut state);
+        let hp_after = state.p1_active_mons[0].hp;
+        assert!(hp_after < hp_before, "Ghost should still take binding chip damage");
+        // But should be allowed to switch out.
+        let cmds = simulator::get_possible_commands_for_active_slot(
+            &state, Player::P1, 0, &mdex, &pdex,
+        );
+        let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
+        assert!(has_switch, "Ghost-type should be able to switch despite PartiallyTrapped");
+    }
+
+    // ── 6. Shed Shell bypasses switch-lock ───────────────────────────────────
+
+    #[test]
+    fn shed_shell_bypasses_trap() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Splash);
+        let mut foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        foe.item = Item::ShedShell;
+        let bench = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+        let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+        let p1_id = state.p1_active_mons[0].mon_id;
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p1_id), 3),
+        );
+        let cmds = simulator::get_possible_commands_for_active_slot(
+            &state, Player::P2, 0, &mdex, &pdex,
+        );
+        let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
+        assert!(has_switch, "Shed Shell holder should bypass PartiallyTrapped switch-lock");
+    }
+
+    // ── 7. Bind releases when the trapper leaves ──────────────────────────────
+
+    #[test]
+    fn bind_releases_when_trapper_switches_out() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Splash);
+        let user_bench = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let mut state = battle_state_from_lists(
+            vec![user], vec![user_bench], vec![foe], vec![],
+        );
+        let p1_id = state.p1_active_mons[0].mon_id;
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p1_id), 3),
+        );
+        // P1 switches out (trapper leaves).
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let still_trapped = bs.p2_active_mons[0].volatiles.iter().any(|v|
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(_), _))
+                );
+                assert!(!still_trapped, "PartiallyTrapped should be released when trapper switches out");
+            }
+        }
+    }
+
+    // ── 8. Magic Guard skips binding chip ────────────────────────────────────
+
+    #[test]
+    fn magic_guard_prevents_binding_chip() {
+        let user = mon(Species::Clefable, Ability::MagicGuard, PokemonMove::Splash);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+        let p2_id = state.p2_active_mons[0].mon_id;
+        state.p1_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p2_id), 3),
+        );
+        let hp_before = state.p1_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut state);
+        let hp_after = state.p1_active_mons[0].hp;
+        assert_eq!(hp_after, hp_before, "Magic Guard should prevent binding chip damage");
+    }
+
+    // ── 9. Substitute blocks binding application ─────────────────────────────
+
+    #[test]
+    fn substitute_blocks_bind() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Bind);
+        let mut foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        // Manually give the foe a Substitute volatile.
+        foe.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute, 0));
+        let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let has_trap = bs.p2_active_mons[0].volatiles.iter().any(|v|
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(_), _))
+                );
+                assert!(!has_trap, "Substitute should block PartiallyTrapped from being applied");
+            }
+        }
+    }
+
+    // ── 10. Mean Look traps, fails on Ghost ──────────────────────────────────
+
+    #[test]
+    fn mean_look_traps_target() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Umbreon, Ability::Synchronize, PokemonMove::MeanLook);
+        let foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+        let bench = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let trapped_branch = outcomes.iter().find(|(s, _)| matches!(s,
+            MatchState::BattleState(bs)
+            if bs.p2_active_mons[0].volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Trapped(_), _))
+            )
+        ));
+        assert!(trapped_branch.is_some(), "Mean Look should apply Trapped volatile");
+        // In the trapped branch the foe cannot switch.
+        if let Some((MatchState::BattleState(bs), _)) = trapped_branch {
+            let cmds = simulator::get_possible_commands_for_active_slot(
+                bs, Player::P2, 0, &mdex, &pdex,
+            );
+            let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
+            assert!(!has_switch, "Mean Look target should not be able to switch");
+        }
+    }
+
+    #[test]
+    fn mean_look_fails_on_ghost() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Umbreon, Ability::Synchronize, PokemonMove::MeanLook);
+        // Gengar is Ghost-type.
+        let foe  = mon(Species::Gengar, Ability::CursedBody, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let has_trap = bs.p2_active_mons[0].volatiles.iter().any(|v|
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Trapped(_), _))
+                );
+                assert!(!has_trap, "Mean Look should not trap Ghost-type targets");
+            }
+        }
+    }
+
+    // ── 11. Spirit Shackle deals damage and traps ─────────────────────────────
+
+    #[test]
+    fn spirit_shackle_deals_damage_and_traps() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let user = mon(Species::Decidueye, Ability::Overgrow, PokemonMove::SpiritShackle);
+        // Slowpoke is Water/Psychic — not immune to Ghost-type moves.
+        let foe  = mon(Species::Slowpoke, Ability::Oblivious, PokemonMove::Splash);
+        let bench = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        // Should deal damage (HP decreased) AND apply Trapped.
+        let hit_and_trapped = outcomes.iter().any(|(s, _)| matches!(s,
+            MatchState::BattleState(bs)
+            if bs.p2_active_mons[0].hp < 400
+                && bs.p2_active_mons[0].volatiles.iter().any(|v|
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Trapped(_), _))
+                )
+        ));
+        assert!(hit_and_trapped, "Spirit Shackle should deal damage and apply Trapped volatile");
+    }
+}

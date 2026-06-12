@@ -1718,6 +1718,42 @@ pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus)
     }
 }
 
+/// Returns true when `mon` is prevented from switching out voluntarily.
+///
+/// Binding (`PartiallyTrapped`): Ghost-types ignore the switch-lock but still take chip
+/// damage — the volatile stays on them for that purpose; they just cannot be locked in.
+/// Pure trapping (`Trapped`): full switch-lock; Ghosts are immune to the move's application
+/// in the first place (see `apply_trapping_move`), so they never carry this volatile.
+/// Shed Shell bypasses all trapping.
+pub fn is_trapped(state: &BattleState, mon: &PokemonState) -> bool {
+    if item_is_active(state, mon) && mon.item == Item::ShedShell {
+        return false;
+    }
+    let has_binding = has_status_volatile(mon, &VolatileStatus::PartiallyTrapped(0));
+    if has_binding && !pokemon_has_type(mon, &PokemonType::Ghost) {
+        return true;
+    }
+    if has_status_volatile(mon, &VolatileStatus::Trapped(0)) {
+        return true;
+    }
+    false
+}
+
+/// When a Pokémon leaves the field (switch-out or faint), release any trapping volatiles
+/// (`PartiallyTrapped` / `Trapped`) whose source `mon_id` matches the departing Pokémon.
+/// Scans all currently-active slots on both sides.
+pub fn release_traps_set_by(state: &mut BattleState, source_mon_id: u8) {
+    for mon in state.p1_active_mons.iter_mut()
+        .chain(state.p2_active_mons.iter_mut())
+    {
+        mon.volatiles.retain(|v| !matches!(v,
+            VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(src), _)
+            | VolatileStatusState::TurnStatus(VolatileStatus::Trapped(src), _)
+            if *src == source_mon_id
+        ));
+    }
+}
+
 pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
     let hp_before = mon.hp;
     mon.hp = hp_before.saturating_sub(damage);
@@ -3416,9 +3452,8 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
     let abilities_suppressed = abilities_are_suppressed(state);
     let items_suppressed = items_are_suppressed(state);
 
-    // Apply the departing Pokémon's own switch-out ability, and note its ability for
-    // the field-effect checks below.
-    let departed_ability = {
+    // Apply the departing Pokémon's own switch-out ability, and note its ability and id.
+    let (departed_ability, departing_mon_id) = {
         let back = match player {
             Player::P1 => &mut state.p1_back_mons,
             Player::P2 => &mut state.p2_back_mons,
@@ -3427,10 +3462,11 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
             return;
         };
         let ability = departed.ability.clone();
+        let mon_id = departed.mon_id;
         if !abilities_suppressed {
             apply_switch_out_ability_effects(departed, BerryEnv::simple(items_suppressed));
         }
-        ability
+        (ability, mon_id)
     };
 
     // Neutralizing Gas suppression lifts when its holder leaves the field.
@@ -3443,6 +3479,9 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
 
     // Departing weather sources / Cloud Nine users may change Castform's form.
     update_forecast_forms(state);
+
+    // Release any binding/trapping volatiles that this Pokémon had set on opponents.
+    release_traps_set_by(state, departing_mon_id);
 }
 
 /// Handle field effects when the Pokémon at `slot_index` (for `player`) faints:
@@ -3451,7 +3490,7 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
 /// to still occupy its active slot (with `fainted == true`); the helpers below ignore
 /// fainted Pokémon, so it is correctly treated as gone from the field.
 pub fn handle_pokemon_faint(state: &mut BattleState, player: Player, slot_index: u8) {
-    let fainted_ability = {
+    let (fainted_ability, fainted_mon_id) = {
         let mons = match player {
             Player::P1 => &state.p1_active_mons,
             Player::P2 => &state.p2_active_mons,
@@ -3459,7 +3498,7 @@ pub fn handle_pokemon_faint(state: &mut BattleState, player: Player, slot_index:
         let Some(mon) = mons.get(slot_index as usize) else {
             return;
         };
-        mon.ability.clone()
+        (mon.ability.clone(), mon.mon_id)
     };
 
     // Neutralizing Gas suppression lifts when its holder faints.
@@ -3494,6 +3533,9 @@ pub fn handle_pokemon_faint(state: &mut BattleState, player: Player, slot_index:
 
     // A fainting weather source / Cloud Nine user may change Castform's form.
     update_forecast_forms(state);
+
+    // Release any binding/trapping volatiles that this Pokémon had set on opponents.
+    release_traps_set_by(state, fainted_mon_id);
 }
 
 /// While Neutralizing Gas is active it suppresses primal-weather abilities, so any
@@ -4166,6 +4208,75 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
             let max_hp = mon.stats[0].max(1);
             gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p2_envs[i]);
         }
+    }
+
+    // Binding chip damage (PartiallyTrapped residual).
+    // Canonical order: same phase as Leech Seed, after Leftovers but before burn/poison.
+    // Ghost-types are NOT exempt — they still take chip; they are only exempt from the
+    // switch-prevention (enforced separately in `is_trapped`).
+    apply_binding_chip_damage(state, &p1_envs, &p2_envs, ctx.abilities_suppressed, ctx.items_suppressed);
+}
+
+/// Phase 1.5 of end-of-turn processing: deal chip damage to partially-trapped Pokémon.
+/// Each trapped mon takes 1/8 (or 1/6 with trapper's Binding Band) of its own max HP.
+/// Magic Guard prevents this. BerryEnvs must have been pre-computed for the active slots.
+fn apply_binding_chip_damage(
+    state: &mut BattleState,
+    p1_envs: &[BerryEnv],
+    p2_envs: &[BerryEnv],
+    abilities_suppressed: bool,
+    items_suppressed: bool,
+) {
+    // Collect (side, slot_index, trapper_mon_id) for each trapped active mon.
+    let trapped_slots: Vec<(Player, usize, u8)> = {
+        let p1_trapped: Vec<_> = state.p1_active_mons.iter().enumerate().filter_map(|(i, m)| {
+            m.volatiles.iter().find_map(|v| {
+                if let VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(src), _) = v {
+                    Some((Player::P1, i, *src))
+                } else { None }
+            })
+        }).collect();
+        let p2_trapped: Vec<_> = state.p2_active_mons.iter().enumerate().filter_map(|(i, m)| {
+            m.volatiles.iter().find_map(|v| {
+                if let VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(src), _) = v {
+                    Some((Player::P2, i, *src))
+                } else { None }
+            })
+        }).collect();
+        p1_trapped.into_iter().chain(p2_trapped).collect()
+    };
+
+    for (side, slot_idx, src_id) in trapped_slots {
+        // Find whether the trapper (by mon_id) holds an active Binding Band.
+        let binding_band = state.p1_active_mons.iter().chain(state.p2_active_mons.iter())
+            .find(|m| m.mon_id == src_id)
+            .map_or(false, |trapper| {
+                !items_suppressed && !klutz_disables_item(trapper)
+                    && trapper.item == Item::BindingBand
+            });
+
+        let env = match side {
+            Player::P1 => p1_envs[slot_idx],
+            Player::P2 => p2_envs[slot_idx],
+        };
+
+        let mons = match side {
+            Player::P1 => &mut state.p1_active_mons,
+            Player::P2 => &mut state.p2_active_mons,
+        };
+        let Some(mon) = mons.get_mut(slot_idx) else { continue; };
+        if mon.fainted { continue; }
+
+        let magic_guard = !abilities_suppressed && mon.ability == Ability::MagicGuard;
+        if magic_guard { continue; }
+
+        let max_hp = mon.stats[0].max(1);
+        let chip = if binding_band {
+            ((max_hp as u32) / 6).max(1) as u16
+        } else {
+            ((max_hp as u32) / 8).max(1) as u16
+        };
+        deal_residual_damage(mon, chip, env);
     }
 }
 
@@ -5230,7 +5341,7 @@ fn apply_hazard_removal_move(bs: &mut BattleState, attacker_slot: FieldSlot, mov
             // Clear the user's own side and free the user from binding + Leech Seed.
             clear_entry_hazards(bs, user);
             if let Some(mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
-                remove_status_volatile(mon, &VolatileStatus::PartiallyTrapped);
+                remove_status_volatile(mon, &VolatileStatus::PartiallyTrapped(0));
                 remove_status_volatile(mon, &VolatileStatus::LeechSeed);
             }
         }
@@ -5829,6 +5940,100 @@ pub(crate) fn try_drawin_negate(
     negated
 }
 
+/// Apply the binding (partial-trapping) volatile to `target_slot` with duration branching.
+///
+/// Called from `apply_secondary_effects` to handle the parsed `PartiallyTrapped(u8::MAX)`
+/// sentinel.  Branches the outcome tree based on duration (4 or 5 turns) unless the
+/// attacker holds a Grip Claw (fixed 7 turns).  Ghosts receive the volatile (they still
+/// take chip damage) but the switch-prevention is waived in `is_trapped`.
+fn apply_binding_trap(
+    branches: Vec<(BattleState, f64)>,
+    attacker_mon_id: u8,
+    target_slot: FieldSlot,
+) -> Vec<(BattleState, f64)> {
+    let mut new_branches = Vec::with_capacity(branches.len() * 2);
+    for (bs, prob) in branches {
+        // Skip if already bound (cannot stack) or protected by a Substitute.
+        let already_bound = get_pokemon_at_slot(&bs, target_slot)
+            .map_or(false, |m| has_status_volatile(m, &VolatileStatus::PartiallyTrapped(0)));
+        let has_sub = get_pokemon_at_slot(&bs, target_slot)
+            .map_or(false, |m| has_status_volatile(m, &VolatileStatus::Substitute));
+        if already_bound || has_sub {
+            new_branches.push((bs, prob));
+            continue;
+        }
+
+        // Grip Claw (held by the trapper): locate the trapper by mon_id for doubles safety.
+        let grip_claw = bs.p1_active_mons.iter().chain(bs.p2_active_mons.iter())
+            .find(|m| m.mon_id == attacker_mon_id)
+            .map_or(false, |trapper| {
+                item_is_active(&bs, trapper) && trapper.item == Item::GripClaw
+            });
+
+        if grip_claw {
+            let mut applied = bs.clone();
+            if let Some(mon) = get_pokemon_at_slot_mut(&mut applied, target_slot) {
+                mon.volatiles.push(VolatileStatusState::TurnStatus(
+                    VolatileStatus::PartiallyTrapped(attacker_mon_id), 7,
+                ));
+            }
+            new_branches.push((applied, prob));
+        } else {
+            // 50/50 branch: 4 turns or 5 turns.
+            for duration in [4u8, 5u8] {
+                let mut applied = bs.clone();
+                if let Some(mon) = get_pokemon_at_slot_mut(&mut applied, target_slot) {
+                    mon.volatiles.push(VolatileStatusState::TurnStatus(
+                        VolatileStatus::PartiallyTrapped(attacker_mon_id), duration,
+                    ));
+                }
+                new_branches.push((applied, prob * 0.5));
+            }
+        }
+    }
+    new_branches
+}
+
+/// Apply the pure-trapping effect for Block / Mean Look / Spirit Shackle.
+///
+/// These moves store their trap in Showdown's unparsed `onHit` JS, so they are
+/// hand-coded here.  Unlike partial trapping there is no chip damage; the trap lasts
+/// until the trapper leaves the field (duration = 0 → permanent, released by
+/// `release_traps_set_by`).
+///
+/// Ghost-type targets are fully immune (the volatile is simply not applied).  Spirit
+/// Shackle's damage is handled by the normal damage pipeline; this function only adds
+/// the `Trapped` volatile post-damage.
+fn apply_trapping_move(
+    bs: &mut BattleState,
+    attacker_slot: FieldSlot,
+    target_slot: FieldSlot,
+    move_name: &PokemonMove,
+) {
+    match move_name {
+        PokemonMove::Block | PokemonMove::MeanLook | PokemonMove::SpiritShackle => {
+            let attacker_mon_id = get_pokemon_at_slot(bs, attacker_slot)
+                .map(|m| m.mon_id)
+                .unwrap_or(u8::MAX);
+            // Ghost targets are fully immune to pure-trapping moves.
+            let target_is_ghost = get_pokemon_at_slot(bs, target_slot)
+                .map_or(false, |m| pokemon_has_type(m, &PokemonType::Ghost));
+            // Substitute blocks the trapping effect.
+            let target_has_sub = get_pokemon_at_slot(bs, target_slot)
+                .map_or(false, |m| has_status_volatile(m, &VolatileStatus::Substitute));
+            if target_is_ghost || target_has_sub { return; }
+            if let Some(mon) = get_pokemon_at_slot_mut(bs, target_slot) {
+                if !has_status_volatile(mon, &VolatileStatus::Trapped(0)) {
+                    mon.volatiles.push(VolatileStatusState::TurnStatus(
+                        VolatileStatus::Trapped(attacker_mon_id), 0,
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Apply move secondary effects with appropriate probability.
 /// This is called after a move hits to apply status, volatile status, side conditions, etc.
 pub fn apply_secondary_effects(
@@ -5911,6 +6116,12 @@ pub fn apply_secondary_effects(
             {
                 continue;
             }
+            // PartiallyTrapped sentinel: handled separately below with duration branching.
+            if secondary.random_choices.is_empty()
+                && matches!(&secondary.effect.volatile_status, Some(VolatileStatus::PartiallyTrapped(_)))
+            {
+                continue;
+            }
             let chance = secondary.chance as f64 / 100.0;
             let choices = if secondary.random_choices.is_empty() {
                 std::slice::from_ref(&secondary.effect)
@@ -5927,6 +6138,19 @@ pub fn apply_secondary_effects(
             for (bs, _) in branches.iter_mut() {
                 apply_effect_to_target(bs, attacker_slot, target_slot, &burn, side_condition_target);
             }
+        }
+
+        // Binding trap: apply PartiallyTrapped with source-id and duration branching.
+        // Handled after all other target secondaries so flinch / stat drops fire first.
+        let has_bind_secondary = move_data.secondaries.iter().any(|s| {
+            s.random_choices.is_empty()
+                && matches!(&s.effect.volatile_status, Some(VolatileStatus::PartiallyTrapped(_)))
+        });
+        if has_bind_secondary {
+            let attacker_mon_id = get_pokemon_at_slot(state, attacker_slot)
+                .map(|m| m.mon_id)
+                .unwrap_or(u8::MAX);
+            branches = apply_binding_trap(branches, attacker_mon_id, target_slot);
         }
     }
 
@@ -5972,6 +6196,12 @@ pub fn apply_secondary_effects(
     // Hazard removal / clearing moves (Rapid Spin, Mortal Spin, Defog, Tidy Up).
     for (bs, _) in branches.iter_mut() {
         apply_hazard_removal_move(bs, attacker_slot, &move_data.name);
+    }
+
+    // Pure-trapping moves (Block, Mean Look, Spirit Shackle): apply Trapped volatile.
+    // These moves store their trap in unparsed Showdown onHit JS, so they are hand-coded.
+    for (bs, _) in branches.iter_mut() {
+        apply_trapping_move(bs, attacker_slot, target_slot, &move_data.name);
     }
 
     // Transform move: deterministic, no branching.

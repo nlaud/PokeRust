@@ -60,14 +60,15 @@ pub fn battle_state_from_lists(
         items_consumed_this_turn: vec![],
     };
 
-    // Assign each side a stable, party-unique `mon_id` (active slots first, then bench), so
-    // tests that build mons directly via `build_pokemon_state` (all defaulting to id 0) still
-    // get distinguishable identities — needed e.g. for Sticky Web's Mirror Armor reflection.
+    // Assign each side a stable, party-unique `mon_id` (active slots first, then bench).
+    // P2's ids are offset by P1's total party count so a single u8 is globally unique across
+    // both teams — required for trapping-volatile source tracking (PartiallyTrapped/Trapped).
+    let p1_count = state.p1_active_mons.len() + state.p1_back_mons.len();
     for (idx, mon) in state.p1_active_mons.iter_mut().chain(state.p1_back_mons.iter_mut()).enumerate() {
         mon.mon_id = idx as u8;
     }
     for (idx, mon) in state.p2_active_mons.iter_mut().chain(state.p2_back_mons.iter_mut()).enumerate() {
-        mon.mon_id = idx as u8;
+        mon.mon_id = (p1_count + idx) as u8;
     }
 
     for slot_idx in 0..state.p1_active_mons.len() {

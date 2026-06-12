@@ -44,15 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Binding and trapping
-Give the target a Bound volatile (chip damage per turn + can't escape for 4–5 turns)
-or a Can't Escape volatile (no chip damage).
-**Binding (damage + trap):**
-- Bind, Fire Spin, Infestation, Sand Tomb, Snap Trap, Wrap
-- Whirlpool — also ×2 power vs. a Submerged target
-**Trapping only:**
-- Block, Mean Look, Spirit Shackle
-
 ### Healing — per-turn volatile moves
 Give the user (or target) a volatile that restores HP at end of each turn.
 - Aqua Ring — restore 1/16 max HP per turn to user
