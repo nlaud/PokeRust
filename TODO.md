@@ -44,22 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Healing — per-turn volatile moves
-Give the user (or target) a volatile that restores HP at end of each turn.
-- Aqua Ring — restore 1/16 max HP per turn to user
-- Ingrain — restore 1/16 max HP per turn; roots user (can't switch out)
-- Leech Seed — drain 1/8 of target's max HP per turn; heal user by that amount
-- Wish — restore ½ of user's max HP to the Pokémon in that slot on the next turn
-
-### Healing — immediate and redistributive
-Moves that change HP without a turn-based volatile.
-- Heal Bell — cure status conditions of all party members
-- Heal Pulse — restore ½ max HP of one target (can target ally)
-- Life Dew — restore ¼ max HP to user and all allies
-- Pain Split — average the user's and target's current HP
-- Roost — restore ½ max HP; user loses Flying type for the rest of this turn
-- Strength Sap — restore HP equal to target's Attack; lower target's Atk by 1
-
 ### Volatile status — move restriction
 Give the target a volatile that limits which moves it can use. Each requires a
 new VolatileStatus variant and end-of-turn countdown.
