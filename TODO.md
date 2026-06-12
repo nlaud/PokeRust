@@ -44,11 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Forced-switch moves
-Force the target to switch out. Shares infrastructure with self-switch (already implemented).
-- Circle Throw / Dragon Tail — deal damage then force target to switch
-- Roar / Whirlwind — force target to switch (Roar is non-damaging)
-
 ### Binding and trapping
 Give the target a Bound volatile (chip damage per turn + can't escape for 4–5 turns)
 or a Can't Escape volatile (no chip damage).

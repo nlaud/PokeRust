@@ -19438,4 +19438,235 @@ mod priority_abilities {
         }
     }
 
+    mod forced_switch_moves {
+        use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+        use crate::data::ability::Ability;
+        use crate::data::pokemon_move::PokemonMove;
+        use crate::data::species::Species;
+        use crate::dex_data::{SideCondition, Status, VolatileStatus};
+        use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+        use crate::simuilator_test_helpers::{
+            battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+            simple_attack,
+        };
+
+        fn mon(species: Species, ability: Ability, m0: PokemonMove) -> PokemonState {
+            let pd = pokemon_dex();
+            let md = move_dex();
+            build_pokemon_state(
+                species, &pd, &md, Some(50),
+                Some([Some(m0), Some(PokemonMove::Splash), None, None]),
+                None, Some(ability), None, None, None, None, None, false,
+            )
+        }
+
+        fn run(state: BattleState, s1: usize, s2: usize) -> Vec<(MatchState, f64)> {
+            run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![s1])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![s2])),
+                &move_dex(),
+                &pokemon_dex(),
+            )
+        }
+
+        fn p2_active_species_mass(outcomes: &[(MatchState, f64)], species: Species) -> f64 {
+            outcomes.iter().filter_map(|(s, p)| match s {
+                MatchState::BattleState(bs) if bs.p2_active_mons[0].species == species => Some(*p),
+                _ => None,
+            }).sum()
+        }
+
+        // ── Roar / Whirlwind ────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn roar_forces_target_to_switch() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Roar);
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            let bench = mon(Species::Gyarados, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].species, Species::Gyarados, "Roar dragged in the bench mon");
+        }
+
+        #[test]
+        fn roar_random_replacement_branches_equally() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Whirlwind);
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            let b1 = mon(Species::Gyarados, Ability::Pressure, PokemonMove::Splash);
+            let b2 = mon(Species::Machamp, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![b1, b2]);
+            let outcomes = run(state, 0, 0);
+            assert!((p2_active_species_mass(&outcomes, Species::Gyarados) - 0.5).abs() < 0.01);
+            assert!((p2_active_species_mass(&outcomes, Species::Machamp) - 0.5).abs() < 0.01);
+        }
+
+        #[test]
+        fn roar_with_no_bench_does_not_switch_and_fails() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Roar);
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].species, Species::Clefable, "no bench → no switch");
+            assert!(after.p1_active_mons[0].last_move_failed, "Roar with no legal target failed");
+        }
+
+        // ── Dragon Tail / Circle Throw ──────────────────────────────────────────────────────
+
+        #[test]
+        fn dragon_tail_damages_then_switches_on_hit() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::DragonTail);
+            let foe = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+            let bench = mon(Species::Gyarados, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+            let outcomes = run(state, 0, 0);
+            // 90% accuracy → switch on the hit branch only.
+            assert!((p2_active_species_mass(&outcomes, Species::Gyarados) - 0.9).abs() < 0.02);
+        }
+
+        #[test]
+        fn dragon_tail_into_type_immunity_does_not_switch() {
+            // Dragon is 0× vs Fairy (Clefable): no damage, no switch.
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::DragonTail);
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            let bench = mon(Species::Gyarados, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+            let outcomes = run(state, 0, 0);
+            assert_eq!(p2_active_species_mass(&outcomes, Species::Gyarados), 0.0, "immune target is not phazed");
+        }
+
+        #[test]
+        fn circle_throw_replacement_takes_stealth_rock() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Roar);
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            let bench = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+            let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+            state.p2_side_conditions.push(SideCondition::StealthRock);
+            state.p2_side_condition_turns.push(0);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            let m = &after.p2_active_mons[0];
+            assert_eq!(m.species, Species::Snorlax);
+            assert!(m.hp < m.stats[0], "forced-in replacement took Stealth Rock");
+        }
+
+        // ── Blocking conditions ─────────────────────────────────────────────────────────────
+
+        #[test]
+        fn suction_cups_blocks_the_forced_switch() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Roar);
+            let foe = mon(Species::Snorlax, Ability::SuctionCups, PokemonMove::Splash);
+            let bench = mon(Species::Gyarados, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].species, Species::Snorlax, "Suction Cups blocks phazing");
+        }
+
+        #[test]
+        fn guard_dog_blocks_the_forced_switch() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Roar);
+            let foe = mon(Species::Snorlax, Ability::GuardDog, PokemonMove::Splash);
+            let bench = mon(Species::Gyarados, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].species, Species::Snorlax, "Guard Dog blocks phazing");
+        }
+
+        #[test]
+        fn ingrain_blocks_the_forced_switch() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Roar);
+            let foe = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+            let bench = mon(Species::Gyarados, Ability::Pressure, PokemonMove::Splash);
+            let mut state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+            state.p2_active_mons[0].volatiles.push(
+                VolatileStatusState::MoveStatus(VolatileStatus::Ingrain, 0));
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].species, Species::Snorlax, "Ingrain roots the target");
+        }
+
+        // ── Queue purge: a slower queued move must not run for the replacement ───────────────
+
+        #[test]
+        fn phazed_target_slower_move_does_not_run_for_replacement() {
+            // P2's Clefable selects Swords Dance (priority 0); P1's faster Snorlax... no — use Roar
+            // (−6) so P2 acts first? We need P2 to be phazed BEFORE acting: give the phazer a
+            // higher-priority guaranteed-first slot via Whirlwind (−6) vs a −7 move. Trick Room is
+            // −7. P1 Whirlwind (−6) resolves before P2's Trick Room (−7); P2 is switched out, so
+            // Trick Room must never set Trick Room.
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Whirlwind);
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::TrickRoom);
+            let bench = mon(Species::Gyarados, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![bench]);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert_eq!(after.p2_active_mons[0].species, Species::Gyarados, "target was phazed");
+            assert!(
+                after.pseudo_weathers.iter().all(|pw| !matches!(pw, crate::dex_data::PseudoWeather::TrickRoom)),
+                "the switched-out target's queued Trick Room must not execute"
+            );
+        }
+
+        // ── Stomping Tantrum / `last_move_failed` ───────────────────────────────────────────
+
+        #[test]
+        fn confusion_self_hit_sets_last_move_failed() {
+            let mut user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Tackle);
+            user.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Confusion, 4));
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            let outcomes = run(state, 0, 0);
+            // The self-hit branch: P1 took damage, P2 untouched (Tackle never executed).
+            let self_hit = outcomes.iter().find(|(s, _)| matches!(s,
+                MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].hp < bs.p1_active_mons[0].stats[0]
+                        && bs.p2_active_mons[0].hp == bs.p2_active_mons[0].stats[0]));
+            let (MatchState::BattleState(bs), _) = self_hit.expect("a confusion self-hit branch exists") else { unreachable!() };
+            assert!(bs.p1_active_mons[0].last_move_failed, "confusion self-hit counts as a failed move");
+        }
+
+        #[test]
+        fn status_move_that_changes_nothing_fails() {
+            // Swords Dance already at +6 → no change → last_move_failed.
+            let mut user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::SwordsDance);
+            user.boosts[0] = 6;
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert!(after.p1_active_mons[0].last_move_failed, "a status move that did nothing failed");
+        }
+
+        #[test]
+        fn successful_status_move_clears_failed_even_through_protect() {
+            // Swords Dance is self-targeting, so an opposing Protect cannot stop it: 0 "damage", but
+            // the move still succeeds → not failed (the "0 damage but succeeds" case).
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::SwordsDance);
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert_eq!(after.p1_active_mons[0].boosts[0], 2, "Swords Dance landed");
+            assert!(!after.p1_active_mons[0].last_move_failed, "a successful status move did not fail");
+        }
+
+        #[test]
+        fn thunder_wave_on_already_paralyzed_target_fails() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::ThunderWave);
+            let mut foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            foe.status = Some(Status::Paralysis);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            // Already-statused target → no change in any branch → failed everywhere.
+            for (s, _) in run(state, 0, 0) {
+                if let MatchState::BattleState(bs) = s {
+                    assert!(bs.p1_active_mons[0].last_move_failed, "Thunder Wave on a paralyzed target failed");
+                }
+            }
+        }
+
+        #[test]
+        fn splash_is_a_no_op_success_not_a_failure() {
+            let user = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
+            let foe = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+            let after = extract_battle_state(run(state, 0, 0)).0;
+            assert!(!after.p1_active_mons[0].last_move_failed, "Splash is a no-op success, not a failure");
+        }
+    }
+
 }
