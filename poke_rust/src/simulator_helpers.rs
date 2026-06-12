@@ -1957,7 +1957,7 @@ pub(crate) fn try_consume_mental_herb(mon: &mut PokemonState, items_suppressed: 
     let mental_volatiles = [
         VolatileStatus::Attract,
         VolatileStatus::Taunt,
-        VolatileStatus::Encore,
+        VolatileStatus::Encore(PokemonMove::Struggle),
         VolatileStatus::Torment,
         VolatileStatus::HealBlock,
         VolatileStatus::Disable(PokemonMove::Struggle),
@@ -3996,6 +3996,16 @@ pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
             mon.switched_in_this_turn = false;
             // Roost's Flying-type suppression only lasts the turn it is used.
             remove_status_volatile(mon, &VolatileStatus::Roost);
+            // Encore ends immediately once its move runs out of PP.
+            let encore_move_out_of_pp = mon.volatiles.iter().find_map(|v| match v {
+                VolatileStatusState::MoveStatus(VolatileStatus::Encore(m), _) => Some(m.clone()),
+                _ => None,
+            }).is_some_and(|m| {
+                !mon.moves.iter().zip(mon.move_pp.iter()).any(|(slot, pp)| slot.as_ref() == Some(&m) && *pp > 0)
+            });
+            if encore_move_out_of_pp {
+                remove_status_volatile(mon, &VolatileStatus::Encore(PokemonMove::Struggle));
+            }
         }
         bs.items_consumed_this_turn.clear();
     }
@@ -4952,17 +4962,19 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             let is_move_status = matches!(
                 volatile,
                 VolatileStatus::Disable(_)
-                    | VolatileStatus::Encore
+                    | VolatileStatus::Encore(_)
                     | VolatileStatus::GlaiveRush
                     | VolatileStatus::Taunt
+                    | VolatileStatus::ThroatChop
                     | VolatileStatus::SemiInvulnerable(_)
                     | VolatileStatus::Confusion
             );
 
         let duration = match volatile {
             VolatileStatus::Disable(_) => 4,
-            VolatileStatus::Encore => 3,
+            VolatileStatus::Encore(_) => 3,
             VolatileStatus::Taunt => 3,
+            VolatileStatus::ThroatChop => 2,
             VolatileStatus::GlaiveRush => 1,
             VolatileStatus::SemiInvulnerable(_) => 0,
             VolatileStatus::Confusion => thread_rng().gen_range(2..=5),
@@ -5339,7 +5351,7 @@ fn apply_effect_to_target(
                 volatile,
                 VolatileStatus::Taunt
                     | VolatileStatus::Torment
-                    | VolatileStatus::Encore
+                    | VolatileStatus::Encore(_)
                     | VolatileStatus::Disable(_)
                     | VolatileStatus::Attract
                     | VolatileStatus::HealBlock
@@ -5740,6 +5752,55 @@ pub fn try_apply_disable(state: &mut BattleState, source_slot: FieldSlot, target
     let effect = HitEffect { volatile_status: Some(VolatileStatus::Disable(last_move)), ..Default::default() };
     apply_effect_to_target(state, source_slot, target_slot, &effect, target_slot.player);
     true
+}
+
+/// Moves Encore cannot lock the target into. Mirrors Showdown's `failencore` flag: copying /
+/// move-calling moves, Encore/Mimic/Sketch/Mirror Move, Struggle, and Transform.
+pub(crate) fn encore_immune_move(mv: &PokemonMove) -> bool {
+    matches!(
+        mv,
+        PokemonMove::Struggle
+            | PokemonMove::Encore
+            | PokemonMove::Mimic
+            | PokemonMove::Sketch
+            | PokemonMove::MirrorMove
+            | PokemonMove::Transform
+            | PokemonMove::Metronome
+            | PokemonMove::Assist
+            | PokemonMove::MeFirst
+            | PokemonMove::Copycat
+            | PokemonMove::NaturePower
+            | PokemonMove::SleepTalk
+    )
+}
+
+/// Apply Encore to `target_slot`, locking it into its `last_used_move` for 3 turns. Returns the
+/// encored move on success (so the caller can also rewrite a pending queued action this turn), or
+/// `None` if Encore fails (no last move, an Encore-immune move, or already Encored).
+pub fn try_apply_encore(
+    state: &mut BattleState,
+    source_slot: FieldSlot,
+    target_slot: FieldSlot,
+) -> Option<PokemonMove> {
+    let last_move = {
+        let tgt = get_pokemon_at_slot(state, target_slot)?;
+        let m = match &tgt.last_used_move {
+            Some(mv) if !encore_immune_move(mv) => mv.clone(),
+            _ => return None,
+        };
+        // Fail if the target no longer carries that move with PP (e.g. it was forgotten/0 PP).
+        let has_pp = tgt.moves.iter().zip(tgt.move_pp.iter())
+            .any(|(slot, pp)| slot.as_ref() == Some(&m) && *pp > 0);
+        if !has_pp { return None; }
+        if has_status_volatile(tgt, &VolatileStatus::Encore(PokemonMove::Struggle)) { return None; }
+        m
+    };
+    let effect = HitEffect { volatile_status: Some(VolatileStatus::Encore(last_move.clone())), ..Default::default() };
+    apply_effect_to_target(state, source_slot, target_slot, &effect, target_slot.player);
+    // Confirm the volatile actually landed (Aroma Veil / Mental Herb may have blocked or cured it).
+    let landed = get_pokemon_at_slot(state, target_slot)
+        .is_some_and(|t| has_status_volatile(t, &VolatileStatus::Encore(PokemonMove::Struggle)));
+    if landed { Some(last_move) } else { None }
 }
 
 /// Damage the attacker by `numer/denom` of its max HP (Rough Skin / Aftermath pattern).
@@ -6341,6 +6402,21 @@ pub fn apply_secondary_effects(
             let burn = HitEffect { status: Some(Status::Burn), ..Default::default() };
             for (bs, _) in branches.iter_mut() {
                 apply_effect_to_target(bs, attacker_slot, target_slot, &burn, side_condition_target);
+            }
+        }
+
+        // Throat Chop: on hit, prevent the target from using sound moves for 2 turns. Showdown
+        // stores this as a 100% `onHit` secondary that the parser cannot represent. Blocked by a
+        // Substitute; consecutive hits do not refresh the duration (apply_volatile_to_pokemon's
+        // already-has guard handles that).
+        if move_data.name == PokemonMove::ThroatChop {
+            let target_has_sub = get_pokemon_at_slot(state, target_slot)
+                .is_some_and(|m| has_status_volatile(m, &VolatileStatus::Substitute));
+            if !target_has_sub {
+                let eff = HitEffect { volatile_status: Some(VolatileStatus::ThroatChop), ..Default::default() };
+                for (bs, _) in branches.iter_mut() {
+                    apply_effect_to_target(bs, attacker_slot, target_slot, &eff, side_condition_target);
+                }
             }
         }
 

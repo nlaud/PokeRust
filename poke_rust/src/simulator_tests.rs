@@ -18717,7 +18717,7 @@ mod priority_abilities {
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
                     let encored = bs.p1_active_mons[0].volatiles.iter().any(|v|
-                        matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::Encore, _))
+                        matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::Encore(_), _))
                     );
                     assert!(!encored, "Aroma Veil: Encore should not apply to the holder");
                 }
@@ -20396,4 +20396,253 @@ mod healing_moves {
 
     #[allow(dead_code)]
     fn _slot(player: Player) -> FieldSlot { FieldSlot { player, slot_index: 0 } }
+}
+
+mod move_restriction {
+    use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::simulator::get_possible_commands_for_active_slot;
+    use crate::simulator_helpers;
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+        simple_attack,
+    };
+
+    fn build(species: Species, moves: [Option<PokemonMove>; 4], item: Option<Item>) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50), Some(moves),
+            None, Some(Ability::None), None, item, None, None, None, false,
+        )
+    }
+
+    fn p1_commands(state: &BattleState) -> Vec<BattleCommand> {
+        get_possible_commands_for_active_slot(state, Player::P1, 0, &move_dex(), &pokemon_dex())
+    }
+
+    fn has_move(cmds: &[BattleCommand], mon: &PokemonState, mv: PokemonMove) -> bool {
+        cmds.iter().any(|c| matches!(c,
+            BattleCommand::Attack(a) if mon.moves.get(a.move_slot).and_then(|m| m.as_ref()) == Some(&mv)))
+    }
+
+    fn has_struggle(cmds: &[BattleCommand]) -> bool {
+        cmds.iter().any(|c| matches!(c, BattleCommand::Struggle { .. }))
+    }
+
+    fn has_vol(mon: &PokemonState, v: &VolatileStatus) -> bool {
+        simulator_helpers::has_status_volatile(mon, v)
+    }
+
+    // ── Taunt ────────────────────────────────────────────────────────────────
+    #[test]
+    fn taunt_filters_status_moves_keeps_damaging() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Taunt, 3));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_move(&cmds, &p1, PokemonMove::Tackle), "Taunt keeps damaging moves selectable");
+        assert!(!has_move(&cmds, &p1, PokemonMove::Splash), "Taunt blocks status moves");
+    }
+
+    #[test]
+    fn taunt_with_only_status_moves_forces_struggle() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Splash), Some(PokemonMove::SwordsDance), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Taunt, 3));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_struggle(&cmds), "Taunt + only status moves → Struggle; cmds={:?}", cmds);
+        assert!(!has_move(&cmds, &p1, PokemonMove::Splash));
+    }
+
+    #[test]
+    fn taunt_move_applies_volatile() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        p1.stats[5] = 1;
+        let mut p2 = build(Species::Gengar, [Some(PokemonMove::Taunt), None, None, None], None);
+        p2.stats[5] = 200;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Taunt), "Taunt move applies the volatile");
+    }
+
+    #[test]
+    fn faster_taunt_makes_selected_status_move_fail_this_turn() {
+        // P1 selected Swords Dance (legal at turn start); a faster Taunt lands first and the
+        // status move fails this turn, so no +2 Attack is applied.
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::SwordsDance), None, None, None], None);
+        p1.stats[5] = 1;
+        let mut p2 = build(Species::Gengar, [Some(PokemonMove::Taunt), None, None, None], None);
+        p2.stats[5] = 200;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Taunt));
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 0, "faster Taunt makes Swords Dance fail this turn");
+    }
+
+    // ── Throat Chop ──────────────────────────────────────────────────────────
+    #[test]
+    fn throat_chop_blocks_sound_moves_in_command_list() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::HyperVoice), Some(PokemonMove::Tackle), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::ThroatChop, 2));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(!has_move(&cmds, &p1, PokemonMove::HyperVoice), "Throat Chop blocks sound moves");
+        assert!(has_move(&cmds, &p1, PokemonMove::Tackle), "Throat Chop leaves non-sound moves selectable");
+    }
+
+    #[test]
+    fn throat_chop_applies_volatile_on_hit() {
+        let mut p1 = build(Species::Gengar, [Some(PokemonMove::ThroatChop), None, None, None], None);
+        p1.stats[5] = 200;
+        let mut p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        p2.stats[5] = 1;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::ThroatChop), "Throat Chop applies its volatile on hit");
+    }
+
+    #[test]
+    fn faster_throat_chop_makes_selected_sound_move_fail() {
+        // P1 selected Hyper Voice (sound); a faster Throat Chop lands and the sound move fails,
+        // so P2 (the Throat Chop user) takes no Hyper Voice damage.
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::HyperVoice), None, None, None], None);
+        p1.stats[5] = 1;
+        let mut p2 = build(Species::Gengar, [Some(PokemonMove::ThroatChop), None, None, None], None);
+        p2.stats[5] = 200;
+        let p2_max = p2.stats[0];
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::ThroatChop));
+        assert_eq!(bs.p2_active_mons[0].hp, p2_max, "faster Throat Chop makes the sound move fail (no damage dealt)");
+    }
+
+    // ── Torment ──────────────────────────────────────────────────────────────
+    #[test]
+    fn torment_blocks_repeating_last_move() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Tackle), Some(PokemonMove::BodySlam), None, None], None);
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Torment, 0));
+        p1.last_used_move = Some(PokemonMove::Tackle);
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(!has_move(&cmds, &p1, PokemonMove::Tackle), "Torment blocks repeating the last move");
+        assert!(has_move(&cmds, &p1, PokemonMove::BodySlam), "Torment allows a different move");
+    }
+
+    #[test]
+    fn torment_plus_choice_forces_struggle() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Some(Item::ChoiceBand));
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Torment, 0));
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(PokemonMove::Tackle), 0));
+        p1.last_used_move = Some(PokemonMove::Tackle);
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_struggle(&cmds), "Choice + Torment on the locked move → Struggle; cmds={:?}", cmds);
+        assert!(!has_move(&cmds, &p1, PokemonMove::Tackle));
+    }
+
+    // ── Encore ───────────────────────────────────────────────────────────────
+    #[test]
+    fn encore_forces_only_the_encored_move() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Encore(PokemonMove::Splash), 3));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_move(&cmds, &p1, PokemonMove::Splash), "Encore forces the encored move");
+        assert!(!has_move(&cmds, &p1, PokemonMove::Tackle), "Encore blocks all other moves");
+    }
+
+    #[test]
+    fn encore_plus_disable_forces_struggle() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Splash), Some(PokemonMove::Tackle), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Encore(PokemonMove::Splash), 3));
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Disable(PokemonMove::Splash), 4));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_struggle(&cmds), "Encore + Disable on the encored move → Struggle; cmds={:?}", cmds);
+    }
+
+    #[test]
+    fn encore_ends_when_encored_move_runs_out_of_pp() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Splash), Some(PokemonMove::Tackle), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Encore(PokemonMove::Splash), 3));
+        p1.move_pp[0] = 0; // encored Splash has no PP → Encore has effectively ended
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_move(&cmds, &p1, PokemonMove::Tackle), "Encore ends once its move is out of PP; other moves usable");
+    }
+
+    #[test]
+    fn encore_fails_with_no_last_move() {
+        let mut p1 = build(Species::Gengar, [Some(PokemonMove::Encore), None, None, None], None);
+        p1.stats[5] = 200;
+        let mut p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        p2.stats[5] = 1;
+        p2.last_used_move = None; // never acted → Encore fails
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::Encore(PokemonMove::Struggle)),
+            "Encore fails when the target has no last move");
+    }
+
+    #[test]
+    fn encore_mid_turn_replaces_queued_move() {
+        // P1 (faster) encores P2. P2 selected Splash this turn but its last move was Tackle, so the
+        // queued Splash is rewritten to Tackle and P2 damages P1 this very turn. P1 is Normal-type
+        // so the forced Tackle connects.
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Encore), None, None, None], None);
+        p1.stats[5] = 200;
+        let p1_max = p1.stats[0];
+        let mut p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), Some(PokemonMove::Tackle), None, None], None);
+        p2.stats[5] = 1;
+        p2.last_used_move = Some(PokemonMove::Tackle);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), // P2 selected Splash (slot 0)
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::Encore(PokemonMove::Struggle)), "Encore applied");
+        assert!(bs.p1_active_mons[0].hp < p1_max,
+            "Encore rewrote P2's queued Splash to Tackle, damaging P1 this turn");
+    }
 }

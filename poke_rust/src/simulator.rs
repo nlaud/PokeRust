@@ -829,6 +829,29 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
+    // Move-restriction enforcement at execution time: a move that became illegal AFTER it was
+    // selected — a faster Taunt or Throat Chop applied this turn, or a Disable from Cursed Body —
+    // fails here. Mirrors flinch handling: the move is prevented, counts as failed, and consumes no
+    // PP. Struggle is exempt; Torment and Encore are intentionally NOT checked here (Torment still
+    // permits the move selected the turn it lands, and Encore forces a move rather than failing one).
+    if action.move_name != PokemonMove::Struggle {
+        let blocked_by_taunt = matches!(move_data.category, MoveCategory::Status)
+            && simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::Taunt);
+        let blocked_by_throat_chop = simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Sound)
+            && simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::ThroatChop);
+        let blocked_by_disable = attacker.volatiles.iter().any(|v| matches!(
+            v,
+            crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Disable(m), _) if *m == action.move_name
+        ));
+        if blocked_by_taunt || blocked_by_throat_chop || blocked_by_disable {
+            if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                mon.last_move_failed = true;
+                mon.stall_counter = 0;
+            }
+            return vec![(MatchState::BattleState(next_state), 1.0)];
+        }
+    }
+
     // Handle charging and semi-invulnerability mechanics
     if let Some(outcomes) = handle_charging_and_semi_invulnerability(&state, &mut attacker, action, move_data, &mut next_state) {
         return outcomes;
@@ -1275,6 +1298,30 @@ fn possible_damage_outcomes_for_move(
             return simulator_helpers::coalesce_branches(result);
         }
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+    }
+
+    // Encore: lock the target into repeating its last move for 3 turns. If the target still has a
+    // pending move action this turn (it acts after the Encore user), rewrite that queued action to
+    // the encored move so it is forced THIS turn.
+    if move_name == PokemonMove::Encore {
+        let target_slot = target_slots[0];
+        match simulator_helpers::try_apply_encore(&mut next_state, action.user_slot, target_slot) {
+            Some(encored_move) => {
+                // Mid-turn replacement: rewrite the target's still-queued MoveAction.
+                let new_priority = move_dex.get(&encored_move).map(|d| d.priority).unwrap_or(0);
+                for queued in next_state.action_queue.iter_mut() {
+                    if let Action::MoveAction(ma) = queued {
+                        if ma.user_slot == target_slot {
+                            ma.move_name = encored_move.clone();
+                            ma.priority = new_priority;
+                        }
+                    }
+                }
+                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+            }
+            None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
+        }
     }
 
     // Heal Bell: a sound-based move that cures the status of the user, its entire party
@@ -2229,6 +2276,22 @@ fn generate_commands_for_active(
         }
     });
 
+    // Move-restriction volatiles. Encore forces a single move (unless that move has run out of PP,
+    // in which case Encore has effectively ended); Taunt blocks status moves; Throat Chop blocks
+    // sound moves; Torment blocks repeating the last move used.
+    let encored_move: Option<PokemonMove> = mon.volatiles.iter().find_map(|v| {
+        if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Encore(m), _) = v {
+            Some(m.clone())
+        } else {
+            None
+        }
+    }).filter(|m| {
+        mon.moves.iter().zip(mon.move_pp.iter()).any(|(slot, pp)| slot.as_ref() == Some(m) && *pp > 0)
+    });
+    let taunted = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Taunt);
+    let throat_chopped = simulator_helpers::has_status_volatile(mon, &VolatileStatus::ThroatChop);
+    let tormented = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Torment);
+
     // Attacks: filter by choice-lock and 0-PP, then fall back to Struggle.
     let mut emitted_attack = false;
     for (i, move_name_opt) in mon.moves.iter().enumerate() {
@@ -2248,6 +2311,26 @@ fn generate_commands_for_active(
             crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Disable(m), _) if m == move_name
         ));
         if is_disabled { continue; }
+
+        // Encore: only the encored move is selectable.
+        if let Some(ref enc) = encored_move {
+            if move_name != enc { continue; }
+        }
+
+        // Taunt: status moves cannot be selected.
+        if taunted && move_dex.get(move_name).map_or(false, |d| matches!(d.category, MoveCategory::Status)) {
+            continue;
+        }
+
+        // Throat Chop: sound-based moves cannot be selected.
+        if throat_chopped
+            && move_dex.get(move_name).map_or(false, |d| simulator_helpers::move_has_flag(d, &crate::dex_data::MoveFlag::Sound))
+        {
+            continue;
+        }
+
+        // Torment: the same move cannot be used twice in a row.
+        if tormented && mon.last_used_move.as_ref() == Some(move_name) { continue; }
 
         let target_type = move_dex.get(move_name).map(|d| &d.target).unwrap_or(&MoveTarget::Normal);
 
