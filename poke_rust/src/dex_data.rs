@@ -249,7 +249,9 @@ pub enum SlotCondition {
     HealingWish,
     LunarDance,
     RevivalBlessing,
-    Wish,
+    /// Pending Wish: `heal` HP (½ the wisher's max HP) is restored to whatever Pokémon
+    /// occupies this slot when `turns_remaining` reaches 0 at end of turn.
+    Wish { heal: u16, turns_remaining: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -627,7 +629,9 @@ fn parse_slot_condition(s: &str) -> Option<SlotCondition> {
         "healingwish" => Some(SlotCondition::HealingWish),
         "lunardance" => Some(SlotCondition::LunarDance),
         "revivalblessing" => Some(SlotCondition::RevivalBlessing),
-        "wish" => Some(SlotCondition::Wish),
+        // Wish is applied via a dedicated move handler that computes the heal amount from the
+        // user's max HP; this placeholder only marks the move as state-changing during parsing.
+        "wish" => Some(SlotCondition::Wish { heal: 0, turns_remaining: 0 }),
         _ => None,
     }
 }

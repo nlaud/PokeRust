@@ -765,6 +765,23 @@ fn no_effect_outcome(
     }
 }
 
+/// Build the standard success outcome for a status move that has already mutated `next_state`
+/// (PP already decremented). Mirrors the confusion-split bookkeeping used by Attract/Disable:
+/// if the user is confused, the move's success branch carries 50% weight alongside the 50%
+/// self-hit branches; otherwise it is the sole 100% outcome.
+fn status_move_self_outcome(
+    next_state: BattleState,
+    confusion_self_hit_outcomes: &Option<Vec<(MatchState, f64)>>,
+) -> Vec<(MatchState, f64)> {
+    let has_confusion = confusion_self_hit_outcomes.is_some();
+    let mut result: Vec<(MatchState, f64)> = Vec::new();
+    if let Some(c) = confusion_self_hit_outcomes {
+        for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+    }
+    result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+    simulator_helpers::coalesce_branches(result)
+}
+
 fn possible_damage_outcomes_for_move(
     state: &BattleState,
     action: &MoveAction,
@@ -1196,6 +1213,32 @@ fn possible_damage_outcomes_for_move(
         target_slots = simulator_helpers::check_and_apply_redirection(&next_state, action.user_slot, target_slots, Some(move_data));
     }
 
+    // Life Dew: restore 1/4 max HP to the user and every ally currently in battle. Heal Block
+    // suppresses the heal per-recipient. Targets "allies" in the data — which excludes the user
+    // and resolves to an empty target list in singles — so it is handled here before the
+    // empty-target early return below.
+    if move_name == PokemonMove::LifeDew {
+        let player = action.user_slot.player;
+        let slot_count = match player {
+            Player::P1 => next_state.p1_active_mons.len(),
+            Player::P2 => next_state.p2_active_mons.len(),
+        };
+        let envs: Vec<_> = (0..slot_count)
+            .map(|i| simulator_helpers::berry_env(&next_state, FieldSlot { player, slot_index: i as u8 }))
+            .collect();
+        let actives = match player {
+            Player::P1 => &mut next_state.p1_active_mons,
+            Player::P2 => &mut next_state.p2_active_mons,
+        };
+        for (i, mon) in actives.iter_mut().enumerate() {
+            if mon.fainted || simulator_helpers::heal_is_blocked(mon) { continue; }
+            let heal = (mon.stats[0].max(1) as u32 / 4) as u16;
+            simulator_helpers::gain_hp(mon, heal, envs[i]);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     if target_slots.is_empty() {
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
     }
@@ -1232,6 +1275,162 @@ fn possible_damage_outcomes_for_move(
             return simulator_helpers::coalesce_branches(result);
         }
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+    }
+
+    // Heal Bell: a sound-based move that cures the status of the user, its entire party
+    // (including reserves) and any allies. The user is cured even if it has Soundproof; other
+    // active allies with Soundproof are not. Reserves are cured regardless of their ability.
+    if move_name == PokemonMove::HealBell {
+        let player = action.user_slot.player;
+        let user_idx = action.user_slot.slot_index as usize;
+        let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&next_state);
+        let (actives, backs) = match player {
+            Player::P1 => (&mut next_state.p1_active_mons, &mut next_state.p1_back_mons),
+            Player::P2 => (&mut next_state.p2_active_mons, &mut next_state.p2_back_mons),
+        };
+        for (i, mon) in actives.iter_mut().enumerate() {
+            if mon.fainted { continue; }
+            let soundproof = !abilities_suppressed && mon.ability == Ability::Soundproof;
+            if i == user_idx || !soundproof {
+                mon.status = None;
+            }
+        }
+        for mon in backs.iter_mut() {
+            if !mon.fainted { mon.status = None; }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Heal Pulse: restore the target's HP by 1/2 (3/4 with Mega Launcher). Fails if the target
+    // is already at full HP or behind a Substitute, or if the user or target is under Heal Block.
+    if move_name == PokemonMove::HealPulse {
+        let target_slot = target_slots[0];
+        let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&next_state);
+        let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
+        let user_hb = user.map(simulator_helpers::heal_is_blocked).unwrap_or(false);
+        let mega_launcher = user
+            .map(|m| !abilities_suppressed && m.ability == Ability::MegaLauncher)
+            .unwrap_or(false);
+        let target_env = simulator_helpers::berry_env(&next_state, target_slot);
+        let mut heal: Option<u16> = None;
+        if let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot) {
+            let max_hp = target.stats[0].max(1);
+            let full = target.hp >= max_hp;
+            let sub = simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute);
+            if !user_hb && !simulator_helpers::heal_is_blocked(target) && !full && !sub {
+                heal = Some(if mega_launcher {
+                    (max_hp as u32 * 3 / 4) as u16
+                } else {
+                    (max_hp as u32 / 2) as u16
+                });
+            }
+        }
+        match heal {
+            Some(amount) => {
+                if let Some(t) = mon_at_slot_mut(&mut next_state, target_slot) {
+                    simulator_helpers::gain_hp(t, amount, target_env);
+                }
+                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+            }
+            None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
+        }
+    }
+
+    // Pain Split: average the user's and target's current HP, capped at each one's max. Fails if
+    // the target is behind a Substitute. Sets HP directly (ignores type effectiveness; not subject
+    // to Counter/Bide) and is NOT prevented by Heal Block.
+    if move_name == PokemonMove::PainSplit {
+        let target_slot = target_slots[0];
+        let sub = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute))
+            .unwrap_or(false);
+        if sub {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let user_hp = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| m.hp).unwrap_or(0);
+        let target_hp = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| m.hp).unwrap_or(0);
+        let avg = (((user_hp as u32 + target_hp as u32) / 2).max(1)) as u16;
+        if let Some(u) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+            u.hp = avg.min(u.stats[0]);
+        }
+        if let Some(t) = mon_at_slot_mut(&mut next_state, target_slot) {
+            t.hp = avg.min(t.stats[0]);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Strength Sap: heal the user by the target's effective Attack stat (Big Root ×1.3), then
+    // lower the target's Attack by 1. Fails only if the target's Attack is already at -6 (it still
+    // succeeds and heals when the drop is a no-op, e.g. Clear Body). Liquid Ooze on the target
+    // turns the heal into damage to the user; Heal Block prevents only the heal.
+    if move_name == PokemonMove::StrengthSap {
+        let target_slot = target_slots[0];
+        let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
+        let at_min = target.map(|m| m.boosts[0] <= -6).unwrap_or(true);
+        if at_min {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&next_state);
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        let target_ref = target.expect("checked above");
+        let target_atk = simulator_helpers::effective_stat(
+            &next_state, target_ref, crate::dex_data::PokemonStat::Atk, false, false,
+        ).round().max(1.0) as u16;
+        let liquid_ooze = !abilities_suppressed && target_ref.ability == Ability::LiquidOoze;
+        let user_env = simulator_helpers::berry_env(&next_state, action.user_slot);
+        if let Some(user) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+            let amount = simulator_helpers::apply_big_root(user, target_atk, items_suppressed);
+            if liquid_ooze {
+                simulator_helpers::take_damage(user, amount, user_env);
+            } else if !simulator_helpers::heal_is_blocked(user) {
+                simulator_helpers::gain_hp(user, amount, user_env);
+            }
+        }
+        simulator_helpers::apply_opponent_stat_drop(
+            &mut next_state, target_slot, action.user_slot, [-1, 0, 0, 0, 0, 0, 0], items_suppressed, false,
+        );
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Wish: queue a delayed heal of half the user's max HP on the user's slot, resolved at the
+    // end of the NEXT turn to whoever occupies that slot. Fails if a Wish is already pending for
+    // the slot or the user is prevented from healing by Heal Block.
+    if move_name == PokemonMove::Wish {
+        let slot_idx = action.user_slot.slot_index as usize;
+        let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
+        let user_max_hp = user.map(|m| m.stats[0].max(1)).unwrap_or(1);
+        let heal_blocked = user.map(simulator_helpers::heal_is_blocked).unwrap_or(false);
+        let conds = match action.user_slot.player {
+            Player::P1 => &mut next_state.p1_slot_conditions,
+            Player::P2 => &mut next_state.p2_slot_conditions,
+        };
+        let already_pending = conds
+            .get(slot_idx)
+            .map(|c| c.iter().any(|sc| matches!(sc, crate::dex_data::SlotCondition::Wish { .. })))
+            .unwrap_or(false);
+        if heal_blocked || already_pending {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(slot_conds) = conds.get_mut(slot_idx) {
+            slot_conds.push(crate::dex_data::SlotCondition::Wish {
+                heal: (user_max_hp / 2).max(1),
+                turns_remaining: 2,
+            });
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        let has_confusion = confusion_self_hit_outcomes.is_some();
+        let mut result = Vec::new();
+        if let Some(ref c) = confusion_self_hit_outcomes {
+            for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+        }
+        result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+        return simulator_helpers::coalesce_branches(result);
     }
 
     // Calculate targets multiplier (0.75x for 2+ targets, 1.0x for 1 target)
@@ -2365,22 +2564,25 @@ fn apply_post_damage_move_effects(
 
         let max_hp = attacker_mon.stats[0].max(1);
 
+        // Heal Block prevents any HP recovery from moves, draining moves and Shell Bell
+        // (the move still works otherwise; recoil/damage are unaffected).
+        let heal_blocked = simulator_helpers::heal_is_blocked(attacker_mon);
+
         // Unconditional self-heal
-        if move_data.heal_fraction[0] > 0 && move_data.heal_fraction[1] > 0 {
+        if !heal_blocked && move_data.heal_fraction[0] > 0 && move_data.heal_fraction[1] > 0 {
             let heal = ((max_hp as u32 * move_data.heal_fraction[0] as u32) / move_data.heal_fraction[1] as u32) as u16;
             if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
 
         // Drain heal
-        if move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
+        if !heal_blocked && move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
             let heal = ((total_dmg * move_data.drain_fraction[0] as u32) / move_data.drain_fraction[1] as u32) as u16;
             if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
 
         // Shell Bell: restore 1/8 of damage dealt (rounded down) to the attacker.
         // Does not consume the item. Based on damage dealt, not HP lost by target.
-        // TODO: gate on Heal Block when that mechanic is implemented.
-        if attacker_item_active && attacker_mon.item == crate::data::item::Item::ShellBell {
+        if !heal_blocked && attacker_item_active && attacker_mon.item == crate::data::item::Item::ShellBell {
             let heal = (total_dmg / 8) as u16;
             if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
