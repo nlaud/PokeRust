@@ -1839,11 +1839,18 @@ pub fn team_preview_state_from_teamsheets(
     brought_per_side: u8,
     use_stat_points: bool,
 ) -> TeamPreviewState {
+    let p1_mons = parse_team_sheet(p1_path, pokemon_dex, move_dex, use_stat_points);
+    let p1_size = p1_mons.len() as u8;
+    let mut p2_mons = parse_team_sheet(p2_path, pokemon_dex, move_dex, use_stat_points);
+    // Offset P2's mon_ids so they are globally unique across both teams (P1 = 0..n, P2 = n..2n).
+    // This lets a single u8 identify any Pokémon on the field, which is needed to track the
+    // source of binding/trapping volatiles (ends when the trapper leaves the field).
+    for mon in &mut p2_mons { mon.mon_id += p1_size; }
     TeamPreviewState {
         active_per_side,
         brought_per_side,
-        p1_mons: parse_team_sheet(p1_path, pokemon_dex, move_dex, use_stat_points),
-        p2_mons: parse_team_sheet(p2_path, pokemon_dex, move_dex, use_stat_points),
+        p1_mons,
+        p2_mons,
     }
 }
 
@@ -1992,11 +1999,16 @@ fn generate_commands_for_active(
         return locked_charging_commands(mon, &charged_move, &charged_targets);
     }
 
-    // Normal turn: switches first
-    let mut cmds: Vec<BattleCommand> = my_back.iter().enumerate()
-        .filter(|(_, m)| !m.fainted)
-        .map(|(i, _)| BattleCommand::Switch(SwitchCommand { party_index: i }))
-        .collect();
+    // Normal turn: switches first (suppressed while the mon is trapped).
+    let trapped = simulator_helpers::is_trapped(state, mon);
+    let mut cmds: Vec<BattleCommand> = if !trapped {
+        my_back.iter().enumerate()
+            .filter(|(_, m)| !m.fainted)
+            .map(|(i, _)| BattleCommand::Switch(SwitchCommand { party_index: i }))
+            .collect()
+    } else {
+        vec![]
+    };
 
     if mon.fainted { return cmds; }
 
@@ -2869,7 +2881,7 @@ fn perform_self_switch(
                     matches!(v,
                         VolatileStatusState::TurnStatus(Confusion, _)
                         | VolatileStatusState::TurnStatus(FocusEnergy, _)
-                        | VolatileStatusState::TurnStatus(PartiallyTrapped, _)
+                        | VolatileStatusState::TurnStatus(PartiallyTrapped(_), _)
                         | VolatileStatusState::TurnStatus(LeechSeed, _)
                         | VolatileStatusState::TurnStatus(Curse, _)
                         | VolatileStatusState::TurnStatus(Substitute, _)
