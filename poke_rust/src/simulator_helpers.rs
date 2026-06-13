@@ -1515,6 +1515,30 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
         return vec![(dmg, false, 1.0)];
     }
 
+    // One-hit KO moves (Fissure, Guillotine, Horn Drill, Sheer Cold): faint the target
+    // outright. Type immunity (Ground vs Flying, Ice vs Ice for Sheer Cold) and
+    // invulnerability still zero the hit. Sturdy grants full immunity. Dealing the
+    // target's current HP routes Focus Sash / Band / Endure / Disguise through the
+    // normal survive-at-1 pipeline. No crit / spread / roll scaling.
+    if move_data.ohko {
+        let sturdy_immune = !pokemon_ability_is_suppressed(_state, target)
+            && target.ability == Ability::Sturdy;
+        // Sheer Cold cannot affect Ice-type targets (Gen 7+). This is a move-specific
+        // immunity, not a type-chart one (Ice resists Ice at 0.5×, it is not immune).
+        let sheer_cold_ice_immune = move_data.name == crate::data::pokemon_move::PokemonMove::SheerCold
+            && pokemon_has_type(target, &PokemonType::Ice);
+        let dmg = if effectiveness > 0.0
+            && invulnerability_multiplier > 0.0
+            && !sturdy_immune
+            && !sheer_cold_ice_immune
+        {
+            target.hp
+        } else {
+            0
+        };
+        return vec![(dmg, false, 1.0)];
+    }
+
     // Fixed-damage moves: bypass the base-power formula entirely.
     // Type immunity still applies (e.g. Night Shade/Ghost vs Normal → 0),
     // as does the invulnerability multiplier. No crit / spread / roll scaling.
@@ -2928,6 +2952,32 @@ pub fn accuracy_hit_probability(
         && move_hits_minimized_harder(&move_data.name)
     {
         return 1.0;
+    }
+
+    // One-hit KO moves use a level-based accuracy that ignores accuracy/evasion stages
+    // and all accuracy modifiers. They fail outright against a higher-level target (even
+    // under No Guard). Sheer Cold's base is 20 for non-Ice users (30 otherwise).
+    if move_data.ohko {
+        if attacker.level < target.level {
+            return 0.0;
+        }
+        // No Guard (on either side) guarantees the hit.
+        let no_guard = (!pokemon_ability_is_suppressed(state, attacker)
+                && attacker.ability == Ability::NoGuard)
+            || (!pokemon_ability_is_suppressed(state, target)
+                && target.ability == Ability::NoGuard);
+        if no_guard {
+            return 1.0;
+        }
+        let base: i32 = if move_data.name == PokemonMove::SheerCold
+            && !pokemon_has_type(attacker, &PokemonType::Ice)
+        {
+            20
+        } else {
+            30
+        };
+        let acc = (attacker.level as i32 - target.level as i32 + base).clamp(0, 100);
+        return acc as f64 / 100.0;
     }
 
     match move_data.accuracy {
