@@ -3857,6 +3857,94 @@ fn prune_timed_effects<T: Clone>(effects: &mut Vec<T>, turns: &mut Vec<u8>) {
     *turns = kept_turns;
 }
 
+/// Fire end-of-turn effects for volatiles that are about to expire this turn (turns == 1)
+/// or that deal recurring effects (SyrupBomb speed drop). Must be called BEFORE
+/// `decrement_volatile_statuses` so the volatiles are still present when we check them.
+fn apply_volatile_eot_effects(state: &mut BattleState) {
+    let abilities_suppressed = abilities_are_suppressed(state);
+    let items_suppressed = items_are_suppressed(state);
+    let sun_blocks_freeze = weather_is_sunlight(state);
+
+    // ── SyrupBomb: −1 Speed stage each turn the volatile is active ───────────────────────
+    // Collect slots first to avoid borrow conflicts.
+    let syrup_slots: Vec<(Player, usize)> = state.p1_active_mons.iter().enumerate()
+        .filter_map(|(i, m)| {
+            if !m.fainted && m.volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::SyrupBomb, n) if *n > 0))
+            { Some((Player::P1, i)) } else { None }
+        })
+        .chain(state.p2_active_mons.iter().enumerate().filter_map(|(i, m)| {
+            if !m.fainted && m.volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::SyrupBomb, n) if *n > 0))
+            { Some((Player::P2, i)) } else { None }
+        }))
+        .collect();
+
+    for (player, idx) in syrup_slots {
+        let mons = match player {
+            Player::P1 => &mut state.p1_active_mons,
+            Player::P2 => &mut state.p2_active_mons,
+        };
+        if let Some(mon) = mons.get_mut(idx) {
+            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, -1, 0, 0], items_suppressed, false);
+        }
+    }
+
+    // ── Yawn: apply sleep when the volatile expires (turns == 1 → about to be removed) ───
+    let yawn_slots: Vec<(Player, usize)> = state.p1_active_mons.iter().enumerate()
+        .filter_map(|(i, m)| {
+            if !m.fainted && m.volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1)))
+            { Some((Player::P1, i)) } else { None }
+        })
+        .chain(state.p2_active_mons.iter().enumerate().filter_map(|(i, m)| {
+            if !m.fainted && m.volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1)))
+            { Some((Player::P2, i)) } else { None }
+        }))
+        .collect();
+
+    if !yawn_slots.is_empty() {
+        let state_snapshot = state.clone();
+        for (player, idx) in yawn_slots {
+            let mons = match player {
+                Player::P1 => &mut state.p1_active_mons,
+                Player::P2 => &mut state.p2_active_mons,
+            };
+            if let Some(mon) = mons.get_mut(idx) {
+                apply_status_to_pokemon(&state_snapshot, sun_blocks_freeze, mon, &crate::dex_data::Status::Sleep(0));
+            }
+        }
+    }
+
+    // ── PerishSong: faint when counter reaches 1 (about to be removed) ───────────────────
+    let perish_slots: Vec<(Player, usize)> = state.p1_active_mons.iter().enumerate()
+        .filter_map(|(i, m)| {
+            if !m.fainted && m.volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::PerishSong, 1)))
+            { Some((Player::P1, i)) } else { None }
+        })
+        .chain(state.p2_active_mons.iter().enumerate().filter_map(|(i, m)| {
+            if !m.fainted && m.volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::PerishSong, 1)))
+            { Some((Player::P2, i)) } else { None }
+        }))
+        .collect();
+
+    for (player, idx) in perish_slots {
+        let mons = match player {
+            Player::P1 => &mut state.p1_active_mons,
+            Player::P2 => &mut state.p2_active_mons,
+        };
+        if let Some(mon) = mons.get_mut(idx) {
+            if !abilities_suppressed && mon.ability == Ability::MagicGuard { continue; }
+            mon.hp = 0;
+            mon.fainted = true;
+            clear_pokemon_on_faint(mon);
+        }
+    }
+}
+
 fn decrement_volatile_statuses(mons: &mut [PokemonState]) {
     for mon in mons {
         let mut kept = Vec::with_capacity(mon.volatiles.len());
@@ -3933,6 +4021,9 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
 
     prune_timed_effects(&mut state.p1_side_conditions, &mut state.p1_side_condition_turns);
     prune_timed_effects(&mut state.p2_side_conditions, &mut state.p2_side_condition_turns);
+
+    // Before decrementing, fire effects for volatiles that expire this turn.
+    apply_volatile_eot_effects(state);
 
     // Volatile status duration 0 means permanent, so preserve it. (Back mons cannot have volatiles)
     decrement_volatile_statuses(&mut state.p1_active_mons);
@@ -4029,6 +4120,16 @@ fn get_volatile_duration(volatile: &VolatileStatus) -> u8 {
         | VolatileStatus::RagePowder => 1,
         // MustRecharge should last for 2 turns (expires after 1 end-of-turn decrement)
         VolatileStatus::MustRecharge => 2,
+        // Yawn: apply sleep at end of next turn (decrement 2→1→removed+sleep)
+        VolatileStatus::Yawn => 2,
+        // HealBlock: Psychic Noise applies 2-turn block (Heal Block move is Past/nonstandard)
+        VolatileStatus::HealBlock => 2,
+        // SyrupBomb: 3 speed drops over 3 turns (decrement 3→2→1→removed)
+        VolatileStatus::SyrupBomb => 3,
+        // Uproar: lock user into 3 turns (decrement 3→2→1→removed)
+        VolatileStatus::Uproar => 3,
+        // PerishSong: faint after 3 more turns (apply with 4, decrement 4→3→2→1→removed+faint)
+        VolatileStatus::PerishSong => 4,
         // Default: permanent until explicitly removed
         _ => 0,
     }
@@ -4081,6 +4182,13 @@ fn apply_status_to_pokemon(state: &BattleState, sun_blocks_freeze: bool, mon: &m
 
     if matches!(status, Status::Sleep(_)) && pokemon_is_on_terrain(state, mon, &Terrain::ElectricTerrain) {
         return;
+    }
+
+    // Uproar: while any Pokémon on the field is making an uproar, no Pokémon can fall asleep.
+    if matches!(status, Status::Sleep(_)) {
+        let uproar_active = state.p1_active_mons.iter().chain(state.p2_active_mons.iter())
+            .any(|m| !m.fainted && has_status_volatile(m, &VolatileStatus::Uproar));
+        if uproar_active { return; }
     }
 
     if matches!(status, Status::Burn | Status::Poison | Status::ToxicPoison(_) | Status::Paralysis | Status::Sleep(_) | Status::Frozen(_))
@@ -4303,6 +4411,9 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
     // Ghost-types are NOT exempt — they still take chip; they are only exempt from the
     // switch-prevention (enforced separately in `is_trapped`).
     apply_binding_chip_damage(state, &p1_envs, &p2_envs, ctx.abilities_suppressed, ctx.items_suppressed);
+
+    // Salt Cure chip damage: 1/8 HP (1/4 for Water/Steel). Magic Guard prevents.
+    apply_salt_cure_damage(state, &p1_envs, &p2_envs, ctx.abilities_suppressed);
 }
 
 /// Tick pending Wishes on every slot. A Wish set this turn carries `turns_remaining == 2`;
@@ -4482,6 +4593,50 @@ fn apply_binding_chip_damage(
         } else {
             ((max_hp as u32) / 8).max(1) as u16
         };
+        deal_residual_damage(mon, chip, env);
+    }
+}
+
+/// End-of-turn Salt Cure chip damage: 1/8 max HP (1/4 for Water- or Steel-types).
+/// Magic Guard prevents the damage. Called from `apply_pre_status_residuals`.
+fn apply_salt_cure_damage(
+    state: &mut BattleState,
+    p1_envs: &[BerryEnv],
+    p2_envs: &[BerryEnv],
+    abilities_suppressed: bool,
+) {
+    let salt_cured_slots: Vec<(Player, usize)> = {
+        let p1: Vec<_> = state.p1_active_mons.iter().enumerate().filter_map(|(i, m)| {
+            if !m.fainted && has_status_volatile(m, &VolatileStatus::SaltCure) {
+                Some((Player::P1, i))
+            } else { None }
+        }).collect();
+        let p2: Vec<_> = state.p2_active_mons.iter().enumerate().filter_map(|(i, m)| {
+            if !m.fainted && has_status_volatile(m, &VolatileStatus::SaltCure) {
+                Some((Player::P2, i))
+            } else { None }
+        }).collect();
+        p1.into_iter().chain(p2).collect()
+    };
+
+    for (side, slot_idx) in salt_cured_slots {
+        let env = match side {
+            Player::P1 => p1_envs[slot_idx],
+            Player::P2 => p2_envs[slot_idx],
+        };
+        let mons = match side {
+            Player::P1 => &mut state.p1_active_mons,
+            Player::P2 => &mut state.p2_active_mons,
+        };
+        let Some(mon) = mons.get_mut(slot_idx) else { continue; };
+        if mon.fainted { continue; }
+        if !abilities_suppressed && mon.ability == Ability::MagicGuard { continue; }
+
+        let max_hp = mon.stats[0].max(1);
+        let is_water_or_steel = pokemon_has_type(mon, &PokemonType::Water)
+            || pokemon_has_type(mon, &PokemonType::Steel);
+        let divisor: u32 = if is_water_or_steel { 4 } else { 8 };
+        let chip = ((max_hp as u32) / divisor).max(1) as u16;
         deal_residual_damage(mon, chip, env);
     }
 }
@@ -5000,6 +5155,11 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
 /// immediately — appropriate for all self-boost paths (Moxie, post-KO boosts, etc.).
 pub(crate) fn apply_stat_boost_external(mon: &mut PokemonState, boosts: &[i8; 7], items_suppressed: bool) {
     apply_stat_boosts_to_pokemon(mon, boosts, items_suppressed, false);
+}
+
+/// Public thin wrapper around `apply_volatile_to_pokemon` for callers outside this module.
+pub(crate) fn apply_volatile_to_pokemon_pub(state: &BattleState, mon: &mut PokemonState, volatile: &VolatileStatus) {
+    apply_volatile_to_pokemon(state, mon, volatile);
 }
 
 /// Apply a stat boost delta to `mon`, clamping each stage to `[-6, 6]`.
@@ -6482,6 +6642,31 @@ pub fn apply_secondary_effects(
     // These moves store their trap in unparsed Showdown onHit JS, so they are hand-coded.
     for (bs, _) in branches.iter_mut() {
         apply_trapping_move(bs, attacker_slot, target_slot, &move_data.name);
+    }
+
+    // Salt Cure: apply the SaltCure volatile on hit. The condition-based volatile is not
+    // parsed from Showdown's JS condition block, so it is hand-coded here.
+    if move_data.name == PokemonMove::SaltCure {
+        for (bs, _) in branches.iter_mut() {
+            let state_snapshot = bs.clone();
+            if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot) {
+                if !target_mon.fainted {
+                    apply_volatile_to_pokemon(&state_snapshot, target_mon, &VolatileStatus::SaltCure);
+                }
+            }
+        }
+    }
+
+    // Uproar: wake all sleeping Pokémon on the field when first used.
+    // Sleep prevention for subsequent turns is handled in apply_status_to_pokemon.
+    if move_data.name == PokemonMove::Uproar {
+        for (bs, _) in branches.iter_mut() {
+            for mon in bs.p1_active_mons.iter_mut().chain(bs.p2_active_mons.iter_mut()) {
+                if matches!(mon.status, Some(crate::dex_data::Status::Sleep(_))) {
+                    mon.status = None;
+                }
+            }
+        }
     }
 
     // Transform move: deterministic, no branching.

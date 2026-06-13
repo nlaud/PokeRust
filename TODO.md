@@ -44,15 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Volatile status — ongoing debuffs
-Volatiles that apply recurring damage, debuffs, or delayed effects each turn.
-- Perish Song — all on-field Pokémon faint after 3 turns
-- Psychic Noise — Healing Prevented (2 turns)
-- Salt Cure — 1/8 HP per turn; ×2 for Water- and Steel-types
-- Syrup Bomb — Speed drops 1 stage each turn for 3 turns
-- Uproar — user attacks for 3 turns; no Pokémon on field can sleep
-- Yawn — target falls asleep at end of next turn
-
 ### Stat manipulation — clearing and copying
 Remove or duplicate stat-stage changes on the field.
 - Clear Smog — deal damage + reset target's stat changes to zero
