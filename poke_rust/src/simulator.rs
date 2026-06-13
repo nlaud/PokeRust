@@ -1445,6 +1445,74 @@ fn possible_damage_outcomes_for_move(
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
     }
 
+    // Type-changing moves (Soak, Magic Powder, Forest's Curse, Trick-or-Treat, Reflect Type,
+    // Electrify). Each mutates a Pokémon's active types — or, for Electrify, the type of the
+    // target's move this turn — and follows the standard status-move shape: apply via a
+    // helper, decrement PP and coalesce on success, else `no_effect_outcome`.
+    if matches!(
+        move_name,
+        PokemonMove::Soak
+            | PokemonMove::MagicPowder
+            | PokemonMove::ForestsCurse
+            | PokemonMove::TrickorTreat
+            | PokemonMove::ReflectType
+            | PokemonMove::Electrify
+    ) {
+        let target_slot = target_slots[0];
+        let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        // Protect-family blocking (all six carry the protect flag; King's Shield lets status
+        // moves through, handled inside protect_blocks_move).
+        if simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, target_slot, &target, move_data, false,
+        ).is_some() {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        // Magic Powder is a powder move: Grass-types, Overcoat, and Safety Goggles are immune.
+        if move_name == PokemonMove::MagicPowder
+            && simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Powder)
+            && simulator_helpers::is_immune_to_powder(&next_state, &target)
+        {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let applied = match move_name {
+            PokemonMove::Soak => simulator_helpers::try_set_single_type(
+                &mut next_state, target_slot, PokemonType::Water,
+            ),
+            PokemonMove::MagicPowder => simulator_helpers::try_set_single_type(
+                &mut next_state, target_slot, PokemonType::Psychic,
+            ),
+            PokemonMove::ForestsCurse => simulator_helpers::try_add_type(
+                &mut next_state, target_slot, PokemonType::Grass,
+                VolatileStatus::ForestsCurse, PokemonType::Ghost, VolatileStatus::TrickorTreat,
+            ),
+            PokemonMove::TrickorTreat => simulator_helpers::try_add_type(
+                &mut next_state, target_slot, PokemonType::Ghost,
+                VolatileStatus::TrickorTreat, PokemonType::Grass, VolatileStatus::ForestsCurse,
+            ),
+            PokemonMove::ReflectType => simulator_helpers::try_apply_reflect_type(
+                &mut next_state, action.user_slot, target_slot,
+            ),
+            PokemonMove::Electrify => {
+                simulator_helpers::apply_electrify(&mut next_state, action.user_slot, target_slot);
+                true
+            }
+            _ => unreachable!(),
+        };
+        if !applied {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        let has_confusion = confusion_self_hit_outcomes.is_some();
+        let mut result = Vec::new();
+        if let Some(ref c) = confusion_self_hit_outcomes {
+            for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+        }
+        result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+        return simulator_helpers::coalesce_branches(result);
+    }
+
     // Encore: lock the target into repeating its last move for 3 turns. If the target still has a
     // pending move action this turn (it acts after the Encore user), rewrite that queued action to
     // the encored move so it is forced THIS turn.
@@ -4123,6 +4191,12 @@ fn perform_switch_out_in(
 
     let mut leaving = active[slot_idx].clone();
     clear_pokemon_for_switch_out(&mut leaving);
+    // In-battle type changes (Soak, Magic Powder, Forest's Curse, Trick-or-Treat, Reflect
+    // Type) end when the Pokémon leaves the field. Restore the current forme's natural types
+    // from the dex; this is a no-op for unaffected Pokémon and correct after a forme change.
+    if let Some(form_data) = pokemon_dex.get(&leaving.species) {
+        leaving.types = form_data.types.clone();
+    }
 
     // The incoming replacement switched in this turn (Payback won't double against it).
     if let Some(incoming) = back.get_mut(bench_index) {
