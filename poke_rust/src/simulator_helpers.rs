@@ -6657,6 +6657,23 @@ pub fn apply_secondary_effects(
         }
     }
 
+    // Clear Smog: reset all of the target's stat stages to 0 on hit.
+    // The onHit effect is blocked if the target was behind a Substitute (no bypasssub flag).
+    if move_data.name == PokemonMove::ClearSmog {
+        let target_had_sub = get_pokemon_at_slot(state, target_slot)
+            .map(|m| has_status_volatile(m, &VolatileStatus::Substitute))
+            .unwrap_or(false);
+        if !target_had_sub {
+            for (bs, _) in branches.iter_mut() {
+                if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot) {
+                    if !target_mon.fainted {
+                        target_mon.boosts = [0; 7];
+                    }
+                }
+            }
+        }
+    }
+
     // Uproar: wake all sleeping Pokémon on the field when first used.
     // Sleep prevention for subsequent turns is handled in apply_status_to_pokemon.
     if move_data.name == PokemonMove::Uproar {

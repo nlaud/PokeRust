@@ -21203,3 +21203,307 @@ mod volatile_status_debuffs {
             "Second Psychic Noise should not refresh an already-active HealBlock");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stat manipulation — clearing, copying, splitting, swapping
+// Clear Smog, Haze, Psych Up, Guard Split/Swap, Power Shift/Trick, Power Split/Swap, Speed Swap
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod stat_manipulation {
+    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simulator_helpers;
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+        simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn has_vol(mon: &PokemonState, v: &VolatileStatus) -> bool {
+        simulator_helpers::has_status_volatile(mon, v)
+    }
+
+    fn run(p1: PokemonState, p2: PokemonState) -> crate::battle::BattleState {
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        bs
+    }
+
+    // ── Clear Smog ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn clear_smog_resets_target_stat_stages() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::ClearSmog);
+        p1.stats[5] = 200; // faster
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts = [2, -1, 3, 0, 1, 0, -2]; // various stages
+        let bs = run(p1, p2);
+        assert_eq!(bs.p2_active_mons[0].boosts, [0; 7],
+            "Clear Smog should reset all of the target's stat stages to 0");
+    }
+
+    #[test]
+    fn clear_smog_does_not_reset_own_stages() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::ClearSmog);
+        p1.stats[5] = 200;
+        p1.boosts[0] = 3; // user has +3 Atk — should be untouched
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 3,
+            "Clear Smog should not touch the user's own stat stages");
+    }
+
+    // ── Haze ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn haze_clears_all_stat_stages_on_field() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Haze);
+        p1.boosts = [2, 0, -1, 0, 3, 0, 0];
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts = [-2, 1, 0, 4, 0, 0, 0];
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts, [0; 7], "Haze should clear user's stat stages");
+        assert_eq!(bs.p2_active_mons[0].boosts, [0; 7], "Haze should clear target's stat stages");
+    }
+
+    // ── Psych Up ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn psych_up_copies_target_stat_stages() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PsychUp);
+        p1.stats[5] = 200;
+        p1.boosts = [1, 0, 0, 0, 0, 0, 0]; // user has +1 Atk — should be overwritten
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts = [-1, 2, 0, 3, 0, 0, -1]; // target's stages
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts, [-1, 2, 0, 3, 0, 0, -1],
+            "Psych Up should copy all of the target's stat stages to the user");
+        // Target's stages should be unchanged.
+        assert_eq!(bs.p2_active_mons[0].boosts, [-1, 2, 0, 3, 0, 0, -1],
+            "Psych Up should not alter the target's stat stages");
+    }
+
+    #[test]
+    fn psych_up_copies_focus_energy() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PsychUp);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, 0));
+        let bs = run(p1, p2);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::FocusEnergy),
+            "Psych Up should copy Focus Energy volatile from target");
+    }
+
+    #[test]
+    fn psych_up_removes_focus_energy_if_target_lacks_it() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PsychUp);
+        p1.stats[5] = 200;
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, 0));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash); // no Focus Energy
+        let bs = run(p1, p2);
+        assert!(!has_vol(&bs.p1_active_mons[0], &VolatileStatus::FocusEnergy),
+            "Psych Up should remove user's Focus Energy when target does not have it");
+    }
+
+    // ── Guard Split ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn guard_split_averages_def_and_spd() {
+        // stats[]: hp=0, atk=1, def=2, spa=3, spd=4, spe=5
+        let mut p1 = mon(Species::Snorlax, PokemonMove::GuardSplit);
+        p1.stats[5] = 200; // faster
+        p1.stats[2] = 100; // user Def
+        p1.stats[4] = 80;  // user SpD
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[2] = 200; // target Def
+        p2.stats[4] = 160; // target SpD
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[2], 150, "Guard Split: user Def should be (100+200)/2 = 150");
+        assert_eq!(bs.p1_active_mons[0].stats[4], 120, "Guard Split: user SpD should be (80+160)/2 = 120");
+        assert_eq!(bs.p2_active_mons[0].stats[2], 150, "Guard Split: target Def should be (100+200)/2 = 150");
+        assert_eq!(bs.p2_active_mons[0].stats[4], 120, "Guard Split: target SpD should be (80+160)/2 = 120");
+    }
+
+    #[test]
+    fn guard_split_uses_floor_division() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::GuardSplit);
+        p1.stats[5] = 200;
+        p1.stats[2] = 101; // odd sum
+        p1.stats[4] = 99;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[2] = 100;
+        p2.stats[4] = 100;
+        let bs = run(p1, p2);
+        // (101+100)/2 = 100 (floor), (99+100)/2 = 99 (floor)
+        assert_eq!(bs.p1_active_mons[0].stats[2], 100, "Guard Split should floor-divide");
+        assert_eq!(bs.p1_active_mons[0].stats[4], 99, "Guard Split should floor-divide");
+    }
+
+    // ── Guard Swap ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn guard_swap_exchanges_def_spd_stages() {
+        // boosts[]: atk=0, def=1, spa=2, spd=3, spe=4, acc=5, eva=6
+        let mut p1 = mon(Species::Snorlax, PokemonMove::GuardSwap);
+        p1.stats[5] = 200;
+        p1.boosts[1] = 2; // user Def boost
+        p1.boosts[3] = -1; // user SpD boost
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts[1] = -3; // target Def boost
+        p2.boosts[3] = 1;  // target SpD boost
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts[1], -3, "Guard Swap: user should receive target's Def stage");
+        assert_eq!(bs.p1_active_mons[0].boosts[3], 1,  "Guard Swap: user should receive target's SpD stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[1], 2,  "Guard Swap: target should receive user's Def stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[3], -1, "Guard Swap: target should receive user's SpD stage");
+    }
+
+    #[test]
+    fn guard_swap_leaves_other_stages_untouched() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::GuardSwap);
+        p1.stats[5] = 200;
+        p1.boosts[0] = 3; // Atk — should not be swapped
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts[0] = -2;
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 3,  "Guard Swap should not touch Attack stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[0], -2, "Guard Swap should not touch Attack stage");
+    }
+
+    // ── Power Split ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_split_averages_atk_and_spa() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerSplit);
+        p1.stats[5] = 200;
+        p1.stats[1] = 50;  // user Atk
+        p1.stats[3] = 60;  // user SpA
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[1] = 150; // target Atk
+        p2.stats[3] = 140; // target SpA
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[1], 100, "Power Split: user Atk should be (50+150)/2 = 100");
+        assert_eq!(bs.p1_active_mons[0].stats[3], 100, "Power Split: user SpA should be (60+140)/2 = 100");
+        assert_eq!(bs.p2_active_mons[0].stats[1], 100, "Power Split: target Atk should be (50+150)/2 = 100");
+        assert_eq!(bs.p2_active_mons[0].stats[3], 100, "Power Split: target SpA should be (60+140)/2 = 100");
+    }
+
+    // ── Power Swap ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_swap_exchanges_atk_spa_stages() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerSwap);
+        p1.stats[5] = 200;
+        p1.boosts[0] = 4; // user Atk stage
+        p1.boosts[2] = -2; // user SpA stage
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts[0] = -1; // target Atk stage
+        p2.boosts[2] = 3;  // target SpA stage
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts[0], -1, "Power Swap: user receives target's Atk stage");
+        assert_eq!(bs.p1_active_mons[0].boosts[2], 3,  "Power Swap: user receives target's SpA stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[0], 4,  "Power Swap: target receives user's Atk stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[2], -2, "Power Swap: target receives user's SpA stage");
+    }
+
+    // ── Speed Swap ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn speed_swap_exchanges_raw_speed_stats() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SpeedSwap);
+        p1.stats[5] = 200; // user Speed
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[5] = 80;  // target Speed
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[5], 80,  "Speed Swap: user should have target's original Speed");
+        assert_eq!(bs.p2_active_mons[0].stats[5], 200, "Speed Swap: target should have user's original Speed");
+    }
+
+    // ── Power Trick ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_trick_swaps_own_atk_and_def() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerTrick);
+        p1.stats[1] = 130; // Atk
+        p1.stats[2] = 65;  // Def
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[1], 65,  "Power Trick: Atk should become old Def");
+        assert_eq!(bs.p1_active_mons[0].stats[2], 130, "Power Trick: Def should become old Atk");
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PowerTrick),
+            "Power Trick volatile should be applied");
+    }
+
+    #[test]
+    fn power_trick_second_use_reverts_swap() {
+        // First use: swap. Apply volatile manually to simulate a second use.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerTrick);
+        p1.stats[1] = 130; // original Atk (currently set as Def due to ongoing swap)
+        p1.stats[2] = 65;  // original Def (currently set as Atk)
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::PowerTrick, 0));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run(p1, p2);
+        // Second use should swap back: stats[1]=65 (was 130), stats[2]=130 (was 65)
+        assert_eq!(bs.p1_active_mons[0].stats[1], 65,  "Power Trick second use: Atk reverts");
+        assert_eq!(bs.p1_active_mons[0].stats[2], 130, "Power Trick second use: Def reverts");
+        assert!(!has_vol(&bs.p1_active_mons[0], &VolatileStatus::PowerTrick),
+            "Power Trick volatile should be removed on second use");
+    }
+
+    #[test]
+    fn power_trick_reverts_on_switch_out() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        p1.stats[1] = 65;  // currently swapped (Atk is holding Def value)
+        p1.stats[2] = 130; // currently swapped (Def is holding Atk value)
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::PowerTrick, 0));
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let mut state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        // The Snorlax switched to bench — its stats should be reverted.
+        let snorlax = &bs.p1_back_mons[0];
+        assert_eq!(snorlax.stats[1], 130, "Power Trick: Atk should be restored on switch-out");
+        assert_eq!(snorlax.stats[2], 65,  "Power Trick: Def should be restored on switch-out");
+        assert!(!has_vol(snorlax, &VolatileStatus::PowerTrick),
+            "Power Trick volatile should be cleared on switch-out");
+    }
+
+    // ── Power Shift ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_shift_swaps_own_atk_and_def() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerShift);
+        p1.stats[1] = 110; // Atk
+        p1.stats[2] = 80;  // Def
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[1], 80,  "Power Shift: Atk should become old Def");
+        assert_eq!(bs.p1_active_mons[0].stats[2], 110, "Power Shift: Def should become old Atk");
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PowerShift),
+            "Power Shift volatile should be applied");
+    }
+}
