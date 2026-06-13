@@ -195,6 +195,7 @@ pub enum VolatileStatus {
     Powder,
     PowerShift,
     PowerTrick,
+    SpeedSwap(u16),
     PerishSong,
     Rage,
     RagePowder,

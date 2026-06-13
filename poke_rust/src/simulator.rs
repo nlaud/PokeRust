@@ -1669,9 +1669,13 @@ fn possible_damage_outcomes_for_move(
         let user_spe = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[5]).unwrap_or(0);
         let target_spe = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[5]).unwrap_or(0);
         if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            simulator_helpers::remove_status_volatile(user, &VolatileStatus::SpeedSwap(0));
+            user.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpeedSwap(user_spe), 0));
             user.stats[5] = target_spe;
         }
         if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            simulator_helpers::remove_status_volatile(target, &VolatileStatus::SpeedSwap(0));
+            target.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpeedSwap(target_spe), 0));
             target.stats[5] = user_spe;
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
@@ -3296,10 +3300,21 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     // Revert Power Trick / Power Shift stat swap before clearing volatiles.
     let had_power_trick_swap = simulator_helpers::has_status_volatile(mon, &VolatileStatus::PowerTrick)
         || simulator_helpers::has_status_volatile(mon, &VolatileStatus::PowerShift);
+    // Revert Speed Swap: restore the original Speed stored in the volatile.
+    let original_spe = mon.volatiles.iter().find_map(|v| {
+        if let crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpeedSwap(spe), _) = v {
+            Some(*spe)
+        } else {
+            None
+        }
+    });
     mon.volatiles.clear();
     mon.boosts.iter_mut().for_each(|b| *b = 0);
     if had_power_trick_swap {
         mon.stats.swap(1, 2);
+    }
+    if let Some(spe) = original_spe {
+        mon.stats[5] = spe;
     }
     if matches!(mon.status, Some(Status::ToxicPoison(_))) {
         mon.status = Some(Status::ToxicPoison(0));

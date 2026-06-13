@@ -21506,4 +21506,84 @@ mod stat_manipulation {
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PowerShift),
             "Power Shift volatile should be applied");
     }
+
+    // ── Switch-out clearing ───────────────────────────────────────────────────
+
+    #[test]
+    fn guard_swap_received_stages_cleared_on_switch_out() {
+        // After Guard Swap the user holds the target's Def/SpD stages in their boosts array.
+        // All boost stages are zeroed by clear_pokemon_for_switch_out, so switching out
+        // should remove them.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        p1.boosts[1] = -3; // Def stage received from Guard Swap
+        p1.boosts[3] = 2;  // SpD stage received from Guard Swap
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        let snorlax = &bs.p1_back_mons[0];
+        assert_eq!(snorlax.boosts[1], 0, "Guard Swap: received Def stage cleared on switch-out");
+        assert_eq!(snorlax.boosts[3], 0, "Guard Swap: received SpD stage cleared on switch-out");
+    }
+
+    #[test]
+    fn power_swap_received_stages_cleared_on_switch_out() {
+        // After Power Swap the user holds the target's Atk/SpA stages in their boosts array.
+        // All boost stages are zeroed by clear_pokemon_for_switch_out.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        p1.boosts[0] = 4;  // Atk stage received from Power Swap
+        p1.boosts[2] = -2; // SpA stage received from Power Swap
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        let snorlax = &bs.p1_back_mons[0];
+        assert_eq!(snorlax.boosts[0], 0, "Power Swap: received Atk stage cleared on switch-out");
+        assert_eq!(snorlax.boosts[2], 0, "Power Swap: received SpA stage cleared on switch-out");
+    }
+
+    #[test]
+    fn speed_swap_stat_reverts_on_switch_out() {
+        // Speed Swap stores the original Speed in a SpeedSwap volatile.
+        // clear_pokemon_for_switch_out restores it so the mon re-enters with its own Speed.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SpeedSwap);
+        p1.stats[5] = 200; // user Speed
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[5] = 80; // target Speed
+        // Run Speed Swap first, then switch out in a second turn.
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let swap_outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (after_swap, _) = extract_battle_state(swap_outcomes);
+        // Confirm the swap happened.
+        assert_eq!(after_swap.p1_active_mons[0].stats[5], 80,  "Speed Swap: user should have target's speed");
+        assert_eq!(after_swap.p2_active_mons[0].stats[5], 200, "Speed Swap: target should have user's speed");
+        // Now switch out P1's Snorlax.
+        let switch_outcomes = run_single_turn(
+            &MatchState::BattleState(after_swap),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(switch_outcomes);
+        let snorlax = &bs.p1_back_mons[0];
+        assert_eq!(snorlax.stats[5], 200, "Speed Swap: original Speed restored on switch-out");
+    }
 }
