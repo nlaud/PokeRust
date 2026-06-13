@@ -1511,6 +1511,194 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
+    // Haze: reset all stat stages for every active Pokémon on the field.
+    // Bypasses Substitute; not blocked by Protect (field-wide effect).
+    if move_name == PokemonMove::Haze {
+        for mon in next_state.p1_active_mons.iter_mut()
+            .chain(next_state.p2_active_mons.iter_mut())
+        {
+            mon.boosts = [0; 7];
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Psych Up: copy target's stat stages and Focus Energy status to the user.
+    // Bypasses Substitute; not blocked by Protect.
+    if move_name == PokemonMove::PsychUp {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let state_snapshot = next_state.clone();
+        let target_boosts = simulator_helpers::get_pokemon_at_slot(&state_snapshot, target_slot)
+            .map(|m| m.boosts)
+            .unwrap_or([0; 7]);
+        let target_has_focus = simulator_helpers::get_pokemon_at_slot(&state_snapshot, target_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusEnergy))
+            .unwrap_or(false);
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            user.boosts = target_boosts;
+            if target_has_focus {
+                if !simulator_helpers::has_status_volatile(user, &VolatileStatus::FocusEnergy) {
+                    simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, user, &VolatileStatus::FocusEnergy);
+                }
+            } else {
+                simulator_helpers::remove_status_volatile(user, &VolatileStatus::FocusEnergy);
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Guard Split: average the user's and target's raw Defense and Sp. Def stats (floor).
+    // Blocked by Substitute; blocked by Protect. stats[]: hp=0,atk=1,def=2,spa=3,spd=4,spe=5
+    if move_name == PokemonMove::GuardSplit {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let target_has_sub = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute))
+            .unwrap_or(false);
+        if !target_has_sub {
+            let user_def = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[2]).unwrap_or(0);
+            let user_spd = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[4]).unwrap_or(0);
+            let target_def = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[2]).unwrap_or(0);
+            let target_spd = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[4]).unwrap_or(0);
+            let new_def = ((user_def as u32 + target_def as u32) / 2) as u16;
+            let new_spd = ((user_spd as u32 + target_spd as u32) / 2) as u16;
+            if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+                user.stats[2] = new_def;
+                user.stats[4] = new_spd;
+            }
+            if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+                target.stats[2] = new_def;
+                target.stats[4] = new_spd;
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Guard Swap: swap the user's and target's Defense and Sp. Def stat stages.
+    // Bypasses Substitute. boosts[]: atk=0,def=1,spa=2,spd=3,spe=4,acc=5,eva=6
+    if move_name == PokemonMove::GuardSwap {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let (user_def_b, user_spd_b, target_def_b, target_spd_b) = {
+            let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
+            let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
+            (user.map(|m| m.boosts[1]).unwrap_or(0),
+             user.map(|m| m.boosts[3]).unwrap_or(0),
+             target.map(|m| m.boosts[1]).unwrap_or(0),
+             target.map(|m| m.boosts[3]).unwrap_or(0))
+        };
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            user.boosts[1] = target_def_b;
+            user.boosts[3] = target_spd_b;
+        }
+        if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            target.boosts[1] = user_def_b;
+            target.boosts[3] = user_spd_b;
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Power Split: average the user's and target's raw Attack and Sp. Atk stats (floor).
+    // Blocked by Substitute; blocked by Protect. stats[]: atk=1, spa=3
+    if move_name == PokemonMove::PowerSplit {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let target_has_sub = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute))
+            .unwrap_or(false);
+        if !target_has_sub {
+            let user_atk = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[1]).unwrap_or(0);
+            let user_spa = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[3]).unwrap_or(0);
+            let target_atk = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[1]).unwrap_or(0);
+            let target_spa = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[3]).unwrap_or(0);
+            let new_atk = ((user_atk as u32 + target_atk as u32) / 2) as u16;
+            let new_spa = ((user_spa as u32 + target_spa as u32) / 2) as u16;
+            if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+                user.stats[1] = new_atk;
+                user.stats[3] = new_spa;
+            }
+            if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+                target.stats[1] = new_atk;
+                target.stats[3] = new_spa;
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Power Swap: swap the user's and target's Attack and Sp. Atk stat stages.
+    // Bypasses Substitute. boosts[]: atk=0, spa=2
+    if move_name == PokemonMove::PowerSwap {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let (user_atk_b, user_spa_b, target_atk_b, target_spa_b) = {
+            let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
+            let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
+            (user.map(|m| m.boosts[0]).unwrap_or(0),
+             user.map(|m| m.boosts[2]).unwrap_or(0),
+             target.map(|m| m.boosts[0]).unwrap_or(0),
+             target.map(|m| m.boosts[2]).unwrap_or(0))
+        };
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            user.boosts[0] = target_atk_b;
+            user.boosts[2] = target_spa_b;
+        }
+        if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            target.boosts[0] = user_atk_b;
+            target.boosts[2] = user_spa_b;
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Speed Swap: exchange the user's and target's raw Speed stats.
+    // Bypasses Substitute. stats[]: spe=5
+    if move_name == PokemonMove::SpeedSwap {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let user_spe = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[5]).unwrap_or(0);
+        let target_spe = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[5]).unwrap_or(0);
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            user.stats[5] = target_spe;
+        }
+        if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            target.stats[5] = user_spe;
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Power Trick / Power Shift: swap the user's raw Attack and Defense stats.
+    // Using the move again re-swaps (restoring original values). The volatile tracks
+    // whether the swap is currently active; it is reverted on switch-out.
+    if move_name == PokemonMove::PowerTrick || move_name == PokemonMove::PowerShift {
+        let volatile = if move_name == PokemonMove::PowerTrick {
+            VolatileStatus::PowerTrick
+        } else {
+            VolatileStatus::PowerShift
+        };
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            user.stats.swap(1, 2); // Swap raw Atk and Def
+            if simulator_helpers::has_status_volatile(user, &volatile) {
+                simulator_helpers::remove_status_volatile(user, &volatile);
+            } else {
+                user.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(volatile, 0));
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     // Calculate targets multiplier (0.75x for 2+ targets, 1.0x for 1 target)
     let targets_mult = simulator_helpers::damage_targets_multiplier(target_slots.len());
 
@@ -3105,8 +3293,14 @@ pub fn validate_battle_command_combination(cmds: &[BattleCommand]) -> bool {
 /// Reset volatile statuses and boosts on a Pokémon that is switching out.
 fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     use crate::data::species::Species;
+    // Revert Power Trick / Power Shift stat swap before clearing volatiles.
+    let had_power_trick_swap = simulator_helpers::has_status_volatile(mon, &VolatileStatus::PowerTrick)
+        || simulator_helpers::has_status_volatile(mon, &VolatileStatus::PowerShift);
     mon.volatiles.clear();
     mon.boosts.iter_mut().for_each(|b| *b = 0);
+    if had_power_trick_swap {
+        mon.stats.swap(1, 2);
+    }
     if matches!(mon.status, Some(Status::ToxicPoison(_))) {
         mon.status = Some(Status::ToxicPoison(0));
     }
@@ -3218,7 +3412,6 @@ fn perform_self_switch(
                         | VolatileStatusState::TurnStatus(Curse, _)
                         | VolatileStatusState::TurnStatus(Substitute, _)
                         | VolatileStatusState::TurnStatus(Ingrain, _)
-                        | VolatileStatusState::TurnStatus(PowerTrick, _)
                         | VolatileStatusState::TurnStatus(HealBlock, _)
                         | VolatileStatusState::TurnStatus(Embargo, _)
                         | VolatileStatusState::TurnStatus(MagnetRise, _)
