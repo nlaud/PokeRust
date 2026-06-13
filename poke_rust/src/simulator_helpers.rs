@@ -6022,6 +6022,56 @@ fn ability_excluded_from_wandering_spirit(ability: &Ability) -> bool {
     )
 }
 
+/// Abilities with the `cantsuppress` flag — cannot be replaced, suppressed, or given away
+/// by Gastro Acid, Worry Seed, Simple Beam, or as the target of Entrainment.
+pub(crate) fn ability_cannot_be_suppressed(ability: &Ability) -> bool {
+    matches!(ability,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::BattleBond
+        | Ability::Comatose | Ability::Commander | Ability::Disguise | Ability::GulpMissile
+        | Ability::IceFace | Ability::Multitype | Ability::PowerConstruct | Ability::RKSSystem
+        | Ability::Schooling | Ability::ShieldsDown | Ability::StanceChange | Ability::ZerotoHero
+    )
+}
+
+/// Abilities with the `failskillswap` flag — neither side may have these for Skill Swap.
+pub(crate) fn ability_excluded_from_skill_swap(ability: &Ability) -> bool {
+    matches!(ability,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::BattleBond
+        | Ability::Comatose | Ability::Commander | Ability::Disguise | Ability::GulpMissile
+        | Ability::HadronEngine | Ability::HungerSwitch | Ability::IceFace | Ability::Illusion
+        | Ability::Multitype | Ability::NeutralizingGas | Ability::OrichalcumPulse
+        | Ability::PoisonPuppeteer | Ability::PowerConstruct | Ability::Protosynthesis
+        | Ability::QuarkDrive | Ability::RKSSystem | Ability::Schooling | Ability::ShieldsDown
+        | Ability::StanceChange | Ability::TeraShell | Ability::TeraShift | Ability::TeraformZero
+        | Ability::WonderGuard | Ability::ZenMode | Ability::ZerotoHero
+    )
+}
+
+/// Abilities with the `failroleplay` flag — the TARGET cannot have these for Role Play.
+pub(crate) fn ability_cannot_be_role_played(ability: &Ability) -> bool {
+    matches!(ability,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::BattleBond
+        | Ability::Comatose | Ability::Commander | Ability::Disguise | Ability::FlowerGift
+        | Ability::Forecast | Ability::GulpMissile | Ability::IceFace | Ability::Illusion
+        | Ability::Imposter | Ability::Multitype | Ability::NeutralizingGas
+        | Ability::PowerConstruct | Ability::PowerofAlchemy | Ability::Protosynthesis
+        | Ability::QuarkDrive | Ability::Receiver | Ability::RKSSystem | Ability::Schooling
+        | Ability::ShieldsDown | Ability::StanceChange | Ability::Trace | Ability::WonderGuard
+        | Ability::ZenMode | Ability::ZerotoHero
+    )
+}
+
+/// Abilities with the `noentrain` flag — the USER cannot have these for Entrainment.
+pub(crate) fn ability_excluded_from_entrainment_user(ability: &Ability) -> bool {
+    matches!(ability,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::Commander
+        | Ability::Disguise | Ability::FlowerGift | Ability::Forecast | Ability::GulpMissile
+        | Ability::HungerSwitch | Ability::IceFace | Ability::Illusion | Ability::Imposter
+        | Ability::NeutralizingGas | Ability::PowerConstruct | Ability::PowerofAlchemy
+        | Ability::Receiver | Ability::Trace | Ability::ZerotoHero
+    )
+}
+
 /// Return true if infatuation can be applied from `source_slot` to `target_slot`.
 /// Requires opposite, non-genderless genders; target must not already be Attracted or Oblivious.
 pub fn can_be_infatuated(state: &BattleState, source_slot: FieldSlot, target_slot: FieldSlot) -> bool {
