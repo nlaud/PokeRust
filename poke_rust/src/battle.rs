@@ -1,8 +1,10 @@
-use crate::pokemon::PokemonState;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::{PokemonData, PseudoWeather, SideCondition, SelfSwitchType, SlotCondition, Terrain, Weather};
+use crate::dex_data::{
+    PokemonData, PseudoWeather, SelfSwitchType, SideCondition, SlotCondition, Terrain, Weather,
+};
+use crate::pokemon::PokemonState;
 use std::collections::HashMap;
 
 fn humanize_identifier(value: impl AsRef<str>) -> String {
@@ -12,9 +14,11 @@ fn humanize_identifier(value: impl AsRef<str>) -> String {
 
     for current in value.chars() {
         let insert_space = match previous {
-            Some(prev) => (prev.is_ascii_lowercase() && current.is_ascii_uppercase())
-                || (prev.is_ascii_digit() && current.is_ascii_alphabetic())
-                || (prev.is_ascii_alphabetic() && current.is_ascii_digit()),
+            Some(prev) => {
+                (prev.is_ascii_lowercase() && current.is_ascii_uppercase())
+                    || (prev.is_ascii_digit() && current.is_ascii_alphabetic())
+                    || (prev.is_ascii_alphabetic() && current.is_ascii_digit())
+            }
             None => false,
         };
 
@@ -34,26 +38,29 @@ fn species_name(species: &Species) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Player{
+pub enum Player {
     P1,
     P2,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FieldSlot{
+pub struct FieldSlot {
     pub player: Player,
     pub slot_index: u8,
 }
 
 impl std::fmt::Debug for FieldSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let p = match self.player { Player::P1 => "P1", Player::P2 => "P2" };
+        let p = match self.player {
+            Player::P1 => "P1",
+            Player::P2 => "P2",
+        };
         write!(f, "{}_{}", p, self.slot_index)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MoveAction{
+pub struct MoveAction {
     pub move_name: PokemonMove,
     pub priority: i8,
     pub user_slot: FieldSlot,
@@ -65,23 +72,23 @@ pub struct MoveAction{
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SwitchAction{
+pub struct SwitchAction {
     pub user_slot: FieldSlot,
     pub switch_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MegaAction{
+pub struct MegaAction {
     pub user_slot: FieldSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TeraAction{
+pub struct TeraAction {
     pub user_slot: FieldSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Action{
+pub enum Action {
     MoveAction(MoveAction),
     SwitchAction(SwitchAction),
     MegaAction(MegaAction),
@@ -89,9 +96,9 @@ pub enum Action{
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BattleState{
+pub struct BattleState {
     pub active_per_side: u8,
-    
+
     pub p1_active_mons: Vec<PokemonState>,
     pub p2_active_mons: Vec<PokemonState>,
     pub p1_back_mons: Vec<PokemonState>,
@@ -143,63 +150,128 @@ pub struct BattleState{
 /// Format a single Pokémon's state as a multi-line string for display.
 fn format_mon(m: &PokemonState) -> String {
     let stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
-    let stats_str = stat_names.iter().enumerate()
+    let stats_str = stat_names
+        .iter()
+        .enumerate()
         .map(|(i, name)| format!("{}: {}", name, m.stats[i]))
-        .collect::<Vec<_>>().join(", ");
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let boost_names = ["Atk", "Def", "SpA", "SpD", "Spe", "Acc", "Eva"];
-    let active_boosts: Vec<String> = m.boosts.iter().enumerate()
+    let active_boosts: Vec<String> = m
+        .boosts
+        .iter()
+        .enumerate()
         .filter(|(_, b)| **b != 0)
         .map(|(i, b)| format!("{}{:+}", boost_names[i], b))
         .collect();
-    let boosts_str = if active_boosts.is_empty() { "none".to_string() } else { active_boosts.join(", ") };
+    let boosts_str = if active_boosts.is_empty() {
+        "none".to_string()
+    } else {
+        active_boosts.join(", ")
+    };
 
-    let status_str = m.status.as_ref().map(|s| format!("{:?}", s)).unwrap_or_else(|| "Healthy".to_string());
-    let vol_str = if m.volatiles.is_empty() { "none".to_string() }
-                  else { m.volatiles.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ") };
-    let tera_info = if m.is_tera { format!("Tera({:?})", m.tera_type) } else { "No Tera".to_string() };
+    let status_str = m
+        .status
+        .as_ref()
+        .map(|s| format!("{:?}", s))
+        .unwrap_or_else(|| "Healthy".to_string());
+    let vol_str = if m.volatiles.is_empty() {
+        "none".to_string()
+    } else {
+        m.volatiles
+            .iter()
+            .map(|v| format!("{:?}", v))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let tera_info = if m.is_tera {
+        format!("Tera({:?})", m.tera_type)
+    } else {
+        "No Tera".to_string()
+    };
     let mega_info = if m.has_mega_form {
-        m.mega_species.as_ref().map(|s| format!("Mega({:?})", s)).unwrap_or_else(|| "Has Mega (unknown species)".to_string())
-    } else { "No Mega".to_string() };
-    let moves_str = m.moves.iter().enumerate()
+        m.mega_species
+            .as_ref()
+            .map(|s| format!("Mega({:?})", s))
+            .unwrap_or_else(|| "Has Mega (unknown species)".to_string())
+    } else {
+        "No Mega".to_string()
+    };
+    let moves_str = m
+        .moves
+        .iter()
+        .enumerate()
         .map(|(i, mov)| {
-            let name = mov.as_ref().map(|mv| humanize_identifier(format!("{:?}", mv))).unwrap_or_else(|| format!("Move {}", i + 1));
+            let name = mov
+                .as_ref()
+                .map(|mv| humanize_identifier(format!("{:?}", mv)))
+                .unwrap_or_else(|| format!("Move {}", i + 1));
             format!("{} (PP {})", name, m.move_pp.get(i).copied().unwrap_or(0))
         })
-        .collect::<Vec<_>>().join(", ");
+        .collect::<Vec<_>>()
+        .join(", ");
 
     format!(
         "{} ({}/{} HP), Status: {}{}\n    Stats: {}\n    Boosts: {}\n    Volatiles: {}\n    {} | {}\n    Moves: {}",
-        species_name(&m.species), m.hp, m.stats[0], status_str,
+        species_name(&m.species),
+        m.hp,
+        m.stats[0],
+        status_str,
         if m.item != crate::data::item::Item::None {
             format!(", Item: {:?}, Ability: {:?}", m.item, m.ability)
         } else {
             format!(", Ability: {:?}", m.ability)
         },
-        stats_str, boosts_str, vol_str, tera_info, mega_info, moves_str,
+        stats_str,
+        boosts_str,
+        vol_str,
+        tera_info,
+        mega_info,
+        moves_str,
     )
 }
 
 /// Write a labelled team section (active or back) to `f`.
-fn write_team_section(f: &mut std::fmt::Formatter<'_>, label: &str, mons: &[PokemonState]) -> std::fmt::Result {
+fn write_team_section(
+    f: &mut std::fmt::Formatter<'_>,
+    label: &str,
+    mons: &[PokemonState],
+) -> std::fmt::Result {
     writeln!(f, "{}:", label)?;
     if mons.is_empty() {
         writeln!(f, "  (none)")
     } else {
-        writeln!(f, "  {}", mons.iter().map(format_mon).collect::<Vec<_>>().join("\n  "))
+        writeln!(
+            f,
+            "  {}",
+            mons.iter().map(format_mon).collect::<Vec<_>>().join("\n  ")
+        )
     }
 }
 
 impl std::fmt::Display for BattleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Turn {} (Started: {}, Ended: {})", self.turn_number, self.turn_started, self.turn_ended)?;
+        writeln!(
+            f,
+            "Turn {} (Started: {}, Ended: {})",
+            self.turn_number, self.turn_started, self.turn_ended
+        )?;
 
         write_team_section(f, "P1 Active", &self.p1_active_mons)?;
         write_team_section(f, "P1 Back", &self.p1_back_mons)?;
-        writeln!(f, "P1 Has Tera: {} | Has Mega: {}", self.p1_has_tera, self.p1_has_mega)?;
+        writeln!(
+            f,
+            "P1 Has Tera: {} | Has Mega: {}",
+            self.p1_has_tera, self.p1_has_mega
+        )?;
         write_team_section(f, "P2 Active", &self.p2_active_mons)?;
         write_team_section(f, "P2 Back", &self.p2_back_mons)?;
-        writeln!(f, "P2 Has Tera: {} | Has Mega: {}", self.p2_has_tera, self.p2_has_mega)?;
+        writeln!(
+            f,
+            "P2 Has Tera: {} | Has Mega: {}",
+            self.p2_has_tera, self.p2_has_mega
+        )?;
 
         if let Some(weather) = &self.weather {
             if let Some(turns) = self.weather_turns {
@@ -247,21 +319,29 @@ impl std::fmt::Display for BattleState {
             writeln!(f, "P2 Side Conditions: {}", p2_side_strs.join(", "))?;
         }
 
-        let p1_has_slot_conds = self.p1_slot_conditions.iter().any(|slot_conds| !slot_conds.is_empty());
+        let p1_has_slot_conds = self
+            .p1_slot_conditions
+            .iter()
+            .any(|slot_conds| !slot_conds.is_empty());
         if p1_has_slot_conds {
             for (slot_idx, slot_conds) in self.p1_slot_conditions.iter().enumerate() {
                 if !slot_conds.is_empty() {
-                    let slot_strs: Vec<String> = slot_conds.iter().map(|sc| format!("{:?}", sc)).collect();
+                    let slot_strs: Vec<String> =
+                        slot_conds.iter().map(|sc| format!("{:?}", sc)).collect();
                     writeln!(f, "  P1 Slot {}: {}", slot_idx, slot_strs.join(", "))?;
                 }
             }
         }
 
-        let p2_has_slot_conds = self.p2_slot_conditions.iter().any(|slot_conds| !slot_conds.is_empty());
+        let p2_has_slot_conds = self
+            .p2_slot_conditions
+            .iter()
+            .any(|slot_conds| !slot_conds.is_empty());
         if p2_has_slot_conds {
             for (slot_idx, slot_conds) in self.p2_slot_conditions.iter().enumerate() {
                 if !slot_conds.is_empty() {
-                    let slot_strs: Vec<String> = slot_conds.iter().map(|sc| format!("{:?}", sc)).collect();
+                    let slot_strs: Vec<String> =
+                        slot_conds.iter().map(|sc| format!("{:?}", sc)).collect();
                     writeln!(f, "  P2 Slot {}: {}", slot_idx, slot_strs.join(", "))?;
                 }
             }
@@ -279,7 +359,7 @@ impl std::fmt::Display for BattleState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TeamPreviewState{
+pub struct TeamPreviewState {
     pub active_per_side: u8,
     pub brought_per_side: u8,
     pub p1_mons: Vec<PokemonState>,
@@ -287,10 +367,10 @@ pub struct TeamPreviewState{
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MatchState{
+pub enum MatchState {
     BattleState(BattleState),
     TeamPreviewState(TeamPreviewState),
-    GameOverState{winner:Player},
+    GameOverState { winner: Player },
 }
 
 impl std::fmt::Display for MatchState {
@@ -298,10 +378,18 @@ impl std::fmt::Display for MatchState {
         match self {
             MatchState::BattleState(bs) => write!(f, "{}", bs),
             MatchState::TeamPreviewState(tp) => {
-                write!(f, "TeamPreview: P1={} mons, P2={} mons", tp.p1_mons.len(), tp.p2_mons.len())
+                write!(
+                    f,
+                    "TeamPreview: P1={} mons, P2={} mons",
+                    tp.p1_mons.len(),
+                    tp.p2_mons.len()
+                )
             }
             MatchState::GameOverState { winner } => {
-                let w = match winner { Player::P1 => "P1", Player::P2 => "P2" };
+                let w = match winner {
+                    Player::P1 => "P1",
+                    Player::P2 => "P2",
+                };
                 write!(f, "GameOver: winner={}", w)
             }
         }
@@ -322,8 +410,12 @@ impl std::fmt::Debug for AttackCommand {
         if let Some(t) = &self.target {
             write!(f, "->{:?}", t)?;
         }
-        if self.terastallize { write!(f, " TERA")?; }
-        if self.mega_evolve { write!(f, " MEGA")?; }
+        if self.terastallize {
+            write!(f, " TERA")?;
+        }
+        if self.mega_evolve {
+            write!(f, " MEGA")?;
+        }
         write!(f, ")")
     }
 }
@@ -345,7 +437,9 @@ pub enum BattleCommand {
     Switch(SwitchCommand),
     /// Forced when the holder has no usable move (all PP exhausted, or choice-locked move is out of PP).
     /// Carries no tera/mega fields — the holder cannot Tera or Mega Evolve on a Struggle turn.
-    Struggle { target: Option<FieldSlot> },
+    Struggle {
+        target: Option<FieldSlot>,
+    },
     Pass,
 }
 
@@ -356,7 +450,9 @@ impl std::fmt::Debug for BattleCommand {
             BattleCommand::Switch(s) => write!(f, "{:?}", s),
             BattleCommand::Struggle { target } => {
                 write!(f, "Struggle")?;
-                if let Some(t) = target { write!(f, "->{:?}", t)?; }
+                if let Some(t) = target {
+                    write!(f, "->{:?}", t)?;
+                }
                 Ok(())
             }
             BattleCommand::Pass => write!(f, "Pass"),
@@ -372,7 +468,11 @@ pub struct TeamPreviewCommand {
 
 impl std::fmt::Debug for TeamPreviewCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Preview({:?} | {:?})", self.active_indices, self.back_indices)
+        write!(
+            f,
+            "Preview({:?} | {:?})",
+            self.active_indices, self.back_indices
+        )
     }
 }
 
@@ -381,7 +481,6 @@ pub enum PlayerCommand {
     Battle(Vec<BattleCommand>),
     Pass,
     TeamPreview(TeamPreviewCommand),
-    Forfeit,
 }
 
 impl std::fmt::Debug for PlayerCommand {
@@ -390,14 +489,15 @@ impl std::fmt::Debug for PlayerCommand {
             PlayerCommand::Battle(cmds) => {
                 write!(f, "Battle[")?;
                 for (i, cmd) in cmds.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{:?}", cmd)?;
                 }
                 write!(f, "]")
-            },
+            }
             PlayerCommand::TeamPreview(cmd) => write!(f, "{:?}", cmd),
-            PlayerCommand::Forfeit => write!(f, "Forfeit"),
-                PlayerCommand::Pass => write!(f, "Pass"),
+            PlayerCommand::Pass => write!(f, "Pass"),
         }
     }
 }
@@ -418,10 +518,20 @@ pub fn change_form(
 
     let old_max_hp = mon.stats[0].max(1);
     let hp_ratio = mon.hp.min(old_max_hp) as f32 / old_max_hp as f32;
-    let stats = crate::pokemon::calc_stats_for_level(form_data.base_stats, mon.ivs, mon.evs, mon.level, &mon.nature);
+    let stats = crate::pokemon::calc_stats_for_level(
+        form_data.base_stats,
+        mon.ivs,
+        mon.evs,
+        mon.level,
+        &mon.nature,
+    );
     let new_max_hp = stats[0].max(1);
     let scaled_hp = (hp_ratio * new_max_hp as f32).floor() as u16;
-    let hp = if mon.hp == 0 { 0 } else { scaled_hp.clamp(1, new_max_hp) };
+    let hp = if mon.hp == 0 {
+        0
+    } else {
+        scaled_hp.clamp(1, new_max_hp)
+    };
 
     mon.species = new_species;
     mon.types = form_data.types.clone();
@@ -433,7 +543,10 @@ pub fn change_form(
 
 /// Applies Mega Evolution to a Pokemon if it is eligible.
 /// Returns true if Mega Evolution was applied.
-pub fn try_mega_evolution(mon: &mut PokemonState, pokemon_dex: &HashMap<Species, PokemonData>) -> bool {
+pub fn try_mega_evolution(
+    mon: &mut PokemonState,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> bool {
     if mon.fainted || mon.is_mega || !mon.has_mega_form {
         return false;
     }
