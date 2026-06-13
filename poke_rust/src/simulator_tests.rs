@@ -23166,4 +23166,241 @@ mod ability_manipulation_moves {
         assert_eq!(bs.p2_active_mons[0].original_ability, None,
             "Simple Beam should fail when target already has Simple");
     }
+
+    // One-hit KO moves: Fissure, Guillotine, Horn Drill, Sheer Cold.
+    mod ohko_moves {
+        use super::*;
+        use std::collections::HashMap;
+        use crate::data::item::Item;
+        use crate::simuilator_test_helpers::hit_probability;
+
+        fn build(
+            pdex: &HashMap<Species, crate::dex_data::PokemonData>,
+            mdex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
+            species: Species,
+            level: u8,
+            first_move: PokemonMove,
+            ability: Ability,
+            item: Option<Item>,
+        ) -> PokemonState {
+            build_pokemon_state(
+                species, pdex, mdex, Some(level),
+                Some([Some(first_move), None, None, None]),
+                None, Some(ability), None, item,
+                None, None, None, false,
+            )
+        }
+
+        fn run(
+            mdex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
+            pdex: &HashMap<Species, crate::dex_data::PokemonData>,
+            p1: PokemonState,
+            p2: PokemonState,
+        ) -> Vec<(MatchState, f64)> {
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                mdex, pdex,
+            )
+        }
+
+        // Probability that P1 wins outright (its OHKO connected and fainted P2's only mon).
+        fn p1_win_probability(outcomes: &[(MatchState, f64)]) -> f64 {
+            outcomes
+                .iter()
+                .filter(|(s, _)| matches!(s, MatchState::GameOverState { winner: Player::P1 }))
+                .map(|(_, p)| *p)
+                .sum()
+        }
+
+        #[test]
+        fn ohko_faints_target_on_hit_at_equal_level() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            let hit = hit_probability(&outcomes, target_hp);
+            assert!((hit - 0.30).abs() < 1e-9, "equal-level OHKO should hit 30%, got {hit}");
+            // The only way to reduce the lone target's HP is the full OHKO faint → P1 win.
+            let win = p1_win_probability(&outcomes);
+            assert!((win - 0.30).abs() < 1e-9, "OHKO hit must faint the target (P1 win 30%), got {win}");
+        }
+
+        #[test]
+        fn ohko_accuracy_increases_with_level_advantage() {
+            // 80 − 50 + 30 = 60% accuracy.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 80, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            let hit = hit_probability(&outcomes, target_hp);
+            assert!((hit - 0.60).abs() < 1e-9, "OHKO 30 levels above target should hit 60%, got {hit}");
+        }
+
+        #[test]
+        fn ohko_fails_against_higher_level_target() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Snorlax, 80, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            let hit = hit_probability(&outcomes, target_hp);
+            assert!(hit < 1e-9, "OHKO must always fail against a higher-level target, got {hit}");
+        }
+
+        #[test]
+        fn sheer_cold_uses_base_20_for_non_ice_user() {
+            // Non-Ice user, equal level → 0 + 20 = 20% accuracy.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::SheerCold, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            let hit = hit_probability(&outcomes, target_hp);
+            assert!((hit - 0.20).abs() < 1e-9, "Sheer Cold from a non-Ice user should hit 20%, got {hit}");
+        }
+
+        #[test]
+        fn sheer_cold_uses_base_30_for_ice_user() {
+            // Ice-type user (Glaceon), equal level → 0 + 30 = 30% accuracy.
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Glaceon, 50, PokemonMove::SheerCold, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            let hit = hit_probability(&outcomes, target_hp);
+            assert!((hit - 0.30).abs() < 1e-9, "Sheer Cold from an Ice-type user should hit 30%, got {hit}");
+        }
+
+        #[test]
+        fn fissure_does_not_affect_flying_type() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Fissure, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Pidgeot, 50, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            assert!(hit_probability(&outcomes, target_hp) < 1e-9,
+                "Fissure (Ground) must not affect a Flying-type target");
+        }
+
+        #[test]
+        fn fissure_does_not_affect_levitate() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Fissure, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::Levitate, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            assert!(hit_probability(&outcomes, target_hp) < 1e-9,
+                "Fissure (Ground) must not affect a Levitate target");
+        }
+
+        #[test]
+        fn guillotine_does_not_affect_ghost_type() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Guillotine, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Gengar, 50, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            assert!(hit_probability(&outcomes, target_hp) < 1e-9,
+                "Guillotine (Normal) must not affect a Ghost-type target");
+        }
+
+        #[test]
+        fn sheer_cold_does_not_affect_ice_type() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::SheerCold, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Glaceon, 50, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            assert!(hit_probability(&outcomes, target_hp) < 1e-9,
+                "Sheer Cold (Ice) must not affect an Ice-type target");
+        }
+
+        #[test]
+        fn sturdy_is_immune_to_ohko() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::Sturdy, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            assert!(hit_probability(&outcomes, target_hp) < 1e-9,
+                "Sturdy must grant full immunity to OHKO moves");
+        }
+
+        #[test]
+        fn focus_sash_survives_ohko_at_full_hp() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, Some(Item::FocusSash));
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            // Focus Sash converts every lethal OHKO hit into survival at 1 HP, so the target
+            // never faints: no game-over branch exists.
+            assert!(p1_win_probability(&outcomes) < 1e-9, "Focus Sash must prevent the OHKO faint");
+            // On the 30% hit branch the holder is left at exactly 1 HP with the Sash consumed.
+            let survive_at_one: f64 = outcomes
+                .iter()
+                .filter_map(|(s, p)| match s {
+                    MatchState::BattleState(bs)
+                        if bs.p2_active_mons[0].hp == 1
+                            && !bs.p2_active_mons[0].fainted
+                            && bs.p2_active_mons[0].item == Item::None => Some(*p),
+                    _ => None,
+                })
+                .sum();
+            assert!((survive_at_one - 0.30).abs() < 1e-9,
+                "Focus Sash should leave the OHKO target at 1 HP on the 30% hit branch, got {survive_at_one}");
+        }
+
+        #[test]
+        fn no_guard_guarantees_ohko_hit() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::NoGuard, None);
+            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            let hit = hit_probability(&outcomes, target_hp);
+            assert!((hit - 1.0).abs() < 1e-9, "No Guard should make an equal-level OHKO always hit, got {hit}");
+        }
+
+        #[test]
+        fn no_guard_still_fails_against_higher_level_target() {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::NoGuard, None);
+            let target = build(&pdex, &mdex, Species::Snorlax, 80, PokemonMove::Splash, Ability::None, None);
+            let target_hp = target.hp;
+            let outcomes = run(&mdex, &pdex, attacker, target);
+
+            assert!(hit_probability(&outcomes, target_hp) < 1e-9,
+                "No Guard does not override the higher-level OHKO failure rule");
+        }
+    }
 }
