@@ -193,7 +193,11 @@ pub enum VolatileStatus {
     Obstruct,
     OctoLock,
     ChoiceLock(PokemonMove),
-    LockedMove,
+    /// User is locked into a rampaging move (Thrash/Outrage/Petal Dance/Raging Fury).
+    /// Payload: the move being rampaged. Stored as MoveStatus(_, turns_remaining) where
+    /// turns_remaining counts *additional* turns still to fire (0 = this was the last one,
+    /// confusion fires at end of it).
+    LockedMove(crate::data::pokemon_move::PokemonMove),
     SemiInvulnerable(PokemonMove),
     Powder,
     PowerShift,
@@ -549,7 +553,7 @@ fn parse_volatile(s: &str) -> Option<VolatileStatus> {
         "perishsong" => Some(VolatileStatus::PerishSong),
         "obstruct" => Some(VolatileStatus::Obstruct),
         "octolock" => Some(VolatileStatus::OctoLock),
-        "lockedmove" => Some(VolatileStatus::LockedMove),
+
         "powder" => Some(VolatileStatus::Powder),
         "powershift" => Some(VolatileStatus::PowerShift),
         "powertrick" => Some(VolatileStatus::PowerTrick),

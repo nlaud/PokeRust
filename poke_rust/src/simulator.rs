@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use rand::Rng;
 use colored::Colorize;
 use crate::battle::{
     MatchState, BattleState, TeamPreviewState, PlayerCommand, BattleCommand,
@@ -489,11 +490,26 @@ fn apply_single_hit_branch(
 
             // Per-turn damage tracking: Assurance reads `damaged_this_turn`; Avalanche
             // checks whether this specific attacker slot damaged the holder this turn.
+            // Counter/Mirror Coat/Metal Burst/Comeuppance read the last hit by category.
             if eff_damage > 0 {
                 target_mon.damaged_this_turn = true;
                 if !target_mon.damaged_by_this_turn.contains(&attack_slot) {
                     target_mon.damaged_by_this_turn.push(attack_slot);
                 }
+                match move_data.category {
+                    crate::dex_data::MoveCategory::Physical => {
+                        target_mon.last_physical_damage_taken = eff_damage;
+                        target_mon.last_physical_attacker = Some(attack_slot);
+                    }
+                    crate::dex_data::MoveCategory::Special => {
+                        target_mon.last_special_damage_taken = eff_damage;
+                        target_mon.last_special_attacker = Some(attack_slot);
+                    }
+                    crate::dex_data::MoveCategory::Status => {}
+                }
+                // Any-category tracker for Metal Burst / Comeuppance.
+                target_mon.last_damage_taken = eff_damage;
+                target_mon.last_damage_attacker = Some(attack_slot);
             }
 
             // Focus Sash was spent to survive this hit.
@@ -826,6 +842,16 @@ fn possible_damage_outcomes_for_move(
             mon.last_move_failed = true;
             mon.stall_counter = 0;
         }
+        // Flinch disrupts a rampage lock. Use post-decrement turns from `attacker`.
+        let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
+            if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+        });
+        if let Some(turns) = rampage_lock_turns {
+            let is_misty = matches!(next_state.terrain, Some(crate::dex_data::Terrain::MistyTerrain));
+            if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                disrupt_rampage_lock(mon, turns, is_misty);
+            }
+        }
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -847,6 +873,16 @@ fn possible_damage_outcomes_for_move(
             if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
                 mon.last_move_failed = true;
                 mon.stall_counter = 0;
+            }
+            // Disable/Taunt/ThroatChop disrupts a rampage lock.
+            let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
+                if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+            });
+            if let Some(turns) = rampage_lock_turns {
+                let is_misty = matches!(next_state.terrain, Some(crate::dex_data::Terrain::MistyTerrain));
+                if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                    disrupt_rampage_lock(mon, turns, is_misty);
+                }
             }
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
@@ -1264,6 +1300,45 @@ fn possible_damage_outcomes_for_move(
 
     if target_slots.is_empty() {
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+    }
+
+    // Counter / Mirror Coat / Metal Burst / Comeuppance: fail if no qualifying damage was
+    // received this turn. The damage computation in calculate_damage_outcomes_for_target
+    // reads `attacker.last_*_damage_taken`; that field is 0 when no hit was received.
+    // We gate here so the move is cleanly flagged as failed (sets last_move_failed, costs PP).
+    {
+        let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
+        let fails = match move_name {
+            PokemonMove::Counter     => user.map_or(true, |m| m.last_physical_damage_taken == 0),
+            PokemonMove::MirrorCoat  => user.map_or(true, |m| m.last_special_damage_taken == 0),
+            PokemonMove::MetalBurst | PokemonMove::Comeuppance
+                                     => user.map_or(true, |m| m.last_damage_taken == 0),
+            _ => false,
+        };
+        if fails {
+            if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                mon.last_move_failed = true;
+            }
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
+    // Counter / Mirror Coat / Metal Burst / Comeuppance: override target to the slot that
+    // last damaged the user this turn, ignoring the player's chosen target.
+    {
+        let override_slot: Option<FieldSlot> = match move_name {
+            PokemonMove::Counter => simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .and_then(|m| m.last_physical_attacker),
+            PokemonMove::MirrorCoat => simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .and_then(|m| m.last_special_attacker),
+            PokemonMove::MetalBurst | PokemonMove::Comeuppance
+                => simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .and_then(|m| m.last_damage_attacker),
+            _ => None,
+        };
+        if let Some(slot) = override_slot {
+            target_slots = vec![slot];
+        }
     }
 
     // Memento: lower target's Attack and Sp. Atk by 2 stages each, then the user faints.
@@ -2518,6 +2593,16 @@ fn possible_damage_outcomes_for_move(
         if let Some(mon) = mon_at_slot_mut(&mut fail_state, action.user_slot) {
             mon.last_move_failed = true;
         }
+        // Paralysis disrupts a rampage lock. Use post-decrement turns from `attacker`.
+        let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
+            if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+        });
+        if let Some(turns) = rampage_lock_turns {
+            let is_misty = matches!(fail_state.terrain, Some(crate::dex_data::Terrain::MistyTerrain));
+            if let Some(mon) = mon_at_slot_mut(&mut fail_state, action.user_slot) {
+                disrupt_rampage_lock(mon, turns, is_misty);
+            }
+        }
         final_outcomes.push((MatchState::BattleState(fail_state), par_fail_prob));
     }
 
@@ -2550,6 +2635,16 @@ fn possible_damage_outcomes_for_move(
             // A move prevented by sleep/freeze counts as failed (Stomping Tantrum / Micle Berry).
             mon.last_move_failed = true;
         }
+        // Sleep/freeze disrupts a rampage lock.
+        let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
+            if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+        });
+        if let Some(turns) = rampage_lock_turns {
+            let is_misty = matches!(status_fail_state.terrain, Some(crate::dex_data::Terrain::MistyTerrain));
+            if let Some(mon) = mon_at_slot_mut(&mut status_fail_state, action.user_slot) {
+                disrupt_rampage_lock(mon, turns, is_misty);
+            }
+        }
         final_outcomes.push((MatchState::BattleState(status_fail_state), status_fail_prob));
     }
 
@@ -2564,6 +2659,16 @@ fn possible_damage_outcomes_for_move(
         // A move prevented by infatuation counts as failed (Stomping Tantrum / Micle Berry).
         if let Some(mon) = mon_at_slot_mut(&mut fail_state, action.user_slot) {
             mon.last_move_failed = true;
+        }
+        // Infatuation disrupts a rampage lock.
+        let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
+            if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+        });
+        if let Some(turns) = rampage_lock_turns {
+            let is_misty = matches!(fail_state.terrain, Some(crate::dex_data::Terrain::MistyTerrain));
+            if let Some(mon) = mon_at_slot_mut(&mut fail_state, action.user_slot) {
+                disrupt_rampage_lock(mon, turns, is_misty);
+            }
         }
         final_outcomes.push((MatchState::BattleState(fail_state), attract_fail_prob));
     }
@@ -2708,6 +2813,52 @@ fn locked_semi_invulnerable_commands(mon: &PokemonState, player: Player) -> Vec<
     vec![BattleCommand::Pass]
 }
 
+/// Disrupt an in-progress rampage lock, clearing the volatile and applying confusion if this is
+/// the final locked turn (per game quirk: disruption on the final turn still confuses).
+///
+/// `post_decrement_turns`: the turns value on the `LockedMove` volatile AFTER
+/// `decrement_move_statuses` has already run (i.e. the value visible in `attacker` or `next_state`
+/// at the point of disruption). `turns == 1` means the next natural decrement would drop the
+/// volatile, making this the last locked turn.
+fn disrupt_rampage_lock(
+    mon: &mut PokemonState,
+    post_decrement_turns: u8,
+    is_misty_terrain: bool,
+) {
+    simulator_helpers::remove_status_volatile(mon, &VolatileStatus::LockedMove(
+        crate::data::pokemon_move::PokemonMove::Tackle // payload ignored by discriminant match
+    ));
+    let is_final_turn = post_decrement_turns == 1;
+    if is_final_turn && !simulator_helpers::is_confused(mon) && !is_misty_terrain {
+        let duration = rand::thread_rng().gen_range(2u8..=5u8);
+        mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+            VolatileStatus::Confusion,
+            duration,
+        ));
+    }
+}
+
+/// Return commands for a Pokémon locked into a rampaging move (Thrash/Outrage/Petal Dance/Raging Fury).
+/// The user must re-select that move and cannot switch. Target is re-resolved normally each turn
+/// (i.e. the only opposing slot — singles; doubles will pick a foe slot below).
+fn locked_rampage_commands(mon: &PokemonState, locked_move: &PokemonMove, player: Player, state: &BattleState, slot_idx: usize) -> Vec<BattleCommand> {
+    let opposing_player = match player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+    // Pick any live opposing slot as the default target (slot 0 in singles).
+    let target = match opposing_player {
+        Player::P1 => state.p1_active_mons.iter().enumerate().find(|(_, m)| !m.fainted).map(|(i, _)| FieldSlot { player: opposing_player, slot_index: i as u8 }),
+        Player::P2 => state.p2_active_mons.iter().enumerate().find(|(_, m)| !m.fainted).map(|(i, _)| FieldSlot { player: opposing_player, slot_index: i as u8 }),
+    };
+    // Validate: rampaging move must still be in the moveset.
+    for (i, move_opt) in mon.moves.iter().enumerate() {
+        if move_opt.as_ref() == Some(locked_move) {
+            // No tera/mega variants while locked — the lock was established without them.
+            return vec![BattleCommand::Attack(AttackCommand { move_slot: i, target, terastallize: false, mega_evolve: false })];
+        }
+    }
+    // Shouldn't happen, but if the move somehow isn't in the moveset, pass.
+    vec![BattleCommand::Pass]
+}
+
 /// Return commands for a Pokémon locked into a charging move (or pass if move not found).
 fn locked_charging_commands(mon: &PokemonState, charged_move: &PokemonMove, charged_targets: &[FieldSlot]) -> Vec<BattleCommand> {
     for (i, move_opt) in mon.moves.iter().enumerate() {
@@ -2766,6 +2917,14 @@ fn generate_commands_for_active(
         if let crate::pokemon::VolatileStatusState::Charging(mov, targets) = v { Some((mov.clone(), targets.clone())) } else { None }
     }) {
         return locked_charging_commands(mon, &charged_move, &charged_targets);
+    }
+
+    // Locked: rampaging (Thrash / Outrage / Petal Dance / Raging Fury).
+    // Cannot switch or use a different move while the LockedMove volatile is present.
+    if let Some(locked_move) = mon.volatiles.iter().find_map(|v| {
+        if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(m), _) = v { Some(m.clone()) } else { None }
+    }) {
+        return locked_rampage_commands(mon, &locked_move, player, state, slot_idx);
     }
 
     // Normal turn: switches first (suppressed while the mon is trapped).
@@ -3233,6 +3392,60 @@ fn apply_post_damage_move_effects(
             }
         }
 
+        // Rampaging moves (Thrash / Outrage / Petal Dance / Raging Fury):
+        //
+        //  Turn 1 (no lock yet): if the move connected push MoveStatus(LockedMove, N) where N ∈
+        //  {2, 3} (rand). N is the total turn count, including this one — so N=2 means "1 more
+        //  locked turn after this". decrement_move_statuses fires at the START of each subsequent
+        //  turn: 3→2→1, then 1 is dropped. When the remaining count == 1 at post-damage time we
+        //  know this is the final locked turn: remove the lock and confuse the user.
+        //
+        //  Disruption (total_dmg == 0: miss, immune, Protect, flinch etc.): remove the lock
+        //  immediately without confusion — UNLESS this was going to be the final turn anyway
+        //  (turns == 1), in which case still confuse per game quirk.
+        let is_rampaging_move = matches!(move_data.name,
+            PokemonMove::Thrash | PokemonMove::Outrage | PokemonMove::PetalDance | PokemonMove::RagingFury
+        );
+        if is_rampaging_move && !attacker_fainted {
+            let existing_lock: Option<u8> = attacker_mon.volatiles.iter().find_map(|v| {
+                if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v {
+                    Some(*t)
+                } else {
+                    None
+                }
+            });
+            match existing_lock {
+                None => {
+                    // First use. Only start the lock if the move actually connected.
+                    if total_dmg > 0 {
+                        let extra_turns = rand::thread_rng().gen_range(2u8..=3u8);
+                        attacker_mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+                            VolatileStatus::LockedMove(move_data.name.clone()),
+                            extra_turns,
+                        ));
+                    }
+                }
+                Some(turns) => {
+                    let is_final_turn = turns == 1;
+                    let disrupted = total_dmg == 0;
+                    // Remove the lock volatile (covers both expiry and disruption).
+                    simulator_helpers::remove_status_volatile(attacker_mon, &VolatileStatus::LockedMove(move_data.name.clone()));
+                    // Confuse the user when the rampage ends naturally (final turn),
+                    // or when disrupted on the final turn (game quirk — still confuses).
+                    // Disrupted mid-rampage (not final turn) → no confusion.
+                    if !disrupted || is_final_turn {
+                        if !simulator_helpers::is_confused(attacker_mon) && !attacker_env.misty_terrain {
+                            let duration = rand::thread_rng().gen_range(2u8..=5u8);
+                            attacker_mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+                                VolatileStatus::Confusion,
+                                duration,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         // Self-destruct moves: faint the user after damage is dealt.
         //
         //  "always" (Explosion, Self-Destruct, Misty Explosion): user always faints,
@@ -3673,6 +3886,12 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     // Per-turn event flags don't follow a Pokémon to the bench.
     mon.damaged_this_turn = false;
     mon.damaged_by_this_turn.clear();
+    mon.last_physical_damage_taken = 0;
+    mon.last_physical_attacker = None;
+    mon.last_special_damage_taken = 0;
+    mon.last_special_attacker = None;
+    mon.last_damage_taken = 0;
+    mon.last_damage_attacker = None;
     mon.stats_raised_this_turn = false;
     mon.stats_lowered_this_turn = false;
     mon.switched_in_this_turn = false;

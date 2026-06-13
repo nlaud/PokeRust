@@ -22464,3 +22464,272 @@ mod self_fainting_and_crash_moves {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rampaging moves (Thrash / Outrage / Petal Dance / Raging Fury)
+// ─────────────────────────────────────────────────────────────────────────────
+mod rampaging_moves {
+    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+    use crate::simulator;
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        )
+    }
+
+    fn has_locked_move_volatile(mon: &PokemonState) -> bool {
+        mon.volatiles.iter().any(|v| matches!(v, VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), _)))
+    }
+
+    fn is_confused(mon: &PokemonState) -> bool {
+        mon.volatiles.iter().any(|v| matches!(v, VolatileStatusState::MoveStatus(VolatileStatus::Confusion, _)))
+    }
+
+    /// Using Thrash on the first turn should apply the LockedMove volatile on the attacker.
+    #[test]
+    fn thrash_applies_locked_move_volatile() {
+        // Snorlax (bulky) vs Blissey (very bulky — won't faint on one Thrash)
+        let p1 = mon(Species::Snorlax, PokemonMove::Thrash);
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(
+                    has_locked_move_volatile(&bs.p1_active_mons[0]),
+                    "Thrash turn 1: attacker must have LockedMove volatile"
+                );
+                assert!(
+                    !is_confused(&bs.p1_active_mons[0]),
+                    "Thrash turn 1: attacker must NOT be confused yet"
+                );
+            }
+        }
+    }
+
+    /// While locked, get_possible_commands_for_active_slot should only return Thrash (no switch).
+    #[test]
+    fn thrash_lock_restricts_commands_to_rampage_move() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Thrash);
+        // Pre-inject a LockedMove volatile to simulate turn 2
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(PokemonMove::Thrash), 2));
+
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+        let cmds = simulator::get_possible_commands_for_active_slot(
+            &state, Player::P1, 0, &move_dex(), &pokemon_dex(),
+        );
+        // Only attack commands for Thrash (no switch commands)
+        for cmd in &cmds {
+            match cmd {
+                crate::battle::BattleCommand::Switch(_) => panic!("locked mon must not be able to switch"),
+                crate::battle::BattleCommand::Attack(a) => assert_eq!(a.move_slot, 0, "wrong move slot"),
+                _ => {}
+            }
+        }
+        assert!(!cmds.is_empty(), "must have at least one command (attack)");
+    }
+
+    /// After the lock expires (turns == 1 entering post-damage), the user should be confused.
+    #[test]
+    fn thrash_final_turn_applies_confusion() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Thrash);
+        // turns = 2 → decrement_move_statuses will bring it to 1 → apply_post_damage detects final turn
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(PokemonMove::Thrash), 2));
+
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        let confused_prob: f64 = outcomes.iter()
+            .filter(|(s, _)| matches!(s, MatchState::BattleState(bs) if is_confused(&bs.p1_active_mons[0])))
+            .map(|(_, p)| p)
+            .sum();
+
+        assert!(
+            confused_prob > 0.9,
+            "Thrash final turn: attacker should become confused (got {:.3})",
+            confused_prob
+        );
+
+        // Lock must be gone after it expires
+        let still_locked_prob: f64 = outcomes.iter()
+            .filter(|(s, _)| matches!(s, MatchState::BattleState(bs) if has_locked_move_volatile(&bs.p1_active_mons[0])))
+            .map(|(_, p)| p)
+            .sum();
+        assert!(
+            still_locked_prob < 0.01,
+            "Thrash final turn: LockedMove volatile must be removed (still_locked_prob = {:.3})",
+            still_locked_prob
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Counter / Mirror Coat / Metal Burst / Comeuppance
+// ─────────────────────────────────────────────────────────────────────────────
+mod counter_retaliation_moves {
+    use crate::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        )
+    }
+
+    /// Counter should return 2x the physical damage the user received this turn.
+    /// We pre-set last_physical_damage_taken to a known value to get a deterministic result.
+    #[test]
+    fn counter_returns_2x_physical_damage() {
+        let mut p1 = mon(Species::Blissey, PokemonMove::Counter);
+        // Simulate having already been hit by 50 physical damage this turn
+        p1.last_physical_damage_taken = 50;
+        p1.last_physical_attacker = Some(FieldSlot { player: Player::P2, slot_index: 0 });
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let p2_max_hp = p2.stats[0];
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let p2_damage = p2_max_hp.saturating_sub(bs.p2_active_mons[0].hp);
+                assert_eq!(p2_damage, 100,
+                    "Counter must deal 2× the physical damage taken (expected 100, got {})", p2_damage);
+            }
+        }
+    }
+
+    /// Counter fails if no physical damage was taken this turn.
+    #[test]
+    fn counter_fails_without_physical_damage() {
+        let p1 = mon(Species::Blissey, PokemonMove::Counter);
+        // last_physical_damage_taken is 0 by default — no hit received
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let p2_max_hp = p2.stats[0];
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, p2_max_hp,
+                    "Counter must fail (deal 0 damage) when no physical damage was taken");
+            }
+        }
+    }
+
+    /// Mirror Coat fails if only physical damage was taken (not special).
+    #[test]
+    fn mirror_coat_fails_on_physical_hit() {
+        let mut p1 = mon(Species::Blissey, PokemonMove::MirrorCoat);
+        // Has physical damage but no special damage
+        p1.last_physical_damage_taken = 50;
+        p1.last_physical_attacker = Some(FieldSlot { player: Player::P2, slot_index: 0 });
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let p2_max_hp = p2.stats[0];
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, p2_max_hp,
+                    "Mirror Coat must fail when only physical damage was taken");
+            }
+        }
+    }
+
+    /// Metal Burst returns 1.5× any damage (physical or special).
+    #[test]
+    fn metal_burst_returns_1_5x_any_damage() {
+        let mut p1 = mon(Species::Registeel, PokemonMove::MetalBurst);
+        // Simulate 40 any-damage taken this turn
+        p1.last_damage_taken = 40;
+        p1.last_damage_attacker = Some(FieldSlot { player: Player::P2, slot_index: 0 });
+
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+        let p2_max_hp = p2.stats[0];
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let p2_damage = p2_max_hp.saturating_sub(bs.p2_active_mons[0].hp);
+                assert_eq!(p2_damage, 60,
+                    "Metal Burst must deal 1.5× the damage taken (expected 60, got {})", p2_damage);
+            }
+        }
+    }
+
+    /// Metal Burst fails if no damage was taken.
+    #[test]
+    fn metal_burst_fails_without_damage() {
+        let p1 = mon(Species::Registeel, PokemonMove::MetalBurst);
+        // No damage taken (all fields default 0)
+
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+        let p2_max_hp = p2.stats[0];
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, p2_max_hp,
+                    "Metal Burst must fail when no damage was taken");
+            }
+        }
+    }
+}

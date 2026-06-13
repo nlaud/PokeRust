@@ -123,6 +123,18 @@ pub struct PokemonState{
     /// Slots whose direct move hits damaged this Pokémon this turn. Read by Avalanche
     /// ("the target damaged the user this turn").
     pub damaged_by_this_turn: Vec<crate::battle::FieldSlot>,
+    /// Damage taken from the most recent physical direct-move hit this turn, and the slot
+    /// that landed it. Overwritten per-hit (multi-hit: final hit wins). Read by Counter.
+    pub last_physical_damage_taken: u16,
+    pub last_physical_attacker: Option<crate::battle::FieldSlot>,
+    /// Damage taken from the most recent special direct-move hit this turn, and the slot
+    /// that landed it. Read by Mirror Coat.
+    pub last_special_damage_taken: u16,
+    pub last_special_attacker: Option<crate::battle::FieldSlot>,
+    /// Damage taken from the most recent direct-move hit this turn (any category), and the
+    /// slot that landed it. Read by Metal Burst and Comeuppance.
+    pub last_damage_taken: u16,
+    pub last_damage_attacker: Option<crate::battle::FieldSlot>,
     /// Any stat stage actually rose this turn (post-clamp). Gates Burning Jealousy's burn.
     pub stats_raised_this_turn: bool,
     /// Any stat stage actually fell this turn (post-clamp). Read by Lash Out's ×2.
@@ -458,6 +470,9 @@ pub fn build_pokemon_state(
         last_move_failed: false, original_ability: None, last_used_move: None,
         one_time_ability_used: false, entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
         item_lost: false, damaged_this_turn: false, damaged_by_this_turn: Vec::new(),
+        last_physical_damage_taken: 0, last_physical_attacker: None,
+        last_special_damage_taken: 0, last_special_attacker: None,
+        last_damage_taken: 0, last_damage_attacker: None,
         stats_raised_this_turn: false, stats_lowered_this_turn: false,
         switched_in_this_turn: false, stall_counter: 0,
         pre_transform: None, evs, ivs,
