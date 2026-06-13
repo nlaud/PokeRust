@@ -44,19 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Stat boosting moves with a cost or condition
-Self-boost moves that require paying HP or meeting a condition.
-- Belly Drum — Attack → +6; cost ½ max HP
-- Charge — +1 Sp. Def; gain Electric Boost status (next Electric move ×2)
-- Clangorous Soul — +1 to all stats; cost 1/3 max HP
-- Dragon Cheer — +1 crit ratio to allies (+2 if Dragon-type)
-- Focus Energy — +2 critical-hit ratio stages
-- Magnetic Flux — +1 Def/Sp. Def to Plus/Minus ability allies
-- Minimize — +2 evasiveness; gain Minimized status
-- Stockpile — +1 Def/Sp. Def; raise Stockpile level (max 3)
-- Spit Up — power 100/200/300 per Stockpile level; fails without Stockpile
-- Swallow — heal ¼/½/full HP per Stockpile level; fails without Stockpile
-
 ### Self-fainting moves
 User faints as part of the move. The replacement-choice flow (already built for
 forced faint and self-switch) handles bringing in the next Pokémon.
