@@ -437,13 +437,53 @@ pub fn crit_is_guaranteed(attacker: &PokemonState, target: &PokemonState, move_n
     merciless_crit || laser_focus || always_crit_move
 }
 
-/// Returns the effective crit ratio after applying held-item boosts (e.g. Scope Lens).
-fn effective_crit_ratio(state: &BattleState, attacker: &PokemonState, base: u8) -> u8 {
+/// Returns the effective crit ratio after applying held-item boosts (Scope Lens) and
+/// status-based crit-stage boosts (Focus Energy +2, Dragon Cheer +1/+2).
+pub(crate) fn effective_crit_ratio(state: &BattleState, attacker: &PokemonState, base: u8) -> u8 {
+    let mut ratio = base;
     if item_is_active(state, attacker) && attacker.item == Item::ScopeLens {
-        base.saturating_add(1)
-    } else {
-        base
+        ratio = ratio.saturating_add(1);
     }
+    if has_status_volatile(attacker, &VolatileStatus::FocusEnergy) {
+        ratio = ratio.saturating_add(2);
+    }
+    ratio = ratio.saturating_add(dragon_cheer_crit_bonus(attacker));
+    ratio
+}
+
+/// The crit-stage bonus a Pokémon is currently receiving from Dragon Cheer (0 if none).
+/// The amount (1 or 2) was locked in when the move was used and is stored on the volatile.
+fn dragon_cheer_crit_bonus(mon: &PokemonState) -> u8 {
+    mon.volatiles.iter().find_map(|v| match v {
+        VolatileStatusState::TurnStatus(VolatileStatus::DragonCheer(n), _)
+        | VolatileStatusState::MoveStatus(VolatileStatus::DragonCheer(n), _) => Some(*n),
+        _ => None,
+    }).unwrap_or(0)
+}
+
+/// The Pokémon's current Stockpile level (0–3). 0 means no Stockpile charge.
+pub(crate) fn stockpile_level(mon: &PokemonState) -> u8 {
+    mon.volatiles.iter().find_map(|v| match v {
+        VolatileStatusState::TurnStatus(VolatileStatus::Stockpile(n), _)
+        | VolatileStatusState::MoveStatus(VolatileStatus::Stockpile(n), _) => Some(*n),
+        _ => None,
+    }).unwrap_or(0)
+}
+
+/// Moves that deal double damage to — and never miss — a Minimized target.
+pub(crate) fn move_hits_minimized_harder(move_name: &PokemonMove) -> bool {
+    matches!(
+        move_name,
+        PokemonMove::BodySlam
+            | PokemonMove::Stomp
+            | PokemonMove::DragonRush
+            | PokemonMove::HeatCrash
+            | PokemonMove::HeavySlam
+            | PokemonMove::FlyingPress
+            | PokemonMove::Steamroller
+            | PokemonMove::SupercellSlam
+            | PokemonMove::MaliciousMoonsault
+    )
 }
 
 pub fn critical_hit_probability(
@@ -468,13 +508,13 @@ pub fn critical_hit_probability(
         return vec![(true, 1.0)];
     }
 
+    // Champions crit-stage odds. `crit_ratio` is 1-indexed (1 = stage +0):
+    //   +0 → 1/24, +1 → 1/8, +2 → 1/2, +3 and beyond → guaranteed.
     let crit_chance = match crit_ratio {
-        6 => 1.0,
-        5 => 0.5,
-        4 => 1.0 / 3.0,
-        3 => 0.25,
+        0 | 1 => 1.0 / 24.0,
         2 => 0.125,
-        _ => 1.0 / 24.0,
+        3 => 0.5,
+        _ => 1.0,
     };
 
     vec![(false, 1.0 - crit_chance), (true, crit_chance)]
@@ -875,8 +915,8 @@ fn variable_move_base_power(
             let max_hp = target.stats[0].max(1) as u32;
             Some(((100 * target.hp as u32 / max_hp) as u16).max(1))
         }
-        // Weight-ratio table. TODO: ×2 damage + bypass accuracy vs Minimized targets
-        // once Minimize exists (Protect-variants TODO group).
+        // Weight-ratio table. (×2 damage + accuracy bypass vs Minimized targets is applied
+        // generically in calculate_damage_outcomes_for_target_with_options / accuracy_hit_probability.)
         M::HeatCrash | M::HeavySlam => {
             let user_w = attacker.weight_hg as u32;
             let target_w = target.weight_hg.max(1) as u32;
@@ -926,6 +966,11 @@ fn variable_move_base_power(
         M::StompingTantrum | M::TemperFlare => {
             Some(if attacker.last_move_failed { bp * 2 } else { bp })
         }
+        // Spit Up: 100 / 200 / 300 for Stockpile level 1 / 2 / 3. The fail-on-no-Stockpile
+        // check runs before the damage path; the Stockpile charge (and its Def/SpD boosts)
+        // are consumed afterwards in apply_post_damage_move_effects, so the level is still
+        // readable here.
+        M::SpitUp => Some(100 * stockpile_level(attacker) as u16),
         _ => None,
     }
 }
@@ -1471,6 +1516,12 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
         };
     let screen_mult   = screen_damage_multiplier(_state, _target_slot, move_data, false); // overridden per-crit below
 
+    // Minimize: a handful of moves (Body Slam, Stomp, …) deal double damage to a Minimized
+    // target. The accompanying accuracy bypass lives in accuracy_hit_probability.
+    let minimize_mult = if has_status_volatile(target, &VolatileStatus::Minimize)
+        && move_hits_minimized_harder(&move_data.name)
+    { 2.0 } else { 1.0 };
+
     // Analytic: ×1.3 when the attacker is the very last mover this turn.
     let analytic_mult = if !pokemon_ability_is_suppressed(_state, attacker)
         && attacker.ability == Ability::Analytic
@@ -1535,6 +1586,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
             dmg = (dmg * this_screen_mult).floor();
             dmg = (dmg * burn_mult).floor();
             dmg = (dmg * invulnerability_multiplier).floor();
+            dmg = (dmg * minimize_mult).floor();
             dmg = (dmg * weather_mult).floor();
             dmg = (dmg * dry_skin_mult).floor();
             dmg = (dmg * type_boost_mult).floor();    // type-boosting item in the "other" multiplier bucket
@@ -2825,6 +2877,13 @@ pub fn accuracy_hit_probability(
 ) -> f64 {
     if let Some(forced_accuracy) = weather_forced_accuracy(state, &move_data.name) {
         return forced_accuracy;
+    }
+
+    // Minimize: moves that hit Minimized targets harder also never miss them.
+    if has_status_volatile(target, &VolatileStatus::Minimize)
+        && move_hits_minimized_harder(&move_data.name)
+    {
+        return 1.0;
     }
 
     match move_data.accuracy {
