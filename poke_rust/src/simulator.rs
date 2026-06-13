@@ -1480,6 +1480,37 @@ fn possible_damage_outcomes_for_move(
         return simulator_helpers::coalesce_branches(result);
     }
 
+    // Perish Song: sound-based field move — applies PerishSong volatile (counter=4) to every
+    // active Pokémon. Soundproof protects other Pokémon (not the user). Skips mons that
+    // already have PerishSong. Always hits (no accuracy check).
+    if move_name == PokemonMove::PerishSong {
+        let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&next_state);
+        let user_slot_idx = action.user_slot.slot_index as usize;
+        let user_player = action.user_slot.player;
+        let all_slots: Vec<(Player, usize)> = {
+            let p1_slots: Vec<_> = (0..next_state.p1_active_mons.len()).map(|i| (Player::P1, i)).collect();
+            let p2_slots: Vec<_> = (0..next_state.p2_active_mons.len()).map(|i| (Player::P2, i)).collect();
+            p1_slots.into_iter().chain(p2_slots).collect()
+        };
+        let state_snapshot = next_state.clone();
+        for (player, idx) in all_slots {
+            let is_user = player == user_player && idx == user_slot_idx;
+            let mons = match player {
+                Player::P1 => &mut next_state.p1_active_mons,
+                Player::P2 => &mut next_state.p2_active_mons,
+            };
+            let Some(mon) = mons.get_mut(idx) else { continue };
+            if mon.fainted { continue; }
+            // Soundproof blocks Perish Song for non-users.
+            if !is_user && !abilities_suppressed && mon.ability == Ability::Soundproof { continue; }
+            // Skip if already afflicted.
+            if simulator_helpers::has_status_volatile(mon, &VolatileStatus::PerishSong) { continue; }
+            simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, mon, &VolatileStatus::PerishSong);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     // Calculate targets multiplier (0.75x for 2+ targets, 1.0x for 1 target)
     let targets_mult = simulator_helpers::damage_targets_multiplier(target_slots.len());
 
@@ -2291,11 +2322,16 @@ fn generate_commands_for_active(
     let taunted = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Taunt);
     let throat_chopped = simulator_helpers::has_status_volatile(mon, &VolatileStatus::ThroatChop);
     let tormented = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Torment);
+    // Uproar: while active, the user must keep using Uproar.
+    let uproar_locked = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Uproar);
 
     // Attacks: filter by choice-lock and 0-PP, then fall back to Struggle.
     let mut emitted_attack = false;
     for (i, move_name_opt) in mon.moves.iter().enumerate() {
         let Some(move_name) = move_name_opt else { continue; };
+
+        // Uproar lock: only Uproar is selectable while the volatile is active.
+        if uproar_locked && *move_name != PokemonMove::Uproar { continue; }
 
         // Choice lock: only the locked move is selectable.
         if let Some(ref locked) = choice_locked_move {
@@ -3126,6 +3162,18 @@ fn perform_switch_out_in(
     std::mem::swap(&mut active[slot_idx], &mut back[bench_index]);
     back[bench_index] = leaving;
 
+    // SyrupBomb ends when the user leaves the field — remove it from all opponents.
+    // (The target's SyrupBomb is on the opponent side relative to the one switching out.)
+    {
+        let opp_mons = match user_slot.player {
+            Player::P1 => &mut next_state.p2_active_mons,
+            Player::P2 => &mut next_state.p1_active_mons,
+        };
+        for opp in opp_mons.iter_mut() {
+            simulator_helpers::remove_status_volatile(opp, &VolatileStatus::SyrupBomb);
+        }
+    }
+
     // All switch-out side effects (switch-out abilities, Neutralizing Gas lift, primal
     // weather ending) are handled here, after the departing Pokémon has reached the bench.
     simulator_helpers::handle_pokemon_switch_out(next_state, user_slot.player, bench_index);
@@ -3159,7 +3207,6 @@ fn perform_self_switch(
             if let Some(mon) = mons.get(slot_idx) {
                 let boosts = mon.boosts;
                 // Passable volatiles per Bulbapedia (newest generation).
-                // Note: Perish Song and Aqua Ring are not yet representable in VolatileStatus.
                 let passable = mon.volatiles.iter().filter(|v| {
                     use crate::pokemon::VolatileStatusState;
                     use VolatileStatus::*;
@@ -3177,6 +3224,7 @@ fn perform_self_switch(
                         | VolatileStatusState::TurnStatus(MagnetRise, _)
                         | VolatileStatusState::TurnStatus(Telekinesis, _)
                         | VolatileStatusState::TurnStatus(GastroAcid, _)
+                        | VolatileStatusState::TurnStatus(PerishSong, _)
                     )
                 }).cloned().collect::<Vec<_>>();
                 (Some(boosts), passable)
