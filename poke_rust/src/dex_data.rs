@@ -161,7 +161,10 @@ pub enum VolatileStatus {
     DestinyBond,
     Protect,
     Disable(PokemonMove),
-    DragonCheer,
+    /// Critical-hit boost from Dragon Cheer. The payload stores the crit-stage bonus
+    /// (1, or 2 when the boosted ally was Dragon-type at the time the move was used);
+    /// it is locked in at application and does not change if the ally's type changes.
+    DragonCheer(u8),
     Electrify,
     Embargo,
     Encore(PokemonMove),
@@ -209,7 +212,10 @@ pub enum VolatileStatus {
     SpikyShield,
     SkyDrop,
     Spotlight,
-    Stockpile,
+    /// Stockpile charge level (1–3). Stored as TurnStatus(_, 0) so the payload — not a turn
+    /// counter — carries the level; it persists until Spit Up / Swallow consume it or the
+    /// user switches out.
+    Stockpile(u8),
     /// Carries the fainted-ally count (1–5) snapshotted at switch-in. Stored as
     /// TurnStatus(_, 0) so it lasts indefinitely on the field and is wiped on switch-out.
     SupremeOverlord(u8),
@@ -513,7 +519,7 @@ fn parse_volatile(s: &str) -> Option<VolatileStatus> {
         "destinybond" => Some(VolatileStatus::DestinyBond),
         "protect" => Some(VolatileStatus::Protect),
         "disable" => Some(VolatileStatus::Disable(PokemonMove::Struggle)),
-        "dragoncheer" => Some(VolatileStatus::DragonCheer),
+        "dragoncheer" => Some(VolatileStatus::DragonCheer(1)),
         "electrify" => Some(VolatileStatus::Electrify),
         "embargo" => Some(VolatileStatus::Embargo),
         // Encore is applied via a dedicated handler that captures the target's last move; this
@@ -559,7 +565,7 @@ fn parse_volatile(s: &str) -> Option<VolatileStatus> {
         "spikyshield" => Some(VolatileStatus::SpikyShield),
         "skydrop" => Some(VolatileStatus::SkyDrop),
         "spotlight" => Some(VolatileStatus::Spotlight),
-        "stockpile" => Some(VolatileStatus::Stockpile),
+        "stockpile" => Some(VolatileStatus::Stockpile(0)),
         "syrupbomb" => Some(VolatileStatus::SyrupBomb),
         "tarshot" => Some(VolatileStatus::TarShot),
         "taunt" => Some(VolatileStatus::Taunt),

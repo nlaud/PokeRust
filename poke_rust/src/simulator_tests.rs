@@ -2297,6 +2297,304 @@ mod tests {
         }
     }
 
+    mod cost_and_condition_boosts {
+        use super::*;
+
+        fn build_mon(
+            species: Species,
+            moves: [Option<PokemonMove>; 4],
+            ability: Option<Ability>,
+            pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>,
+            move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
+        ) -> PokemonState {
+            build_pokemon_state(
+                species, pokemon_dex, move_dex, None, Some(moves), None, ability,
+                Some(Nature::Hardy), None, None, Some([0, 0, 0, 0, 0, 0]), None, true,
+            )
+        }
+
+        fn run(
+            state: &BattleState,
+            p1_slots: Vec<usize>,
+            p2_slots: Vec<usize>,
+            move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
+            pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>,
+            consider_crit: bool,
+            rolls: u8,
+        ) -> Vec<(MatchState, f64)> {
+            simulate_turn(
+                &MatchState::BattleState(state.clone()),
+                &PlayerCommand::Battle(simple_attack(Player::P1, p1_slots)),
+                &PlayerCommand::Battle(simple_attack(Player::P2, p2_slots)),
+                move_dex,
+                pokemon_dex,
+                consider_crit,
+                rolls,
+            )
+        }
+
+        fn first_state(outcomes: Vec<(MatchState, f64)>) -> BattleState {
+            for (state, _) in outcomes {
+                if let MatchState::BattleState(bs) = state {
+                    return bs;
+                }
+            }
+            panic!("no battle state in outcomes");
+        }
+
+        #[test]
+        fn belly_drum_maxes_attack_and_halves_hp() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::BellyDrum), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let max_hp = initial.p1_active_mons[0].hp;
+
+            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            assert_eq!(state.p1_active_mons[0].boosts[0], 6);
+            assert_eq!(state.p1_active_mons[0].hp, max_hp - max_hp / 2);
+        }
+
+        #[test]
+        fn belly_drum_fails_when_hp_too_low() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let mut p1 = build_mon(Species::Snorlax, [Some(PokemonMove::BellyDrum), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            p1.hp = p1.stats[0] / 2; // exactly half → fails
+            let half_hp = p1.hp;
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            assert_eq!(state.p1_active_mons[0].boosts[0], 0);
+            assert_eq!(state.p1_active_mons[0].hp, half_hp);
+            // The move still consumed PP.
+            assert_eq!(state.p1_active_mons[0].move_pp[0], initial.p1_active_mons[0].move_pp[0] - 1);
+        }
+
+        #[test]
+        fn clangorous_soul_raises_all_and_costs_a_third() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = build_mon(Species::Kommoo, [Some(PokemonMove::ClangorousSoul), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let max_hp = initial.p1_active_mons[0].hp;
+
+            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            assert_eq!(&state.p1_active_mons[0].boosts[0..5], &[1, 1, 1, 1, 1]);
+            assert_eq!(state.p1_active_mons[0].hp, max_hp - max_hp / 3);
+        }
+
+        #[test]
+        fn charge_raises_spdef_and_sets_volatile() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = build_mon(Species::Pikachu, [Some(PokemonMove::Charge), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            assert_eq!(state.p1_active_mons[0].boosts[3], 1); // Sp. Def
+            assert!(state.p1_active_mons[0].volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Charge, _))));
+        }
+
+        #[test]
+        fn focus_energy_applies_crit_volatile_and_table() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::FocusEnergy), None, None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            // Volatile applied.
+            assert!(simulator_helpers::has_status_volatile(&state.p1_active_mons[0], &VolatileStatus::FocusEnergy));
+            // +2 crit stages: a base-1 ratio becomes 3.
+            assert_eq!(simulator_helpers::effective_crit_ratio(&state, &state.p1_active_mons[0], 1), 3);
+            // Stage +2 (ratio 3) is a 50% crit chance under Champions odds.
+            let crit = simulator_helpers::critical_hit_probability(
+                &state.p1_active_mons[0], &state.p2_active_mons[0], &PokemonMove::Tackle, true, 3);
+            let crit_chance: f64 = crit.iter().filter(|(c, _)| *c).map(|(_, p)| *p).sum();
+            assert!((crit_chance - 0.5).abs() < 1e-9, "expected 50% crit, got {crit_chance}");
+
+            // Using Focus Energy again fails (no second volatile stacked).
+            let state2 = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let count = state2.p1_active_mons[0].volatiles.iter()
+                .filter(|v| matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, _)))
+                .count();
+            assert_eq!(count, 1);
+        }
+
+        #[test]
+        fn dragon_cheer_gives_dragon_ally_two_crit_stages() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Slot 0 (Snorlax) uses Dragon Cheer on its Dragon-type ally (Garchomp, slot 1).
+            let user = build_mon(Species::Snorlax, [Some(PokemonMove::DragonCheer), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let ally = build_mon(Species::Garchomp, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let foe_a = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let foe_b = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![user, ally], vec![], vec![foe_a, foe_b], vec![]);
+
+            let state = first_state(run(&initial, vec![0, 0], vec![0, 0], &move_dex, &pokemon_dex, false, 1));
+            // The Dragon ally received +2 (DragonCheer(2)).
+            assert!(state.p1_active_mons[1].volatiles.iter().any(|v|
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::DragonCheer(2), _))));
+            assert_eq!(simulator_helpers::effective_crit_ratio(&state, &state.p1_active_mons[1], 1), 3);
+            // The user itself is unaffected.
+            assert!(!simulator_helpers::has_status_volatile(&state.p1_active_mons[0], &VolatileStatus::DragonCheer(0)));
+        }
+
+        #[test]
+        fn magnetic_flux_boosts_only_plus_minus() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // User has Plus; ally has a non-Plus/Minus ability and must not be boosted.
+            let user = build_mon(Species::Plusle, [Some(PokemonMove::MagneticFlux), Some(PokemonMove::Splash), None, None], Some(Ability::Plus), &pokemon_dex, &move_dex);
+            let ally = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Some(Ability::Illuminate), &pokemon_dex, &move_dex);
+            let foe_a = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let foe_b = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![user, ally], vec![], vec![foe_a, foe_b], vec![]);
+
+            let state = first_state(run(&initial, vec![0, 0], vec![0, 0], &move_dex, &pokemon_dex, false, 1));
+            // Plus user gains +1 Def/Sp. Def.
+            assert_eq!(state.p1_active_mons[0].boosts[1], 1);
+            assert_eq!(state.p1_active_mons[0].boosts[3], 1);
+            // Non-Plus/Minus ally is untouched.
+            assert_eq!(state.p1_active_mons[1].boosts[1], 0);
+            assert_eq!(state.p1_active_mons[1].boosts[3], 0);
+        }
+
+        #[test]
+        fn minimize_raises_evasion_and_sets_volatile() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Minimize), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            assert_eq!(state.p1_active_mons[0].boosts[6], 2); // evasion
+            assert!(simulator_helpers::has_status_volatile(&state.p1_active_mons[0], &VolatileStatus::Minimize));
+        }
+
+        #[test]
+        fn minimize_doubles_body_slam_and_never_misses() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Control: Body Slam into a non-minimized Snorlax.
+            let atk = build_mon(Species::Snorlax, [Some(PokemonMove::BodySlam), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let def = build_mon(Species::Snorlax, [Some(PokemonMove::Minimize), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![atk], vec![], vec![def], vec![]);
+            let full_hp = initial.p2_active_mons[0].hp;
+
+            let control = run(&initial, vec![0], vec![1], &move_dex, &pokemon_dex, false, 1);
+            let control_dmg = *damage_distribution(&control, full_hp).keys().max().unwrap();
+            assert!(control_dmg > 0);
+
+            // Minimize first, then Body Slam.
+            let minimized = first_state(run(&initial, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let after = run(&minimized, vec![0], vec![1], &move_dex, &pokemon_dex, false, 1);
+            // Always hits a minimized target.
+            assert!((hit_probability(&after, full_hp) - 1.0).abs() < 1e-9);
+            let minimized_dmg = *damage_distribution(&after, full_hp).keys().max().unwrap();
+            assert_eq!(minimized_dmg, control_dmg * 2);
+        }
+
+        #[test]
+        fn stockpile_stacks_to_three_then_fails() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+            for expected in 1..=3u8 {
+                state = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+                assert_eq!(simulator_helpers::stockpile_level(&state.p1_active_mons[0]), expected);
+                assert_eq!(state.p1_active_mons[0].boosts[1], expected as i8); // Def
+                assert_eq!(state.p1_active_mons[0].boosts[3], expected as i8); // Sp. Def
+            }
+            // Fourth use fails — level stays at 3, boosts unchanged.
+            state = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            assert_eq!(simulator_helpers::stockpile_level(&state.p1_active_mons[0]), 3);
+            assert_eq!(state.p1_active_mons[0].boosts[1], 3);
+        }
+
+        #[test]
+        fn spit_up_scales_power_and_consumes_stockpile() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let make = || {
+                let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::SpitUp), None, None], None, &pokemon_dex, &move_dex);
+                let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+                battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])
+            };
+            let full_hp = make().p2_active_mons[0].hp;
+
+            // One layer of Stockpile, then Spit Up (100 BP).
+            let s1 = first_state(run(&make(), vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let out1 = run(&s1, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1);
+            let dmg1 = *damage_distribution(&out1, full_hp).keys().max().unwrap();
+
+            // Two layers, then Spit Up (200 BP) deals more.
+            let mut s2 = first_state(run(&make(), vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            s2 = first_state(run(&s2, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let out2 = run(&s2, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1);
+            let dmg2 = *damage_distribution(&out2, full_hp).keys().max().unwrap();
+
+            assert!(dmg2 > dmg1, "200 BP Spit Up ({dmg2}) should beat 100 BP ({dmg1})");
+
+            // Spit Up consumed the charge and removed the Def/Sp. Def boosts.
+            let after = first_state(out2);
+            assert_eq!(simulator_helpers::stockpile_level(&after.p1_active_mons[0]), 0);
+            assert_eq!(after.p1_active_mons[0].boosts[1], 0);
+            assert_eq!(after.p1_active_mons[0].boosts[3], 0);
+        }
+
+        #[test]
+        fn spit_up_fails_without_stockpile() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::SpitUp), None, None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let full_hp = initial.p2_active_mons[0].hp;
+
+            let out = run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1);
+            // No damage dealt.
+            assert!(damage_distribution(&out, full_hp).keys().max().copied().unwrap_or(0) == 0);
+        }
+
+        #[test]
+        fn swallow_heals_by_level_and_consumes_stockpile() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::Swallow), None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let max_hp = state.p1_active_mons[0].hp;
+
+            // Two layers of Stockpile.
+            state = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            state = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            // Drop the user's HP so the heal is observable and not capped.
+            state.p1_active_mons[0].hp = max_hp / 4;
+            let before_hp = state.p1_active_mons[0].hp;
+
+            let state = first_state(run(&state, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1));
+            // Level 2 heals ½ max HP.
+            assert_eq!(state.p1_active_mons[0].hp, before_hp + max_hp / 2);
+            // Stockpile charge and its Def/Sp. Def boosts are gone.
+            assert_eq!(simulator_helpers::stockpile_level(&state.p1_active_mons[0]), 0);
+            assert_eq!(state.p1_active_mons[0].boosts[1], 0);
+            assert_eq!(state.p1_active_mons[0].boosts[3], 0);
+        }
+    }
+
     mod doubles {
         use super::*;
 
