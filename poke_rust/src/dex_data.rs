@@ -231,6 +231,13 @@ pub enum VolatileStatus {
     Torment,
     Uproar,
     Yawn,
+    /// Marks that the Grass type currently on this Pokémon was *added* by Forest's Curse
+    /// (as opposed to being one of its natural types). Used so Trick-or-Treat knows to
+    /// replace the added type rather than appending a fourth type. Cleared on switch-out.
+    ForestsCurse,
+    /// Marks that the Ghost type currently on this Pokémon was *added* by Trick-or-Treat.
+    /// Mirror of `ForestsCurse`. Cleared on switch-out.
+    TrickorTreat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

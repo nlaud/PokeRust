@@ -733,6 +733,13 @@ pub(crate) fn effective_move_type(state: &BattleState, attacker: &PokemonState, 
     if ate_ability_converts(state, attacker, move_data) {
         return ate_ability_target_type(&attacker.ability).unwrap();
     }
+    // Electrify makes the user's move Electric-type for the turn. Among type-changing
+    // effects it applies last, so it overrides Normalize/-ate. It does not affect Struggle.
+    if move_data.name != PokemonMove::Struggle
+        && has_status_volatile(attacker, &VolatileStatus::Electrify)
+    {
+        return PokemonType::Electric;
+    }
     base
 }
 
@@ -4286,6 +4293,8 @@ pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
             mon.switched_in_this_turn = false;
             // Roost's Flying-type suppression only lasts the turn it is used.
             remove_status_volatile(mon, &VolatileStatus::Roost);
+            // Electrify only redirects the affected Pokémon's move for the current turn.
+            remove_status_volatile(mon, &VolatileStatus::Electrify);
             // Encore ends immediately once its move runs out of PP.
             let encore_move_out_of_pp = mon.volatiles.iter().find_map(|v| match v {
                 VolatileStatusState::MoveStatus(VolatileStatus::Encore(m), _) => Some(m.clone()),
@@ -6161,6 +6170,80 @@ pub fn try_apply_disable(state: &mut BattleState, source_slot: FieldSlot, target
     let effect = HitEffect { volatile_status: Some(VolatileStatus::Disable(last_move)), ..Default::default() };
     apply_effect_to_target(state, source_slot, target_slot, &effect, target_slot.player);
     true
+}
+
+/// Set the target's type to a single `new_type` (Soak → Water, Magic Powder → Psychic).
+/// Fails if the target is Terastallized, already that pure type, or — unless its ability is
+/// suppressed — has Multitype/RKS System (form-locked abilities). Fully replacing the type
+/// also clears any added-type markers. Returns true on success.
+pub fn try_set_single_type(state: &mut BattleState, target_slot: FieldSlot, new_type: PokemonType) -> bool {
+    let blocked = {
+        let Some(tgt) = get_pokemon_at_slot(state, target_slot) else { return false; };
+        let form_locked = !pokemon_ability_is_suppressed(state, tgt)
+            && matches!(tgt.ability, Ability::Multitype | Ability::RKSSystem);
+        tgt.is_tera || form_locked || tgt.types == vec![new_type.clone()]
+    };
+    if blocked { return false; }
+    let Some(tgt) = get_pokemon_at_slot_mut(state, target_slot) else { return false; };
+    tgt.types = vec![new_type];
+    remove_status_volatile(tgt, &VolatileStatus::ForestsCurse);
+    remove_status_volatile(tgt, &VolatileStatus::TrickorTreat);
+    true
+}
+
+/// Add an extra type to the target (Forest's Curse → Grass, Trick-or-Treat → Ghost).
+/// Fails if the target is Terastallized or already has `added_type`. If the *other*
+/// add-type move had previously added `other_type`, that type is replaced rather than
+/// stacking a fourth type. Returns true on success.
+pub fn try_add_type(
+    state: &mut BattleState,
+    target_slot: FieldSlot,
+    added_type: PokemonType,
+    marker: VolatileStatus,
+    other_type: PokemonType,
+    other_marker: VolatileStatus,
+) -> bool {
+    let has_other = {
+        let Some(tgt) = get_pokemon_at_slot(state, target_slot) else { return false; };
+        if tgt.is_tera || pokemon_has_type(tgt, &added_type) { return false; }
+        has_status_volatile(tgt, &other_marker)
+    };
+    let Some(tgt) = get_pokemon_at_slot_mut(state, target_slot) else { return false; };
+    if has_other {
+        // The other add-type move's contribution is replaced, not stacked.
+        tgt.types.retain(|t| t != &other_type);
+        remove_status_volatile(tgt, &other_marker);
+    }
+    tgt.types.push(added_type);
+    tgt.volatiles.push(VolatileStatusState::TurnStatus(marker, 0));
+    true
+}
+
+/// Reflect Type: change the user's type(s) to match the target's current type(s),
+/// including any type added by Forest's Curse / Trick-or-Treat. If the target is
+/// Terastallized the user copies its Tera type. Fails if the user is Terastallized or the
+/// target is typeless. Returns true on success.
+pub fn try_apply_reflect_type(state: &mut BattleState, user_slot: FieldSlot, target_slot: FieldSlot) -> bool {
+    let copied = {
+        let Some(user) = get_pokemon_at_slot(state, user_slot) else { return false; };
+        if user.is_tera { return false; }
+        let Some(tgt) = get_pokemon_at_slot(state, target_slot) else { return false; };
+        let types = if tgt.is_tera { vec![tgt.tera_type.clone()] } else { tgt.types.clone() };
+        if types.is_empty() { return false; }
+        types
+    };
+    let Some(user) = get_pokemon_at_slot_mut(state, user_slot) else { return false; };
+    user.types = copied;
+    remove_status_volatile(user, &VolatileStatus::ForestsCurse);
+    remove_status_volatile(user, &VolatileStatus::TrickorTreat);
+    true
+}
+
+/// Electrify: give the target the Electrify volatile so that the move it uses later this
+/// turn becomes Electric-type. The volatile is cleared at end of turn.
+pub fn apply_electrify(state: &mut BattleState, source_slot: FieldSlot, target_slot: FieldSlot) {
+    let effect = HitEffect { volatile_status: Some(VolatileStatus::Electrify), ..Default::default() };
+    apply_effect_to_target(state, source_slot, target_slot, &effect, target_slot.player);
 }
 
 /// Moves Encore cannot lock the target into. Mirrors Showdown's `failencore` flag: copying /
