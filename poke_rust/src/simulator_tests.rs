@@ -18321,6 +18321,39 @@ mod priority_abilities {
             assert_eq!(bs2.p2_active_mons[0].status, None,
                 "a target that didn't boost this turn must not be burned");
         }
+
+        #[test]
+        fn alluring_voice_confuses_only_freshly_boosted_targets() {
+            use crate::dex_data::VolatileStatus;
+            use crate::simulator_helpers::has_status_volatile;
+
+            // Target is faster, so its Swords Dance resolves before Alluring Voice lands.
+            // Confusion duration branches (2–5 turns), so assert across every outcome.
+            let mut boosting = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::AlluringVoice)], vec![],
+                vec![mon(Species::Shuckle, Ability::None, PokemonMove::SwordsDance)], vec![],
+            );
+            boosting.p1_active_mons[0].stats[5] = 1;
+            boosting.p2_active_mons[0].stats[5] = 200;
+            let outcomes = run(boosting);
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::Confusion))),
+                "a target that raised stats this turn must be confused");
+
+            // Same speed setup, but the target does nothing → no confusion.
+            let mut idle = battle_state_from_lists(
+                vec![mon(Species::Snorlax, Ability::None, PokemonMove::AlluringVoice)], vec![],
+                vec![mon(Species::Shuckle, Ability::None, PokemonMove::Splash)], vec![],
+            );
+            idle.p1_active_mons[0].stats[5] = 1;
+            idle.p2_active_mons[0].stats[5] = 200;
+            let outcomes = run(idle);
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if !has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::Confusion))),
+                "a target that didn't boost this turn must not be confused");
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
