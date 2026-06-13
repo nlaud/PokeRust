@@ -42,12 +42,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 ---
 
 ## Moves
-### OHKO Moves
-- Fissure
-- Guillotine
-- Horn Drill
-- Sheer Cold
-
 ### Type-changing moves
 Alter a Pokémon's active type(s) during battle.
 - Electrify — target's next move becomes Electric-type this turn
