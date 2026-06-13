@@ -7,26 +7,11 @@ cargo run -- --p1 ../teamsheets/{teamsheet path} --p2 ../teamsheets/{teamsheet p
 
 ### New features
 - Create a function to take in battle state and battle actions, then apply those to create a vector of tuples possible battle states resulting from that along with their probabilities.
-    - Things to keep in mind: Neutralizing Gas and Magic Room !!!!!!!
-    - Later focus SLOWLY on implementing actual battle functions
-        - Switch out moves
-        - PROTECT!!
-        - Struggle
-        - Berries, Unnerve?, Other Consumables (sash), Type Boost Items
-        - Choice Items
-        - Leftovers, misc. items (bright powder?)
-        - Side conditions (Types of spikes, are there more?)
-        - Other significant abilities (Prankster, sturdy, pixilate + dragonize, spicy spray, shadow tag, clear body, huge power, zero to hero, scrappy, parental bond, intimidate, competetive + defiant, mega sol, mega launcher, levitate, telepathy, cloud nine, multiscale, stamina, mold breaker, disguise, technician, scrappy, compound eyes, friend guard)
-        - Other significant items!
-        - Moves with unique effects (explosion, encore, disable, skill swap, roost, burn up, body press, foul play, OHKO moves, focus blast/punch, etc..)
-        - Other Volatiles + Statuses
-        - Implement Struggling when no PP
-        - Imperfect information handling
+    - Handling Imperfect information, how to input information and update imperfect information states
 - Eventually create nash solver and recursive evaluation
 
 ### Random Stuff
-- Add a CLI flag for whether simulating user can choose which outcome happens.
-- Unit Tests...
+- Eventually a frontend for this, maybe a mentor mode + battle the AI mode + maybe a team evaluater long running mode?
 
 ### Resources
 Sequencing: https://bulbapedia.bulbagarden.net/wiki/User:FIQ/Turn_sequence

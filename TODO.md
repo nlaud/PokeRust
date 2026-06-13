@@ -44,21 +44,7 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Self-fainting moves
-User faints as part of the move. The replacement-choice flow (already built for
-forced faint and self-switch) handles bringing in the next Pokémon.
-- Explosion / Self-Destruct — high base power; user faints immediately
-- Final Gambit — deal damage equal to user's current HP; user faints
-- Healing Wish — user faints; replacement enters fully healed with no status
-- Memento — −2 Atk and Sp. Atk to target; user faints
-- Misty Explosion — user faints; 1.5× power in Misty Terrain
-
 ### Crash-damage moves and rampaging moves
-**Crash damage (miss or fail → user takes ½ max HP recoil):**
-- Axe Kick — also 30% confuse on hit
-- High Jump Kick
-- Supercell Slam — also ×2 power vs. Minimized targets
-
 **Rampaging (lock into move for 2–3 turns; confused after):**
 - Outrage, Petal Dance, Raging Fury, Thrash
 
@@ -155,7 +141,6 @@ More architecturally significant; each likely needs its own research pass.
 - Flying Press — damage uses both Fighting and Flying type effectiveness combined
 - Instruct — make the target immediately repeat their last move
 - Last Resort — 140 power; fails unless the user has already used all other known moves
-- Misty Explosion — ×1.5 power in Misty Terrain; user faints
 - Pollen Puff — deal damage to opponents; restore ½ max HP to allies instead
 - Round — power doubles for each additional Round user acting in the same turn
 - Shell Side Arm — use whichever calculation (physical or special) deals more damage; 20% poison

@@ -1471,6 +1471,15 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let attack_type  = effective_move_type(_state, attacker, move_data);
     let effectiveness = move_type_effectiveness(_state, &attack_type, target);
 
+    // Final Gambit: deals fixed damage equal to the user's current HP. Type immunity (e.g.
+    // Ghost vs Fighting) and invulnerability still zero out the damage. No crit / spread /
+    // roll scaling. The user faint is handled in apply_post_damage_move_effects via the
+    // SelfDestructType::IfHit path (triggered only when total_dmg > 0).
+    if move_data.name == crate::data::pokemon_move::PokemonMove::FinalGambit {
+        let dmg = if effectiveness > 0.0 && invulnerability_multiplier > 0.0 { attacker.hp } else { 0 };
+        return vec![(dmg, false, 1.0)];
+    }
+
     // Fixed-damage moves: bypass the base-power formula entirely.
     // Type immunity still applies (e.g. Night Shade/Ghost vs Normal → 0),
     // as does the invulnerability multiplier. No crit / spread / roll scaling.
@@ -3242,6 +3251,46 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     apply_entry_hazards(state, slot);
     if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) {
         return;
+    }
+
+    // Healing Wish: if a HealingWish slot condition is present on this slot, fully restore the
+    // entrant's HP and cure its status. The condition persists if the entrant is already at full
+    // HP with no status condition (Gen 8+ behaviour — it waits for a damaged/statused Pokémon).
+    // Hazard chip is healed because this check runs after apply_entry_hazards.
+    {
+        let slot_idx = slot.slot_index as usize;
+        let has_healing_wish = match slot.player {
+            crate::battle::Player::P1 => state.p1_slot_conditions
+                .get(slot_idx)
+                .map(|conds| conds.iter().any(|sc| matches!(sc, crate::dex_data::SlotCondition::HealingWish)))
+                .unwrap_or(false),
+            crate::battle::Player::P2 => state.p2_slot_conditions
+                .get(slot_idx)
+                .map(|conds| conds.iter().any(|sc| matches!(sc, crate::dex_data::SlotCondition::HealingWish)))
+                .unwrap_or(false),
+        };
+        if has_healing_wish {
+            let (max_hp, current_hp, has_status) = match get_pokemon_at_slot(state, slot) {
+                Some(mon) => (mon.stats[0].max(1), mon.hp, mon.status.is_some()),
+                None => (0, 0, false),
+            };
+            let needs_heal = current_hp < max_hp || has_status;
+            if needs_heal {
+                if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+                    mon.hp = max_hp;
+                    mon.status = None;
+                }
+                // Remove the HealingWish condition from this slot.
+                let conds = match slot.player {
+                    crate::battle::Player::P1 => &mut state.p1_slot_conditions,
+                    crate::battle::Player::P2 => &mut state.p2_slot_conditions,
+                };
+                if let Some(slot_conds) = conds.get_mut(slot_idx) {
+                    slot_conds.retain(|sc| !matches!(sc, crate::dex_data::SlotCondition::HealingWish));
+                }
+            }
+            // If the entrant is already full HP with no status, leave the condition in place.
+        }
     }
 
     let ability = match get_pokemon_at_slot(state, slot) {
@@ -6031,7 +6080,7 @@ pub fn try_apply_encore(
 ///   - Crash damage (High Jump Kick / Jump Kick miss — 1/2 max HP) — Magic Guard: TODO
 ///   - Leech Seed end-of-turn drain — Magic Guard: TODO (see apply_status_residual)
 ///   - Entry hazard switch-in damage (Spikes, Stealth Rock, Toxic Spikes) — Magic Guard: TODO
-fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSlot, numer: u32, denom: u32) {
+pub(crate) fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSlot, numer: u32, denom: u32) {
     let abilities_suppressed = abilities_are_suppressed(bs);
     let (max_hp, magic_guard) = {
         let Some(m) = get_pokemon_at_slot(bs, attacker_slot) else { return };
