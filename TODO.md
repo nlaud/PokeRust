@@ -44,15 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Ability manipulation moves
-Change a Pokémon's ability mid-battle.
-- Entrainment — change target's ability to match user's
-- Gastro Acid — give target the No Ability status
-- Role Play — change user's ability to match target's
-- Simple Beam — change target's ability to Simple
-- Skill Swap — swap user's and target's abilities
-- Worry Seed — change target's ability to Insomnia
-
 ### Type-changing moves
 Alter a Pokémon's active type(s) during battle.
 - Electrify — target's next move becomes Electric-type this turn

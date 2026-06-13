@@ -22733,3 +22733,405 @@ mod counter_retaliation_moves {
         }
     }
 }
+
+#[cfg(test)]
+mod ability_manipulation_moves {
+    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{Status, VolatileStatus};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simulator::simulate_turn;
+    use crate::simulator_helpers;
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
+        run_single_turn, simple_attack,
+    };
+
+    fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, pdex, mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    // ── Skill Swap ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn skill_swap_exchanges_abilities() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Alakazam, Ability::Synchronize, PokemonMove::SkillSwap);
+        p1.stats[5] = 200; // p1 moves first
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = simulate_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1,
+        );
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+            if bs.p1_active_mons[0].ability == Ability::ThickFat
+            && bs.p2_active_mons[0].ability == Ability::Synchronize)),
+            "Skill Swap should swap both abilities");
+    }
+
+    #[test]
+    fn skill_swap_stashes_original_ability() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Alakazam, Ability::Synchronize, PokemonMove::SkillSwap);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p1_active_mons[0].original_ability, Some(Ability::Synchronize));
+        assert_eq!(bs.p2_active_mons[0].original_ability, Some(Ability::ThickFat));
+    }
+
+    #[test]
+    fn skill_swap_fails_on_wonder_guard() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Alakazam, Ability::Synchronize, PokemonMove::SkillSwap);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shedinja, Ability::WonderGuard, PokemonMove::Splash);
+        let p2_hp = p2.hp;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        // Abilities should be unchanged when Wonder Guard blocks the swap
+        assert_eq!(bs.p1_active_mons[0].ability, Ability::Synchronize, "p1 ability should be unchanged");
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::WonderGuard, "Wonder Guard should block Skill Swap");
+        assert_eq!(bs.p2_active_mons[0].hp, p2_hp, "no damage should occur");
+    }
+
+    #[test]
+    fn skill_swap_reverts_on_switch_out() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Alakazam, Ability::Synchronize, PokemonMove::SkillSwap);
+        p1.stats[5] = 200;
+        let p1_bench = mon(Species::Blissey, Ability::None, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let t1 = simulate_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1,
+        );
+        let (swapped_state, _) = t1.into_iter()
+            .find(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                if bs.p1_active_mons[0].ability == Ability::ThickFat))
+            .expect("swap should apply on turn 1");
+        let t2 = simulate_turn(
+            &swapped_state,
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1,
+        );
+        let reverted = t2.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
+            if bs.p1_back_mons.iter().any(|m| m.ability == Ability::Synchronize)));
+        assert!(reverted, "Skill Swap should revert on switch-out");
+    }
+
+    // ── Role Play ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn role_play_copies_target_ability_to_user() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Ditto, Ability::Limber, PokemonMove::RolePlay);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p1_active_mons[0].ability, Ability::ThickFat, "Role Play should copy target's ability");
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::ThickFat, "target's ability should be unchanged");
+    }
+
+    #[test]
+    fn role_play_fails_on_trace_target() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Ditto, Ability::Limber, PokemonMove::RolePlay);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Gardevoir, Ability::Trace, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p1_active_mons[0].ability, Ability::Limber, "Role Play should fail against Trace target");
+    }
+
+    #[test]
+    fn role_play_bypasses_protect() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Ditto, Ability::Limber, PokemonMove::RolePlay);
+        p1.stats[5] = 200;
+        // p2 uses Protect — Role Play has no protect flag and should bypass it
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Protect);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p1_active_mons[0].ability, Ability::ThickFat,
+            "Role Play should bypass Protect and copy the ability");
+    }
+
+    // ── Entrainment ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn entrainment_gives_target_users_ability() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Audino, Ability::Healer, PokemonMove::Entrainment);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::Healer, "Entrainment should give target the user's ability");
+        assert_eq!(bs.p1_active_mons[0].ability, Ability::Healer, "user's ability should be unchanged");
+    }
+
+    #[test]
+    fn entrainment_fails_on_truant_target() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Audino, Ability::Healer, PokemonMove::Entrainment);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Slaking, Ability::Truant, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::Truant, "Entrainment should fail against Truant");
+    }
+
+    #[test]
+    fn entrainment_fails_on_same_ability() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Audino, Ability::Healer, PokemonMove::Entrainment);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Blissey, Ability::Healer, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        // same ability → no change, original_ability stays None
+        assert_eq!(bs.p2_active_mons[0].original_ability, None, "Entrainment should fail on same ability");
+    }
+
+    // ── Gastro Acid ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn gastro_acid_applies_suppression_volatile() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Qwilfish, Ability::PoisonPoint, PokemonMove::GastroAcid);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert!(simulator_helpers::has_status_volatile(
+            &bs.p2_active_mons[0], &VolatileStatus::GastroAcid),
+            "Gastro Acid should apply the GastroAcid volatile");
+        // ability field itself is preserved — suppression is via the volatile
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::ThickFat,
+            "ability field should remain unchanged after Gastro Acid");
+    }
+
+    #[test]
+    fn gastro_acid_fails_on_cantsuppress_ability() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Qwilfish, Ability::PoisonPoint, PokemonMove::GastroAcid);
+        p1.stats[5] = 200;
+        // Multitype is in the cantsuppress set
+        let p2 = mon(Species::Arceus, Ability::Multitype, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert!(!simulator_helpers::has_status_volatile(
+            &bs.p2_active_mons[0], &VolatileStatus::GastroAcid),
+            "Gastro Acid should fail against cantsuppress abilities");
+    }
+
+    #[test]
+    fn gastro_acid_reverts_on_switch_out() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Qwilfish, Ability::PoisonPoint, PokemonMove::GastroAcid);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let p2_bench = mon(Species::Blissey, Ability::None, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![p2_bench]);
+        let t1 = simulate_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1,
+        );
+        let (suppressed_state, _) = t1.into_iter()
+            .find(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                if simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::GastroAcid)))
+            .expect("Gastro Acid should be applied on turn 1");
+        let t2 = simulate_turn(
+            &suppressed_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            mdex, pdex, false, 1,
+        );
+        let reverted = t2.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
+            if bs.p2_back_mons.iter().any(|m|
+                !simulator_helpers::has_status_volatile(m, &VolatileStatus::GastroAcid)
+                && m.ability == Ability::ThickFat)));
+        assert!(reverted, "Gastro Acid volatile should be cleared on switch-out");
+    }
+
+    // ── Worry Seed ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn worry_seed_changes_target_to_insomnia() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Exeggutor, Ability::Chlorophyll, PokemonMove::WorrySeed);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::Insomnia,
+            "Worry Seed should change target's ability to Insomnia");
+    }
+
+    #[test]
+    fn worry_seed_cures_sleep() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Exeggutor, Ability::Chlorophyll, PokemonMove::WorrySeed);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        p2.status = Some(Status::Sleep(3));
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::Insomnia,
+            "Worry Seed should apply Insomnia");
+        assert!(bs.p2_active_mons[0].status.is_none(),
+            "Worry Seed should cure sleep when applying Insomnia");
+    }
+
+    #[test]
+    fn worry_seed_fails_on_truant() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Exeggutor, Ability::Chlorophyll, PokemonMove::WorrySeed);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Slaking, Ability::Truant, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::Truant,
+            "Worry Seed should fail against Truant");
+    }
+
+    // ── Simple Beam ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn simple_beam_changes_target_to_simple() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Swoobat, Ability::Simple, PokemonMove::SimpleBeam);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::Simple,
+            "Simple Beam should change target's ability to Simple");
+    }
+
+    #[test]
+    fn simple_beam_fails_on_truant() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Swoobat, Ability::Simple, PokemonMove::SimpleBeam);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Slaking, Ability::Truant, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::Truant,
+            "Simple Beam should fail against Truant");
+    }
+
+    #[test]
+    fn simple_beam_fails_on_already_simple() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Swoobat, Ability::Simple, PokemonMove::SimpleBeam);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Bibarel, Ability::Simple, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        // original_ability stays None when the move fails
+        assert_eq!(bs.p2_active_mons[0].original_ability, None,
+            "Simple Beam should fail when target already has Simple");
+    }
+}

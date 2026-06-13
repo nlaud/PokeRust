@@ -2035,6 +2035,215 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
+    // Skill Swap: exchange user's and target's current abilities.
+    // Bypasses Substitute (bypasssub flag). Honors Protect. Fails if either ability is in the
+    // failskillswap set. Same-ability swap now succeeds (Gen VI+). Fires on-gain effects for both.
+    if move_name == PokemonMove::SkillSwap {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned();
+        let Some(target) = target else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        if simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, target_slot, &target, move_data, false,
+        ).is_some() {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let (user_ability, target_ability) = {
+            let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
+            (user.map(|m| m.ability.clone()).unwrap_or(Ability::None), target.ability.clone())
+        };
+        if simulator_helpers::ability_excluded_from_skill_swap(&user_ability)
+            || simulator_helpers::ability_excluded_from_skill_swap(&target_ability)
+        {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            if user.original_ability.is_none() { user.original_ability = Some(user_ability.clone()); }
+            user.ability = target_ability.clone();
+        }
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            if tgt.original_ability.is_none() { tgt.original_ability = Some(target_ability); }
+            tgt.ability = user_ability;
+        }
+        simulator_helpers::process_pokemon_gain_ability(&mut next_state, action.user_slot);
+        simulator_helpers::process_pokemon_gain_ability(&mut next_state, target_slot);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Role Play: user copies the target's ability.
+    // Bypasses both Substitute and Protect (no protect/bypasssub flags in Showdown data).
+    // Fails if same ability; target's ability is in failroleplay set; user's ability is cantsuppress.
+    if move_name == PokemonMove::RolePlay {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let (user_ability, target_ability) = {
+            let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
+            let tgt = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
+            (
+                user.map(|m| m.ability.clone()).unwrap_or(Ability::None),
+                tgt.map(|m| m.ability.clone()).unwrap_or(Ability::None),
+            )
+        };
+        if user_ability == target_ability
+            || simulator_helpers::ability_cannot_be_role_played(&target_ability)
+            || simulator_helpers::ability_cannot_be_suppressed(&user_ability)
+        {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            if user.original_ability.is_none() { user.original_ability = Some(user_ability); }
+            user.ability = target_ability;
+        }
+        simulator_helpers::process_pokemon_gain_ability(&mut next_state, action.user_slot);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Entrainment: target copies the user's ability.
+    // Honors Protect and Substitute. Fails if same ability; target is in cantsuppress or Truant;
+    // user's ability is in noentrain set.
+    if move_name == PokemonMove::Entrainment {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned();
+        let Some(target) = target else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        if simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, target_slot, &target, move_data, false,
+        ).is_some() {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute) {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let (user_ability, target_ability) = {
+            let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
+            (user.map(|m| m.ability.clone()).unwrap_or(Ability::None), target.ability.clone())
+        };
+        if user_ability == target_ability
+            || simulator_helpers::ability_cannot_be_suppressed(&target_ability)
+            || target_ability == Ability::Truant
+            || simulator_helpers::ability_excluded_from_entrainment_user(&user_ability)
+        {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            if tgt.original_ability.is_none() { tgt.original_ability = Some(target_ability); }
+            tgt.ability = user_ability;
+        }
+        simulator_helpers::process_pokemon_gain_ability(&mut next_state, target_slot);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Gastro Acid: suppress the target's ability via the GastroAcid volatile.
+    // Does NOT overwrite the ability field; suppression is checked via pokemon_ability_is_suppressed.
+    // Auto-reverts on switch-out when volatiles are cleared. Honors Protect and Substitute.
+    // Fails if target's ability is in the cantsuppress set.
+    if move_name == PokemonMove::GastroAcid {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned();
+        let Some(target) = target else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        if simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, target_slot, &target, move_data, false,
+        ).is_some() {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute) {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if simulator_helpers::ability_cannot_be_suppressed(&target.ability) {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let state_snapshot = next_state.clone();
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            // apply_volatile_to_pokemon_pub skips if already present, so no duplicate guard needed.
+            simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, tgt, &VolatileStatus::GastroAcid);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Worry Seed: change target's ability to Insomnia; cure sleep if affected.
+    // Fails (via onTryImmunity) if target's ability is Truant or already Insomnia.
+    // Fails (via onTryHit cantsuppress) for protected abilities. Honors Protect and Substitute.
+    if move_name == PokemonMove::WorrySeed {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned();
+        let Some(target) = target else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        if simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, target_slot, &target, move_data, false,
+        ).is_some() {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute) {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if target.ability == Ability::Truant
+            || target.ability == Ability::Insomnia
+            || simulator_helpers::ability_cannot_be_suppressed(&target.ability)
+        {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            if tgt.original_ability.is_none() { tgt.original_ability = Some(tgt.ability.clone()); }
+            tgt.ability = Ability::Insomnia;
+            if matches!(tgt.status, Some(Status::Sleep(_))) {
+                tgt.status = None;
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Simple Beam: change target's ability to Simple.
+    // Fails if target's ability is already Simple or Truant, or is in cantsuppress set.
+    // Honors Protect and Substitute.
+    if move_name == PokemonMove::SimpleBeam {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned();
+        let Some(target) = target else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        if simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, target_slot, &target, move_data, false,
+        ).is_some() {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute) {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if target.ability == Ability::Simple
+            || target.ability == Ability::Truant
+            || simulator_helpers::ability_cannot_be_suppressed(&target.ability)
+        {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            if tgt.original_ability.is_none() { tgt.original_ability = Some(tgt.ability.clone()); }
+            tgt.ability = Ability::Simple;
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     // Power Trick / Power Shift: swap the user's raw Attack and Defense stats.
     // Using the move again re-swaps (restoring original values). The volatile tracks
     // whether the swap is currently active; it is reverted on switch-out.
