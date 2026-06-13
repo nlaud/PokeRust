@@ -29,7 +29,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 - Pressure — opponents expend 1 extra PP per move used against the holder
 - Protean / Libero — change type to match the move being used (once per switch-in)
 - Sand Force — +30% power for Rock/Ground/Steel in sandstorm
-- Sand Spit — summon sandstorm when struck by a move
 - Shadow Tag — opponents cannot switch out (does not affect other Shadow Tag users)
 - Sheer Force — remove secondary effects from moves; gain 1.3× power on those moves
 - Stalwart — ignore move and ability redirection
@@ -138,4 +137,5 @@ More architecturally significant; each likely needs its own research pass.
 ## Refactors
 - use thaws_target move bool and defrost move flag instead of fixed lists.
 - Use move flags such as IgnoreImmunity, IgnoreEvasion, Ignore... Flags (Refactor these to be move flags)
--
+- Recheck all test, suggest new tests, etc.
+- Refactor Outrage-type moves to act more like sleep, having a 50% chance to end after 2nd attack, then 100% on the last one.
