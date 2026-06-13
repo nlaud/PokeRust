@@ -6764,6 +6764,19 @@ pub fn apply_secondary_effects(
             }
         }
 
+        // Alluring Voice: confuse the target only if its stats were raised earlier this turn.
+        // Showdown stores this as a 100% `onHit` secondary the parser cannot represent, so apply
+        // it explicitly. The move is `bypasssub`, so the confusion applies through a Substitute
+        // (no sub guard); Own Tempo / Misty Terrain immunity is handled in apply_volatile_to_pokemon.
+        let alluring_voice_confuse = move_data.name == PokemonMove::AlluringVoice
+            && get_pokemon_at_slot(state, target_slot).is_some_and(|m| m.stats_raised_this_turn);
+        if alluring_voice_confuse {
+            let eff = HitEffect { volatile_status: Some(VolatileStatus::Confusion), ..Default::default() };
+            for (bs, _) in branches.iter_mut() {
+                apply_effect_to_target(bs, attacker_slot, target_slot, &eff, side_condition_target);
+            }
+        }
+
         // Throat Chop: on hit, prevent the target from using sound moves for 2 turns. Showdown
         // stores this as a 100% `onHit` secondary that the parser cannot represent. Blocked by a
         // Substitute; consecutive hits do not refresh the duration (apply_volatile_to_pokemon's

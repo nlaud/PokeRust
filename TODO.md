@@ -42,9 +42,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 ---
 
 ## Moves
-### Forgotten
-- Alluring Voice
-
 ### OHKO Moves
 - Fissure
 - Guillotine
