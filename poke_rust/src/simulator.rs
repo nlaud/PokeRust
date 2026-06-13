@@ -1523,6 +1523,214 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
+    // Belly Drum: maximise Attack at the cost of ½ max HP. Fails if the user has ½ max HP
+    // or less, or if Attack is already at +6. (Contrary inversion is not modelled until the
+    // ability itself is implemented.)
+    if move_name == PokemonMove::BellyDrum {
+        let (hp, max_hp, atk_boost) = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| (m.hp, m.stats[0].max(1), m.boosts[0]))
+            .unwrap_or((0, 1, 0));
+        if max_hp <= 1 || 2 * hp <= max_hp || atk_boost >= 6 {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let cost = max_hp / 2;
+        let env = simulator_helpers::berry_env(&next_state, action.user_slot);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            simulator_helpers::take_damage(mon, cost, env);
+            if mon.boosts[0] < 6 { mon.stats_raised_this_turn = true; }
+            mon.boosts[0] = 6;
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Clangorous Soul: +1 to Atk/Def/SpA/SpD/Spe at the cost of ⅓ max HP. Fails if the user
+    // has ⅓ max HP or less, or if all five of those stats are already at +6.
+    if move_name == PokemonMove::ClangorousSoul {
+        let (hp, max_hp, all_maxed) = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| (m.hp, m.stats[0].max(1), m.boosts[0..5].iter().all(|&b| b >= 6)))
+            .unwrap_or((0, 1, true));
+        if max_hp <= 1 || 3 * hp <= max_hp || all_maxed {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let cost = max_hp / 3;
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        let env = simulator_helpers::berry_env(&next_state, action.user_slot);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            simulator_helpers::take_damage(mon, cost, env);
+            simulator_helpers::apply_stat_boost_external(mon, &[1, 1, 1, 1, 1, 0, 0], items_suppressed);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Charge: +1 Sp. Def and apply the Charge volatile (doubles the user's next Electric move).
+    // Non-cumulative — re-using it just refreshes the volatile while still raising Sp. Def.
+    if move_name == PokemonMove::Charge {
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            simulator_helpers::apply_stat_boost_external(mon, &[0, 0, 0, 1, 0, 0, 0], items_suppressed);
+            simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Charge);
+            mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Charge, 0));
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Focus Energy: +2 critical-hit stages (via the FocusEnergy volatile). Fails if the user is
+    // already under Focus Energy or Dragon Cheer.
+    if move_name == PokemonMove::FocusEnergy {
+        let blocked = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusEnergy)
+                || simulator_helpers::has_status_volatile(m, &VolatileStatus::DragonCheer(0)))
+            .unwrap_or(true);
+        if blocked {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, 0));
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Dragon Cheer: give an adjacent ally +1 critical-hit stage (+2 if that ally is Dragon-type
+    // at the time of use; the amount is locked in). Fails with no adjacent ally, or if the ally
+    // already has Focus Energy or Dragon Cheer.
+    if move_name == PokemonMove::DragonCheer {
+        let user_player = action.user_slot.player;
+        let user_idx = action.user_slot.slot_index as usize;
+        let actives_len = match user_player {
+            Player::P1 => next_state.p1_active_mons.len(),
+            Player::P2 => next_state.p2_active_mons.len(),
+        };
+        let ally_idx = (0..actives_len).find(|&i| {
+            i != user_idx
+                && simulator_helpers::get_pokemon_at_slot(&next_state, FieldSlot { player: user_player, slot_index: i as u8 })
+                    .map(|m| !m.fainted)
+                    .unwrap_or(false)
+        });
+        let Some(ally_idx) = ally_idx else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let ally_slot = FieldSlot { player: user_player, slot_index: ally_idx as u8 };
+        let ally = simulator_helpers::get_pokemon_at_slot(&next_state, ally_slot);
+        let blocked = ally
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusEnergy)
+                || simulator_helpers::has_status_volatile(m, &VolatileStatus::DragonCheer(0)))
+            .unwrap_or(true);
+        if blocked {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let amount = ally
+            .map(|m| if simulator_helpers::pokemon_has_type(m, &PokemonType::Dragon) { 2 } else { 1 })
+            .unwrap_or(1);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, ally_slot) {
+            mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::DragonCheer(amount), 0));
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Magnetic Flux: +1 Def/Sp. Def to every Pokémon on the user's side whose ability is Plus or
+    // Minus (the user included). Fails if no such Pokémon is present.
+    if move_name == PokemonMove::MagneticFlux {
+        let user_player = action.user_slot.player;
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        let actives_len = match user_player {
+            Player::P1 => next_state.p1_active_mons.len(),
+            Player::P2 => next_state.p2_active_mons.len(),
+        };
+        let mut any = false;
+        for i in 0..actives_len {
+            let slot = FieldSlot { player: user_player, slot_index: i as u8 };
+            let eligible = simulator_helpers::get_pokemon_at_slot(&next_state, slot)
+                .map(|m| !m.fainted
+                    && matches!(m.ability, Ability::Plus | Ability::Minus)
+                    && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, m))
+                .unwrap_or(false);
+            if eligible {
+                if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, slot) {
+                    simulator_helpers::apply_stat_boost_external(mon, &[0, 1, 0, 1, 0, 0, 0], items_suppressed);
+                }
+                any = true;
+            }
+        }
+        if !any {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Minimize: +2 evasiveness and apply the Minimize volatile (certain moves hit it for double
+    // and never miss — handled in the damage calculation).
+    if move_name == PokemonMove::Minimize {
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            simulator_helpers::apply_stat_boost_external(mon, &[0, 0, 0, 0, 0, 0, 2], items_suppressed);
+            if !simulator_helpers::has_status_volatile(mon, &VolatileStatus::Minimize) {
+                mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Minimize, 0));
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Stockpile: +1 Def/Sp. Def and raise the Stockpile level (max 3). Fails at level 3.
+    if move_name == PokemonMove::Stockpile {
+        let level = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(simulator_helpers::stockpile_level)
+            .unwrap_or(3);
+        if level >= 3 {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            simulator_helpers::apply_stat_boost_external(mon, &[0, 1, 0, 1, 0, 0, 0], items_suppressed);
+            simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Stockpile(0));
+            mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Stockpile(level + 1), 0));
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Swallow: heal ¼ / ½ / full max HP for Stockpile level 1 / 2 / 3, then consume the Stockpile
+    // charge and the Def/Sp. Def boosts it granted. Fails if the user has not used Stockpile.
+    if move_name == PokemonMove::Swallow {
+        let (level, max_hp, heal_blocked) = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| (simulator_helpers::stockpile_level(m), m.stats[0].max(1), simulator_helpers::heal_is_blocked(m)))
+            .unwrap_or((0, 1, true));
+        if level == 0 {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let heal = (match level { 1 => max_hp / 4, 2 => max_hp / 2, _ => max_hp }).max(1);
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        let env = simulator_helpers::berry_env(&next_state, action.user_slot);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            if !heal_blocked {
+                simulator_helpers::gain_hp(mon, heal, env);
+            }
+            simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Stockpile(0));
+            let drop = -(level as i8);
+            simulator_helpers::apply_stat_boost_external(mon, &[0, drop, 0, drop, 0, 0, 0], items_suppressed);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Spit Up: fails outright if the user has no Stockpile charge. On success it is an ordinary
+    // damaging move — its base power (100/200/300) comes from variable_move_base_power, and the
+    // Stockpile charge + its Def/Sp. Def boosts are consumed in apply_post_damage_move_effects.
+    if move_name == PokemonMove::SpitUp {
+        let level = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(simulator_helpers::stockpile_level)
+            .unwrap_or(0);
+        if level == 0 {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
     // Psych Up: copy target's stat stages and Focus Energy status to the user.
     // Bypasses Substitute; not blocked by Protect.
     if move_name == PokemonMove::PsychUp {
@@ -2861,6 +3069,7 @@ fn apply_post_damage_move_effects(
         .map(|m| simulator_helpers::item_is_active(&bs, m))
         .unwrap_or(false);
     let attacker_env = simulator_helpers::berry_env(&bs, attacker_slot);
+    let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
     let mut forced_winner: Option<Player> = None;
     let mut attacker_fainted = false;
 
@@ -2918,6 +3127,17 @@ fn apply_post_damage_move_effects(
                     attacker_fainted = true;
                     if opponent_wiped { forced_winner = Some(attacker_slot.player); }
                 }
+            }
+        }
+
+        // Spit Up: using the move consumes the Stockpile charge and removes the Def/Sp. Def
+        // boosts it granted (the base power was already read from the level during damage calc).
+        if move_data.name == PokemonMove::SpitUp {
+            let level = simulator_helpers::stockpile_level(attacker_mon) as i8;
+            if level > 0 {
+                simulator_helpers::remove_status_volatile(attacker_mon, &VolatileStatus::Stockpile(0));
+                let drop = -level;
+                simulator_helpers::apply_stat_boost_external(attacker_mon, &[0, drop, 0, drop, 0, 0, 0], items_suppressed);
             }
         }
     }
