@@ -21555,22 +21555,35 @@ mod stat_manipulation {
     }
 
     #[test]
-    fn speed_swap_stat_persists_on_switch_out() {
-        // Speed Swap modifies the raw Speed stat permanently for the battle.
-        // There is no volatile tracking the swap, so the new stat value is retained on the bench.
-        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
-        p1.stats[5] = 80; // Speed value after having received the opponent's lower Speed
+    fn speed_swap_stat_reverts_on_switch_out() {
+        // Speed Swap stores the original Speed in a SpeedSwap volatile.
+        // clear_pokemon_for_switch_out restores it so the mon re-enters with its own Speed.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SpeedSwap);
+        p1.stats[5] = 200; // user Speed
         let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
-        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[5] = 80; // target Speed
+        // Run Speed Swap first, then switch out in a second turn.
         let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
-        let outcomes = run_single_turn(
+        let swap_outcomes = run_single_turn(
             &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (after_swap, _) = extract_battle_state(swap_outcomes);
+        // Confirm the swap happened.
+        assert_eq!(after_swap.p1_active_mons[0].stats[5], 80,  "Speed Swap: user should have target's speed");
+        assert_eq!(after_swap.p2_active_mons[0].stats[5], 200, "Speed Swap: target should have user's speed");
+        // Now switch out P1's Snorlax.
+        let switch_outcomes = run_single_turn(
+            &MatchState::BattleState(after_swap),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             &move_dex(), &pokemon_dex(),
         );
-        let (bs, _) = extract_battle_state(outcomes);
+        let (bs, _) = extract_battle_state(switch_outcomes);
         let snorlax = &bs.p1_back_mons[0];
-        assert_eq!(snorlax.stats[5], 80, "Speed Swap: raw Speed change persists through switch-out");
+        assert_eq!(snorlax.stats[5], 200, "Speed Swap: original Speed restored on switch-out");
     }
 }
