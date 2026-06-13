@@ -1471,6 +1471,41 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let attack_type  = effective_move_type(_state, attacker, move_data);
     let effectiveness = move_type_effectiveness(_state, &attack_type, target);
 
+    // Counter / Mirror Coat / Metal Burst / Comeuppance: return a multiple of damage taken
+    // this turn. All four deal typeless damage — they bypass type immunity entirely (a Ghost
+    // can be hit by Counter). Invulnerability still zeroes them out.
+    //
+    //   Counter       — 2× last physical damage taken
+    //   Mirror Coat   — 2× last special damage taken
+    //   Metal Burst / Comeuppance — 1.5× most-recent damage of any category
+    //
+    // Fail logic (no qualifying damage) is handled as an early return upstream in
+    // possible_damage_outcomes_for_move; if we reach here, the damage is > 0.
+    {
+        use crate::data::pokemon_move::PokemonMove as M;
+        let retaliation_dmg: Option<u16> = match move_data.name {
+            M::Counter => {
+                let raw = attacker.last_physical_damage_taken;
+                if raw > 0 { Some((raw as u32 * 2).min(u16::MAX as u32) as u16) } else { None }
+            }
+            M::MirrorCoat => {
+                let raw = attacker.last_special_damage_taken;
+                if raw > 0 { Some((raw as u32 * 2).min(u16::MAX as u32) as u16) } else { None }
+            }
+            M::MetalBurst | M::Comeuppance => {
+                let raw = attacker.last_damage_taken;
+                if raw > 0 { Some(((raw as u32 * 3) / 2).max(1).min(u16::MAX as u32) as u16) } else { None }
+            }
+            _ => None,
+        };
+        if let Some(dmg) = retaliation_dmg {
+            // Typeless: bypass effectiveness entirely (no immunity, no resistance).
+            // Invulnerability (e.g. mid-Fly) still blocks the hit.
+            let effective_dmg = if invulnerability_multiplier > 0.0 { dmg } else { 0 };
+            return vec![(effective_dmg, false, 1.0)];
+        }
+    }
+
     // Final Gambit: deals fixed damage equal to the user's current HP. Type immunity (e.g.
     // Ghost vs Fighting) and invulnerability still zero out the damage. No crit / spread /
     // roll scaling. The user faint is handled in apply_post_damage_move_effects via the
@@ -4190,6 +4225,12 @@ pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
             mon.entered_this_turn = false;
             mon.damaged_this_turn = false;
             mon.damaged_by_this_turn.clear();
+            mon.last_physical_damage_taken = 0;
+            mon.last_physical_attacker = None;
+            mon.last_special_damage_taken = 0;
+            mon.last_special_attacker = None;
+            mon.last_damage_taken = 0;
+            mon.last_damage_attacker = None;
             mon.stats_raised_this_turn = false;
             mon.stats_lowered_this_turn = false;
             mon.switched_in_this_turn = false;

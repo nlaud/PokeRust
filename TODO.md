@@ -44,17 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Crash-damage moves and rampaging moves
-**Rampaging (lock into move for 2–3 turns; confused after):**
-- Outrage, Petal Dance, Raging Fury, Thrash
-
-### Counter and retaliation moves
-Deal damage proportional to damage received this turn. Requires tracking damage
-taken this turn by type (physical vs. special).
-- Counter — 2× the physical damage received this turn
-- Mirror Coat — 2× the special damage received this turn
-- Comeuppance / Metal Burst — 1.5× any damage received this turn
-
 ### Ability manipulation moves
 Change a Pokémon's ability mid-battle.
 - Entrainment — change target's ability to match user's
