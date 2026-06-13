@@ -42,15 +42,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 ---
 
 ## Moves
-### Type-changing moves
-Alter a Pokémon's active type(s) during battle.
-- Electrify — target's next move becomes Electric-type this turn
-- Forest's Curse — add Grass type to target
-- Magic Powder — change target's type to Psychic
-- Reflect Type — change user's type to match target's
-- Soak — change target's type to Water
-- Trick-or-Treat — add Ghost type to target
-
 ### Item manipulation moves
 Steal, swap, remove, or force consumption of held items.
 - Bug Bite / Pluck — eat target's Berry and apply its effect to user

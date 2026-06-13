@@ -23403,4 +23403,215 @@ mod ability_manipulation_moves {
                 "No Guard does not override the higher-level OHKO failure rule");
         }
     }
+
+    // ── Type-changing moves: Soak, Magic Powder, Forest's Curse, Trick-or-Treat,
+    //    Reflect Type, Electrify ────────────────────────────────────────────────
+    mod type_changing_moves {
+        use super::*;
+        use crate::battle::{BattleState, FieldSlot};
+        use crate::dex_data::PokemonType;
+
+        fn build(species: Species, moves: [Option<PokemonMove>; 4], ability: Ability) -> PokemonState {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &pdex, &mdex, Some(50), Some(moves),
+                None, Some(ability), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
+            )
+        }
+
+        fn mv(species: Species, m: PokemonMove) -> PokemonState {
+            build(species, [Some(m), None, None, None], Ability::None)
+        }
+
+        /// Run a single turn where P1 uses its move (slot 0) and P2 uses Splash, returning the
+        /// resulting battle state (single deterministic branch for these status moves).
+        fn run_p1_status(p1: PokemonState, p2: PokemonState) -> BattleState {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )).0
+        }
+
+        #[test]
+        fn soak_changes_target_to_pure_water() {
+            let bs = run_p1_status(
+                mv(Species::Snorlax, PokemonMove::Soak),
+                mv(Species::Snorlax, PokemonMove::Splash),
+            );
+            assert_eq!(bs.p2_active_mons[0].types, vec![PokemonType::Water],
+                "Soak should make the target pure Water");
+        }
+
+        #[test]
+        fn soak_fails_against_multitype() {
+            let bs = run_p1_status(
+                mv(Species::Snorlax, PokemonMove::Soak),
+                build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::Multitype),
+            );
+            assert_eq!(bs.p2_active_mons[0].types, vec![PokemonType::Normal],
+                "Soak should fail against a Multitype Pokémon, leaving its type unchanged");
+        }
+
+        #[test]
+        fn magic_powder_changes_target_to_pure_psychic() {
+            let bs = run_p1_status(
+                mv(Species::Snorlax, PokemonMove::MagicPowder),
+                mv(Species::Snorlax, PokemonMove::Splash),
+            );
+            assert_eq!(bs.p2_active_mons[0].types, vec![PokemonType::Psychic],
+                "Magic Powder should make the target pure Psychic");
+        }
+
+        #[test]
+        fn magic_powder_fails_against_grass_type() {
+            let target = mv(Species::Bulbasaur, PokemonMove::Splash);
+            let original = target.types.clone();
+            let bs = run_p1_status(mv(Species::Snorlax, PokemonMove::MagicPowder), target);
+            assert_eq!(bs.p2_active_mons[0].types, original,
+                "Magic Powder is a powder move and must fail against a Grass-type target");
+        }
+
+        #[test]
+        fn forests_curse_adds_grass_type() {
+            let bs = run_p1_status(
+                mv(Species::Snorlax, PokemonMove::ForestsCurse),
+                mv(Species::Snorlax, PokemonMove::Splash),
+            );
+            assert_eq!(bs.p2_active_mons[0].types, vec![PokemonType::Normal, PokemonType::Grass],
+                "Forest's Curse should add Grass to the target's existing type");
+        }
+
+        #[test]
+        fn forests_curse_fails_if_target_already_grass() {
+            let target = mv(Species::Bulbasaur, PokemonMove::Splash);
+            let original = target.types.clone();
+            let bs = run_p1_status(mv(Species::Snorlax, PokemonMove::ForestsCurse), target);
+            assert_eq!(bs.p2_active_mons[0].types, original,
+                "Forest's Curse should fail against an already-Grass target");
+        }
+
+        #[test]
+        fn trick_or_treat_adds_ghost_type() {
+            let bs = run_p1_status(
+                mv(Species::Snorlax, PokemonMove::TrickorTreat),
+                mv(Species::Snorlax, PokemonMove::Splash),
+            );
+            assert_eq!(bs.p2_active_mons[0].types, vec![PokemonType::Normal, PokemonType::Ghost],
+                "Trick-or-Treat should add Ghost to the target's existing type");
+        }
+
+        #[test]
+        fn forests_curse_replaces_trick_or_treat_added_type() {
+            // Directly exercise the replacement rule: a Trick-or-Treat'd Ghost is replaced by
+            // Grass (rather than stacking a fourth type) when Forest's Curse is applied.
+            let state = battle_state_from_lists(
+                vec![mv(Species::Snorlax, PokemonMove::Splash)], vec![],
+                vec![mv(Species::Snorlax, PokemonMove::Splash)], vec![],
+            );
+            let mut bs = state;
+            let slot = FieldSlot { player: Player::P2, slot_index: 0 };
+            assert!(simulator_helpers::try_add_type(
+                &mut bs, slot, PokemonType::Ghost,
+                VolatileStatus::TrickorTreat, PokemonType::Grass, VolatileStatus::ForestsCurse,
+            ));
+            assert_eq!(bs.p2_active_mons[0].types, vec![PokemonType::Normal, PokemonType::Ghost]);
+            assert!(simulator_helpers::try_add_type(
+                &mut bs, slot, PokemonType::Grass,
+                VolatileStatus::ForestsCurse, PokemonType::Ghost, VolatileStatus::TrickorTreat,
+            ));
+            assert_eq!(bs.p2_active_mons[0].types, vec![PokemonType::Normal, PokemonType::Grass],
+                "Forest's Curse should replace the Trick-or-Treat Ghost, not stack a 4th type");
+            assert!(simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::ForestsCurse));
+            assert!(!simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::TrickorTreat));
+        }
+
+        #[test]
+        fn reflect_type_copies_target_types() {
+            let bs = run_p1_status(
+                mv(Species::Snorlax, PokemonMove::ReflectType),
+                mv(Species::Squirtle, PokemonMove::Splash),
+            );
+            assert_eq!(bs.p1_active_mons[0].types, vec![PokemonType::Water],
+                "Reflect Type should make the user copy the target's type(s)");
+        }
+
+        #[test]
+        fn reflect_type_fails_when_user_terastallized() {
+            let mut user = mv(Species::Snorlax, PokemonMove::ReflectType);
+            user.is_tera = true;
+            user.tera_type = PokemonType::Fire;
+            let bs = run_p1_status(user, mv(Species::Squirtle, PokemonMove::Splash));
+            assert_eq!(bs.p1_active_mons[0].types, vec![PokemonType::Normal],
+                "Reflect Type should fail while the user is Terastallized");
+        }
+
+        #[test]
+        fn electrify_makes_targets_move_electric() {
+            // Gengar (Ghost/Poison) is immune to a Normal-type Tackle. Gengar outspeeds Snorlax,
+            // so its Electrify lands first and Snorlax's Tackle becomes Electric — which is no
+            // longer immune — so Gengar takes damage.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = mv(Species::Gengar, PokemonMove::Electrify);
+            let p1_hp = p1.hp;
+            let p2 = mv(Species::Snorlax, PokemonMove::Tackle);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                if bs.p1_active_mons[0].hp < p1_hp)),
+                "Electrify should turn the target's Normal move Electric so it damages a Ghost-type");
+        }
+
+        #[test]
+        fn electrify_volatile_cleared_at_end_of_turn() {
+            let bs = run_p1_status(
+                mv(Species::Gengar, PokemonMove::Electrify),
+                mv(Species::Snorlax, PokemonMove::Splash),
+            );
+            assert!(!simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &VolatileStatus::Electrify),
+                "Electrify only lasts the current turn and must be cleared at end of turn");
+        }
+
+        #[test]
+        fn type_change_reverts_on_switch_out() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let p1 = build(Species::Snorlax, [Some(PokemonMove::Soak), Some(PokemonMove::Splash), None, None], Ability::None);
+            let p2 = mv(Species::Snorlax, PokemonMove::Splash);
+            let p2_back = mv(Species::Pikachu, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![p2_back]);
+
+            // Turn 1: Soak makes the P2 active Snorlax pure Water.
+            let after_t1 = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )).0;
+            assert_eq!(after_t1.p2_active_mons[0].types, vec![PokemonType::Water]);
+
+            // Turn 2: P2 switches the Soaked Snorlax out. It should revert to Normal on the bench.
+            let after_t2 = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(after_t1),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+                &mdex, &pdex,
+            )).0;
+            let snorlax = after_t2.p2_back_mons.iter().find(|m| m.species == Species::Snorlax)
+                .expect("Soaked Snorlax should be on the bench after switching out");
+            assert_eq!(snorlax.types, vec![PokemonType::Normal],
+                "A Soaked Pokémon's type should revert when it switches out");
+        }
+    }
 }
