@@ -20646,3 +20646,864 @@ mod move_restriction {
             "Encore rewrote P2's queued Splash to Tackle, damaging P1 this turn");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Volatile status — ongoing debuffs
+// Perish Song, Psychic Noise, Salt Cure, Syrup Bomb, Uproar, Yawn
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod volatile_status_debuffs {
+    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{Status, Terrain, VolatileStatus};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simulator::get_possible_commands_for_active_slot;
+    use crate::simulator_helpers;
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+        simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut m = build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        m.stats[0] = 400;
+        m.hp = 400;
+        m
+    }
+
+    fn has_vol(mon: &PokemonState, v: &VolatileStatus) -> bool {
+        simulator_helpers::has_status_volatile(mon, v)
+    }
+
+    fn vol_turns(mon: &PokemonState, v: &VolatileStatus) -> Option<u8> {
+        mon.volatiles.iter().find_map(|vs| match vs {
+            VolatileStatusState::TurnStatus(x, n) if x == v => Some(*n),
+            _ => None,
+        })
+    }
+
+    // ── Salt Cure ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn salt_cure_applies_volatile_on_hit() {
+        let p1 = mon(Species::Snorlax, PokemonMove::SaltCure, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::SaltCure),
+            "Salt Cure should apply SaltCure volatile on hit");
+    }
+
+    #[test]
+    fn salt_cure_chip_is_one_eighth_max_hp() {
+        // Build state with SaltCure pre-applied; call EOT to verify chip = max_hp/8.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        let max_hp = state.p2_active_mons[0].stats[0];
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::SaltCure, 0),
+        );
+        let hp_before = state.p2_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut state);
+        let chip = hp_before - state.p2_active_mons[0].hp;
+        assert_eq!(chip, max_hp / 8,
+            "Salt Cure chip for Normal-type should be 1/8 max HP ({}/8={}), got {}",
+            max_hp, max_hp / 8, chip);
+    }
+
+    #[test]
+    fn salt_cure_chip_is_one_fourth_for_water_type() {
+        // Lapras is Water/Ice — should take 1/4 max HP instead of 1/8.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Lapras, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        let max_hp = state.p2_active_mons[0].stats[0];
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::SaltCure, 0),
+        );
+        let hp_before = state.p2_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut state);
+        let chip = hp_before - state.p2_active_mons[0].hp;
+        assert_eq!(chip, max_hp / 4,
+            "Salt Cure chip for Water-type should be 1/4 max HP, got {}", chip);
+    }
+
+    #[test]
+    fn salt_cure_chip_is_one_fourth_for_steel_type() {
+        // Steelix is Steel/Ground — should take 1/4 max HP.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Steelix, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        let max_hp = state.p2_active_mons[0].stats[0];
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::SaltCure, 0),
+        );
+        let hp_before = state.p2_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut state);
+        let chip = hp_before - state.p2_active_mons[0].hp;
+        assert_eq!(chip, max_hp / 4,
+            "Salt Cure chip for Steel-type should be 1/4 max HP, got {}", chip);
+    }
+
+    #[test]
+    fn salt_cure_magic_guard_prevents_chip() {
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Clefable, PokemonMove::Splash, Ability::MagicGuard)],
+            vec![],
+        );
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::SaltCure, 0),
+        );
+        let hp_before = state.p2_active_mons[0].hp;
+        simulator_helpers::apply_end_of_turn_status_effects(&mut state);
+        assert_eq!(state.p2_active_mons[0].hp, hp_before,
+            "Magic Guard should prevent Salt Cure chip damage");
+    }
+
+    // ── Syrup Bomb ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn syrup_bomb_applies_volatile_on_hit() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SyrupBomb, Ability::None);
+        p1.stats[5] = 200; // faster so we can use branch-finding
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        // Syrup Bomb has 90% accuracy; at least one branch should have the volatile.
+        let hit = outcomes.into_iter().any(|(s, _)| matches!(&s,
+            MatchState::BattleState(bs) if has_vol(&bs.p2_active_mons[0], &VolatileStatus::SyrupBomb)
+        ));
+        assert!(hit, "Syrup Bomb should apply SyrupBomb volatile on hit");
+    }
+
+    #[test]
+    fn syrup_bomb_drops_speed_each_turn_for_3_turns() {
+        // Pre-apply SyrupBomb(n=3); each decrement_effect_timers fires a −1 Speed drop.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::SyrupBomb, 3),
+        );
+
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert_eq!(state.p2_active_mons[0].boosts[4], -1, "After 1st EOT: Speed should be −1");
+
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert_eq!(state.p2_active_mons[0].boosts[4], -2, "After 2nd EOT: Speed should be −2");
+
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert_eq!(state.p2_active_mons[0].boosts[4], -3, "After 3rd EOT: Speed should be −3");
+
+        assert!(!has_vol(&state.p2_active_mons[0], &VolatileStatus::SyrupBomb),
+            "SyrupBomb volatile should be removed after 3 speed drops");
+    }
+
+    #[test]
+    fn syrup_bomb_removed_when_user_switches_out() {
+        // SyrupBomb ends when the user leaves the field; P2 (target) should lose the volatile.
+        let p1 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let mut state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::SyrupBomb, 2),
+        );
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::SyrupBomb),
+            "SyrupBomb should be removed from P2 when P1 (the user) switches out");
+    }
+
+    // ── Perish Song ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn perish_song_applies_to_both_mons() {
+        let p1 = mon(Species::Snorlax, PokemonMove::PerishSong, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PerishSong),
+            "Perish Song should afflict the user");
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::PerishSong),
+            "Perish Song should afflict the target");
+    }
+
+    #[test]
+    fn perish_song_counter_decrements_each_eot() {
+        // After applying via run_single_turn, the counter starts at 4 and decrements once
+        // during the turn's EOT (4→3). Subsequent manual decrements advance 3→2→1.
+        let p1 = mon(Species::Snorlax, PokemonMove::PerishSong, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (mut bs, _) = extract_battle_state(outcomes);
+        // After the turn's EOT: 4→3
+        assert_eq!(vol_turns(&bs.p1_active_mons[0], &VolatileStatus::PerishSong), Some(3),
+            "PerishSong counter should be 3 after first EOT");
+        // Manual next EOT: 3→2
+        simulator_helpers::decrement_effect_timers(&mut bs);
+        assert_eq!(vol_turns(&bs.p1_active_mons[0], &VolatileStatus::PerishSong), Some(2),
+            "PerishSong counter should be 2 after second EOT");
+    }
+
+    #[test]
+    fn perish_song_faints_after_3_full_turns() {
+        // PerishSong applied with n=4; 4 EOT calls trigger the faint on the 4th.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        state.p1_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::PerishSong, 4),
+        );
+        simulator_helpers::decrement_effect_timers(&mut state); // 4→3
+        simulator_helpers::decrement_effect_timers(&mut state); // 3→2
+        simulator_helpers::decrement_effect_timers(&mut state); // 2→1
+        assert!(!state.p1_active_mons[0].fainted, "Pokémon should not have fainted yet (counter=1)");
+        simulator_helpers::decrement_effect_timers(&mut state); // effect fires → faint
+        assert!(state.p1_active_mons[0].fainted,
+            "Perish Song should faint the Pokémon when the counter reaches 0");
+    }
+
+    #[test]
+    fn perish_song_soundproof_blocks_for_non_user() {
+        // P2 has Soundproof → Perish Song should not afflict P2, but still afflict P1 (the user).
+        let p1 = mon(Species::Snorlax, PokemonMove::PerishSong, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Soundproof);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::PerishSong),
+            "Soundproof should block Perish Song for a non-user");
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PerishSong),
+            "User should still be afflicted when opponent has Soundproof");
+    }
+
+    #[test]
+    fn perish_song_user_with_soundproof_still_afflicted() {
+        // P1 has Soundproof but uses Perish Song → still afflicts itself (user exception).
+        let p1 = mon(Species::Snorlax, PokemonMove::PerishSong, Ability::Soundproof);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PerishSong),
+            "User with Soundproof should still be afflicted by its own Perish Song");
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::PerishSong),
+            "Target without Soundproof should also be afflicted");
+    }
+
+    // ── Uproar ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn uproar_applies_lock_volatile_to_user() {
+        let p1 = mon(Species::Snorlax, PokemonMove::Uproar, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Uproar),
+            "Uproar should apply the Uproar volatile to the user");
+    }
+
+    #[test]
+    fn uproar_wakes_sleeping_target() {
+        let p1 = mon(Species::Snorlax, PokemonMove::Uproar, Ability::None);
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.status = Some(Status::Sleep(2));
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert_eq!(bs.p2_active_mons[0].status, None,
+            "Uproar should wake all sleeping Pokémon");
+    }
+
+    #[test]
+    fn uproar_prevents_sleep_via_yawn() {
+        // P1 has Uproar volatile active; P2's Yawn volatile is expiring.
+        // Uproar on any field mon should block the Yawn-triggered sleep.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        state.p1_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::Uproar, 2),
+        );
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1),
+        );
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert_eq!(state.p2_active_mons[0].status, None,
+            "Uproar on the field should prevent Yawn from inducing sleep");
+    }
+
+    #[test]
+    fn uproar_lock_forces_only_uproar() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Uproar, Ability::None);
+        p1.moves[1] = Some(PokemonMove::Tackle);
+        p1.move_pp[1] = 35;
+        p1.max_pp[1] = 35;
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Uproar, 2));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let cmds = get_possible_commands_for_active_slot(
+            &state, Player::P1, 0, &move_dex(), &pokemon_dex(),
+        );
+        let has_uproar = cmds.iter().any(|c| matches!(c,
+            BattleCommand::Attack(a) if
+                state.p1_active_mons[0].moves.get(a.move_slot)
+                    .and_then(|m| m.as_ref()) == Some(&PokemonMove::Uproar)
+        ));
+        let has_tackle = cmds.iter().any(|c| matches!(c,
+            BattleCommand::Attack(a) if
+                state.p1_active_mons[0].moves.get(a.move_slot)
+                    .and_then(|m| m.as_ref()) == Some(&PokemonMove::Tackle)
+        ));
+        assert!(has_uproar, "Uproar should remain selectable while locked");
+        assert!(!has_tackle, "Other moves should be blocked during Uproar lock");
+    }
+
+    // ── Yawn ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn yawn_applies_volatile_to_target() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Yawn, Ability::None);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::Yawn),
+            "Yawn should apply the Yawn volatile");
+        assert_eq!(bs.p2_active_mons[0].status, None,
+            "Target should not be asleep immediately after Yawn");
+    }
+
+    #[test]
+    fn yawn_induces_sleep_when_volatile_expires() {
+        // Yawn volatile with n=1 (about to expire) → sleep on EOT.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1),
+        );
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert!(matches!(state.p2_active_mons[0].status, Some(Status::Sleep(_))),
+            "Yawn should apply Sleep when its volatile expires");
+        assert!(!has_vol(&state.p2_active_mons[0], &VolatileStatus::Yawn),
+            "Yawn volatile should be removed after sleep is applied");
+    }
+
+    #[test]
+    fn yawn_sleep_blocked_by_insomnia() {
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::Insomnia)],
+            vec![],
+        );
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1),
+        );
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert_eq!(state.p2_active_mons[0].status, None,
+            "Insomnia should prevent Yawn from applying sleep");
+    }
+
+    #[test]
+    fn yawn_sleep_blocked_by_electric_terrain() {
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        state.terrain = Some(Terrain::ElectricTerrain);
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1),
+        );
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert_eq!(state.p2_active_mons[0].status, None,
+            "Electric Terrain should prevent Yawn from applying sleep");
+    }
+
+    #[test]
+    fn yawn_second_use_does_not_reset_expiry() {
+        // P2 has Yawn(n=1) (about to expire); P1 uses Yawn again.
+        // The second Yawn should be blocked (already_has), so EOT still triggers sleep on schedule.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Yawn, Ability::None);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1));
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        // If counter was refreshed (bug), sleep would not apply yet (n would be 2→1 after EOT).
+        assert!(matches!(bs.p2_active_mons[0].status, Some(Status::Sleep(_))),
+            "Sleep should have been applied this turn (Yawn expiry was not reset by second use)");
+        assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::Yawn),
+            "Yawn volatile should be gone after expiry");
+    }
+
+    // ── Psychic Noise ────────────────────────────────────────────────────────
+
+    #[test]
+    fn psychic_noise_applies_healblock() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PsychicNoise, Ability::None);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::HealBlock),
+            "Psychic Noise should apply HealBlock to the target");
+        assert!(simulator_helpers::heal_is_blocked(&bs.p2_active_mons[0]),
+            "Healing should be blocked while HealBlock is active");
+    }
+
+    #[test]
+    fn psychic_noise_healblock_lasts_2_turns() {
+        // HealBlock starts at n=2; after 2 EOT decrements it should be gone.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::HealBlock, 2),
+        );
+        assert!(simulator_helpers::heal_is_blocked(&state.p2_active_mons[0]),
+            "HealBlock should block healing immediately after application");
+
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert!(has_vol(&state.p2_active_mons[0], &VolatileStatus::HealBlock),
+            "HealBlock (n=2) should still be active after first decrement");
+
+        simulator_helpers::decrement_effect_timers(&mut state);
+        assert!(!has_vol(&state.p2_active_mons[0], &VolatileStatus::HealBlock),
+            "HealBlock should expire after 2 decrements");
+        assert!(!simulator_helpers::heal_is_blocked(&state.p2_active_mons[0]),
+            "Healing should be unblocked after HealBlock expires");
+    }
+
+    #[test]
+    fn psychic_noise_second_use_does_not_refresh_healblock() {
+        // P2 already has HealBlock(n=1); a second Psychic Noise should not reset it to n=2.
+        // If it did refresh, HealBlock would survive this turn's EOT decrement (n=2→1, still present).
+        // If it correctly does NOT refresh, EOT decrements n=1→removed.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PsychicNoise, Ability::None);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::HealBlock, 1));
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::HealBlock),
+            "Second Psychic Noise should not refresh an already-active HealBlock");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stat manipulation — clearing, copying, splitting, swapping
+// Clear Smog, Haze, Psych Up, Guard Split/Swap, Power Shift/Trick, Power Split/Swap, Speed Swap
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod stat_manipulation {
+    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simulator_helpers;
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+        simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn has_vol(mon: &PokemonState, v: &VolatileStatus) -> bool {
+        simulator_helpers::has_status_volatile(mon, v)
+    }
+
+    fn run(p1: PokemonState, p2: PokemonState) -> crate::battle::BattleState {
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        bs
+    }
+
+    // ── Clear Smog ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn clear_smog_resets_target_stat_stages() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::ClearSmog);
+        p1.stats[5] = 200; // faster
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts = [2, -1, 3, 0, 1, 0, -2]; // various stages
+        let bs = run(p1, p2);
+        assert_eq!(bs.p2_active_mons[0].boosts, [0; 7],
+            "Clear Smog should reset all of the target's stat stages to 0");
+    }
+
+    #[test]
+    fn clear_smog_does_not_reset_own_stages() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::ClearSmog);
+        p1.stats[5] = 200;
+        p1.boosts[0] = 3; // user has +3 Atk — should be untouched
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 3,
+            "Clear Smog should not touch the user's own stat stages");
+    }
+
+    // ── Haze ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn haze_clears_all_stat_stages_on_field() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Haze);
+        p1.boosts = [2, 0, -1, 0, 3, 0, 0];
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts = [-2, 1, 0, 4, 0, 0, 0];
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts, [0; 7], "Haze should clear user's stat stages");
+        assert_eq!(bs.p2_active_mons[0].boosts, [0; 7], "Haze should clear target's stat stages");
+    }
+
+    // ── Psych Up ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn psych_up_copies_target_stat_stages() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PsychUp);
+        p1.stats[5] = 200;
+        p1.boosts = [1, 0, 0, 0, 0, 0, 0]; // user has +1 Atk — should be overwritten
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts = [-1, 2, 0, 3, 0, 0, -1]; // target's stages
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts, [-1, 2, 0, 3, 0, 0, -1],
+            "Psych Up should copy all of the target's stat stages to the user");
+        // Target's stages should be unchanged.
+        assert_eq!(bs.p2_active_mons[0].boosts, [-1, 2, 0, 3, 0, 0, -1],
+            "Psych Up should not alter the target's stat stages");
+    }
+
+    #[test]
+    fn psych_up_copies_focus_energy() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PsychUp);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, 0));
+        let bs = run(p1, p2);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::FocusEnergy),
+            "Psych Up should copy Focus Energy volatile from target");
+    }
+
+    #[test]
+    fn psych_up_removes_focus_energy_if_target_lacks_it() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PsychUp);
+        p1.stats[5] = 200;
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, 0));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash); // no Focus Energy
+        let bs = run(p1, p2);
+        assert!(!has_vol(&bs.p1_active_mons[0], &VolatileStatus::FocusEnergy),
+            "Psych Up should remove user's Focus Energy when target does not have it");
+    }
+
+    // ── Guard Split ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn guard_split_averages_def_and_spd() {
+        // stats[]: hp=0, atk=1, def=2, spa=3, spd=4, spe=5
+        let mut p1 = mon(Species::Snorlax, PokemonMove::GuardSplit);
+        p1.stats[5] = 200; // faster
+        p1.stats[2] = 100; // user Def
+        p1.stats[4] = 80;  // user SpD
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[2] = 200; // target Def
+        p2.stats[4] = 160; // target SpD
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[2], 150, "Guard Split: user Def should be (100+200)/2 = 150");
+        assert_eq!(bs.p1_active_mons[0].stats[4], 120, "Guard Split: user SpD should be (80+160)/2 = 120");
+        assert_eq!(bs.p2_active_mons[0].stats[2], 150, "Guard Split: target Def should be (100+200)/2 = 150");
+        assert_eq!(bs.p2_active_mons[0].stats[4], 120, "Guard Split: target SpD should be (80+160)/2 = 120");
+    }
+
+    #[test]
+    fn guard_split_uses_floor_division() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::GuardSplit);
+        p1.stats[5] = 200;
+        p1.stats[2] = 101; // odd sum
+        p1.stats[4] = 99;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[2] = 100;
+        p2.stats[4] = 100;
+        let bs = run(p1, p2);
+        // (101+100)/2 = 100 (floor), (99+100)/2 = 99 (floor)
+        assert_eq!(bs.p1_active_mons[0].stats[2], 100, "Guard Split should floor-divide");
+        assert_eq!(bs.p1_active_mons[0].stats[4], 99, "Guard Split should floor-divide");
+    }
+
+    // ── Guard Swap ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn guard_swap_exchanges_def_spd_stages() {
+        // boosts[]: atk=0, def=1, spa=2, spd=3, spe=4, acc=5, eva=6
+        let mut p1 = mon(Species::Snorlax, PokemonMove::GuardSwap);
+        p1.stats[5] = 200;
+        p1.boosts[1] = 2; // user Def boost
+        p1.boosts[3] = -1; // user SpD boost
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts[1] = -3; // target Def boost
+        p2.boosts[3] = 1;  // target SpD boost
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts[1], -3, "Guard Swap: user should receive target's Def stage");
+        assert_eq!(bs.p1_active_mons[0].boosts[3], 1,  "Guard Swap: user should receive target's SpD stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[1], 2,  "Guard Swap: target should receive user's Def stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[3], -1, "Guard Swap: target should receive user's SpD stage");
+    }
+
+    #[test]
+    fn guard_swap_leaves_other_stages_untouched() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::GuardSwap);
+        p1.stats[5] = 200;
+        p1.boosts[0] = 3; // Atk — should not be swapped
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts[0] = -2;
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 3,  "Guard Swap should not touch Attack stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[0], -2, "Guard Swap should not touch Attack stage");
+    }
+
+    // ── Power Split ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_split_averages_atk_and_spa() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerSplit);
+        p1.stats[5] = 200;
+        p1.stats[1] = 50;  // user Atk
+        p1.stats[3] = 60;  // user SpA
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[1] = 150; // target Atk
+        p2.stats[3] = 140; // target SpA
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[1], 100, "Power Split: user Atk should be (50+150)/2 = 100");
+        assert_eq!(bs.p1_active_mons[0].stats[3], 100, "Power Split: user SpA should be (60+140)/2 = 100");
+        assert_eq!(bs.p2_active_mons[0].stats[1], 100, "Power Split: target Atk should be (50+150)/2 = 100");
+        assert_eq!(bs.p2_active_mons[0].stats[3], 100, "Power Split: target SpA should be (60+140)/2 = 100");
+    }
+
+    // ── Power Swap ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_swap_exchanges_atk_spa_stages() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerSwap);
+        p1.stats[5] = 200;
+        p1.boosts[0] = 4; // user Atk stage
+        p1.boosts[2] = -2; // user SpA stage
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts[0] = -1; // target Atk stage
+        p2.boosts[2] = 3;  // target SpA stage
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].boosts[0], -1, "Power Swap: user receives target's Atk stage");
+        assert_eq!(bs.p1_active_mons[0].boosts[2], 3,  "Power Swap: user receives target's SpA stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[0], 4,  "Power Swap: target receives user's Atk stage");
+        assert_eq!(bs.p2_active_mons[0].boosts[2], -2, "Power Swap: target receives user's SpA stage");
+    }
+
+    // ── Speed Swap ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn speed_swap_exchanges_raw_speed_stats() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SpeedSwap);
+        p1.stats[5] = 200; // user Speed
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[5] = 80;  // target Speed
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[5], 80,  "Speed Swap: user should have target's original Speed");
+        assert_eq!(bs.p2_active_mons[0].stats[5], 200, "Speed Swap: target should have user's original Speed");
+    }
+
+    // ── Power Trick ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_trick_swaps_own_atk_and_def() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerTrick);
+        p1.stats[1] = 130; // Atk
+        p1.stats[2] = 65;  // Def
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[1], 65,  "Power Trick: Atk should become old Def");
+        assert_eq!(bs.p1_active_mons[0].stats[2], 130, "Power Trick: Def should become old Atk");
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PowerTrick),
+            "Power Trick volatile should be applied");
+    }
+
+    #[test]
+    fn power_trick_second_use_reverts_swap() {
+        // First use: swap. Apply volatile manually to simulate a second use.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerTrick);
+        p1.stats[1] = 130; // original Atk (currently set as Def due to ongoing swap)
+        p1.stats[2] = 65;  // original Def (currently set as Atk)
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::PowerTrick, 0));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run(p1, p2);
+        // Second use should swap back: stats[1]=65 (was 130), stats[2]=130 (was 65)
+        assert_eq!(bs.p1_active_mons[0].stats[1], 65,  "Power Trick second use: Atk reverts");
+        assert_eq!(bs.p1_active_mons[0].stats[2], 130, "Power Trick second use: Def reverts");
+        assert!(!has_vol(&bs.p1_active_mons[0], &VolatileStatus::PowerTrick),
+            "Power Trick volatile should be removed on second use");
+    }
+
+    #[test]
+    fn power_trick_reverts_on_switch_out() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        p1.stats[1] = 65;  // currently swapped (Atk is holding Def value)
+        p1.stats[2] = 130; // currently swapped (Def is holding Atk value)
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::PowerTrick, 0));
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let mut state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        // The Snorlax switched to bench — its stats should be reverted.
+        let snorlax = &bs.p1_back_mons[0];
+        assert_eq!(snorlax.stats[1], 130, "Power Trick: Atk should be restored on switch-out");
+        assert_eq!(snorlax.stats[2], 65,  "Power Trick: Def should be restored on switch-out");
+        assert!(!has_vol(snorlax, &VolatileStatus::PowerTrick),
+            "Power Trick volatile should be cleared on switch-out");
+    }
+
+    // ── Power Shift ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_shift_swaps_own_atk_and_def() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PowerShift);
+        p1.stats[1] = 110; // Atk
+        p1.stats[2] = 80;  // Def
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].stats[1], 80,  "Power Shift: Atk should become old Def");
+        assert_eq!(bs.p1_active_mons[0].stats[2], 110, "Power Shift: Def should become old Atk");
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PowerShift),
+            "Power Shift volatile should be applied");
+    }
+}

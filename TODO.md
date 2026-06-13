@@ -44,30 +44,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Volatile status — ongoing debuffs
-Volatiles that apply recurring damage, debuffs, or delayed effects each turn.
-- Perish Song — all on-field Pokémon faint after 3 turns
-- Psychic Noise — Healing Prevented (2 turns)
-- Salt Cure — 1/8 HP per turn; ×2 for Water- and Steel-types
-- Syrup Bomb — Speed drops 1 stage each turn for 3 turns
-- Uproar — user attacks for 3 turns; no Pokémon on field can sleep
-- Yawn — target falls asleep at end of next turn
-
-### Stat manipulation — clearing and copying
-Remove or duplicate stat-stage changes on the field.
-- Clear Smog — deal damage + reset target's stat changes to zero
-- Haze — clear all stat changes for all Pokémon on the field
-- Psych Up — copy all of the target's current stat changes to user
-
-### Stat manipulation — splitting and swapping
-Exchange or average stats or stat changes between Pokémon.
-- Guard Split — average Defense and Sp. Def between user and target
-- Guard Swap — exchange Defense and Sp. Def changes with target
-- Power Shift / Power Trick — swap user's own Attack and Defense stats
-- Power Split — average Attack and Sp. Atk between user and target
-- Power Swap — exchange Attack and Sp. Atk changes with target
-- Speed Swap — swap Speed stats with target
-
 ### Stat boosting moves with a cost or condition
 Self-boost moves that require paying HP or meeting a condition.
 - Belly Drum — Attack → +6; cost ½ max HP
