@@ -43,6 +43,14 @@ Each has significant individual complexity. Research all edge cases carefully.
 ---
 
 ## Moves
+### Forgotten
+- Alluring Voice
+
+### OHKO Moves
+- Fissure
+- Guillotine
+- Horn Drill
+- Sheer Cold
 
 ### Type-changing moves
 Alter a Pokémon's active type(s) during battle.
@@ -126,3 +134,8 @@ More architecturally significant; each likely needs its own research pass.
 - Shell Side Arm — use whichever calculation (physical or special) deals more damage; 20% poison
 - Smack Down — hits airborne targets; give them Landed status (grounded, loses Flying immunity)
 - Substitute — lose ¼ max HP to create a substitute that absorbs incoming damage
+
+## Refactors
+- use thaws_target move bool and defrost move flag instead of fixed lists.
+- Use move flags such as IgnoreImmunity, IgnoreEvasion, Ignore... Flags (Refactor these to be move flags)
+-

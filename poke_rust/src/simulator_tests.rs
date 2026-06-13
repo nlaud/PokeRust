@@ -543,7 +543,7 @@ mod tests {
             let mut counted_rolls: HashMap<u16, usize> = HashMap::new();
             for &roll in &possible_rolls {
                 *counted_rolls.entry(roll).or_insert(0) += 1;
-            }        
+            }
 
             for (damage_roll, counts) in counted_rolls {
                 let mut outcome = expected_final_state.clone();
@@ -906,7 +906,7 @@ mod tests {
             let mut counted_rolls: HashMap<u16, usize> = HashMap::new();
             for &roll in &possible_rolls {
                 *counted_rolls.entry(roll).or_insert(0) += 1;
-            }        
+            }
 
             for (damage_roll, counts) in counted_rolls {
                 let mut outcome = expected_final_state.clone();
@@ -1943,243 +1943,243 @@ mod tests {
     mod stat_boosts {
         use super::*;
 
-        #[test]                                                                   
-        fn attack_boosts() {                                      
-            let pokemon_dex = pokemon_dex();                                      
-            let move_dex = move_dex();                                            
+        #[test]
+        fn attack_boosts() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
 
-            // Mimeikyu: Attacker (Swords Dance, Shadow Claw)                     
-            let p1_mon_initial = build_pokemon_state(                             
-                Species::Mimikyu,                                                 
-                &pokemon_dex,                                                     
-                &move_dex,                                                        
-                None,                                                        
-                Some([                                                            
-                    Some(PokemonMove::SwordsDance),                               
-                    Some(PokemonMove::Splash),                                    
-                    None,                                                         
-                    Some(PokemonMove::ShadowClaw),                                
-                ]),                                                               
-                None,                                                             
-                None,                                                             
-                Some(Nature::Adamant),                                              
-                None,                                                             
-                None,                                                             
-                Some([2, 32, 0, 0, 0, 32]),                                       
-                None,                                                             
-                true,                                                             
-            );                                                                    
+            // Mimeikyu: Attacker (Swords Dance, Shadow Claw)
+            let p1_mon_initial = build_pokemon_state(
+                Species::Mimikyu,
+                &pokemon_dex,
+                &move_dex,
+                None,
+                Some([
+                    Some(PokemonMove::SwordsDance),
+                    Some(PokemonMove::Splash),
+                    None,
+                    Some(PokemonMove::ShadowClaw),
+                ]),
+                None,
+                None,
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([2, 32, 0, 0, 0, 32]),
+                None,
+                true,
+            );
 
-            // Aerodactyl: Target (Splash, move out)                              
-            let p2_mon_initial = build_pokemon_state(                             
-                Species::Aerodactyl,                                              
-                &pokemon_dex,                                                     
-                &move_dex,                                                        
-                None,                                                             
-                Some([                                                            
-                    Some(PokemonMove::Splash),                                    
-                    None,                                                         
-                    None,                                                         
-                    None,                                                         
-                ]),                                                               
-                None,                                                             
-                None,                                                             
-                Some(Nature::Lonely),                                              
-                None,                                                             
-                None,                                                             
-                Some([2, 0, 0, 32, 0, 32]),                                     
-                None,                                                             
-                true,                                                             
-            );                                                                    
+            // Aerodactyl: Target (Splash, move out)
+            let p2_mon_initial = build_pokemon_state(
+                Species::Aerodactyl,
+                &pokemon_dex,
+                &move_dex,
+                None,
+                Some([
+                    Some(PokemonMove::Splash),
+                    None,
+                    None,
+                    None,
+                ]),
+                None,
+                None,
+                Some(Nature::Lonely),
+                None,
+                None,
+                Some([2, 0, 0, 32, 0, 32]),
+                None,
+                true,
+            );
 
-            // --- START OF TURN 1: Swords Dance (Mimikyu) vs Splash (Aerodactyl)                                                                    
+            // --- START OF TURN 1: Swords Dance (Mimikyu) vs Splash (Aerodactyl)
 
-            let initial_state = battle_state_from_lists(                          
-                vec![p1_mon_initial],                                     
-                vec![],                                                           
-                vec![p2_mon_initial],                                     
-                vec![],                                                           
-            );                                                                                         
+            let initial_state = battle_state_from_lists(
+                vec![p1_mon_initial],
+                vec![],
+                vec![p2_mon_initial],
+                vec![],
+            );
 
-            // Commands for Turn 1                                                
-            let p1_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Swords Dance                                                            
-            let p2_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash                                                    
+            // Commands for Turn 1
+            let p1_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Swords Dance
+            let p2_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
 
-            let outcomes_t1 = simulate_turn(                                      
-                &MatchState::BattleState(initial_state),                          
-                &p1_cmd_t1,                                                       
-                &p2_cmd_t1,                                                       
-                &move_dex,                                                        
-                &pokemon_dex,                                                     
-                false,                                                            
-                1,                                                                
-            );                                                                    
-
-            assert!(!outcomes_t1.is_empty());                                     
-            let total_probability_t1: f64 = outcomes_t1.iter().map(|(_, p)|       *p).sum();                                                                  
-            assert!((total_probability_t1 - 1.0).abs() < 1e-9);                   
-
-            let (MatchState::BattleState(state_t1), p_t1) = outcomes_t1.into_iter().next().unwrap() else {panic!("BattleState not returned")};      
-            assert!((p_t1 - 1.0).abs() < 1e-9);                                   
-
-            let state_t1: &BattleState = &state_t1;                                
-
-            // Check if Swords Dance was applied (Attack stat increase for P1)                    
-            assert_eq!(state_t1.p1_active_mons[0].boosts[0], 2);           
-
-            // Check for state changes                                            
-            assert!(state_t1.turn_number == 1);                                   
-
-            // Get the state after Turn 1                                         
-            let state_after_t1 = state_t1.clone();                                
-
-
-            // --- START OF TURN 2: Shadow Claw (Mimikyu) vs Splash (Aerodactyl)                
-
-            // Commands for Turn 2                                                
-            let p1_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P1, vec![3])); //Shadow Claw                                
-            let p2_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); //         
-
-            let outcomes_t2 = simulate_turn(                                      
-                &MatchState::BattleState(state_after_t1),                         
-                &p1_cmd_t2,                                                       
-                &p2_cmd_t2,                                                       
-                &move_dex,                                                        
-                &pokemon_dex,                                                     
-                false,                                                            
-                1,                                                                
-            );                                                                    
-
-            assert!(!outcomes_t2.is_empty());    
-
-            // Final probability check                                            
-            let total_probability_t2: f64 = outcomes_t2.iter().map(|(_, p)|*p).sum();                                                                  
-            assert!((total_probability_t2 - 1.0).abs() < 1e-9);                                    
-
-            println!("{:?}", outcomes_t2);                                                                                                 
-            let final_outcome = outcomes_t2.into_iter().find(|(state, _)| {       
-                    matches!(state, MatchState::GameOverState { winner: Player::P1   
-                })});                                                                   
-            assert!(final_outcome.is_some(), "The match should conclude with P1 winning.");
-        }
-
-        #[test]                                                                   
-        fn speed_boosts() {                                      
-            let pokemon_dex = pokemon_dex();                                      
-            let move_dex = move_dex();                                            
-
-            let p1_mon = build_pokemon_state(                             
-                Species::Tyranitar,                                                 
-                &pokemon_dex,                                                     
-                &move_dex,                                                        
-                None,                                                        
-                Some([                                                            
-                    Some(PokemonMove::DragonDance),                               
-                    Some(PokemonMove::Superpower),                                    
-                    None,                                                         
-                    None,                                
-                ]),                                                               
-                None,                                                             
-                None,                                                             
-                Some(Nature::Impish),                                              
-                None,                                                             
-                None,                                                             
-                Some([32, 0, 32, 0, 0, 2]),                                       
-                None,                                                             
-                true,                                                             
-            );                                                                    
-
-            let p2_mon = build_pokemon_state(                             
-                Species::Tyranitar,                                                 
-                &pokemon_dex,                                                     
-                &move_dex,                                                        
-                None,                                                        
-                Some([                                                            
-                    Some(PokemonMove::Splash),                               
-                    Some(PokemonMove::Superpower),                                    
-                    None,                                                         
-                    None,                                
-                ]),                                                               
-                None,                                                             
-                None,                                                             
-                Some(Nature::Impish),                                              
-                None,                                                             
-                None,                                                             
-                Some([32, 0, 32, 0, 0, 2]),                                       
-                None,                                                             
-                true,                                                             
-            );                                                                 
-
-            // --- START OF TURN 1: Swords Dance (Mimikyu) vs Splash (Aerodactyl)                                                                    
-
-            let initial_state = battle_state_from_lists(                          
-                vec![p1_mon],                                     
-                vec![],                                                           
-                vec![p2_mon],                                     
-                vec![],                                                           
-            );                                                                                              
-
-
-            // Commands for Turn 1                                                
-            let p1_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Dragon Dance                                                            
-            let p2_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash                                                    
-
-            let outcomes_t1 = simulate_turn(                                      
-                &MatchState::BattleState(initial_state),                          
-                &p1_cmd_t1,                                                       
-                &p2_cmd_t1,                                                       
-                &move_dex,                                                        
-                &pokemon_dex,                                                     
-                false,                                                            
-                1,                                                                
+            let outcomes_t1 = simulate_turn(
+                &MatchState::BattleState(initial_state),
+                &p1_cmd_t1,
+                &p2_cmd_t1,
+                &move_dex,
+                &pokemon_dex,
+                false,
+                1,
             );
 
             assert!(!outcomes_t1.is_empty());
-            let total_probability_t1: f64 = outcomes_t1.iter().map(|(_, p)|*p).sum();                                                                  
-            assert!((total_probability_t1 - 1.0).abs() < 1e-9);                   
+            let total_probability_t1: f64 = outcomes_t1.iter().map(|(_, p)|       *p).sum();
+            assert!((total_probability_t1 - 1.0).abs() < 1e-9);
 
-            let (MatchState::BattleState(state_t1), p_t1) = outcomes_t1.into_iter().next().unwrap() else {panic!("BattleState not returned")};      
-            assert!((p_t1 - 1.0).abs() < 1e-9);                                   
+            let (MatchState::BattleState(state_t1), p_t1) = outcomes_t1.into_iter().next().unwrap() else {panic!("BattleState not returned")};
+            assert!((p_t1 - 1.0).abs() < 1e-9);
 
-            let state_t1: &BattleState = &state_t1;                                
+            let state_t1: &BattleState = &state_t1;
 
-            // Check for stat increases                    
-            assert_eq!(state_t1.p1_active_mons[0].boosts[0], 1);  
-            assert_eq!(state_t1.p1_active_mons[0].boosts[4], 1);           
+            // Check if Swords Dance was applied (Attack stat increase for P1)
+            assert_eq!(state_t1.p1_active_mons[0].boosts[0], 2);
 
-            // Check for state changes                                            
-            assert!(state_t1.turn_number == 1);                                   
+            // Check for state changes
+            assert!(state_t1.turn_number == 1);
 
-            // Get the state after Turn 1                                         
-            let state_after_t1 = state_t1.clone();                                
+            // Get the state after Turn 1
+            let state_after_t1 = state_t1.clone();
 
 
-            // --- START OF TURN 2: Shadow Claw (Mimikyu) vs Splash (Aerodactyl)                
+            // --- START OF TURN 2: Shadow Claw (Mimikyu) vs Splash (Aerodactyl)
 
-            // Commands for Turn 2                                                
-            let p1_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P1, vec![1])); //Superpower                                
+            // Commands for Turn 2
+            let p1_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P1, vec![3])); //Shadow Claw
+            let p2_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); //
+
+            let outcomes_t2 = simulate_turn(
+                &MatchState::BattleState(state_after_t1),
+                &p1_cmd_t2,
+                &p2_cmd_t2,
+                &move_dex,
+                &pokemon_dex,
+                false,
+                1,
+            );
+
+            assert!(!outcomes_t2.is_empty());
+
+            // Final probability check
+            let total_probability_t2: f64 = outcomes_t2.iter().map(|(_, p)|*p).sum();
+            assert!((total_probability_t2 - 1.0).abs() < 1e-9);
+
+            println!("{:?}", outcomes_t2);
+            let final_outcome = outcomes_t2.into_iter().find(|(state, _)| {
+                    matches!(state, MatchState::GameOverState { winner: Player::P1
+                })});
+            assert!(final_outcome.is_some(), "The match should conclude with P1 winning.");
+        }
+
+        #[test]
+        fn speed_boosts() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let p1_mon = build_pokemon_state(
+                Species::Tyranitar,
+                &pokemon_dex,
+                &move_dex,
+                None,
+                Some([
+                    Some(PokemonMove::DragonDance),
+                    Some(PokemonMove::Superpower),
+                    None,
+                    None,
+                ]),
+                None,
+                None,
+                Some(Nature::Impish),
+                None,
+                None,
+                Some([32, 0, 32, 0, 0, 2]),
+                None,
+                true,
+            );
+
+            let p2_mon = build_pokemon_state(
+                Species::Tyranitar,
+                &pokemon_dex,
+                &move_dex,
+                None,
+                Some([
+                    Some(PokemonMove::Splash),
+                    Some(PokemonMove::Superpower),
+                    None,
+                    None,
+                ]),
+                None,
+                None,
+                Some(Nature::Impish),
+                None,
+                None,
+                Some([32, 0, 32, 0, 0, 2]),
+                None,
+                true,
+            );
+
+            // --- START OF TURN 1: Swords Dance (Mimikyu) vs Splash (Aerodactyl)
+
+            let initial_state = battle_state_from_lists(
+                vec![p1_mon],
+                vec![],
+                vec![p2_mon],
+                vec![],
+            );
+
+
+            // Commands for Turn 1
+            let p1_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Dragon Dance
+            let p2_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
+
+            let outcomes_t1 = simulate_turn(
+                &MatchState::BattleState(initial_state),
+                &p1_cmd_t1,
+                &p2_cmd_t1,
+                &move_dex,
+                &pokemon_dex,
+                false,
+                1,
+            );
+
+            assert!(!outcomes_t1.is_empty());
+            let total_probability_t1: f64 = outcomes_t1.iter().map(|(_, p)|*p).sum();
+            assert!((total_probability_t1 - 1.0).abs() < 1e-9);
+
+            let (MatchState::BattleState(state_t1), p_t1) = outcomes_t1.into_iter().next().unwrap() else {panic!("BattleState not returned")};
+            assert!((p_t1 - 1.0).abs() < 1e-9);
+
+            let state_t1: &BattleState = &state_t1;
+
+            // Check for stat increases
+            assert_eq!(state_t1.p1_active_mons[0].boosts[0], 1);
+            assert_eq!(state_t1.p1_active_mons[0].boosts[4], 1);
+
+            // Check for state changes
+            assert!(state_t1.turn_number == 1);
+
+            // Get the state after Turn 1
+            let state_after_t1 = state_t1.clone();
+
+
+            // --- START OF TURN 2: Shadow Claw (Mimikyu) vs Splash (Aerodactyl)
+
+            // Commands for Turn 2
+            let p1_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P1, vec![1])); //Superpower
             let p2_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P2, vec![1])); //Superpower
 
-            let outcomes_t2 = simulate_turn(                                      
-                &MatchState::BattleState(state_after_t1),                         
-                &p1_cmd_t2,                                                       
-                &p2_cmd_t2,                                                       
-                &move_dex,                                                        
-                &pokemon_dex,                                                     
-                false,                                                            
-                1,                                                                
-            );                                                                    
+            let outcomes_t2 = simulate_turn(
+                &MatchState::BattleState(state_after_t1),
+                &p1_cmd_t2,
+                &p2_cmd_t2,
+                &move_dex,
+                &pokemon_dex,
+                false,
+                1,
+            );
 
-            assert!(!outcomes_t2.is_empty());    
+            assert!(!outcomes_t2.is_empty());
 
-            // Final probability check                                            
-            let total_probability_t2: f64 = outcomes_t2.iter().map(|(_, p)|*p).sum();                                                                  
-            assert!((total_probability_t2 - 1.0).abs() < 1e-9);                                    
+            // Final probability check
+            let total_probability_t2: f64 = outcomes_t2.iter().map(|(_, p)|*p).sum();
+            assert!((total_probability_t2 - 1.0).abs() < 1e-9);
 
-            println!("{:?}", outcomes_t2);                                                                                                 
-            let final_outcome = outcomes_t2.into_iter().find(|(state, _)| {       
-                    matches!(state, MatchState::GameOverState { winner: Player::P1   
-                })});                                                                   
+            println!("{:?}", outcomes_t2);
+            let final_outcome = outcomes_t2.into_iter().find(|(state, _)| {
+                    matches!(state, MatchState::GameOverState { winner: Player::P1
+                })});
             assert!(final_outcome.is_some(), "The match should conclude with P1 winning.");
         }
 
@@ -2188,47 +2188,47 @@ mod tests {
             let pokemon_dex= pokemon_dex();
             let move_dex = move_dex();
 
-            let p1_mon = build_pokemon_state(                             
-                Species::Tyranitar,                                                 
-                &pokemon_dex,                                                     
-                &move_dex,                                                        
-                None,                                                        
-                Some([                                                            
-                    Some(PokemonMove::Splash),                               
-                    Some(PokemonMove::Superpower),                                    
-                    None,                                                         
-                    None,                                
-                ]),                                                               
-                None,                                                             
-                None,                                                             
-                Some(Nature::Adamant),                                              
-                None,                                                             
-                None,                                                             
-                Some([2, 32, 0, 0, 0, 32]),                                       
-                None,                                                             
-                true,                                                             
-            );  
+            let p1_mon = build_pokemon_state(
+                Species::Tyranitar,
+                &pokemon_dex,
+                &move_dex,
+                None,
+                Some([
+                    Some(PokemonMove::Splash),
+                    Some(PokemonMove::Superpower),
+                    None,
+                    None,
+                ]),
+                None,
+                None,
+                Some(Nature::Adamant),
+                None,
+                None,
+                Some([2, 32, 0, 0, 0, 32]),
+                None,
+                true,
+            );
 
-            let p2_mon = build_pokemon_state(                             
-                Species::Aggron,                                                 
-                &pokemon_dex,                                                     
-                &move_dex,                                                        
-                None,                                                        
-                Some([                                                            
-                    Some(PokemonMove::IronDefense),                               
-                    Some(PokemonMove::Splash),                                    
-                    None,                                                         
-                    None,                                
-                ]),                                                               
-                None,                                                             
-                None,                                                             
-                Some(Nature::Impish),                                              
-                None,                                                             
-                None,                                                             
-                Some([32, 0, 32, 0, 0, 2]),                                       
-                None,                                                             
-                true,                                                             
-            );  
+            let p2_mon = build_pokemon_state(
+                Species::Aggron,
+                &pokemon_dex,
+                &move_dex,
+                None,
+                Some([
+                    Some(PokemonMove::IronDefense),
+                    Some(PokemonMove::Splash),
+                    None,
+                    None,
+                ]),
+                None,
+                None,
+                Some(Nature::Impish),
+                None,
+                None,
+                Some([32, 0, 32, 0, 0, 2]),
+                None,
+                true,
+            );
 
             let initial_state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
 
@@ -2283,7 +2283,7 @@ mod tests {
             let mut counted_rolls: HashMap<u16, usize> = HashMap::new();
             for &roll in &possible_rolls {
                 *counted_rolls.entry(roll).or_insert(0) += 1;
-            }        
+            }
 
             for (damage_roll, counts) in counted_rolls {
                 let mut outcome = expected_final_state.clone();
@@ -2686,7 +2686,7 @@ mod tests {
             let mut counted_rolls: HashMap<u16, usize> = HashMap::new();
             for &roll in &possible_rolls {
                 *counted_rolls.entry(roll).or_insert(0) += 1;
-            }        
+            }
 
             for (damage_roll, counts) in counted_rolls {
                 let mut outcome = expected_final_state.clone();
@@ -4999,7 +4999,7 @@ mod tests {
                         Some(crate::dex_data::PokemonType::Normal),
                         None,
                         None,
-                        false,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+                        false,
                     )],
                     vec![],
                 );
@@ -11302,7 +11302,6 @@ mod tests {
                 sleep_usable: false,
                 smart_target: false,
                 tracks_target: false,
-                calls_move: false,
                 has_crash_damage: false,
                 stalling_move: false,
             };
