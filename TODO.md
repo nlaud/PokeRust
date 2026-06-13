@@ -136,6 +136,6 @@ More architecturally significant; each likely needs its own research pass.
 
 ## Refactors
 - use thaws_target move bool and defrost move flag instead of fixed lists.
-- Use move flags such as IgnoreImmunity, IgnoreEvasion, Ignore... Flags (Refactor these to be move flags)
+- Use move flags such as IgnoreImmunity, IgnoreEvasion, Ignore... Flags (Refactor these to be move flags). Use all other move flags as well.
 - Recheck all test, suggest new tests, etc.
 - Refactor Outrage-type moves to act more like sleep, having a 50% chance to end after 2nd attack, then 100% on the last one.
