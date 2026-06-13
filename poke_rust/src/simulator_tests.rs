@@ -21885,3 +21885,582 @@ mod stat_manipulation {
         assert_eq!(snorlax.stats[5], 200, "Speed Swap: original Speed restored on switch-out");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Self-fainting moves (Explosion, Self-Destruct, Misty Explosion, Final Gambit, Memento,
+// Healing Wish) and crash-damage moves (High Jump Kick, Axe Kick, Supercell Slam).
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod self_fainting_and_crash_moves {
+    use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{SlotCondition, Status, Terrain, VolatileStatus};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn mon_with_ability(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        )
+    }
+
+    // ── Explosion / Self-Destruct ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn explosion_faints_user_and_deals_damage() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Explosion);
+        p1.stats[1] = 10; // low Attack so the bulky target survives
+        p1.stats[5] = 200; // fast — goes first
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash); // bench so game doesn't end
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; // enormous Def — target survives
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            match s {
+                MatchState::BattleState(bs) => {
+                    assert!(bs.p1_active_mons[0].fainted, "Explosion: user must faint");
+                    assert!(bs.p2_active_mons[0].hp < 9999,
+                        "Explosion: target must take damage");
+                }
+                MatchState::GameOverState { .. } => {} // target also KO'd is valid
+                _ => panic!("unexpected state variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn self_destruct_faints_user_and_deals_damage() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SelfDestruct);
+        p1.stats[1] = 10;
+        p1.stats[5] = 200;
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            match s {
+                MatchState::BattleState(bs) => {
+                    assert!(bs.p1_active_mons[0].fainted, "Self-Destruct: user must faint");
+                    assert!(bs.p2_active_mons[0].hp < 9999,
+                        "Self-Destruct: target must take damage");
+                }
+                MatchState::GameOverState { .. } => {}
+                _ => panic!("unexpected state variant"),
+            }
+        }
+    }
+
+    // ── Misty Explosion ───────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn misty_explosion_faints_user() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::MistyExplosion);
+        p1.stats[5] = 200;
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        // Make target unkillable via huge Sp. Def (Misty Explosion is Special).
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[4] = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        let all_fainted = outcomes.iter().all(|(s, _)| match s {
+            MatchState::BattleState(bs) => bs.p1_active_mons[0].fainted,
+            MatchState::GameOverState { .. } => true,
+            _ => false,
+        });
+        assert!(all_fainted, "Misty Explosion: user must always faint");
+    }
+
+    #[test]
+    fn misty_explosion_deals_1_5x_damage_in_misty_terrain() {
+        // Misty Explosion's terrain boost is ×1.5 when the user is grounded.
+        // Use very high target Sp. Def so the target never faints (avoids GameOverState).
+        let mk_p1 = || {
+            let mut p1 = mon(Species::Snorlax, PokemonMove::MistyExplosion);
+            p1.stats[5] = 200;
+            p1
+        };
+        let mk_p2 = || {
+            let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+            p2.stats[0] = 60000; p2.hp = 60000;
+            p2.stats[4] = 200; // high HP to prevent KO; moderate SpDef so damage is measurable
+            p2
+        };
+        let bench = || mon(Species::Clefable, PokemonMove::Splash);
+
+        // Without terrain.
+        let state_no_terrain = battle_state_from_lists(
+            vec![mk_p1()], vec![bench()], vec![mk_p2()], vec![],
+        );
+        let damage_no_terrain = {
+            let outcomes = run(state_no_terrain);
+            outcomes.iter().find_map(|(s, _)| {
+                if let MatchState::BattleState(bs) = s {
+                    Some(60000u32.saturating_sub(bs.p2_active_mons[0].hp as u32))
+                } else { None }
+            }).unwrap_or(0)
+        };
+
+        // With Misty Terrain (user is grounded).
+        let mut state_terrain = battle_state_from_lists(
+            vec![mk_p1()], vec![bench()], vec![mk_p2()], vec![],
+        );
+        state_terrain.terrain = Some(Terrain::MistyTerrain);
+        state_terrain.terrain_turns = Some(5);
+        let damage_terrain = {
+            let outcomes = run(state_terrain);
+            outcomes.iter().find_map(|(s, _)| {
+                if let MatchState::BattleState(bs) = s {
+                    Some(60000u32.saturating_sub(bs.p2_active_mons[0].hp as u32))
+                } else { None }
+            }).unwrap_or(0)
+        };
+
+        let ratio = damage_terrain as f64 / damage_no_terrain.max(1) as f64;
+        assert!(
+            (ratio - 1.5).abs() < 0.05,
+            "Misty Explosion: terrain boost should be ×1.5, got ×{:.3} \
+             ({} vs {})", ratio, damage_terrain, damage_no_terrain
+        );
+    }
+
+    // ── Final Gambit ──────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn final_gambit_deals_damage_equal_to_user_hp() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::FinalGambit);
+        p1.stats[5] = 200; // fast — goes first
+        p1.hp = 150; // partial HP
+
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999; p2.stats[4] = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let damage = 9999u16.saturating_sub(bs.p2_active_mons[0].hp);
+                assert_eq!(damage, 150,
+                    "Final Gambit: damage must equal user's current HP (150), got {}", damage);
+                assert!(bs.p1_active_mons[0].fainted,
+                    "Final Gambit: user must faint after connecting");
+            }
+        }
+    }
+
+    #[test]
+    fn final_gambit_user_does_not_faint_vs_ghost() {
+        // Final Gambit is Fighting-type; Ghost-type is immune → 0 damage → user does NOT faint.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::FinalGambit);
+        p1.stats[5] = 200;
+        p1.hp = 150;
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let p2 = mon(Species::Gengar, PokemonMove::Splash); // Ghost/Poison — immune to Fighting
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(!bs.p1_active_mons[0].fainted,
+                    "Final Gambit: user must NOT faint when Fighting is immune (Ghost target)");
+                assert_eq!(bs.p2_active_mons[0].hp, bs.p2_active_mons[0].stats[0],
+                    "Final Gambit: Ghost target must take 0 damage");
+            }
+        }
+    }
+
+    // ── Memento ───────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn memento_drops_atk_and_spatk_by_2_then_faints_user() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Memento);
+        p1.stats[5] = 200; // fast — goes first
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(bs.p1_active_mons[0].fainted, "Memento: user must faint");
+                assert_eq!(bs.p2_active_mons[0].boosts[0], -2,
+                    "Memento: target Attack must drop by 2");
+                assert_eq!(bs.p2_active_mons[0].boosts[2], -2,
+                    "Memento: target Sp. Atk must drop by 2");
+                // Other stats must be unaffected.
+                assert_eq!(bs.p2_active_mons[0].boosts[1], 0,
+                    "Memento: target Defense must be unchanged");
+                assert_eq!(bs.p2_active_mons[0].boosts[4], 0,
+                    "Memento: target Speed must be unchanged");
+            }
+        }
+    }
+
+    #[test]
+    fn memento_user_does_not_faint_when_target_uses_protect() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Memento);
+        p1.stats[5] = 200;
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        // Simulate the target having used Protect this turn.
+        p2.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Protect, 1));
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(!bs.p1_active_mons[0].fainted,
+                    "Memento: user must NOT faint when blocked by Protect");
+                assert_eq!(bs.p2_active_mons[0].boosts[0], 0,
+                    "Memento: target Atk must be unchanged when Protect blocks");
+            }
+        }
+    }
+
+    #[test]
+    fn memento_user_faints_even_when_stat_drops_fail() {
+        // Clear Body / White Smoke would block the drops, but the user still faints (faint is
+        // gated on the move connecting, not on the boost actually landing).
+        // Here we simulate by pre-lowering stats to -6; clamping absorbs the drop but Memento
+        // should still faint the user.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Memento);
+        p1.stats[5] = 200;
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.boosts[0] = -6; // Atk already at minimum
+        p2.boosts[2] = -6; // Sp. Atk already at minimum
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(bs.p1_active_mons[0].fainted,
+                    "Memento: user must faint even when stat drops are already at minimum");
+            }
+        }
+    }
+
+    // ── Healing Wish ──────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn healing_wish_faints_user_and_sets_slot_condition() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::HealingWish);
+        p1.stats[5] = 200;
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(bs.p1_active_mons[0].fainted,
+                    "Healing Wish: user must faint after use");
+                let has_hw = bs.p1_slot_conditions.get(0)
+                    .map(|conds| conds.iter().any(|sc| matches!(sc, SlotCondition::HealingWish)))
+                    .unwrap_or(false);
+                assert!(has_hw,
+                    "Healing Wish: HealingWish slot condition must be set after use");
+            }
+        }
+    }
+
+    #[test]
+    fn healing_wish_fails_without_healthy_bench() {
+        // No bench → the move fails and the user does NOT faint.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::HealingWish);
+        p1.stats[5] = 200;
+        let p1_max_hp = p1.stats[0];
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(!bs.p1_active_mons[0].fainted,
+                    "Healing Wish: user must NOT faint when there is no bench");
+                assert_eq!(bs.p1_active_mons[0].hp, p1_max_hp,
+                    "Healing Wish: user HP should be unchanged when move fails");
+            }
+        }
+    }
+
+    #[test]
+    fn healing_wish_replacement_is_healed_and_cured_on_entry() {
+        // Two-turn test:
+        //   Turn 1 — Healing Wish: user faints, slot condition set.
+        //   Turn 2 (replacement phase) — Clefable enters injured+burned → healed to full and
+        //                                status cured by the slot condition.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let mut p1 = mon(Species::Snorlax, PokemonMove::HealingWish);
+        p1.stats[5] = 200;
+
+        let mut p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let bench_max_hp = p1_bench.stats[0];
+        p1_bench.hp = bench_max_hp / 2; // injured bench mon
+        p1_bench.status = Some(Status::Burn);
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+
+        // Turn 1: use Healing Wish.
+        let after_hw = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let replacement_phase_state = after_hw.into_iter().find_map(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { Some(bs) } else { None }
+        }).expect("Expected BattleState (replacement phase) after Healing Wish");
+
+        assert!(replacement_phase_state.p1_active_mons[0].fainted,
+            "HW Turn 1: user should be fainted");
+        let has_hw_cond = replacement_phase_state.p1_slot_conditions.get(0)
+            .map(|conds| conds.iter().any(|sc| matches!(sc, SlotCondition::HealingWish)))
+            .unwrap_or(false);
+        assert!(has_hw_cond, "HW Turn 1: slot condition must be set");
+
+        // Turn 2 (replacement phase): send in the injured/burned Clefable.
+        let after_entry = run_single_turn(
+            &MatchState::BattleState(replacement_phase_state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        for (s, _) in &after_entry {
+            if let MatchState::BattleState(bs) = s {
+                let entrant = &bs.p1_active_mons[0];
+                assert_eq!(entrant.hp, entrant.stats[0],
+                    "HW entry: replacement must be at full HP (got {}/{}) ", entrant.hp, entrant.stats[0]);
+                assert!(entrant.status.is_none(),
+                    "HW entry: replacement's Burn must be cured on entry");
+            }
+        }
+    }
+
+    // ── High Jump Kick ────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn high_jump_kick_no_crash_on_successful_hit() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::HighJumpKick);
+        let p1_max_hp = p1.stats[0];
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash); // not Ghost-type
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                // Only assert on hit branches (p2 took damage). Miss branches correctly
+                // apply crash, so we don't assert user HP there.
+                if bs.p2_active_mons[0].hp < bs.p2_active_mons[0].stats[0] {
+                    assert_eq!(bs.p1_active_mons[0].hp, p1_max_hp,
+                        "HJK: user HP must be unchanged on a successful hit (no crash)");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn high_jump_kick_crash_on_ghost_type_immunity() {
+        // HJK (Fighting) vs Ghost-type: type immune → hit==true, damage==0 → user crashes.
+        // The crash damage is floor(max_hp / 2), minimum 1.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::HighJumpKick);
+        let p1_max_hp = p1.stats[0];
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Gengar, PokemonMove::Splash); // Ghost/Poison — immune to Fighting
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let expected_crash = (p1_max_hp / 2).max(1);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let crash = p1_max_hp.saturating_sub(bs.p1_active_mons[0].hp);
+                assert_eq!(crash, expected_crash,
+                    "HJK: crash must be ½ max HP ({}) vs Ghost-type, got {}", expected_crash, crash);
+                assert_eq!(bs.p2_active_mons[0].hp, bs.p2_active_mons[0].stats[0],
+                    "HJK: Ghost target must take 0 damage");
+            }
+        }
+    }
+
+    #[test]
+    fn high_jump_kick_magic_guard_blocks_crash() {
+        // Magic Guard prevents the user from taking crash damage on a miss/immunity.
+        let mut p1 = mon_with_ability(Species::Snorlax, PokemonMove::HighJumpKick, Ability::MagicGuard);
+        let p1_max_hp = p1.stats[0];
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Gengar, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p1_active_mons[0].hp, p1_max_hp,
+                    "HJK + Magic Guard: crash damage must be blocked");
+            }
+        }
+    }
+
+    // ── Axe Kick ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn axe_kick_no_crash_on_successful_hit() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::AxeKick);
+        let p1_max_hp = p1.stats[0];
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                // Only assert on hit branches (p2 took damage). Miss branches correctly
+                // apply crash, so we don't assert user HP there.
+                if bs.p2_active_mons[0].hp < bs.p2_active_mons[0].stats[0] {
+                    assert_eq!(bs.p1_active_mons[0].hp, p1_max_hp,
+                        "Axe Kick: user HP must be unchanged on a successful hit");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn axe_kick_crash_on_ghost_type_immunity() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::AxeKick);
+        let p1_max_hp = p1.stats[0];
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Gengar, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let expected_crash = (p1_max_hp / 2).max(1);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let crash = p1_max_hp.saturating_sub(bs.p1_active_mons[0].hp);
+                assert_eq!(crash, expected_crash,
+                    "Axe Kick: crash must be ½ max HP ({}) vs Ghost-type, got {}", expected_crash, crash);
+            }
+        }
+    }
+
+    // ── Supercell Slam ────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn supercell_slam_no_crash_on_successful_hit() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SupercellSlam);
+        let p1_max_hp = p1.stats[0];
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash); // not Ground-type
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                // Only assert on hit branches (p2 took damage). Miss branches correctly
+                // apply crash, so we don't assert user HP there.
+                if bs.p2_active_mons[0].hp < bs.p2_active_mons[0].stats[0] {
+                    assert_eq!(bs.p1_active_mons[0].hp, p1_max_hp,
+                        "Supercell Slam: user HP unchanged on a successful hit");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn supercell_slam_crash_on_ground_type_immunity() {
+        // Supercell Slam (Electric) vs Ground-type: immune → hit==true, damage==0 → crash.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SupercellSlam);
+        let p1_max_hp = p1.stats[0];
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Sandshrew, PokemonMove::Splash); // Ground-type
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let expected_crash = (p1_max_hp / 2).max(1);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let crash = p1_max_hp.saturating_sub(bs.p1_active_mons[0].hp);
+                assert_eq!(crash, expected_crash,
+                    "Supercell Slam: crash must be ½ max HP ({}) vs Ground-type, got {}",
+                    expected_crash, crash);
+                assert_eq!(bs.p2_active_mons[0].hp, bs.p2_active_mons[0].stats[0],
+                    "Supercell Slam: Ground target must take 0 damage");
+            }
+        }
+    }
+
+    #[test]
+    fn supercell_slam_magic_guard_blocks_crash() {
+        let mut p1 = mon_with_ability(Species::Snorlax, PokemonMove::SupercellSlam, Ability::MagicGuard);
+        let p1_max_hp = p1.stats[0];
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Sandshrew, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p1_active_mons[0].hp, p1_max_hp,
+                    "Supercell Slam + Magic Guard: crash damage must be blocked");
+            }
+        }
+    }
+}

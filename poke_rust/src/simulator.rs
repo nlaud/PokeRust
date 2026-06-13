@@ -9,7 +9,7 @@ use crate::pokemon::{
     PokemonState, parse_team_sheet
 };
 use crate::dex_data::{MoveData, MoveTarget, PokemonData};
-use crate::dex_data::{MoveCategory, SelfSwitchType, Status, VolatileStatus};
+use crate::dex_data::{MoveCategory, SelfDestructType, SelfSwitchType, Status, VolatileStatus};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::species::Species;
@@ -1266,6 +1266,76 @@ fn possible_damage_outcomes_for_move(
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
     }
 
+    // Memento: lower target's Attack and Sp. Atk by 2 stages each, then the user faints.
+    // User does NOT faint if the move fails (Protect, no target — the is_empty check above
+    // handles the no-target case). In newest-gen, Substitute does not block status moves that
+    // cause stat drops, so the drops pass through; the user still faints regardless of whether
+    // the drops were neutralised by Clear Body / White Smoke / etc.
+    // Magic Bounce: Memento is uniquely NOT reflected by Magic Bounce (even once implemented),
+    // so no Magic Bounce check is needed here.
+    if move_name == PokemonMove::Memento {
+        let target_slot = target_slots[0];
+        let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned();
+        let Some(target) = target else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        // Protect blocks Memento: user does NOT faint if the target is protected.
+        if simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, target_slot, &target, move_data, false,
+        ).is_some() {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        // Apply -2 Atk / -2 Sp. Atk to the target. Respects Clear Body, White Smoke,
+        // Mirror Armor, etc. The user faints even if all drops are absorbed.
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        simulator_helpers::apply_opponent_stat_drop(
+            &mut next_state, target_slot, action.user_slot, [-2, 0, -2, 0, 0, 0, 0],
+            items_suppressed, false,
+        );
+        // Faint the user unconditionally now that the move has connected.
+        let user_player = action.user_slot.player;
+        let user_slot_index = action.user_slot.slot_index;
+        if let Some(user_mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+            user_mon.hp = 0;
+            user_mon.fainted = true;
+            simulator_helpers::clear_pokemon_on_faint(user_mon);
+        }
+        simulator_helpers::handle_pokemon_faint(&mut next_state, user_player, user_slot_index);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Healing Wish: user faints; the Pokémon that enters its slot is fully healed and
+    // status-cured. The move fails (user does NOT faint) if there is no healthy benched
+    // Pokémon to send in as a replacement.
+    if move_name == PokemonMove::HealingWish {
+        if !has_healthy_bench(&next_state, action.user_slot.player) {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        // Set the slot condition so the replacement entering this slot gets healed on entry.
+        let slot_idx = action.user_slot.slot_index as usize;
+        let conds = match action.user_slot.player {
+            Player::P1 => &mut next_state.p1_slot_conditions,
+            Player::P2 => &mut next_state.p2_slot_conditions,
+        };
+        if let Some(slot_conds) = conds.get_mut(slot_idx) {
+            // Remove any pre-existing HealingWish condition on this slot (only one at a time).
+            slot_conds.retain(|sc| !matches!(sc, crate::dex_data::SlotCondition::HealingWish));
+            slot_conds.push(crate::dex_data::SlotCondition::HealingWish);
+        }
+        // Faint the user.
+        let user_player = action.user_slot.player;
+        let user_slot_index = action.user_slot.slot_index;
+        if let Some(user_mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+            user_mon.hp = 0;
+            user_mon.fainted = true;
+            simulator_helpers::clear_pokemon_on_faint(user_mon);
+        }
+        simulator_helpers::handle_pokemon_faint(&mut next_state, user_player, user_slot_index);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     // Attract move: apply infatuation to the target.
     if move_name == PokemonMove::Attract {
         let target_slot = target_slots[0];
@@ -2334,6 +2404,19 @@ fn possible_damage_outcomes_for_move(
                     } else {
                         hit_branches
                     };
+                    // Crash-damage moves (High Jump Kick, Axe Kick, Supercell Slam) also take
+                    // ½ max HP when the move is a type-immune or ability-immune hit (hit==true
+                    // but damage==0). Covers Ghost vs HJK/Axe Kick and Volt Absorb / Motor Drive
+                    // vs Supercell Slam. Magic Guard on the user skips the damage (handled inside
+                    // apply_hp_damage_to_attacker).
+                    let hit_branches: Vec<(BattleState, f64)> = if move_data.has_crash_damage && *damage == 0 {
+                        hit_branches.into_iter().map(|(mut bs, p)| {
+                            simulator_helpers::apply_hp_damage_to_attacker(&mut bs, action.user_slot, 1, 2);
+                            (bs, p)
+                        }).collect()
+                    } else {
+                        hit_branches
+                    };
                     for (bs, prob) in hit_branches {
                         new_all_outcomes.push((MatchState::BattleState(bs), prob));
                     }
@@ -2348,6 +2431,15 @@ fn possible_damage_outcomes_for_move(
                                 target_mon.status = None;
                             }
                         }
+                    }
+                    // Crash-damage moves (High Jump Kick, Axe Kick, Supercell Slam) take ½ max HP
+                    // when the move fails to connect. This branch covers: accuracy miss,
+                    // Protect-block, target in semi-invulnerable phase, and ability draw-in
+                    // (Lightning Rod / Storm Drain / Volt Absorb that redirected the move).
+                    // The no-valid-target early return above ensures there is no crash when there
+                    // is no target. Magic Guard on the user skips the damage.
+                    if move_data.has_crash_damage {
+                        simulator_helpers::apply_hp_damage_to_attacker(&mut branch_state, action.user_slot, 1, 2);
                     }
                     new_all_outcomes.push((MatchState::BattleState(branch_state), combined_prob));
                 }
@@ -3138,6 +3230,36 @@ fn apply_post_damage_move_effects(
                 simulator_helpers::remove_status_volatile(attacker_mon, &VolatileStatus::Stockpile(0));
                 let drop = -level;
                 simulator_helpers::apply_stat_boost_external(attacker_mon, &[0, drop, 0, drop, 0, 0, 0], items_suppressed);
+            }
+        }
+
+        // Self-destruct moves: faint the user after damage is dealt.
+        //
+        //  "always" (Explosion, Self-Destruct, Misty Explosion): user always faints,
+        //   even if the move missed or the target was behind Protect. Damp already
+        //   prevented reaching this function when Damp is on the field.
+        //
+        //  "ifHit" (Final Gambit): user faints only when the move actually dealt damage
+        //   (total_dmg > 0). Ghost-immune and missed branches produce total_dmg == 0
+        //   and correctly skip the faint.
+        //
+        //  Memento and Healing Wish carry SelfDestructType::IfHit in the data but are
+        //  Status category moves: they are fully handled as hand-coded blocks in
+        //  execute_move and never reach this function.
+        //
+        //  Sturdy / Focus Sash / Focus Band do NOT protect the self-fainting user.
+        if !attacker_fainted {
+            let should_faint = match move_data.self_destruct {
+                SelfDestructType::Always => true,
+                SelfDestructType::IfHit  => total_dmg > 0,
+                SelfDestructType::None   => false,
+            };
+            if should_faint {
+                attacker_mon.hp = 0;
+                attacker_mon.fainted = true;
+                simulator_helpers::clear_pokemon_on_faint(attacker_mon);
+                attacker_fainted = true;
+                if opponent_wiped { forced_winner = Some(attacker_slot.player); }
             }
         }
     }
