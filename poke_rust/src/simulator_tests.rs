@@ -21506,4 +21506,71 @@ mod stat_manipulation {
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PowerShift),
             "Power Shift volatile should be applied");
     }
+
+    // ── Switch-out clearing ───────────────────────────────────────────────────
+
+    #[test]
+    fn guard_swap_received_stages_cleared_on_switch_out() {
+        // After Guard Swap the user holds the target's Def/SpD stages in their boosts array.
+        // All boost stages are zeroed by clear_pokemon_for_switch_out, so switching out
+        // should remove them.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        p1.boosts[1] = -3; // Def stage received from Guard Swap
+        p1.boosts[3] = 2;  // SpD stage received from Guard Swap
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        let snorlax = &bs.p1_back_mons[0];
+        assert_eq!(snorlax.boosts[1], 0, "Guard Swap: received Def stage cleared on switch-out");
+        assert_eq!(snorlax.boosts[3], 0, "Guard Swap: received SpD stage cleared on switch-out");
+    }
+
+    #[test]
+    fn power_swap_received_stages_cleared_on_switch_out() {
+        // After Power Swap the user holds the target's Atk/SpA stages in their boosts array.
+        // All boost stages are zeroed by clear_pokemon_for_switch_out.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        p1.boosts[0] = 4;  // Atk stage received from Power Swap
+        p1.boosts[2] = -2; // SpA stage received from Power Swap
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        let snorlax = &bs.p1_back_mons[0];
+        assert_eq!(snorlax.boosts[0], 0, "Power Swap: received Atk stage cleared on switch-out");
+        assert_eq!(snorlax.boosts[2], 0, "Power Swap: received SpA stage cleared on switch-out");
+    }
+
+    #[test]
+    fn speed_swap_stat_persists_on_switch_out() {
+        // Speed Swap modifies the raw Speed stat permanently for the battle.
+        // There is no volatile tracking the swap, so the new stat value is retained on the bench.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        p1.stats[5] = 80; // Speed value after having received the opponent's lower Speed
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        let snorlax = &bs.p1_back_mons[0];
+        assert_eq!(snorlax.stats[5], 80, "Speed Swap: raw Speed change persists through switch-out");
+    }
 }
