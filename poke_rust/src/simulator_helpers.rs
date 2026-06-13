@@ -352,12 +352,30 @@ pub fn single_type_effectiveness(move_type: &PokemonType, target_type: &PokemonT
     }
 }
 
+/// The types a Pokémon defends with right now. Identical to `mon.types` except while Roost
+/// is active on a Flying-type: Roost suppresses the Flying type for the rest of the turn
+/// (a dual-type keeps its other type; a pure Flying-type is treated as Normal).
+pub fn defensive_types(mon: &PokemonState) -> Vec<PokemonType> {
+    if has_status_volatile(mon, &VolatileStatus::Roost) && pokemon_has_type(mon, &PokemonType::Flying) {
+        let remaining: Vec<PokemonType> = mon
+            .types
+            .iter()
+            .filter(|t| !matches!(t, PokemonType::Flying))
+            .cloned()
+            .collect();
+        if remaining.is_empty() { vec![PokemonType::Normal] } else { remaining }
+    } else {
+        mon.types.clone()
+    }
+}
+
 pub fn move_type_effectiveness(state: &BattleState, move_type: &PokemonType, target: &PokemonState) -> f64 {
-    if target.types.is_empty() {
+    let target_types = defensive_types(target);
+    if target_types.is_empty() {
         return 1.0;
     }
 
-    target.types.iter().fold(1.0, |effectiveness, target_type| {
+    target_types.iter().fold(1.0, |effectiveness, target_type| {
         let mut type_effectiveness = single_type_effectiveness(move_type, target_type);
         if weather_is_strong_winds(state)
             && matches!(target_type, PokemonType::Flying)
@@ -1939,7 +1957,7 @@ pub(crate) fn try_consume_mental_herb(mon: &mut PokemonState, items_suppressed: 
     let mental_volatiles = [
         VolatileStatus::Attract,
         VolatileStatus::Taunt,
-        VolatileStatus::Encore,
+        VolatileStatus::Encore(PokemonMove::Struggle),
         VolatileStatus::Torment,
         VolatileStatus::HealBlock,
         VolatileStatus::Disable(PokemonMove::Struggle),
@@ -2012,6 +2030,27 @@ pub(crate) fn gain_hp(mon: &mut PokemonState, amount: u16, env: BerryEnv) {
     if amount == 0 { return; }
     heal_mon(mon, amount);
     on_hp_change(mon, &env);
+}
+
+/// True if `mon` is currently prevented from being healed by Heal Block.
+pub(crate) fn heal_is_blocked(mon: &PokemonState) -> bool {
+    has_status_volatile(mon, &VolatileStatus::HealBlock)
+}
+
+/// True if `mon` holds an active Big Root (item not suppressed / disabled by Klutz).
+pub(crate) fn holds_active_big_root(mon: &PokemonState, items_suppressed: bool) -> bool {
+    !items_suppressed && !klutz_disables_item(mon) && mon.item == Item::BigRoot
+}
+
+/// Scale a heal/drain amount by Big Root when the recipient holds one. Big Root boosts
+/// the HP recovered from draining moves, Strength Sap, Leech Seed, Ingrain and Aqua Ring
+/// by a factor of 5324/4096 (≈1.3) since Generation V. It does not change the damage dealt
+/// to a Leech Seed target, only the amount the seeder recovers (or loses to Liquid Ooze).
+pub(crate) fn apply_big_root(mon: &PokemonState, base: u16, items_suppressed: bool) -> u16 {
+    if base == 0 || !holds_active_big_root(mon, items_suppressed) {
+        return base;
+    }
+    ((base as u32 * 5324) / 4096) as u16
 }
 
 pub fn team_has_remaining_pokemon(state: &BattleState, player: Player) -> bool {
@@ -2408,7 +2447,20 @@ pub fn pokemon_is_grounded(state: &BattleState, mon: &PokemonState) -> bool {
         return true;
     }
 
-    !pokemon_has_type(mon, &PokemonType::Flying)
+    // Ingrain and Smack Down / Thousand Arrows (SmackDown volatile) force the user to be
+    // grounded regardless of Flying type, Levitate, Air Balloon, Magnet Rise or Telekinesis.
+    if has_status_volatile(mon, &VolatileStatus::Ingrain)
+        || has_status_volatile(mon, &VolatileStatus::SmackDown)
+    {
+        return true;
+    }
+
+    // A Flying-type that has just used Roost loses its Flying type for the turn, so it is
+    // grounded (susceptible to Ground moves, Spikes and terrain) like any other type.
+    let counts_as_flying = pokemon_has_type(mon, &PokemonType::Flying)
+        && !has_status_volatile(mon, &VolatileStatus::Roost);
+
+    !counts_as_flying
         && mon.ability != Ability::Levitate
         && (!matches!(mon.item, Item::AirBalloon) || !item_is_active(state, mon))
         && !has_status_volatile(mon, &VolatileStatus::MagnetRise)
@@ -3942,6 +3994,18 @@ pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
             mon.stats_raised_this_turn = false;
             mon.stats_lowered_this_turn = false;
             mon.switched_in_this_turn = false;
+            // Roost's Flying-type suppression only lasts the turn it is used.
+            remove_status_volatile(mon, &VolatileStatus::Roost);
+            // Encore ends immediately once its move runs out of PP.
+            let encore_move_out_of_pp = mon.volatiles.iter().find_map(|v| match v {
+                VolatileStatusState::MoveStatus(VolatileStatus::Encore(m), _) => Some(m.clone()),
+                _ => None,
+            }).is_some_and(|m| {
+                !mon.moves.iter().zip(mon.move_pp.iter()).any(|(slot, pp)| slot.as_ref() == Some(&m) && *pp > 0)
+            });
+            if encore_move_out_of_pp {
+                remove_status_volatile(mon, &VolatileStatus::Encore(PokemonMove::Struggle));
+            }
         }
         bs.items_consumed_this_turn.clear();
     }
@@ -4157,6 +4221,9 @@ fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, env
 /// Phase 1 of end-of-turn processing: deterministic weather/terrain/item healing.
 /// This runs before any status-cure abilities and before burn/poison damage.
 fn apply_pre_status_residuals(state: &mut BattleState) {
+    // Wish resolves at the very start of the end-of-turn residual phase (before weather).
+    resolve_wish_slot_conditions(state);
+
     let ctx = WeatherResidualCtx {
         rain: weather_is_rain(state),
         snow: weather_is_snow(state),
@@ -4210,11 +4277,150 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
         }
     }
 
+    // Aqua Ring: restore 1/16 max HP (rounded down) at end of turn. Heal Block suppresses
+    // the heal but not the volatile. Big Root boosts the amount by ≈1.3×.
+    for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
+        apply_aqua_ring_residual(mon, ctx.items_suppressed, p1_envs[i]);
+    }
+    for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
+        apply_aqua_ring_residual(mon, ctx.items_suppressed, p2_envs[i]);
+    }
+
+    // Ingrain: restore 1/16 max HP (rounded down) at end of turn, same rules as Aqua Ring.
+    for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
+        apply_ingrain_residual(mon, ctx.items_suppressed, p1_envs[i]);
+    }
+    for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
+        apply_ingrain_residual(mon, ctx.items_suppressed, p2_envs[i]);
+    }
+
+    // Leech Seed: drain 1/8 of the seeded mon's max HP to the Pokémon in the seeder's slot
+    // (the opposing active mon in singles). Liquid Ooze reverses the heal into damage.
+    apply_leech_seed_residual(state, &p1_envs, &p2_envs, ctx.items_suppressed);
+
     // Binding chip damage (PartiallyTrapped residual).
     // Canonical order: same phase as Leech Seed, after Leftovers but before burn/poison.
     // Ghost-types are NOT exempt — they still take chip; they are only exempt from the
     // switch-prevention (enforced separately in `is_trapped`).
     apply_binding_chip_damage(state, &p1_envs, &p2_envs, ctx.abilities_suppressed, ctx.items_suppressed);
+}
+
+/// Tick pending Wishes on every slot. A Wish set this turn carries `turns_remaining == 2`;
+/// it decrements each end of turn and, on reaching 0 (the end of the turn after it was used),
+/// heals the slot's current occupant by the stored amount (½ the wisher's max HP). The heal is
+/// skipped if the occupant is fainted, already at full HP, or under Heal Block. Big Root does
+/// not affect Wish.
+fn resolve_wish_slot_conditions(state: &mut BattleState) {
+    for player in [Player::P1, Player::P2] {
+        let (conds, mons) = match player {
+            Player::P1 => (&mut state.p1_slot_conditions, &mut state.p1_active_mons),
+            Player::P2 => (&mut state.p2_slot_conditions, &mut state.p2_active_mons),
+        };
+        for (slot_idx, slot_conds) in conds.iter_mut().enumerate() {
+            let mut resolved_heal: Option<u16> = None;
+            slot_conds.retain_mut(|sc| {
+                if let crate::dex_data::SlotCondition::Wish { heal, turns_remaining } = sc {
+                    *turns_remaining = turns_remaining.saturating_sub(1);
+                    if *turns_remaining == 0 {
+                        resolved_heal = Some(*heal);
+                        return false; // remove the resolved Wish
+                    }
+                }
+                true
+            });
+            if let Some(heal) = resolved_heal {
+                if let Some(mon) = mons.get_mut(slot_idx) {
+                    if !mon.fainted && !heal_is_blocked(mon) {
+                        let env = BerryEnv::simple(false);
+                        gain_hp(mon, heal, env);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Aqua Ring end-of-turn heal: 1/16 max HP, Big Root–boosted, blocked by Heal Block.
+fn apply_aqua_ring_residual(mon: &mut PokemonState, items_suppressed: bool, env: BerryEnv) {
+    if mon.fainted
+        || !has_status_volatile(mon, &VolatileStatus::AquaRing)
+        || heal_is_blocked(mon)
+    {
+        return;
+    }
+    let max_hp = mon.stats[0].max(1);
+    let heal = apply_big_root(mon, (max_hp as u32 / 16) as u16, items_suppressed);
+    gain_hp(mon, heal, env);
+}
+
+/// Ingrain end-of-turn heal: 1/16 max HP, Big Root–boosted, blocked by Heal Block.
+fn apply_ingrain_residual(mon: &mut PokemonState, items_suppressed: bool, env: BerryEnv) {
+    if mon.fainted
+        || !has_status_volatile(mon, &VolatileStatus::Ingrain)
+        || heal_is_blocked(mon)
+    {
+        return;
+    }
+    let max_hp = mon.stats[0].max(1);
+    let heal = apply_big_root(mon, (max_hp as u32 / 16) as u16, items_suppressed);
+    gain_hp(mon, heal, env);
+}
+
+/// Leech Seed end-of-turn drain. Each seeded active Pokémon loses 1/8 of its max HP (min 1).
+/// In singles the HP goes to the opposing active mon (the seeder's slot). If that mon has
+/// Liquid Ooze the seeder takes the drained amount as damage instead of healing. Big Root on
+/// the seeder boosts the heal (or the Liquid Ooze backlash) but never the damage to the target.
+fn apply_leech_seed_residual(
+    state: &mut BattleState,
+    p1_envs: &[BerryEnv],
+    p2_envs: &[BerryEnv],
+    items_suppressed: bool,
+) {
+    let abilities_suppressed = abilities_are_suppressed(state);
+    // (seeded player, slot index) for each active mon currently carrying Leech Seed.
+    let mut seeded: Vec<(Player, usize)> = Vec::new();
+    for (i, mon) in state.p1_active_mons.iter().enumerate() {
+        if !mon.fainted && has_status_volatile(mon, &VolatileStatus::LeechSeed) {
+            seeded.push((Player::P1, i));
+        }
+    }
+    for (i, mon) in state.p2_active_mons.iter().enumerate() {
+        if !mon.fainted && has_status_volatile(mon, &VolatileStatus::LeechSeed) {
+            seeded.push((Player::P2, i));
+        }
+    }
+
+    for (player, idx) in seeded {
+        // In singles the seeder occupies the mirroring slot on the opposing side.
+        let seeder_player = match player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+        let (target_mon, target_env) = match player {
+            Player::P1 => (&state.p1_active_mons[idx], p1_envs[idx]),
+            Player::P2 => (&state.p2_active_mons[idx], p2_envs[idx]),
+        };
+        let drain = (target_mon.stats[0].max(1) as u32 / 8).max(1) as u16;
+        // Does the seeded mon have (unsuppressed) Liquid Ooze?
+        let liquid_ooze = !abilities_suppressed && target_mon.ability == Ability::LiquidOoze;
+
+        // Apply the drain to the seeded mon.
+        match player {
+            Player::P1 => take_damage(&mut state.p1_active_mons[idx], drain, target_env),
+            Player::P2 => take_damage(&mut state.p2_active_mons[idx], drain, target_env),
+        }
+
+        // Resolve the seeder (opposing active slot in singles); skip if empty/fainted.
+        let (seeder_opt, seeder_env) = match seeder_player {
+            Player::P1 => (state.p1_active_mons.get_mut(idx), p1_envs.get(idx).copied()),
+            Player::P2 => (state.p2_active_mons.get_mut(idx), p2_envs.get(idx).copied()),
+        };
+        let (Some(seeder), Some(seeder_env)) = (seeder_opt, seeder_env) else { continue };
+        if seeder.fainted { continue; }
+        let amount = apply_big_root(seeder, drain, items_suppressed);
+        if liquid_ooze {
+            take_damage(seeder, amount, seeder_env);
+        } else if !heal_is_blocked(seeder) {
+            gain_hp(seeder, amount, seeder_env);
+        }
+    }
 }
 
 /// Phase 1.5 of end-of-turn processing: deal chip damage to partially-trapped Pokémon.
@@ -4719,6 +4925,14 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
     let already_has = has_status_volatile(mon, volatile);
 
     if !already_has {
+        // Leech Seed cannot be planted on Grass-type Pokémon or through a Substitute.
+        if matches!(volatile, VolatileStatus::LeechSeed)
+            && (pokemon_has_type(mon, &PokemonType::Grass)
+                || has_status_volatile(mon, &VolatileStatus::Substitute))
+        {
+            return;
+        }
+
         if matches!(volatile, VolatileStatus::Confusion)
             && !pokemon_ability_is_suppressed(state, mon)
             && mon.ability == Ability::OwnTempo
@@ -4748,17 +4962,19 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             let is_move_status = matches!(
                 volatile,
                 VolatileStatus::Disable(_)
-                    | VolatileStatus::Encore
+                    | VolatileStatus::Encore(_)
                     | VolatileStatus::GlaiveRush
                     | VolatileStatus::Taunt
+                    | VolatileStatus::ThroatChop
                     | VolatileStatus::SemiInvulnerable(_)
                     | VolatileStatus::Confusion
             );
 
         let duration = match volatile {
             VolatileStatus::Disable(_) => 4,
-            VolatileStatus::Encore => 3,
+            VolatileStatus::Encore(_) => 3,
             VolatileStatus::Taunt => 3,
+            VolatileStatus::ThroatChop => 2,
             VolatileStatus::GlaiveRush => 1,
             VolatileStatus::SemiInvulnerable(_) => 0,
             VolatileStatus::Confusion => thread_rng().gen_range(2..=5),
@@ -4899,7 +5115,7 @@ fn filter_opponent_stat_drops(mon: &PokemonState, boosts: &[i8; 7], ability_supp
 /// *before* calling this function.
 /// Sticky Web and Octolock are not yet implemented; add Mirror Armor interactions when they are.
 /// Mold Breaker: TODO (consistent with existing abilities — all currently ignore it).
-fn apply_opponent_stat_drop(
+pub(crate) fn apply_opponent_stat_drop(
     state: &mut BattleState,
     target_slot: FieldSlot,
     source_slot: FieldSlot,
@@ -5135,7 +5351,7 @@ fn apply_effect_to_target(
                 volatile,
                 VolatileStatus::Taunt
                     | VolatileStatus::Torment
-                    | VolatileStatus::Encore
+                    | VolatileStatus::Encore(_)
                     | VolatileStatus::Disable(_)
                     | VolatileStatus::Attract
                     | VolatileStatus::HealBlock
@@ -5536,6 +5752,55 @@ pub fn try_apply_disable(state: &mut BattleState, source_slot: FieldSlot, target
     let effect = HitEffect { volatile_status: Some(VolatileStatus::Disable(last_move)), ..Default::default() };
     apply_effect_to_target(state, source_slot, target_slot, &effect, target_slot.player);
     true
+}
+
+/// Moves Encore cannot lock the target into. Mirrors Showdown's `failencore` flag: copying /
+/// move-calling moves, Encore/Mimic/Sketch/Mirror Move, Struggle, and Transform.
+pub(crate) fn encore_immune_move(mv: &PokemonMove) -> bool {
+    matches!(
+        mv,
+        PokemonMove::Struggle
+            | PokemonMove::Encore
+            | PokemonMove::Mimic
+            | PokemonMove::Sketch
+            | PokemonMove::MirrorMove
+            | PokemonMove::Transform
+            | PokemonMove::Metronome
+            | PokemonMove::Assist
+            | PokemonMove::MeFirst
+            | PokemonMove::Copycat
+            | PokemonMove::NaturePower
+            | PokemonMove::SleepTalk
+    )
+}
+
+/// Apply Encore to `target_slot`, locking it into its `last_used_move` for 3 turns. Returns the
+/// encored move on success (so the caller can also rewrite a pending queued action this turn), or
+/// `None` if Encore fails (no last move, an Encore-immune move, or already Encored).
+pub fn try_apply_encore(
+    state: &mut BattleState,
+    source_slot: FieldSlot,
+    target_slot: FieldSlot,
+) -> Option<PokemonMove> {
+    let last_move = {
+        let tgt = get_pokemon_at_slot(state, target_slot)?;
+        let m = match &tgt.last_used_move {
+            Some(mv) if !encore_immune_move(mv) => mv.clone(),
+            _ => return None,
+        };
+        // Fail if the target no longer carries that move with PP (e.g. it was forgotten/0 PP).
+        let has_pp = tgt.moves.iter().zip(tgt.move_pp.iter())
+            .any(|(slot, pp)| slot.as_ref() == Some(&m) && *pp > 0);
+        if !has_pp { return None; }
+        if has_status_volatile(tgt, &VolatileStatus::Encore(PokemonMove::Struggle)) { return None; }
+        m
+    };
+    let effect = HitEffect { volatile_status: Some(VolatileStatus::Encore(last_move.clone())), ..Default::default() };
+    apply_effect_to_target(state, source_slot, target_slot, &effect, target_slot.player);
+    // Confirm the volatile actually landed (Aroma Veil / Mental Herb may have blocked or cured it).
+    let landed = get_pokemon_at_slot(state, target_slot)
+        .is_some_and(|t| has_status_volatile(t, &VolatileStatus::Encore(PokemonMove::Struggle)));
+    if landed { Some(last_move) } else { None }
 }
 
 /// Damage the attacker by `numer/denom` of its max HP (Rough Skin / Aftermath pattern).
@@ -6137,6 +6402,21 @@ pub fn apply_secondary_effects(
             let burn = HitEffect { status: Some(Status::Burn), ..Default::default() };
             for (bs, _) in branches.iter_mut() {
                 apply_effect_to_target(bs, attacker_slot, target_slot, &burn, side_condition_target);
+            }
+        }
+
+        // Throat Chop: on hit, prevent the target from using sound moves for 2 turns. Showdown
+        // stores this as a 100% `onHit` secondary that the parser cannot represent. Blocked by a
+        // Substitute; consecutive hits do not refresh the duration (apply_volatile_to_pokemon's
+        // already-has guard handles that).
+        if move_data.name == PokemonMove::ThroatChop {
+            let target_has_sub = get_pokemon_at_slot(state, target_slot)
+                .is_some_and(|m| has_status_volatile(m, &VolatileStatus::Substitute));
+            if !target_has_sub {
+                let eff = HitEffect { volatile_status: Some(VolatileStatus::ThroatChop), ..Default::default() };
+                for (bs, _) in branches.iter_mut() {
+                    apply_effect_to_target(bs, attacker_slot, target_slot, &eff, side_condition_target);
+                }
             }
         }
 
