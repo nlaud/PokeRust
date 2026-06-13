@@ -18717,7 +18717,7 @@ mod priority_abilities {
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
                     let encored = bs.p1_active_mons[0].volatiles.iter().any(|v|
-                        matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::Encore, _))
+                        matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::Encore(_), _))
                     );
                     assert!(!encored, "Aroma Veil: Encore should not apply to the holder");
                 }
@@ -20064,5 +20064,585 @@ mod binding_trapping {
                 )
         ));
         assert!(hit_and_trapped, "Spirit Shackle should deal damage and apply Trapped volatile");
+    }
+}
+
+mod healing_moves {
+    use crate::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{SlotCondition, Status, VolatileStatus, PokemonType};
+    use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+        simple_attack,
+    };
+    use crate::simulator_helpers;
+
+    /// Build a level-50 mon with a single move, ability None, no item unless given.
+    fn mon(
+        species: Species,
+        the_move: PokemonMove,
+        ability: Ability,
+        item: Option<Item>,
+    ) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(the_move), None, None, None]),
+            None, Some(ability), None, item, None, None, None, false,
+        )
+    }
+
+    fn run_turn(p1: PokemonState, p2: PokemonState) -> BattleState {
+        run_turn_with_back(p1, vec![], p2)
+    }
+
+    fn run_turn_with_back(p1: PokemonState, p1_back: Vec<PokemonState>, p2: PokemonState) -> BattleState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let initial = battle_state_from_lists(vec![p1], p1_back, vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(initial),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        bs
+    }
+
+    /// Run one turn and return the branch (BattleState) satisfying `pred`. Used for moves that
+    /// branch on accuracy (e.g. Leech Seed at 90%) where we want the connecting-hit branch.
+    fn run_turn_branch(
+        p1: PokemonState,
+        p2: PokemonState,
+        pred: impl Fn(&BattleState) -> bool,
+    ) -> BattleState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(initial),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        outcomes.into_iter().find_map(|(s, _)| match s {
+            MatchState::BattleState(bs) if pred(&bs) => Some(bs),
+            _ => None,
+        }).expect("a branch satisfying the predicate")
+    }
+
+    fn has_vol(mon: &PokemonState, v: &VolatileStatus) -> bool {
+        mon.volatiles.iter().any(|vs| matches!(vs,
+            VolatileStatusState::TurnStatus(x, _) | VolatileStatusState::MoveStatus(x, _) if x == v))
+    }
+
+    // ── Aqua Ring ────────────────────────────────────────────────────────────
+    #[test]
+    fn aqua_ring_heals_one_sixteenth_per_turn() {
+        let mut p1 = mon(Species::Lapras, PokemonMove::AquaRing, Ability::None, None);
+        let max = p1.stats[0];
+        p1.hp = max / 2;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let bs = run_turn(p1, p2);
+        let expected = (max / 2 + max / 16).min(max);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::AquaRing), "Aqua Ring volatile applied");
+        assert_eq!(bs.p1_active_mons[0].hp, expected, "Aqua Ring heals 1/16 max HP per turn");
+    }
+
+    #[test]
+    fn aqua_ring_big_root_boosts_heal() {
+        let mut p1 = mon(Species::Lapras, PokemonMove::AquaRing, Ability::None, Some(Item::BigRoot));
+        let max = p1.stats[0];
+        p1.hp = max / 2;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let bs = run_turn(p1, p2);
+        let base = (max as u32 / 16) as u16;
+        let boosted = ((base as u32 * 5324) / 4096) as u16;
+        let expected = (max / 2 + boosted).min(max);
+        assert_eq!(bs.p1_active_mons[0].hp, expected, "Big Root boosts Aqua Ring heal by ~1.3x");
+    }
+
+    // ── Ingrain ──────────────────────────────────────────────────────────────
+    #[test]
+    fn ingrain_heals_one_sixteenth_per_turn() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Ingrain, Ability::None, None);
+        let max = p1.stats[0];
+        p1.hp = max / 2;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let bs = run_turn(p1, p2);
+        let expected = (max / 2 + max / 16).min(max);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Ingrain), "Ingrain volatile applied");
+        assert_eq!(bs.p1_active_mons[0].hp, expected, "Ingrain heals 1/16 max HP per turn");
+    }
+
+    #[test]
+    fn ingrain_grounds_flying_type() {
+        // A Flying-type with Ingrain is grounded (and so loses its Ground immunity).
+        let mut p1 = mon(Species::Tornadus, PokemonMove::Ingrain, Ability::None, None);
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, 0));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        assert!(simulator_helpers::pokemon_is_grounded(&state, &state.p1_active_mons[0]),
+            "Ingrain grounds a Flying-type");
+    }
+
+    // ── Leech Seed ───────────────────────────────────────────────────────────
+    #[test]
+    fn leech_seed_drains_eighth_and_heals_seeder() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::LeechSeed, Ability::None, None);
+        let p1_max = p1.stats[0];
+        p1.hp = p1_max / 2;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let p2_max = p2.stats[0];
+        // Leech Seed has 90% accuracy; take the connecting-hit branch.
+        let bs = run_turn_branch(p1, p2, |bs| has_vol(&bs.p2_active_mons[0], &VolatileStatus::LeechSeed));
+        let drain = (p2_max as u32 / 8).max(1) as u16;
+        assert_eq!(bs.p2_active_mons[0].hp, p2_max - drain, "seeded mon loses 1/8 max HP");
+        assert_eq!(bs.p1_active_mons[0].hp, (p1_max / 2 + drain).min(p1_max), "seeder heals by drained amount");
+    }
+
+    #[test]
+    fn leech_seed_grass_type_immune() {
+        let p1 = mon(Species::Snorlax, PokemonMove::LeechSeed, Ability::None, None);
+        let p2 = mon(Species::Venusaur, PokemonMove::Splash, Ability::None, None);
+        let p2_max = p2.stats[0];
+        let bs = run_turn(p1, p2);
+        assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::LeechSeed), "Grass-type cannot be seeded");
+        assert_eq!(bs.p2_active_mons[0].hp, p2_max, "Grass-type takes no Leech Seed damage");
+    }
+
+    #[test]
+    fn leech_seed_liquid_ooze_damages_seeder() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::LeechSeed, Ability::None, None);
+        let p1_max = p1.stats[0];
+        p1.hp = p1_max; // full HP so any heal would be a no-op; Liquid Ooze must instead hurt
+        let p2 = mon(Species::Tentacruel, PokemonMove::Splash, Ability::LiquidOoze, None);
+        let p2_max = p2.stats[0];
+        // Leech Seed has 90% accuracy; take the connecting-hit branch.
+        let bs = run_turn_branch(p1, p2, |bs| has_vol(&bs.p2_active_mons[0], &VolatileStatus::LeechSeed));
+        let drain = (p2_max as u32 / 8).max(1) as u16;
+        assert_eq!(bs.p2_active_mons[0].hp, p2_max - drain, "seeded mon still loses 1/8 max HP");
+        assert_eq!(bs.p1_active_mons[0].hp, p1_max - drain, "Liquid Ooze damages the seeder instead of healing");
+    }
+
+    // ── Wish ─────────────────────────────────────────────────────────────────
+    #[test]
+    fn wish_heals_half_users_maxhp_next_turn() {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut p1 = mon(Species::Blissey, PokemonMove::Wish, Ability::None, None);
+        let max = p1.stats[0];
+        p1.hp = 1;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        // Turn 1: Wish is queued, no heal yet.
+        let bs1 = run_turn(p1, p2.clone());
+        assert!(bs1.p1_slot_conditions[0].iter().any(|c| matches!(c, SlotCondition::Wish { .. })),
+            "Wish is pending after turn 1");
+        assert_eq!(bs1.p1_active_mons[0].hp, 1, "Wish does not heal on the turn it is used");
+
+        // Turn 2: Wish resolves at end of turn.
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(bs1),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs2, _) = extract_battle_state(outcomes);
+        let expected = (1 + max / 2).min(max);
+        assert_eq!(bs2.p1_active_mons[0].hp, expected, "Wish heals half the wisher's max HP next turn");
+        assert!(bs2.p1_slot_conditions[0].is_empty(), "Wish is consumed after resolving");
+    }
+
+    // ── Heal Bell ────────────────────────────────────────────────────────────
+    #[test]
+    fn heal_bell_cures_user_and_party() {
+        let mut p1 = mon(Species::Blissey, PokemonMove::HealBell, Ability::None, None);
+        p1.status = Some(Status::Paralysis);
+        let mut back = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        back.status = Some(Status::Poison);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let bs = run_turn_with_back(p1, vec![back], p2);
+        assert_eq!(bs.p1_active_mons[0].status, None, "Heal Bell cures the user");
+        assert_eq!(bs.p1_back_mons[0].status, None, "Heal Bell cures reserve party members");
+    }
+
+    // ── Heal Pulse ───────────────────────────────────────────────────────────
+    #[test]
+    fn heal_pulse_heals_target_half() {
+        let p1 = mon(Species::Blissey, PokemonMove::HealPulse, Ability::None, None);
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let p2_max = p2.stats[0];
+        p2.hp = p2_max / 4;
+        let bs = run_turn(p1, p2);
+        let expected = (p2_max / 4 + p2_max / 2).min(p2_max);
+        assert_eq!(bs.p2_active_mons[0].hp, expected, "Heal Pulse restores 1/2 the target's max HP");
+    }
+
+    #[test]
+    fn heal_pulse_mega_launcher_heals_three_quarters() {
+        let p1 = mon(Species::Blissey, PokemonMove::HealPulse, Ability::MegaLauncher, None);
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let p2_max = p2.stats[0];
+        p2.hp = p2_max / 8;
+        let bs = run_turn(p1, p2);
+        let expected = (p2_max / 8 + (p2_max as u32 * 3 / 4) as u16).min(p2_max);
+        assert_eq!(bs.p2_active_mons[0].hp, expected, "Mega Launcher boosts Heal Pulse to 3/4 max HP");
+    }
+
+    // ── Life Dew ─────────────────────────────────────────────────────────────
+    #[test]
+    fn life_dew_heals_user_quarter() {
+        let mut p1 = mon(Species::Blissey, PokemonMove::LifeDew, Ability::None, None);
+        let max = p1.stats[0];
+        p1.hp = max / 2;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let bs = run_turn(p1, p2);
+        let expected = (max / 2 + max / 4).min(max);
+        assert_eq!(bs.p1_active_mons[0].hp, expected, "Life Dew restores 1/4 max HP to the user");
+    }
+
+    // ── Pain Split ───────────────────────────────────────────────────────────
+    #[test]
+    fn pain_split_averages_hp() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::PainSplit, Ability::None, None);
+        p1.hp = 300;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        p2.hp = 100;
+        let bs = run_turn(p1, p2);
+        let avg = (300 + 100) / 2;
+        assert_eq!(bs.p1_active_mons[0].hp, avg, "Pain Split sets the user to the average HP");
+        assert_eq!(bs.p2_active_mons[0].hp, avg, "Pain Split sets the target to the average HP");
+    }
+
+    // ── Strength Sap ─────────────────────────────────────────────────────────
+    #[test]
+    fn strength_sap_heals_by_attack_and_lowers_it() {
+        let mut p1 = mon(Species::Blissey, PokemonMove::StrengthSap, Ability::None, None);
+        let max = p1.stats[0];
+        p1.hp = 1;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let p2_atk = p2.stats[1];
+        let bs = run_turn(p1, p2);
+        let expected = (1 + p2_atk).min(max);
+        assert_eq!(bs.p1_active_mons[0].hp, expected, "Strength Sap heals by the target's Attack stat");
+        assert_eq!(bs.p2_active_mons[0].boosts[0], -1, "Strength Sap lowers the target's Attack by 1");
+    }
+
+    #[test]
+    fn strength_sap_liquid_ooze_damages_user() {
+        let mut p1 = mon(Species::Blissey, PokemonMove::StrengthSap, Ability::None, None);
+        let max = p1.stats[0];
+        p1.hp = max; // full HP so damage is clearly visible
+        let p2 = mon(Species::Tentacruel, PokemonMove::Splash, Ability::LiquidOoze, None);
+        let p2_atk = p2.stats[1];
+        let bs = run_turn(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].hp, max.saturating_sub(p2_atk),
+            "Liquid Ooze makes Strength Sap damage the user by the target's Attack");
+    }
+
+    // ── Roost ────────────────────────────────────────────────────────────────
+    #[test]
+    fn roost_heals_half_max_hp() {
+        let mut p1 = mon(Species::Tornadus, PokemonMove::Roost, Ability::None, None);
+        let max = p1.stats[0];
+        p1.hp = max / 2;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let bs = run_turn(p1, p2);
+        let expected = (max / 2 + max / 2).min(max);
+        assert_eq!(bs.p1_active_mons[0].hp, expected, "Roost restores 1/2 max HP");
+        // Roost's Flying-type suppression only lasts the turn, so the volatile is gone by now.
+        assert!(!has_vol(&bs.p1_active_mons[0], &VolatileStatus::Roost), "Roost volatile cleared at end of turn");
+    }
+
+    #[test]
+    fn roost_suppresses_flying_type_defensively() {
+        // While Roost is active, a pure Flying-type defends as Normal (Ground hits it for 1x).
+        let mut p1 = mon(Species::Tornadus, PokemonMove::Roost, Ability::None, None);
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Roost, 0));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let mon_ref = &state.p1_active_mons[0];
+        assert_eq!(simulator_helpers::move_type_effectiveness(&state, &PokemonType::Ground, mon_ref), 1.0,
+            "Roosting pure Flying-type is no longer immune to Ground");
+        assert!(simulator_helpers::pokemon_is_grounded(&state, mon_ref),
+            "Roosting Flying-type is grounded");
+        // Sanity: without Roost it is immune and ungrounded.
+        let mut clean = state.p1_active_mons[0].clone();
+        clean.volatiles.clear();
+        let state2 = battle_state_from_lists(vec![clean], vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
+        assert_eq!(simulator_helpers::move_type_effectiveness(&state2, &PokemonType::Ground, &state2.p1_active_mons[0]), 0.0,
+            "Flying-type is immune to Ground without Roost");
+    }
+
+    // ── Heal Block gating ────────────────────────────────────────────────────
+    #[test]
+    fn heal_block_prevents_aqua_ring_heal() {
+        let mut p1 = mon(Species::Lapras, PokemonMove::AquaRing, Ability::None, None);
+        let max = p1.stats[0];
+        p1.hp = max / 2;
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::HealBlock, 5));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let bs = run_turn(p1, p2);
+        assert_eq!(bs.p1_active_mons[0].hp, max / 2, "Heal Block suppresses Aqua Ring's end-of-turn heal");
+    }
+
+    #[allow(dead_code)]
+    fn _slot(player: Player) -> FieldSlot { FieldSlot { player, slot_index: 0 } }
+}
+
+mod move_restriction {
+    use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::simulator::get_possible_commands_for_active_slot;
+    use crate::simulator_helpers;
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+        simple_attack,
+    };
+
+    fn build(species: Species, moves: [Option<PokemonMove>; 4], item: Option<Item>) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50), Some(moves),
+            None, Some(Ability::None), None, item, None, None, None, false,
+        )
+    }
+
+    fn p1_commands(state: &BattleState) -> Vec<BattleCommand> {
+        get_possible_commands_for_active_slot(state, Player::P1, 0, &move_dex(), &pokemon_dex())
+    }
+
+    fn has_move(cmds: &[BattleCommand], mon: &PokemonState, mv: PokemonMove) -> bool {
+        cmds.iter().any(|c| matches!(c,
+            BattleCommand::Attack(a) if mon.moves.get(a.move_slot).and_then(|m| m.as_ref()) == Some(&mv)))
+    }
+
+    fn has_struggle(cmds: &[BattleCommand]) -> bool {
+        cmds.iter().any(|c| matches!(c, BattleCommand::Struggle { .. }))
+    }
+
+    fn has_vol(mon: &PokemonState, v: &VolatileStatus) -> bool {
+        simulator_helpers::has_status_volatile(mon, v)
+    }
+
+    // ── Taunt ────────────────────────────────────────────────────────────────
+    #[test]
+    fn taunt_filters_status_moves_keeps_damaging() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Taunt, 3));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_move(&cmds, &p1, PokemonMove::Tackle), "Taunt keeps damaging moves selectable");
+        assert!(!has_move(&cmds, &p1, PokemonMove::Splash), "Taunt blocks status moves");
+    }
+
+    #[test]
+    fn taunt_with_only_status_moves_forces_struggle() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Splash), Some(PokemonMove::SwordsDance), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Taunt, 3));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_struggle(&cmds), "Taunt + only status moves → Struggle; cmds={:?}", cmds);
+        assert!(!has_move(&cmds, &p1, PokemonMove::Splash));
+    }
+
+    #[test]
+    fn taunt_move_applies_volatile() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        p1.stats[5] = 1;
+        let mut p2 = build(Species::Gengar, [Some(PokemonMove::Taunt), None, None, None], None);
+        p2.stats[5] = 200;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Taunt), "Taunt move applies the volatile");
+    }
+
+    #[test]
+    fn faster_taunt_makes_selected_status_move_fail_this_turn() {
+        // P1 selected Swords Dance (legal at turn start); a faster Taunt lands first and the
+        // status move fails this turn, so no +2 Attack is applied.
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::SwordsDance), None, None, None], None);
+        p1.stats[5] = 1;
+        let mut p2 = build(Species::Gengar, [Some(PokemonMove::Taunt), None, None, None], None);
+        p2.stats[5] = 200;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Taunt));
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 0, "faster Taunt makes Swords Dance fail this turn");
+    }
+
+    // ── Throat Chop ──────────────────────────────────────────────────────────
+    #[test]
+    fn throat_chop_blocks_sound_moves_in_command_list() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::HyperVoice), Some(PokemonMove::Tackle), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::ThroatChop, 2));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(!has_move(&cmds, &p1, PokemonMove::HyperVoice), "Throat Chop blocks sound moves");
+        assert!(has_move(&cmds, &p1, PokemonMove::Tackle), "Throat Chop leaves non-sound moves selectable");
+    }
+
+    #[test]
+    fn throat_chop_applies_volatile_on_hit() {
+        let mut p1 = build(Species::Gengar, [Some(PokemonMove::ThroatChop), None, None, None], None);
+        p1.stats[5] = 200;
+        let mut p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        p2.stats[5] = 1;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::ThroatChop), "Throat Chop applies its volatile on hit");
+    }
+
+    #[test]
+    fn faster_throat_chop_makes_selected_sound_move_fail() {
+        // P1 selected Hyper Voice (sound); a faster Throat Chop lands and the sound move fails,
+        // so P2 (the Throat Chop user) takes no Hyper Voice damage.
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::HyperVoice), None, None, None], None);
+        p1.stats[5] = 1;
+        let mut p2 = build(Species::Gengar, [Some(PokemonMove::ThroatChop), None, None, None], None);
+        p2.stats[5] = 200;
+        let p2_max = p2.stats[0];
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::ThroatChop));
+        assert_eq!(bs.p2_active_mons[0].hp, p2_max, "faster Throat Chop makes the sound move fail (no damage dealt)");
+    }
+
+    // ── Torment ──────────────────────────────────────────────────────────────
+    #[test]
+    fn torment_blocks_repeating_last_move() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Tackle), Some(PokemonMove::BodySlam), None, None], None);
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Torment, 0));
+        p1.last_used_move = Some(PokemonMove::Tackle);
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(!has_move(&cmds, &p1, PokemonMove::Tackle), "Torment blocks repeating the last move");
+        assert!(has_move(&cmds, &p1, PokemonMove::BodySlam), "Torment allows a different move");
+    }
+
+    #[test]
+    fn torment_plus_choice_forces_struggle() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Some(Item::ChoiceBand));
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Torment, 0));
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(PokemonMove::Tackle), 0));
+        p1.last_used_move = Some(PokemonMove::Tackle);
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_struggle(&cmds), "Choice + Torment on the locked move → Struggle; cmds={:?}", cmds);
+        assert!(!has_move(&cmds, &p1, PokemonMove::Tackle));
+    }
+
+    // ── Encore ───────────────────────────────────────────────────────────────
+    #[test]
+    fn encore_forces_only_the_encored_move() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Encore(PokemonMove::Splash), 3));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_move(&cmds, &p1, PokemonMove::Splash), "Encore forces the encored move");
+        assert!(!has_move(&cmds, &p1, PokemonMove::Tackle), "Encore blocks all other moves");
+    }
+
+    #[test]
+    fn encore_plus_disable_forces_struggle() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Splash), Some(PokemonMove::Tackle), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Encore(PokemonMove::Splash), 3));
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Disable(PokemonMove::Splash), 4));
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_struggle(&cmds), "Encore + Disable on the encored move → Struggle; cmds={:?}", cmds);
+    }
+
+    #[test]
+    fn encore_ends_when_encored_move_runs_out_of_pp() {
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Splash), Some(PokemonMove::Tackle), None, None], None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Encore(PokemonMove::Splash), 3));
+        p1.move_pp[0] = 0; // encored Splash has no PP → Encore has effectively ended
+        let p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let cmds = p1_commands(&state);
+        assert!(has_move(&cmds, &p1, PokemonMove::Tackle), "Encore ends once its move is out of PP; other moves usable");
+    }
+
+    #[test]
+    fn encore_fails_with_no_last_move() {
+        let mut p1 = build(Species::Gengar, [Some(PokemonMove::Encore), None, None, None], None);
+        p1.stats[5] = 200;
+        let mut p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None);
+        p2.stats[5] = 1;
+        p2.last_used_move = None; // never acted → Encore fails
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::Encore(PokemonMove::Struggle)),
+            "Encore fails when the target has no last move");
+    }
+
+    #[test]
+    fn encore_mid_turn_replaces_queued_move() {
+        // P1 (faster) encores P2. P2 selected Splash this turn but its last move was Tackle, so the
+        // queued Splash is rewritten to Tackle and P2 damages P1 this very turn. P1 is Normal-type
+        // so the forced Tackle connects.
+        let mut p1 = build(Species::Snorlax, [Some(PokemonMove::Encore), None, None, None], None);
+        p1.stats[5] = 200;
+        let p1_max = p1.stats[0];
+        let mut p2 = build(Species::Snorlax, [Some(PokemonMove::Splash), Some(PokemonMove::Tackle), None, None], None);
+        p2.stats[5] = 1;
+        p2.last_used_move = Some(PokemonMove::Tackle);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), // P2 selected Splash (slot 0)
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::Encore(PokemonMove::Struggle)), "Encore applied");
+        assert!(bs.p1_active_mons[0].hp < p1_max,
+            "Encore rewrote P2's queued Splash to Tackle, damaging P1 this turn");
     }
 }
