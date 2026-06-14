@@ -25764,3 +25764,100 @@ mod turn_state_moves {
         }
     }
 }
+
+/// Tests that first_move_on_field is preserved across a U-turn entry's EOT, so the
+/// replacement Pokémon can use Fake Out / First Impression on the NEXT turn.
+#[cfg(test)]
+mod first_turn_on_field_mid_turn_entry {
+    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    #[test]
+    fn fake_out_available_after_u_turn_entry() {
+        // P1 Zoroark uses U-turn → triggers self_switch_pending → Ambipom switches in.
+        // The send-in call also drains remaining actions (P2's Splash) and runs EOT.
+        // After EOT, it's Turn 2. Ambipom's first_move_on_field must still be true so
+        // Fake Out can fire.
+
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let mut p1_uturn = mon(Species::Zoroark, PokemonMove::Uturn);
+        p1_uturn.stats[5] = 200; // fast — goes first
+        let p1_bench = mon(Species::Ambipom, PokemonMove::FakeOut);
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+
+        let state = battle_state_from_lists(
+            vec![p1_uturn], vec![p1_bench], vec![p2], vec![],
+        );
+
+        // Turn 1: U-turn. simulate_turn stops at self_switch_pending.
+        let after_uturn = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+
+        let pending_state = after_uturn.into_iter().find(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { bs.self_switch_pending.is_some() } else { false }
+        }).map(|(s, _)| s);
+
+        let Some(pending_state) = pending_state else {
+            return; // U-turn missed; test is moot
+        };
+
+        // Send in Ambipom. This call also drains P2's Splash from the queue and runs EOT.
+        // After this call the state is at the start of Turn 2.
+        let after_eot = run_single_turn(
+            &pending_state,
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass]),
+            &mdex, &pdex,
+        );
+
+        // Turn 2: Ambipom uses Fake Out (slot 0). Should deal damage.
+        let initial_p2_hp = match &after_eot[0] {
+            (MatchState::BattleState(bs), _) => bs.p2_active_mons[0].hp,
+            _ => panic!("expected BattleState after EOT"),
+        };
+
+        let mut fake_out_worked = false;
+        for (state_t2, _) in &after_eot {
+            let outcomes = run_single_turn(
+                state_t2,
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            if outcomes.iter().any(|(s, _)| {
+                if let MatchState::BattleState(bs) = s { bs.p2_active_mons[0].hp < initial_p2_hp } else { false }
+            }) {
+                fake_out_worked = true;
+            }
+        }
+
+        assert!(fake_out_worked,
+            "Fake Out should deal damage on Turn 2 after U-turn entry (first_move_on_field must survive EOT)");
+    }
+}
