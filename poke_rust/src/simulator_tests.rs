@@ -24222,3 +24222,480 @@ mod turn_order_and_delayed_moves {
         assert!(any_damaged, "Doom Desire should deal damage at end of the third turn (two turns after use)");
     }
 }
+
+// ── Side and field condition moves ────────────────────────────────────────────────────────────
+mod side_and_field_condition_moves {
+    use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{PseudoWeather, SideCondition};
+    use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::dex_data::VolatileStatus;
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, damage_distribution, extract_battle_state,
+        hit_probability, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+    use crate::simulator::get_possible_commands_for_active_slot;
+    use crate::simulator_helpers;
+
+    fn mon_with(species: Species, the_move: PokemonMove, ability: Ability, item: Item) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, pdex, mdex, Some(50),
+            Some([Some(the_move), None, None, None]),
+            None, Some(ability), None, Some(item), None, None, None, false,
+        )
+    }
+
+    fn mon(species: Species, the_move: PokemonMove) -> PokemonState {
+        mon_with(species, the_move, Ability::None, Item::None)
+    }
+
+    fn bulky() -> PokemonState {
+        mon(Species::Snorlax, PokemonMove::Splash)
+    }
+
+    // ── Aurora Veil ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn aurora_veil_fails_without_snow() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let attacker = mon(Species::Ninetales, PokemonMove::AuroraVeil);
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![bulky()], vec![]);
+        // No snow → Aurora Veil should not add the side condition; P2 uses Splash (deterministic)
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(
+            !bs.p1_side_conditions.iter().any(|c| matches!(c, SideCondition::AuroraVeil)),
+            "Aurora Veil should fail without snow"
+        );
+    }
+
+    #[test]
+    fn aurora_veil_halves_damage_in_singles() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let target_max_hp = bulky().stats[0];
+
+        let mut state_with_veil = battle_state_from_lists(
+            vec![mon(Species::Alakazam, PokemonMove::Psychic)], vec![], vec![bulky()], vec![],
+        );
+        simulator_helpers::add_side_condition(&mut state_with_veil, Player::P2, SideCondition::AuroraVeil, 5);
+
+        let state_no_veil = battle_state_from_lists(
+            vec![mon(Species::Alakazam, PokemonMove::Psychic)], vec![], vec![bulky()], vec![],
+        );
+
+        let outcomes_veil = run_single_turn(
+            &MatchState::BattleState(state_with_veil),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let outcomes_no_veil = run_single_turn(
+            &MatchState::BattleState(state_no_veil),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        let dist_veil = damage_distribution(&outcomes_veil, target_max_hp);
+        let dist_no_veil = damage_distribution(&outcomes_no_veil, target_max_hp);
+        let avg_veil: f64 = dist_veil.iter().map(|(d, p)| *d as f64 * p).sum();
+        let avg_no_veil: f64 = dist_no_veil.iter().map(|(d, p)| *d as f64 * p).sum();
+        let ratio = avg_veil / avg_no_veil;
+        assert!(
+            (ratio - 0.5).abs() < 0.05,
+            "Aurora Veil should halve damage (ratio={:.3})", ratio
+        );
+    }
+
+    #[test]
+    fn light_clay_extends_aurora_veil_to_8_turns() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let attacker = mon_with(Species::Ninetales, PokemonMove::AuroraVeil, Ability::None, Item::LightClay);
+        let mut state = battle_state_from_lists(vec![attacker], vec![], vec![bulky()], vec![]);
+        state.weather = Some(crate::dex_data::Weather::Snow);
+        state.weather_turns = Some(8);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        // One turn has elapsed since the move was used, so duration starts at 8 and decrements to 7.
+        let veil_idx = bs.p1_side_conditions.iter().position(|c| matches!(c, SideCondition::AuroraVeil));
+        let turns_with_clay = veil_idx.map(|i| bs.p1_side_condition_turns[i]);
+
+        // Compare with no Light Clay (should start at 5, now 4)
+        let mut state_no_clay = battle_state_from_lists(
+            vec![mon(Species::Ninetales, PokemonMove::AuroraVeil)],
+            vec![],
+            vec![bulky()],
+            vec![],
+        );
+        state_no_clay.weather = Some(crate::dex_data::Weather::Snow);
+        state_no_clay.weather_turns = Some(8);
+        let outcomes_nc = run_single_turn(
+            &MatchState::BattleState(state_no_clay),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs_nc, _) = extract_battle_state(outcomes_nc);
+        let veil_idx_nc = bs_nc.p1_side_conditions.iter().position(|c| matches!(c, SideCondition::AuroraVeil));
+        let turns_no_clay = veil_idx_nc.map(|i| bs_nc.p1_side_condition_turns[i]);
+
+        assert_eq!(turns_with_clay, Some(7), "Light Clay: Aurora Veil should have 7 turns remaining (started at 8, one turn elapsed)");
+        assert_eq!(turns_no_clay, Some(4), "Without Light Clay: Aurora Veil should have 4 turns remaining (started at 5, one turn elapsed)");
+    }
+
+    // ── Brick Break / Psychic Fangs / Raging Bull ─────────────────────────────
+
+    #[test]
+    fn brick_break_bypasses_reflect_and_removes_it() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let target_max_hp = bulky().stats[0];
+
+        let mut state_with_reflect = battle_state_from_lists(
+            vec![mon(Species::Machamp, PokemonMove::BrickBreak)], vec![], vec![bulky()], vec![],
+        );
+        simulator_helpers::add_side_condition(&mut state_with_reflect, Player::P2, SideCondition::Reflect, 5);
+
+        let state_no_reflect = battle_state_from_lists(
+            vec![mon(Species::Machamp, PokemonMove::BrickBreak)], vec![], vec![bulky()], vec![],
+        );
+
+        let outcomes_reflect = run_single_turn(
+            &MatchState::BattleState(state_with_reflect),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let outcomes_no_reflect = run_single_turn(
+            &MatchState::BattleState(state_no_reflect),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        let dist_r = damage_distribution(&outcomes_reflect, target_max_hp);
+        let dist_nr = damage_distribution(&outcomes_no_reflect, target_max_hp);
+        let avg_r: f64 = dist_r.iter().map(|(d, p)| *d as f64 * p).sum();
+        let avg_nr: f64 = dist_nr.iter().map(|(d, p)| *d as f64 * p).sum();
+        let ratio = avg_r / avg_nr;
+        assert!(
+            (ratio - 1.0).abs() < 0.05,
+            "Brick Break should bypass Reflect on the same hit (ratio={:.3})", ratio
+        );
+
+        // Reflect should be gone after the hit
+        assert!(
+            outcomes_reflect.iter().all(|(s, _)| {
+                if let MatchState::BattleState(bs) = s {
+                    !bs.p2_side_conditions.iter().any(|c| matches!(c, SideCondition::Reflect))
+                } else { true }
+            }),
+            "Reflect should be removed after Brick Break"
+        );
+    }
+
+    #[test]
+    fn psychic_fangs_removes_aurora_veil() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Bruxish, PokemonMove::PsychicFangs)], vec![], vec![bulky()], vec![],
+        );
+        simulator_helpers::add_side_condition(&mut state, Player::P2, SideCondition::AuroraVeil, 5);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        assert!(
+            outcomes.iter().all(|(s, _)| {
+                if let MatchState::BattleState(bs) = s {
+                    !bs.p2_side_conditions.iter().any(|c| matches!(c, SideCondition::AuroraVeil))
+                } else { true }
+            }),
+            "Psychic Fangs should remove Aurora Veil"
+        );
+    }
+
+    // ── Fairy Lock ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fairy_lock_blocks_voluntary_switch_next_turn() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let bench = mon(Species::Blissey, PokemonMove::Splash);
+        let state = battle_state_from_lists(
+            vec![mon(Species::Klefki, PokemonMove::FairyLock)],
+            vec![],
+            vec![bulky()],
+            vec![bench],
+        );
+
+        // P1 uses Fairy Lock, P2 uses Splash (deterministic → 1 outcome)
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(
+            bs.pseudo_weathers.iter().any(|pw| matches!(pw, PseudoWeather::FairyLock)),
+            "FairyLock pseudo-weather should be active after use"
+        );
+
+        let cmds = get_possible_commands_for_active_slot(&bs, Player::P2, 0, mdex, pdex);
+        let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
+        assert!(!has_switch, "Fairy Lock should block voluntary switch for non-Ghost target");
+    }
+
+    #[test]
+    fn fairy_lock_ghost_can_still_switch() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let bench = mon(Species::Blissey, PokemonMove::Splash);
+        let state = battle_state_from_lists(
+            vec![mon(Species::Klefki, PokemonMove::FairyLock)],
+            vec![],
+            vec![mon(Species::Gengar, PokemonMove::Splash)],
+            vec![bench],
+        );
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        let cmds = get_possible_commands_for_active_slot(&bs, Player::P2, 0, mdex, pdex);
+        let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
+        assert!(has_switch, "Ghost-type should still be able to switch despite Fairy Lock");
+    }
+
+    #[test]
+    fn fairy_lock_expires_after_two_turns() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let bench = mon(Species::Blissey, PokemonMove::Splash);
+        let state = battle_state_from_lists(
+            vec![mon(Species::Klefki, PokemonMove::FairyLock)],
+            vec![],
+            vec![bulky()],
+            vec![bench],
+        );
+
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs1, _) = extract_battle_state(outcomes1);
+
+        // Turn 2: both use Splash (deterministic)
+        let outcomes2 = run_single_turn(
+            &MatchState::BattleState(bs1),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs2, _) = extract_battle_state(outcomes2);
+        assert!(
+            !bs2.pseudo_weathers.iter().any(|pw| matches!(pw, PseudoWeather::FairyLock)),
+            "Fairy Lock should expire after 2 turns"
+        );
+        let cmds = get_possible_commands_for_active_slot(&bs2, Player::P2, 0, mdex, pdex);
+        let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
+        assert!(has_switch, "Voluntary switch should be available again after Fairy Lock expires");
+    }
+
+    // ── Gravity ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn gravity_grounds_flying_type_for_earthquake() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let flying_target = mon(Species::Pidgeot, PokemonMove::Splash);
+        let target_max_hp = flying_target.stats[0];
+
+        let mut state_with_gravity = battle_state_from_lists(
+            vec![mon(Species::Garchomp, PokemonMove::Earthquake)],
+            vec![],
+            vec![flying_target.clone()],
+            vec![],
+        );
+        simulator_helpers::add_pseudo_weather(&mut state_with_gravity, PseudoWeather::Gravity, 5);
+
+        let state_no_gravity = battle_state_from_lists(
+            vec![mon(Species::Garchomp, PokemonMove::Earthquake)],
+            vec![],
+            vec![flying_target],
+            vec![],
+        );
+
+        let outcomes_g = run_single_turn(
+            &MatchState::BattleState(state_with_gravity),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let outcomes_ng = run_single_turn(
+            &MatchState::BattleState(state_no_gravity),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        let hit_g = hit_probability(&outcomes_g, target_max_hp);
+        let hit_ng = hit_probability(&outcomes_ng, target_max_hp);
+        assert!(hit_g > 0.9, "Earthquake should damage Flying-type under Gravity (hit={:.2})", hit_g);
+        assert!(hit_ng < 0.01, "Earthquake should not damage Flying-type without Gravity (hit={:.2})", hit_ng);
+    }
+
+    #[test]
+    fn gravity_disables_fly_selection() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Pidgeot, PokemonMove::Fly)], vec![], vec![bulky()], vec![],
+        );
+        simulator_helpers::add_pseudo_weather(&mut state, PseudoWeather::Gravity, 5);
+
+        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, mdex, pdex);
+        // Move slot 0 is Fly — it should not appear as an Attack command under Gravity
+        let can_use_fly = cmds.iter().any(|c| matches!(c, BattleCommand::Attack(a) if a.move_slot == 0));
+        assert!(!can_use_fly, "Fly should not be selectable under Gravity");
+    }
+
+    #[test]
+    fn gravity_cancels_mid_fly_volatile() {
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Pidgeot, PokemonMove::Fly)], vec![], vec![bulky()], vec![],
+        );
+        // Simulate mid-Fly by manually pushing the SemiInvulnerable volatile
+        state.p1_active_mons[0].volatiles.push(
+            VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(PokemonMove::Fly), 1)
+        );
+        // Gravity activation should strip the volatile immediately
+        simulator_helpers::add_pseudo_weather(&mut state, PseudoWeather::Gravity, 5);
+        let still_flying = state.p1_active_mons[0].volatiles.iter().any(|v| matches!(
+            v, VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(PokemonMove::Fly), _)
+        ));
+        assert!(!still_flying, "Gravity should cancel mid-Fly SemiInvulnerable volatile immediately");
+    }
+
+    // ── Safeguard ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn safeguard_lasts_five_turns_not_one() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let state = battle_state_from_lists(
+            vec![mon(Species::Clefable, PokemonMove::Safeguard)], vec![], vec![bulky()], vec![],
+        );
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        let sg_idx = bs.p1_side_conditions.iter().position(|c| matches!(c, SideCondition::SafeGuard));
+        let turns = sg_idx.map(|i| bs.p1_side_condition_turns[i]);
+        assert!(
+            turns.map_or(false, |t| t >= 4),
+            "Safeguard should last ~5 turns, not 1 (got {:?})", turns
+        );
+    }
+
+    #[test]
+    fn safeguard_blocks_will_o_wisp() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Gengar, PokemonMove::WillOWisp)], vec![], vec![bulky()], vec![],
+        );
+        simulator_helpers::add_side_condition(&mut state, Player::P2, SideCondition::SafeGuard, 5);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        // All branches should show no burn on P2 (Safeguard blocks even if Will-O-Wisp hits)
+        assert!(
+            outcomes.iter().all(|(s, _)| {
+                if let MatchState::BattleState(bs) = s {
+                    bs.p2_active_mons[0].status.is_none()
+                } else { true }
+            }),
+            "Safeguard should block Will-O-Wisp burn"
+        );
+    }
+
+    #[test]
+    fn safeguard_does_not_block_rest_self_sleep() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut resting = mon(Species::Snorlax, PokemonMove::Rest);
+        resting.hp = resting.stats[0] / 2;  // drain HP so Rest actually matters
+        let mut state = battle_state_from_lists(vec![resting], vec![], vec![bulky()], vec![]);
+        // P1's own Safeguard should NOT block self-induced Rest sleep
+        simulator_helpers::add_side_condition(&mut state, Player::P1, SideCondition::SafeGuard, 5);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        let is_asleep = matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Sleep(_)));
+        assert!(is_asleep, "Safeguard should NOT block Rest (self-induced sleep)");
+    }
+
+    #[test]
+    fn safeguard_bypassed_by_infiltrator() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let attacker = mon_with(Species::Gengar, PokemonMove::WillOWisp, Ability::Infiltrator, Item::None);
+        let mut state = battle_state_from_lists(vec![attacker], vec![], vec![bulky()], vec![]);
+        simulator_helpers::add_side_condition(&mut state, Player::P2, SideCondition::SafeGuard, 5);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        // At least some branch should have P2 burned (Will-O-Wisp has 85% accuracy but Infiltrator bypasses Safeguard)
+        let any_burned = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                matches!(bs.p2_active_mons[0].status, Some(crate::dex_data::Status::Burn))
+            } else { false }
+        });
+        assert!(any_burned, "Infiltrator should bypass Safeguard and allow burn");
+    }
+}

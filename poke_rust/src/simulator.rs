@@ -3493,6 +3493,11 @@ fn generate_commands_for_active(
         // Torment: the same move cannot be used twice in a row.
         if tormented && mon.last_used_move.as_ref() == Some(move_name) { continue; }
 
+        // Gravity: airborne and jump moves cannot be selected while Gravity is active.
+        if simulator_helpers::is_gravity_active(state) && move_is_disabled_by_gravity(move_name) {
+            continue;
+        }
+
         let target_type = move_dex.get(move_name).map(|d| &d.target).unwrap_or(&MoveTarget::Normal);
 
         let valid_targets = if *move_name == PokemonMove::ExpandingForce
@@ -3698,6 +3703,21 @@ fn can_be_forced_out(bs: &BattleState, slot: FieldSlot) -> bool {
     mon.volatiles.iter().all(|v| !matches!(v,
         crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, _)
             | crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Ingrain, _)))
+}
+
+/// Moves that cannot be selected while Gravity is active.
+fn move_is_disabled_by_gravity(move_name: &PokemonMove) -> bool {
+    matches!(move_name,
+        PokemonMove::Bounce
+        | PokemonMove::Fly
+        | PokemonMove::FlyingPress
+        | PokemonMove::HighJumpKick
+        | PokemonMove::JumpKick
+        | PokemonMove::MagnetRise
+        | PokemonMove::SkyDrop
+        | PokemonMove::Splash
+        | PokemonMove::Telekinesis
+    )
 }
 
 /// Status moves that legitimately succeed without changing any battle state (so the success-by-diff
