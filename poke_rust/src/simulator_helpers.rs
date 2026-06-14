@@ -6945,6 +6945,27 @@ pub fn apply_contact_hit_reactions(
     let is_contact = move_has_flag(move_data, &MoveFlag::Contact);
     let is_physical = matches!(move_data.category, MoveCategory::Physical);
 
+    // Beak Blast: if the holder has the BeakBlastCharging volatile and the attacker's move
+    // makes contact, burn the attacker (100% chance, respects burn immunity).
+    let branches = if is_contact {
+        let has_beak_blast_charging = {
+            let first_bs = &branches[0].0;
+            get_pokemon_at_slot(first_bs, holder_slot)
+                .is_some_and(|m| has_status_volatile(m, &VolatileStatus::BeakBlastCharging))
+        };
+        if has_beak_blast_charging {
+            let eff = HitEffect { status: Some(Status::Burn), ..Default::default() };
+            branches.into_iter().map(|(mut bs, prob)| {
+                apply_effect_to_target(&mut bs, holder_slot, attacker_slot, &eff, attacker_slot.player);
+                (bs, prob)
+            }).collect()
+        } else {
+            branches
+        }
+    } else {
+        branches
+    };
+
     let mut branches = match holder_ability {
         Ability::RoughSkin => {
             if !is_contact { return branches; }

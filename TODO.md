@@ -43,11 +43,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Two-turn charging moves (incomplete)
-Already partially implemented (Fly, Dig, Dive work). Remaining variants:
-- Beak Blast — charge turn: burn any Pokémon that makes contact; attack turn: Flying
-- Phantom Force — charge turn: Concealed (untargetable); attack turn: hits through Protect
-
 ### Complex moves — battle-state conditions
 These check or modify ongoing battle state. Each is individually moderate in complexity.
 - Acupressure — +2 to a random stat (user or random ally in doubles)

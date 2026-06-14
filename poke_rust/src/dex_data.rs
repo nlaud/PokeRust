@@ -200,6 +200,9 @@ pub enum VolatileStatus {
     /// confusion fires at end of it).
     LockedMove(crate::data::pokemon_move::PokemonMove),
     SemiInvulnerable(PokemonMove),
+    /// Set at turn-start before any action resolves; any contact move hitting the holder burns
+    /// the attacker. Cleared at end-of-turn or immediately after Beak Blast fires.
+    BeakBlastCharging,
     Powder,
     PowerShift,
     PowerTrick,
