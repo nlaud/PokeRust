@@ -1630,6 +1630,110 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
+    // After You: force the target to move immediately after the user this turn. Sets moves_first
+    // on the target's queued MoveAction. Bypasses accuracy. Fails if the target has already
+    // acted or is semi-invulnerable.
+    if move_name == PokemonMove::AfterYou {
+        let target_slot = target_slots[0];
+        let target_is_invulnerable = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| m.volatiles.iter().any(|v| matches!(v,
+                crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _)
+                | crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _))))
+            .unwrap_or(false);
+        let target_has_queued_move = next_state.action_queue.iter().any(|a| {
+            if let Action::MoveAction(ma) = a { ma.user_slot == target_slot } else { false }
+        });
+        if target_is_invulnerable || !target_has_queued_move {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        for queued in next_state.action_queue.iter_mut() {
+            if let Action::MoveAction(ma) = queued {
+                if ma.user_slot == target_slot {
+                    ma.moves_first = true;
+                }
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Quash: force the target to act last this turn. Sets moves_last on the target's queued
+    // MoveAction. In Gen IX, multiple Quashed targets move fastest-to-slowest among themselves
+    // (naturally enforced: compare_action_order falls through to speed when both have moves_last).
+    // Affected by Protect. Fails if the target has already acted.
+    if move_name == PokemonMove::Quash {
+        let target_slot = target_slots[0];
+        let target_has_queued_move = next_state.action_queue.iter().any(|a| {
+            if let Action::MoveAction(ma) = a { ma.user_slot == target_slot } else { false }
+        });
+        if !target_has_queued_move {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        for queued in next_state.action_queue.iter_mut() {
+            if let Action::MoveAction(ma) = queued {
+                if ma.user_slot == target_slot {
+                    ma.moves_last = true;
+                }
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Future Sight / Doom Desire: queue a delayed damaging hit on the target's slot that fires
+    // at the end of the second turn after this one. Damage is computed from the full attacker
+    // snapshot at queue time so it remains correct if the user switches out before impact.
+    // Fails if that slot already has a pending FutureMove condition.
+    if move_name == PokemonMove::FutureSight || move_name == PokemonMove::DoomDesire {
+        let target_slot = target_slots[0];
+        let target_player = target_slot.player;
+        let target_idx = target_slot.slot_index as usize;
+        let target_conds = match target_player {
+            Player::P1 => &next_state.p1_slot_conditions,
+            Player::P2 => &next_state.p2_slot_conditions,
+        };
+        let already_pending = target_conds
+            .get(target_idx)
+            .map(|c| c.iter().any(|sc| matches!(sc, crate::dex_data::SlotCondition::FutureMove { .. })))
+            .unwrap_or(false);
+        if already_pending {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        // Snapshot the attacker's relevant state for the damage calc at impact time.
+        let user_slot = action.user_slot;
+        let user_player = user_slot.player;
+        let (snapshot_raw_spa, snapshot_spa_boost, snapshot_level, snapshot_type1, snapshot_type2, snapshot_ability, snapshot_item, attacker_mon_id) =
+            simulator_helpers::get_pokemon_at_slot(&next_state, user_slot)
+            .map(|u| {
+                let t1 = u.types.first().cloned();
+                let t2 = u.types.get(1).cloned();
+                (u.stats[3], u.boosts[2], u.level, t1, t2, u.ability.clone(), u.item.clone(), u.mon_id)
+            })
+            .unwrap_or((0, 0, 1, None, None, Ability::None, Item::None, 0));
+        let conds_mut = match target_player {
+            Player::P1 => &mut next_state.p1_slot_conditions,
+            Player::P2 => &mut next_state.p2_slot_conditions,
+        };
+        if let Some(slot_conds) = conds_mut.get_mut(target_idx) {
+            slot_conds.push(crate::dex_data::SlotCondition::FutureMove {
+                move_name: move_name.clone(),
+                attacker_is_p1: user_player == Player::P1,
+                attacker_slot_index: user_slot.slot_index,
+                attacker_mon_id,
+                snapshot_raw_spa,
+                snapshot_spa_boost,
+                snapshot_level,
+                snapshot_type1,
+                snapshot_type2,
+                snapshot_ability,
+                snapshot_item,
+                turns_remaining: 3, // fires after 2 end-of-turns (ticks: 3→2, 2→1, 1→0=fire)
+            });
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     // Heal Bell: a sound-based move that cures the status of the user, its entire party
     // (including reserves) and any allies. The user is cured even if it has Soundproof; other
     // active allies with Soundproof are not. Reserves are cured regardless of their ability.
@@ -3470,6 +3574,7 @@ fn queue_battle_commands_for_player(
                     user_slot,
                     target_slot: a.target,
                     moves_first: false,
+                    moves_last: false,
                 }));
             }
             BattleCommand::Struggle { target } => {
@@ -3479,6 +3584,7 @@ fn queue_battle_commands_for_player(
                     user_slot,
                     target_slot: *target,
                     moves_first: false,
+                    moves_last: false,
                 }));
             }
             BattleCommand::Pass => {}
@@ -4107,7 +4213,7 @@ fn step_action_queue(
     // end_turn now returns Vec<(BattleState, f64)> because probabilistic abilities
     // (Shed Skin, Healer, Moody, Harvest) can branch the outcome tree.
     if next_state.action_queue.is_empty() {
-        let eot_branches = simulator_helpers::end_turn(&mut next_state);
+        let eot_branches = simulator_helpers::end_turn(&mut next_state, move_dex, config);
         let mut result: Vec<(MatchState, f64)> = Vec::with_capacity(eot_branches.len());
         for (mut bs, prob) in eot_branches {
             if let Some(game_over) = game_over_state_if_battle_finished(&bs) {

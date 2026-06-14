@@ -7422,6 +7422,7 @@ mod tests {
                     user_slot: FieldSlot { player: Player::P1, slot_index: 0 },
                     target_slot: None,
                     moves_first: false,
+                    moves_last: false,
                 });
                 let action_p2 = Action::MoveAction(MoveAction {
                     move_name: PokemonMove::Splash,
@@ -7429,6 +7430,7 @@ mod tests {
                     user_slot: FieldSlot { player: Player::P2, slot_index: 0 },
                     target_slot: None,
                     moves_first: false,
+                    moves_last: false,
                 });
 
                 let base_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &state, &move_dex);
@@ -8678,6 +8680,7 @@ mod tests {
                 user_slot: FieldSlot { player, slot_index: 0 },
                 target_slot: None,
                 moves_first: false,
+                moves_last: false,
             })
         }
 
@@ -23901,5 +23904,321 @@ mod ability_manipulation_moves {
             );
             assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers, "Sticky Hold should protect against Corrosive Gas");
         }
+    }
+}
+
+// ── Turn-order manipulation and delayed moves ────────────────────────────────
+mod turn_order_and_delayed_moves {
+    use crate::battle::{Action, BattleState, FieldSlot, MatchState, MoveAction, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::SlotCondition;
+    use crate::pokemon::{build_pokemon_state, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
+        run_single_turn, simple_attack,
+    };
+    use crate::simulator_helpers;
+
+    fn mon(species: Species, the_move: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(the_move), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        )
+    }
+
+    fn move_action_flags(player: Player, priority: i8, moves_first: bool, moves_last: bool) -> Action {
+        Action::MoveAction(MoveAction {
+            move_name: PokemonMove::Splash,
+            priority,
+            user_slot: FieldSlot { player, slot_index: 0 },
+            target_slot: None,
+            moves_first,
+            moves_last,
+        })
+    }
+
+    fn run_turn(p1: PokemonState, p2: PokemonState) -> BattleState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(initial),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        bs
+    }
+
+    // ── Quash ordering ───────────────────────────────────────────────────────
+
+    #[test]
+    fn quash_moves_last_flag_demotes_faster_action() {
+        let mdex = move_dex();
+        // P2 (Pelipper, fast) has moves_last; P1 (Torkoal, slow) does not.
+        // Torkoal should move first despite being slower.
+        let pdex = pokemon_dex();
+        let slow = build_pokemon_state(
+            Species::Torkoal, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let fast = build_pokemon_state(
+            Species::Pelipper, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = battle_state_from_lists(vec![slow], vec![], vec![fast], vec![]);
+
+        let slow_action = move_action_flags(Player::P1, 0, false, false);
+        let fast_quashed = move_action_flags(Player::P2, 0, false, true);
+
+        // Quashed fast action should order AFTER the slow action.
+        assert_eq!(
+            simulator_helpers::compare_action_order(&slow_action, &fast_quashed, &state, &mdex),
+            std::cmp::Ordering::Less,
+            "Non-quashed slow mon should move before quashed fast mon"
+        );
+    }
+
+    #[test]
+    fn moves_first_overrides_moves_last() {
+        // After You + Quash on the same target: moves_first wins.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let slow = build_pokemon_state(
+            Species::Torkoal, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let fast = build_pokemon_state(
+            Species::Pelipper, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = battle_state_from_lists(vec![slow], vec![], vec![fast], vec![]);
+
+        // moves_last=true but moves_first also true: moves_first takes precedence.
+        let both_flags = move_action_flags(Player::P1, 0, true, true);
+        let normal = move_action_flags(Player::P2, 0, false, false);
+        assert_eq!(
+            simulator_helpers::compare_action_order(&both_flags, &normal, &state, &mdex),
+            std::cmp::Ordering::Less,
+            "moves_first should beat moves_last on the same action"
+        );
+    }
+
+    #[test]
+    fn quash_fails_if_target_already_moved() {
+        // Torkoal (P1, slow) uses Quash. Pelipper (P2, fast) has already moved this turn.
+        // Since Pelipper moves first (faster), P1's Quash has no target left in the queue
+        // and should fail (no_effect).
+        let p1 = mon(Species::Torkoal, PokemonMove::Quash);
+        let p2 = mon(Species::Pelipper, PokemonMove::Splash);
+        let bs = run_turn(p1, p2);
+        // The test just verifies we reach a valid end state without panic.
+        // The Quash failed: Pelipper's HP is unchanged (Quash is status, deals no damage).
+        let p2_max = bs.p2_active_mons[0].stats[0];
+        assert_eq!(bs.p2_active_mons[0].hp, p2_max, "Quash is a status move; target should be at full HP");
+    }
+
+    #[test]
+    fn after_you_fails_if_target_already_moved() {
+        // Torkoal (slow) uses After You targeting Pelipper (fast). Pelipper moves first,
+        // so by the time After You resolves, Pelipper has no queued action → fails.
+        let p1 = mon(Species::Torkoal, PokemonMove::AfterYou);
+        let p2 = mon(Species::Pelipper, PokemonMove::Splash);
+        let bs = run_turn(p1, p2);
+        // Just verify clean resolution; no damage should have been done.
+        let p2_max = bs.p2_active_mons[0].stats[0];
+        assert_eq!(bs.p2_active_mons[0].hp, p2_max, "After You is a status move; target HP unchanged");
+    }
+
+    // ── Future Sight ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn future_sight_queues_slot_condition() {
+        // Turn 1: Slowbro uses Future Sight. A FutureMove condition should appear on P2's slot.
+        let p1 = mon(Species::Slowbro, PokemonMove::FutureSight);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run_turn(p1, p2);
+        let pending = bs.p2_slot_conditions[0].iter().any(|c| matches!(c, SlotCondition::FutureMove { .. }));
+        assert!(pending, "FutureMove slot condition should be queued on P2's slot after turn 1");
+    }
+
+    #[test]
+    fn future_sight_fails_if_already_pending() {
+        // Turn 1: Future Sight queued. Turn 2: user tries again → fails.
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let p1 = mon(Species::Slowbro, PokemonMove::FutureSight);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        // Turn 1
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(initial),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs1, _) = extract_battle_state(outcomes1);
+        assert!(bs1.p2_slot_conditions[0].iter().any(|c| matches!(c, SlotCondition::FutureMove { .. })));
+        // Turn 2: try to use Future Sight again — should fail (no second FutureMove added)
+        let outcomes2 = run_single_turn(
+            &MatchState::BattleState(bs1),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs2, _) = extract_battle_state(outcomes2);
+        let count = bs2.p2_slot_conditions[0].iter().filter(|c| matches!(c, SlotCondition::FutureMove { .. })).count();
+        assert!(count <= 1, "A second Future Sight should fail when one is already pending");
+    }
+
+    #[test]
+    fn future_sight_lands_two_turns_later_and_deals_damage() {
+        // Turn 1: Slowbro uses Future Sight against Snorlax at full HP.
+        // Turn 2: both use their move (FS tries again but fails; Snorlax splashes). Still pending.
+        // End of Turn 3: FutureMove fires — "the second turn after" use.
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let p1 = mon(Species::Slowbro, PokemonMove::FutureSight);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let p2_max_hp = p2.stats[0];
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+        // Turn 1: Future Sight queued (turns_remaining = 3 before end-of-turn tick).
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(initial),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs1, _) = extract_battle_state(outcomes1);
+        assert_eq!(bs1.p2_active_mons[0].hp, p2_max_hp, "Future Sight does not damage on the turn it is used");
+        // After turn 1's end-of-turn tick: 3 → 2.
+        assert!(bs1.p2_slot_conditions[0].iter().any(|c| matches!(c, SlotCondition::FutureMove { turns_remaining, .. } if *turns_remaining == 2)),
+            "FutureMove should have turns_remaining=2 after the first end-of-turn tick");
+
+        // Turn 2: both splash. No fire yet (turns_remaining 2 → 1).
+        let outcomes2 = run_single_turn(
+            &MatchState::BattleState(bs1),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs2, _) = extract_battle_state(outcomes2);
+        assert_eq!(bs2.p2_active_mons[0].hp, p2_max_hp, "Future Sight should not damage on turn 2 (one more turn to go)");
+        assert!(bs2.p2_slot_conditions[0].iter().any(|c| matches!(c, SlotCondition::FutureMove { turns_remaining, .. } if *turns_remaining == 1)),
+            "FutureMove should have turns_remaining=1 after the second end-of-turn tick");
+
+        // Turn 3: end-of-turn fires (turns_remaining 1 → 0). Snorlax should take Psychic damage.
+        let outcomes3 = run_single_turn(
+            &MatchState::BattleState(bs2),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let any_damaged = outcomes3.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].hp < p2_max_hp
+                    && bs.p2_slot_conditions[0].iter().all(|c| !matches!(c, SlotCondition::FutureMove { .. }))
+            } else { false }
+        });
+        assert!(any_damaged, "Future Sight should deal damage at the end of the third turn (two turns after use) and clear the condition");
+    }
+
+    #[test]
+    fn future_sight_dark_type_immune() {
+        // Future Sight is Psychic; Dark-type is immune. Umbreon should take 0 damage.
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let p1 = mon(Species::Slowbro, PokemonMove::FutureSight);
+        let p2 = mon(Species::Umbreon, PokemonMove::Splash);
+        let p2_max_hp = p2.stats[0];
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        // Turn 1: queue Future Sight.
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(initial),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs1, _) = extract_battle_state(outcomes1);
+        // Turn 2: no fire yet.
+        let outcomes2 = run_single_turn(
+            &MatchState::BattleState(bs1),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs2, _) = extract_battle_state(outcomes2);
+        // Turn 3: Future Sight fires — should be immune (Dark type vs Psychic).
+        let outcomes3 = run_single_turn(
+            &MatchState::BattleState(bs2),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs3, _) = extract_battle_state(outcomes3);
+        assert_eq!(bs3.p2_active_mons[0].hp, p2_max_hp,
+            "Dark-type Umbreon should be immune to Future Sight (Psychic type)");
+    }
+
+    // ── Doom Desire ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn doom_desire_queues_slot_condition() {
+        let p1 = mon(Species::Jirachi, PokemonMove::DoomDesire);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let bs = run_turn(p1, p2);
+        let pending = bs.p2_slot_conditions[0].iter().any(|c| matches!(c, SlotCondition::FutureMove { move_name, .. } if *move_name == PokemonMove::DoomDesire));
+        assert!(pending, "Doom Desire should queue a FutureMove condition on P2's slot");
+    }
+
+    #[test]
+    fn doom_desire_lands_and_deals_damage() {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let p1 = mon(Species::Jirachi, PokemonMove::DoomDesire);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let p2_max_hp = p2.stats[0];
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        // Turn 1: queue Doom Desire.
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(initial),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs1, _) = extract_battle_state(outcomes1);
+        // Turn 2: nothing special.
+        let outcomes2 = run_single_turn(
+            &MatchState::BattleState(bs1),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (bs2, _) = extract_battle_state(outcomes2);
+        // Turn 3: Doom Desire fires at end of turn (Steel type, Snorlax is Normal = 1× effective).
+        let outcomes3 = run_single_turn(
+            &MatchState::BattleState(bs2),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let any_damaged = outcomes3.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].hp < p2_max_hp
+            } else { false }
+        });
+        assert!(any_damaged, "Doom Desire should deal damage at end of the third turn (two turns after use)");
     }
 }

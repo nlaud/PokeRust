@@ -69,6 +69,9 @@ pub struct MoveAction {
     /// Probability is combined as 1 − (1−p_qc)(1−p_qd) per holder; decided at turn start.
     /// A mon with only Quick Claw retains the same 20% chance as before.
     pub moves_first: bool,
+    /// Set by Quash: holder acts last within its priority bracket, after all non-Quashed
+    /// Pokémon. moves_first overrides moves_last (After You beats Quash).
+    pub moves_last: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
