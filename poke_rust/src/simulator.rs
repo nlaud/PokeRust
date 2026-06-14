@@ -1647,6 +1647,38 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
+    // Helping Hand: in singles there is no ally slot, so the move always fails.
+    // The ×1.5 boost read-site already exists (simulator_helpers.rs HelpingHand volatile
+    // check); the doubles applier can be added here when doubles support is implemented.
+    if move_name == PokemonMove::HelpingHand {
+        return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+    }
+
+    // Lock-On / Mind Reader: lock the user's accuracy onto the target for the next turn.
+    // Applies LockedOn volatile (MoveStatus, 2 turns) to the user, targeting the opponent by
+    // mon_id. Fails if the user is already locked on. Bypasses evasion and semi-invulnerability
+    // for the user's next move; does NOT bypass Protect or type immunity.
+    if matches!(move_name, PokemonMove::LockOn | PokemonMove::MindReader) {
+        let target_slot = target_slots[0];
+        let target_mon_id = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| m.mon_id)
+            .unwrap_or(u8::MAX);
+        let already_locked = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| m.volatiles.iter().any(|v| matches!(v,
+                crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedOn(_), _)
+                | crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::LockedOn(_), _)
+            )))
+            .unwrap_or(false);
+        if already_locked {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            user.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedOn(target_mon_id), 2));
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     // Poltergeist: fails if the target does not hold an active item (None, Magic Room, Klutz,
     // Embargo, Neutralizing Gas). The "item being held" check mirrors Showdown's behavior —
     // if the item is suppressed it still counts as present for fail purposes only in
@@ -1680,6 +1712,17 @@ fn possible_damage_outcomes_for_move(
             .map(|m| m.first_move_on_field)
             .unwrap_or(false);
         if !eligible {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
+    // Burn Up: fails if the user does not currently have the Fire type. This covers chains
+    // (e.g. a second use after the first already stripped the type) and non-Fire users.
+    if move_name == PokemonMove::BurnUp {
+        let has_fire = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| simulator_helpers::pokemon_has_type(m, &PokemonType::Fire))
+            .unwrap_or(false);
+        if !has_fire {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
     }
