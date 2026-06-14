@@ -3704,10 +3704,15 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
             mon_mut.entered_this_turn = true;
         }
     }
-    // Always mark the Pokémon as not having moved since entry (for Fake Out / First Impression).
+    // Always mark the Pokémon as on their first turn on field (for Fake Out / First Impression).
     // Unlike `entered_this_turn`, this applies to faint-replacements too.
+    // For U-turn/Volt Switch mid-turn entries (turn_started=true, turn_ended=false), EOT will
+    // still run this turn BEFORE the Pokémon gets to act. Set the pending flag so EOT skips
+    // clearing first_move_on_field once, preserving it to the Pokémon's actual first turn.
+    let is_mid_turn_pre_eot = is_replacement_turn && !state.turn_ended;
     if let Some(mon_mut) = get_pokemon_at_slot_mut(state, slot) {
         mon_mut.first_move_on_field = true;
+        mon_mut.first_turn_on_field_pending = is_mid_turn_pre_eot;
     }
 
     // Entry hazards resolve before the switch-in ability. A Pokémon that faints to hazards (e.g.
@@ -4697,7 +4702,13 @@ pub fn end_turn(
     for (bs, _) in branches.iter_mut() {
         for mon in bs.p1_active_mons.iter_mut().chain(bs.p2_active_mons.iter_mut()) {
             mon.entered_this_turn = false;
-            mon.first_move_on_field = false; // only valid for the turn of entry
+            // U-turn/Volt Switch mid-turn entries set first_turn_on_field_pending so EOT skips
+            // clearing first_move_on_field once, preserving it to their actual first turn.
+            if mon.first_turn_on_field_pending {
+                mon.first_turn_on_field_pending = false;
+            } else {
+                mon.first_move_on_field = false;
+            }
             mon.damaged_this_turn = false;
             mon.damaged_by_this_turn.clear();
             mon.last_physical_damage_taken = 0;

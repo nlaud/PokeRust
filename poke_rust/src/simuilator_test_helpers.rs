@@ -190,6 +190,7 @@ pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(Match
         mon.original_ability = None;
         mon.entered_this_turn = false;
         mon.first_move_on_field = false;
+        mon.first_turn_on_field_pending = false;
         // Persists across turns by design (Stomping Tantrum / Micle Berry), but is
         // transient bookkeeping for state-equality purposes.
         mon.last_move_failed = false;

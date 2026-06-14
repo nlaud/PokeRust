@@ -4710,6 +4710,7 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     // Clear the entry flags so they don't persist on the bench.
     mon.entered_this_turn = false;
     mon.first_move_on_field = false;
+    mon.first_turn_on_field_pending = false;
     mon.cud_chew_pending = None;
     // Unburden's boost ends on switch-out.
     mon.item_lost = false;

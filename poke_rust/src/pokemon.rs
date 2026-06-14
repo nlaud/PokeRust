@@ -179,10 +179,18 @@ pub struct PokemonState{
     /// Fling). Persists across switch-out, faint+revive, and Recycle. Required by Belch.
     pub ate_berry_this_battle: bool,
 
-    /// True when this Pokémon has not yet used any move since entering the field.
-    /// Set to true on any entry (including faint-replacement), cleared the first time a move
-    /// resolves. Gates Fake Out and First Impression. Cleared on switch-out.
+    /// True during the first TURN the Pokémon can act. Set on any entry; cleared at end-of-turn.
+    /// For U-turn/self-switch mid-turn entries (turn_started=true, turn_ended=false), the flag
+    /// must survive the current turn's EOT and remain true the NEXT turn. That is handled by
+    /// `first_turn_on_field_pending` (see below). Gates Fake Out and First Impression.
+    /// Cleared on switch-out.
     pub first_move_on_field: bool,
+
+    /// Set in process_pokemon_send_out when a Pokémon enters MID-TURN before EOT has run
+    /// (U-turn / Volt Switch / Parting Shot self-switch; detected via turn_started && !turn_ended).
+    /// Tells EOT Phase 5 to skip clearing first_move_on_field for exactly one EOT cycle, so the
+    /// flag persists to the NEXT turn (the Pokémon's actual first chance to act).
+    pub first_turn_on_field_pending: bool,
 
     /// True on the turn this Pokémon entered battle via a SwitchAction (voluntary or forced
     /// mid-turn). Cleared at the end of end_turn after ability effects are applied.
@@ -478,6 +486,7 @@ pub fn build_pokemon_state(
         gender, weight_hg, tera_type, mega_species, mega_ability,
         last_move_failed: false, original_ability: None, last_used_move: None,
         one_time_ability_used: false, ate_berry_this_battle: false, first_move_on_field: false,
+        first_turn_on_field_pending: false,
         entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
         item_lost: false, damaged_this_turn: false, damaged_by_this_turn: Vec::new(),
         last_physical_damage_taken: 0, last_physical_attacker: None,
