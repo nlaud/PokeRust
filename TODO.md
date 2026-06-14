@@ -43,14 +43,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Side and field condition moves
-Set multi-turn conditions on one or both sides of the field.
-- Aurora Veil — side condition 5 turns (snow only); halve physical and special damage
-- Brick Break / Psychic Fangs / Raging Bull — damage + remove screens on target's side
-- Fairy Lock — all Pokémon gain Can't Escape for 1 turn
-- Gravity — 5 turns; grounds all Pokémon, raises accuracy, disables certain moves
-- Safeguard — side condition 5 turns; protect ally side from status conditions
-
 ### Two-turn charging moves (incomplete)
 Already partially implemented (Fly, Dig, Dive work). Remaining variants:
 - Beak Blast — charge turn: burn any Pokémon that makes contact; attack turn: Flying

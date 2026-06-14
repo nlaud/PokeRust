@@ -355,8 +355,14 @@ pub fn single_type_effectiveness(move_type: &PokemonType, target_type: &PokemonT
 /// The types a Pokémon defends with right now. Identical to `mon.types` except while Roost
 /// is active on a Flying-type: Roost suppresses the Flying type for the rest of the turn
 /// (a dual-type keeps its other type; a pure Flying-type is treated as Normal).
-pub fn defensive_types(mon: &PokemonState) -> Vec<PokemonType> {
-    if has_status_volatile(mon, &VolatileStatus::Roost) && pokemon_has_type(mon, &PokemonType::Flying) {
+pub fn defensive_types(state: &BattleState, mon: &PokemonState) -> Vec<PokemonType> {
+    // Flying is stripped from defensive types when Roost is active on the user, or when
+    // Gravity is active on the field (both effects ground Flying-type Pokémon, removing
+    // their immunity to Ground-type moves for the duration).
+    let strip_flying = (has_status_volatile(mon, &VolatileStatus::Roost)
+        || is_gravity_active(state))
+        && pokemon_has_type(mon, &PokemonType::Flying);
+    if strip_flying {
         let remaining: Vec<PokemonType> = mon
             .types
             .iter()
@@ -370,7 +376,7 @@ pub fn defensive_types(mon: &PokemonState) -> Vec<PokemonType> {
 }
 
 pub fn move_type_effectiveness(state: &BattleState, move_type: &PokemonType, target: &PokemonState) -> f64 {
-    let target_types = defensive_types(target);
+    let target_types = defensive_types(state, target);
     if target_types.is_empty() {
         return 1.0;
     }
@@ -522,6 +528,13 @@ pub fn critical_hit_probability(
 
 fn screen_damage_multiplier(state: &BattleState, target_slot: FieldSlot, move_data: &MoveData, is_crit: bool) -> f64 {
     if is_crit {
+        return 1.0;
+    }
+
+    // Brick Break, Psychic Fangs, and Raging Bull bypass screens on the hit that clears them.
+    if matches!(move_data.name,
+        PokemonMove::BrickBreak | PokemonMove::PsychicFangs | PokemonMove::RagingBull
+    ) {
         return 1.0;
     }
 
@@ -1892,6 +1905,14 @@ pub fn is_trapped(state: &BattleState, mon: &PokemonState) -> bool {
         return true;
     }
     if has_status_volatile(mon, &VolatileStatus::Trapped(0)) {
+        return true;
+    }
+    // Fairy Lock: all non-Ghost Pokémon cannot voluntarily switch out for the next turn.
+    // Shed Shell does not bypass Fairy Lock. Self-switch moves (U-turn, Volt Switch, etc.)
+    // are not blocked because they route through self_switch_pending, not this gate.
+    if state.pseudo_weathers.iter().any(|pw| matches!(pw, PseudoWeather::FairyLock))
+        && !pokemon_has_type(mon, &PokemonType::Ghost)
+    {
         return true;
     }
     false
@@ -4265,8 +4286,39 @@ pub fn add_pseudo_weather(state: &mut BattleState, pseudo_weather: PseudoWeather
     {
         return;
     }
+    let is_gravity = matches!(pseudo_weather, PseudoWeather::Gravity);
     state.pseudo_weathers.push(pseudo_weather);
     state.pseudo_weather_turns.push(duration);
+    if is_gravity {
+        on_gravity_activated(state);
+    }
+}
+
+/// When Gravity activates, cancel any Fly/Bounce/Sky Drop semi-invulnerability or charging
+/// volatiles, and strip Magnet Rise and Telekinesis from all active Pokémon.
+fn on_gravity_activated(state: &mut BattleState) {
+    let gravity_interrupted: &[PokemonMove] = &[
+        PokemonMove::Fly,
+        PokemonMove::Bounce,
+        PokemonMove::SkyDrop,
+    ];
+    for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+        mon.volatiles.retain(|v| {
+            if let VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(m), _) = v {
+                if gravity_interrupted.contains(m) { return false; }
+            }
+            if let VolatileStatusState::Charging(m, _) = v {
+                if gravity_interrupted.contains(m) { return false; }
+            }
+            if matches!(v,
+                VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, _)
+                | VolatileStatusState::MoveStatus(VolatileStatus::MagnetRise, _)
+                | VolatileStatusState::TurnStatus(VolatileStatus::Telekinesis, _)
+                | VolatileStatusState::MoveStatus(VolatileStatus::Telekinesis, _)
+            ) { return false; }
+            true
+        });
+    }
 }
 
 /// Remove pseudo-weather by discriminant.
@@ -4668,18 +4720,27 @@ fn get_volatile_duration(volatile: &VolatileStatus) -> u8 {
 /// Determine the duration for a side condition.
 fn get_side_condition_duration(condition: &SideCondition) -> u8 {
     match condition {
-        // Last only until end of turn
+        // Last only until end of turn (turn-of-use protect variants)
         SideCondition::CraftyShield
         | SideCondition::MatBlock
         | SideCondition::QuickGuard
-        | SideCondition::SafeGuard
         | SideCondition::WideGuard => 1,
         // Entry hazards last indefinitely (until removed by spin/Defog/Tidy Up/Court Change).
         SideCondition::Spikes(_)
         | SideCondition::StealthRock
         | SideCondition::StickyWeb(_)
         | SideCondition::ToxicSpikes(_) => 0,
-        // Default duration
+        // Default duration (5 turns): Reflect, Light Screen, Aurora Veil, Safeguard, Mist, etc.
+        _ => 5,
+    }
+}
+
+/// Determine the initial duration for a pseudo-weather effect.
+fn get_pseudo_weather_duration(pseudo_weather: &PseudoWeather) -> u8 {
+    match pseudo_weather {
+        // Fairy Lock lasts 2 turns: the use-turn and the immediately following turn.
+        PseudoWeather::FairyLock => 2,
+        // All others (Trick Room, Magic Room, Wonder Room, Gravity, …) default to 5 turns.
         _ => 5,
     }
 }
@@ -6055,15 +6116,24 @@ fn apply_weather_effects(state: &mut BattleState, effect: &HitEffect) {
     }
 
     if let Some(pseudo_weather) = &effect.pseudo_weather {
-        if state
+        let already_active = state
             .pseudo_weathers
             .iter()
-            .any(|pw| std::mem::discriminant(pw) == std::mem::discriminant(pseudo_weather))
-        {
+            .any(|pw| std::mem::discriminant(pw) == std::mem::discriminant(pseudo_weather));
+
+        // Trick Room, Wonder Room, and Magic Room toggle: re-using them while active cancels them.
+        // Gravity and Fairy Lock do NOT toggle: re-use simply fails if already active.
+        let is_toggleable = matches!(pseudo_weather,
+            PseudoWeather::TrickRoom | PseudoWeather::WonderRoom
+        );
+
+        if already_active && is_toggleable {
             remove_pseudo_weather(state, pseudo_weather);
-        } else {
-            add_pseudo_weather(state, pseudo_weather.clone(), 5);
+        } else if !already_active {
+            let duration = get_pseudo_weather_duration(pseudo_weather);
+            add_pseudo_weather(state, pseudo_weather.clone(), duration);
         }
+        // If already_active && !is_toggleable: fail silently (no change).
     }
 }
 
@@ -6149,6 +6219,16 @@ fn apply_effect_to_target(
     // Snapshot target type for Flower Veil (Grass-only protection) before the mutable borrow.
     let target_is_grass = get_pokemon_at_slot(state, target_slot)
         .map_or(false, |mon| pokemon_has_type(mon, &PokemonType::Grass));
+    // Safeguard: blocks status and confusion from opponents (unless attacker has Infiltrator).
+    let safeguard_on_target_side = match target_slot.player {
+        Player::P1 => &state.p1_side_conditions,
+        Player::P2 => &state.p2_side_conditions,
+    }.iter().any(|c| matches!(c, SideCondition::SafeGuard));
+    let attacker_has_infiltrator = get_pokemon_at_slot(state, attacker_slot)
+        .map_or(false, |a| !pokemon_ability_is_suppressed(state, a) && a.ability == Ability::Infiltrator);
+    // Light Clay: extend screen/veil duration from 5 to 8 turns.
+    let attacker_has_light_clay = get_pokemon_at_slot(state, attacker_slot)
+        .map_or(false, |a| item_is_active(state, a) && a.item == Item::LightClay);
 
     if let Some(target_mon) = get_pokemon_at_slot_mut(state, target_slot) {
         if let Some(status) = &effect.status {
@@ -6159,8 +6239,14 @@ fn apply_effect_to_target(
             // Rest / Flame Orb / Toxic Orb are not blocked (those go through separate paths).
             let status_blocked_by_flower_veil =
                 flower_veil_on_side && target_is_grass;
+            // Safeguard: block status from opponents (not self) unless Infiltrator.
+            let status_blocked_by_safeguard = safeguard_on_target_side
+                && !attacker_has_infiltrator
+                && attacker_slot.player != target_slot.player;
 
-            if !sleep_blocked_by_sweet_veil && !status_blocked_by_flower_veil {
+            if !sleep_blocked_by_sweet_veil && !status_blocked_by_flower_veil
+                && !status_blocked_by_safeguard
+            {
                 // If attacker has Corrosion, allow poisoning of Poison/Steel types,
                 // but do not overwrite an existing non-volatile status on the target.
                 if attacker_ability == Some(Ability::Corrosion) {
@@ -6195,7 +6281,12 @@ fn apply_effect_to_target(
                     | VolatileStatus::Attract
                     | VolatileStatus::HealBlock
             );
-            if !yawn_blocked_by_sweet_veil && !aroma_veil_blocked {
+            // Safeguard: block Confusion and Yawn from opponents (not self) unless Infiltrator.
+            let volatile_blocked_by_safeguard = safeguard_on_target_side
+                && !attacker_has_infiltrator
+                && attacker_slot.player != target_slot.player
+                && matches!(volatile, VolatileStatus::Confusion | VolatileStatus::Yawn);
+            if !yawn_blocked_by_sweet_veil && !aroma_veil_blocked && !volatile_blocked_by_safeguard {
                 apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile);
 
                 // Steadfast: +1 Speed when the holder flinches.
@@ -6247,7 +6338,13 @@ fn apply_effect_to_target(
                 }
                 other => other.clone(),
             };
-            let duration = get_side_condition_duration(&to_add);
+            let duration = {
+                let base = get_side_condition_duration(&to_add);
+                // Light Clay extends Reflect / Light Screen / Aurora Veil from 5 to 8 turns.
+                if matches!(&to_add, SideCondition::Reflect | SideCondition::LightScreen | SideCondition::AuroraVeil)
+                    && base == 5 && attacker_has_light_clay
+                { 8 } else { base }
+            };
             add_side_condition(state, side_condition_player, to_add, duration);
         }
     }
@@ -6292,7 +6389,15 @@ fn apply_effect_to_attacker(
 
     if let Some(side_condition) = &effect.side_condition {
         if !(matches!(side_condition, SideCondition::AuroraVeil) && !weather_is_snow(state)) {
-            let duration = get_side_condition_duration(side_condition);
+            let attacker_has_light_clay = get_pokemon_at_slot(state, attacker_slot)
+                .map_or(false, |a| item_is_active(state, a) && a.item == Item::LightClay);
+            let duration = {
+                let base = get_side_condition_duration(side_condition);
+                // Light Clay extends Reflect / Light Screen / Aurora Veil from 5 to 8 turns.
+                if matches!(side_condition, SideCondition::Reflect | SideCondition::LightScreen | SideCondition::AuroraVeil)
+                    && base == 5 && attacker_has_light_clay
+                { 8 } else { base }
+            };
             add_side_condition(state, attacker_slot.player, side_condition.clone(), duration);
         }
     }
@@ -6442,6 +6547,15 @@ fn apply_hazard_removal_move(bs: &mut BattleState, attacker_slot: FieldSlot, mov
             let items_suppressed = items_are_suppressed(bs);
             if let Some(mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
                 apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 1, 0, 0], items_suppressed, false);
+            }
+        }
+        PokemonMove::BrickBreak | PokemonMove::PsychicFangs | PokemonMove::RagingBull => {
+            // Remove Reflect, Light Screen, and Aurora Veil from the target's (foe) side.
+            // This is the post-damage clear; the bypass of screen reduction on this same hit
+            // is handled in screen_damage_multiplier. Removal happens even if the target was
+            // behind a Substitute (the move still "hits the side" per current-gen Showdown).
+            for sc in [SideCondition::Reflect, SideCondition::LightScreen, SideCondition::AuroraVeil] {
+                remove_side_condition(bs, foe, &sc);
             }
         }
         _ => {}
