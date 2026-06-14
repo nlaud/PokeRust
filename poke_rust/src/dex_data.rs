@@ -1,4 +1,5 @@
 use crate::data::ability::Ability;
+use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use std::collections::HashMap;
@@ -265,7 +266,29 @@ pub enum SideCondition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SlotCondition {
-    FutureMove,
+    /// Pending Future Sight or Doom Desire. Fires at end of turn when `turns_remaining`
+    /// hits 0. All attacker-side values are snapshotted at queue time so damage is stable
+    /// even if the original user switches out before impact. The live target's stats/types/
+    /// items are used on the defensive side.
+    FutureMove {
+        move_name: PokemonMove,
+        /// True when the attacker is Player 1.
+        attacker_is_p1: bool,
+        attacker_slot_index: u8,
+        /// mon_id of the attacker; lets the resolver verify if the same mon is still in slot.
+        attacker_mon_id: u8,
+        /// Raw Sp.Atk stat value (mon.stats[3]) at queue time, before boosts/ability/item.
+        snapshot_raw_spa: u16,
+        /// Sp.Atk boost stage at queue time (mon.boosts[2]). Combined with snapshot_raw_spa
+        /// in effective_stat to reproduce the correct offensive value.
+        snapshot_spa_boost: i8,
+        snapshot_level: u8,
+        snapshot_type1: Option<PokemonType>,
+        snapshot_type2: Option<PokemonType>,
+        snapshot_ability: Ability,
+        snapshot_item: Item,
+        turns_remaining: u8,
+    },
     HealingWish,
     LunarDance,
     RevivalBlessing,
@@ -655,7 +678,9 @@ fn parse_pseudo_weather(s: &str) -> Option<PseudoWeather> {
 
 fn parse_slot_condition(s: &str) -> Option<SlotCondition> {
     match s {
-        "futuremove" | "futuresight" | "doomdesire" => Some(SlotCondition::FutureMove),
+        // Future Sight and Doom Desire are set via hand-coded effect blocks with full
+        // snapshot data; this parser stub is intentionally omitted so no field-less
+        // FutureMove variant is ever constructed from the dex.
         "healingwish" => Some(SlotCondition::HealingWish),
         "lunardance" => Some(SlotCondition::LunarDance),
         "revivalblessing" => Some(SlotCondition::RevivalBlessing),

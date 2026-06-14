@@ -9,7 +9,8 @@ cargo run -- --p1 ../teamsheets/{teamsheet path} --p2 ../teamsheets/{teamsheet p
 - Create a function to take in battle state and battle actions, then apply those to create a vector of tuples possible battle states resulting from that along with their probabilities.
     - Handling Imperfect information, how to input information and update imperfect information states
     - Update Simulator.md to output information that each player has
-- Eventually create nash solver and recursive evaluation
+- Eventually create nash solver and recursive evaluation (When both players have perfect information)
+- Create a meta sampler from pikalytics, and then get the algorithm to understand that
 
 ### Random Stuff
 - Eventually a frontend for this, maybe a mentor mode + battle the AI mode + maybe a team evaluater long running mode?

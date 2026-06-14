@@ -3449,6 +3449,14 @@ pub fn compare_action_order(
                 _ => {}
             }
 
+            // moves_last flag: set by Quash. Loses to moves_first (checked above).
+            // When both are Quashed, falls through to speed for Gen IX ordering.
+            match (m1.moves_last, m2.moves_last) {
+                (true, false) => return Ordering::Greater,
+                (false, true) => return Ordering::Less,
+                _ => {}
+            }
+
             // Stall: holder always moves last within its bracket, regardless of speed
             // or Trick Room. Overridden only when moves_first is active (handled above).
             if let (Some(p1), Some(p2)) = (user1, user2) {
@@ -4538,12 +4546,16 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
 /// branching wherever a probabilistic ability (Shed Skin, Healer, Moody, Harvest) fires.
 ///
 /// Pipeline:
-///   1. `apply_pre_status_residuals` — weather/terrain/item healing (deterministic)
+///   1. `apply_pre_status_residuals` — weather/terrain/item healing + Future Sight/Doom Desire
 ///   2. `apply_status_cure_abilities` — Hydration/Shed Skin/Healer (may branch)
 ///   3. `apply_status_damage` — burn/poison/toxic (reads cured status, deterministic per branch)
 ///   4. `apply_late_eot_abilities` — Speed Boost/Moody/Harvest/Hunger Switch (may branch)
 ///   5. Clear `entered_this_turn` so Speed Boost fires normally next turn.
-pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
+pub fn end_turn(
+    state: &mut BattleState,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: crate::simulator::DamageConfig,
+) -> Vec<(BattleState, f64)> {
     // Item-loss ledger snapshot: residual damage in Phases 1–3 can consume berries
     // (e.g. Sitrus after burn chip); the diff after Phase 3 fires Unburden / Pickup /
     // Symbiosis reactions before Pickup resolves in Phase 4.
@@ -4559,10 +4571,20 @@ pub fn end_turn(state: &mut BattleState) -> Vec<(BattleState, f64)> {
     state.turn_number = state.turn_number.saturating_add(1);
 
     // Phase 1: weather/terrain/item healing (deterministic, &mut in-place).
+    // Also ticks Future Sight / Doom Desire; fires that have resolved are returned
+    // so their branched damage can be applied before Phase 2.
     apply_pre_status_residuals(state);
+    let fired_future_moves = extract_fired_future_moves(state);
+
+    // Phase 1.5: apply branched Future Sight / Doom Desire damage on all branches.
+    let mut branches = apply_future_move_damage(
+        vec![(state.clone(), 1.0)],
+        &fired_future_moves,
+        move_dex,
+        config,
+    );
 
     // Phase 2: probabilistic status-cure abilities. Branches if Shed Skin or Healer fires.
-    let mut branches = vec![(state.clone(), 1.0)];
     branches = apply_status_cure_abilities(branches);
 
     // Phase 3: burn/poison/toxic damage (deterministic per branch).
@@ -4957,6 +4979,155 @@ fn resolve_wish_slot_conditions(state: &mut BattleState) {
             }
         }
     }
+}
+
+/// Snapshot struct holding the resolved data for a fired Future Sight / Doom Desire.
+struct FiredFutureMove {
+    move_name: PokemonMove,
+    /// Player whose slot the move is targeting (the DEFENDER's side).
+    target_player: Player,
+    target_slot_index: usize,
+    snapshot_raw_spa: u16,
+    snapshot_spa_boost: i8,
+    snapshot_level: u8,
+    snapshot_type1: Option<crate::dex_data::PokemonType>,
+    snapshot_type2: Option<crate::dex_data::PokemonType>,
+    snapshot_ability: Ability,
+    snapshot_item: Item,
+}
+
+/// Tick all FutureMove slot conditions. Returns those that have just fired (turns_remaining → 0),
+/// removing them from the state's slot conditions. Non-firing conditions are decremented in place.
+fn extract_fired_future_moves(state: &mut BattleState) -> Vec<FiredFutureMove> {
+    let mut fired = Vec::new();
+    for player in [Player::P1, Player::P2] {
+        let conds = match player {
+            Player::P1 => &mut state.p1_slot_conditions,
+            Player::P2 => &mut state.p2_slot_conditions,
+        };
+        for (slot_idx, slot_conds) in conds.iter_mut().enumerate() {
+            slot_conds.retain_mut(|sc| {
+                if let crate::dex_data::SlotCondition::FutureMove {
+                    move_name, turns_remaining,
+                    snapshot_raw_spa, snapshot_spa_boost, snapshot_level,
+                    snapshot_type1, snapshot_type2, snapshot_ability, snapshot_item, ..
+                } = sc {
+                    *turns_remaining = turns_remaining.saturating_sub(1);
+                    if *turns_remaining == 0 {
+                        fired.push(FiredFutureMove {
+                            move_name: move_name.clone(),
+                            target_player: player,
+                            target_slot_index: slot_idx,
+                            snapshot_raw_spa: *snapshot_raw_spa,
+                            snapshot_spa_boost: *snapshot_spa_boost,
+                            snapshot_level: *snapshot_level,
+                            snapshot_type1: snapshot_type1.clone(),
+                            snapshot_type2: snapshot_type2.clone(),
+                            snapshot_ability: snapshot_ability.clone(),
+                            snapshot_item: snapshot_item.clone(),
+                        });
+                        return false; // remove fired condition
+                    }
+                }
+                true
+            });
+        }
+    }
+    fired
+}
+
+/// Apply the damage from fired Future Sight / Doom Desire hits, branching on damage rolls
+/// and crits. Ignores Protect, Substitute, and Wonder Guard. The target's live stats and
+/// types are used for defensive values; attacker values come from the snapshot.
+fn apply_future_move_damage(
+    branches: Vec<(BattleState, f64)>,
+    fired: &[FiredFutureMove],
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    config: crate::simulator::DamageConfig,
+) -> Vec<(BattleState, f64)> {
+    if fired.is_empty() {
+        return branches;
+    }
+    let mut current = branches;
+    for hit in fired {
+        let Some(move_data) = move_dex.get(&hit.move_name) else { continue };
+        let mut next_branches: Vec<(BattleState, f64)> = Vec::new();
+        for (state, prob) in current {
+            let target_slot = FieldSlot {
+                player: hit.target_player,
+                slot_index: hit.target_slot_index as u8,
+            };
+            let target = match hit.target_player {
+                Player::P1 => state.p1_active_mons.get(hit.target_slot_index),
+                Player::P2 => state.p2_active_mons.get(hit.target_slot_index),
+            };
+            let Some(target) = target else {
+                next_branches.push((state, prob));
+                continue;
+            };
+            if target.fainted {
+                next_branches.push((state, prob));
+                continue;
+            }
+            // Check Dark-type immunity (Future Sight only; Doom Desire is Steel)
+            let attack_type = effective_move_type(&state, target, move_data); // uses move_data.move_type
+            let effectiveness = {
+                // Build the move type from the snapshot (not from attacker mon — this is what
+                // effective_move_type does using the move's own type, not the attacker's type).
+                // Future Sight's type is Psychic, fixed in move_data. Electrify can change it
+                // but that volatile is on the target here; normally it applies to the attacker.
+                // For simplicity, use the move_data type directly (Psychic for FS, Steel for DD).
+                move_type_effectiveness(&state, &move_data.pokemon_type, target)
+            };
+            if effectiveness == 0.0 {
+                // Immune — no hit, no message in this branch
+                next_branches.push((state, prob));
+                continue;
+            }
+            // Build a synthetic attacker using the target as a clone template, then patch
+            // the fields that affect the offensive damage calculation.
+            let mut synthetic_attacker = target.clone();
+            synthetic_attacker.stats[3] = hit.snapshot_raw_spa;
+            synthetic_attacker.boosts = [0, 0, hit.snapshot_spa_boost, 0, 0, 0, 0];
+            synthetic_attacker.types = {
+                let mut ts = Vec::new();
+                if let Some(t) = hit.snapshot_type1.clone() { ts.push(t); }
+                if let Some(t) = hit.snapshot_type2.clone() { ts.push(t); }
+                ts
+            };
+            synthetic_attacker.ability = hit.snapshot_ability.clone();
+            synthetic_attacker.base_ability = hit.snapshot_ability.clone();
+            synthetic_attacker.item = hit.snapshot_item.clone();
+            synthetic_attacker.level = hit.snapshot_level;
+            synthetic_attacker.status = None;
+            synthetic_attacker.volatiles = vec![];
+            synthetic_attacker.is_tera = false;
+            synthetic_attacker.is_mega = false;
+            // Compute damage outcomes (branches on rolls and crits).
+            // targets_multiplier = 1.0, invulnerability_multiplier = 1.0 (ignores Protect).
+            let damage_outcomes = calculate_damage_outcomes_for_target(
+                &state,
+                &synthetic_attacker,
+                target,
+                target_slot, // attacker slot unknown; pass target slot as placeholder
+                target_slot,
+                move_data,
+                config,
+                1.0,
+                1.0,
+            );
+            for (dmg, _is_crit, dmg_prob) in damage_outcomes {
+                let mut new_state = state.clone();
+                let env = berry_env(&new_state, target_slot);
+                if let Some(t) = get_pokemon_at_slot_mut(&mut new_state, target_slot) {
+                    take_damage(t, dmg, env);
+                }
+                next_branches.push((new_state, prob * dmg_prob));
+            }
+        }
+        current = next_branches;
+    }
+    current
 }
 
 /// Aqua Ring end-of-turn heal: 1/16 max HP, Big Root–boosted, blocked by Heal Block.

@@ -56,11 +56,6 @@ Already partially implemented (Fly, Dig, Dive work). Remaining variants:
 - Beak Blast — charge turn: burn any Pokémon that makes contact; attack turn: Flying
 - Phantom Force — charge turn: Concealed (untargetable); attack turn: hits through Protect
 
-### Delayed and turn-order manipulation moves
-- After You — target moves immediately after user this turn
-- Future Sight — hits target's slot 2 turns later (not blocked by current Pokémon's ability)
-- Quash — force target to act last this turn
-
 ### Complex moves — battle-state conditions
 These check or modify ongoing battle state. Each is individually moderate in complexity.
 - Acupressure — +2 to a random stat (user or random ally in doubles)
