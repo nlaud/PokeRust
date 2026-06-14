@@ -118,6 +118,7 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             if *move_name != PokemonMove::Struggle {
                 mon.last_used_move = Some(move_name.clone());
             }
+
             // Gigaton Hammer / Blood Moon etc.: apply the "can't use repeatedly" volatile.
             // Applied on any use attempt (hit, miss, or blocked) per Bulbapedia.
             if matches!(move_name, PokemonMove::GigatonHammer | PokemonMove::BloodMoon) {
@@ -133,6 +134,10 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
                     ));
                 }
             }
+        }
+        // Update the field-level last-move tracker for Copycat; Struggle excluded.
+        if *move_name != PokemonMove::Struggle {
+            next_state.last_move_on_field = Some(move_name.clone());
         }
     }
 }
@@ -957,7 +962,8 @@ fn possible_damage_outcomes_for_move(
         .position(|move_entry| move_entry.as_ref() == Some(&action.move_name));
 
     let is_struggle = action.move_name == PokemonMove::Struggle;
-    if pp_slot.is_none() && !is_struggle {
+    // Called moves (Copycat, Sleep Talk, etc.) may not be in the attacker's moveset.
+    if pp_slot.is_none() && !is_struggle && !is_called_move {
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
     let pp_index = pp_slot; // Option<usize>; None iff is_struggle
@@ -1824,6 +1830,137 @@ fn possible_damage_outcomes_for_move(
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Acupressure: raise a random stat by +2. Fails if all 7 stats are already at +6.
+    // In this sim, always targets the user (doubles ally-targeting is not implemented).
+    if move_name == PokemonMove::Acupressure {
+        let user_slot = action.user_slot;
+        let boosts = simulator_helpers::get_pokemon_at_slot(&next_state, user_slot)
+            .map(|m| m.boosts)
+            .unwrap_or_default();
+        let eligible: Vec<usize> = (0..7usize).filter(|&i| boosts[i] < 6).collect();
+        if eligible.is_empty() {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        let branches: Vec<(BattleState, f64)> = vec![(next_state.clone(), 1.0)];
+        let per = 1.0 / eligible.len() as f64;
+        let mut new_branches = Vec::new();
+        for stat_idx in &eligible {
+            for (mut bs, prob) in branches.iter().cloned() {
+                let mut delta = [0i8; 7];
+                delta[*stat_idx] = 2;
+                if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, user_slot) {
+                    simulator_helpers::apply_stat_boost_external(mon, &delta, items_suppressed);
+                }
+                new_branches.push((bs, prob * per));
+            }
+        }
+        // consume PP on the original state's branches collapsed
+        for (bs, _) in &mut new_branches {
+            decrement_move_pp(bs, user_slot, &action.move_name);
+        }
+        return new_branches.into_iter()
+            .map(|(bs, p)| (MatchState::BattleState(bs), p))
+            .collect();
+    }
+
+    // Stuff Cheeks: consume held Berry (triggering its normal on-eat effect), then +2 Def.
+    // Fails if the user holds no Berry.
+    if move_name == PokemonMove::StuffCheeks {
+        let user_slot = action.user_slot;
+        let has_berry = simulator_helpers::get_pokemon_at_slot(&next_state, user_slot)
+            .map(|m| m.item.is_berry() && simulator_helpers::item_is_active(&next_state, m))
+            .unwrap_or(false);
+        if !has_berry {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let env = simulator_helpers::berry_env(&next_state, user_slot);
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, user_slot) {
+            let berry = mon.item.clone();
+            mon.consumed_item = Some(berry.clone());
+            mon.item = crate::data::item::Item::None;
+            simulator_helpers::apply_berry_effect(mon, &berry, &env);
+            simulator_helpers::on_berry_eaten(mon, &berry, &env);
+            simulator_helpers::apply_stat_boost_external(mon, &[0, 2, 0, 0, 0, 0, 0], items_suppressed);
+        }
+        decrement_move_pp(&mut next_state, user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Copycat: use the last move executed by any Pokémon on the field.
+    // Fails if no move has been used yet, or if the last move is uncopyable.
+    if move_name == PokemonMove::Copycat {
+        use crate::data::pokemon_move::PokemonMove as M;
+        const UNCOPYABLE: &[M] = &[
+            M::Assist, M::Sketch, M::Metronome, M::MirrorMove, M::Mimic,
+            M::Protect, M::Detect, M::Endure, M::KingsShield, M::SpikyShield,
+            M::BanefulBunker, M::Obstruct, M::SilkTrap, M::BurningBulwark,
+            M::DestinyBond, M::Transform, M::Counter, M::MirrorCoat,
+            M::Copycat, M::NaturePower, M::SleepTalk,
+        ];
+        let last_mv = next_state.last_move_on_field.clone();
+        let copied = match last_mv {
+            None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
+            Some(ref mv) if UNCOPYABLE.contains(mv) => {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+            Some(mv) => mv,
+        };
+        let Some(copied_move_data) = move_dex.get(&copied) else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let copied_priority = copied_move_data.priority;
+
+        // For single-target moves, compute all valid targets. Damaging moves use foe targets
+        // only (never the user's partner); self/ally moves use the normal target rules.
+        // In doubles with multiple valid targets, branch uniformly across each.
+        let valid_targets: Vec<Option<FieldSlot>> =
+            if simulator_helpers::move_target_is_multitarget(&copied_move_data.target) {
+                // Multi-target: pass None; resolve_move_targets handles it inside the inner call.
+                vec![None]
+            } else {
+                let slots = simulator_helpers::resolve_move_targets(
+                    &next_state, action.user_slot, &copied_move_data.target,
+                );
+                if slots.is_empty() {
+                    return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+                }
+                slots.into_iter().map(Some).collect()
+            };
+
+        // Decrement Copycat's own PP before branching.
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+
+        let n = valid_targets.len();
+        let per_prob = 1.0 / n as f64;
+        let mut all_branches: Vec<(MatchState, f64)> = Vec::new();
+        for target_slot in valid_targets {
+            let synthetic_action = MoveAction {
+                move_name: copied.clone(),
+                user_slot: action.user_slot,
+                target_slot,
+                priority: copied_priority,
+                moves_first: action.moves_first,
+                moves_last: action.moves_last,
+            };
+            // Prevent infinite recursion: Copycat cannot copy Copycat (already in UNCOPYABLE).
+            let branch_results = possible_damage_outcomes_for_move(
+                &next_state,
+                &synthetic_action,
+                copied_move_data,
+                config,
+                move_dex,
+                pokemon_dex,
+                true,
+            );
+            for (state, prob) in branch_results {
+                all_branches.push((state, prob * per_prob));
+            }
+        }
+        return simulator_helpers::coalesce_branches(all_branches);
     }
 
     // Fling fails outright if the user has no flingable item (or its item is suppressed by
@@ -5051,6 +5188,7 @@ fn battle_state_from_preview_branching(
         p2_slot_conditions: vec![Vec::new(); preview.active_per_side as usize],
         self_switch_pending: None,
         items_consumed_this_turn: vec![],
+        last_move_on_field: None,
     };
 
     // Collect all active send-out slots

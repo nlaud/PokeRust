@@ -98,7 +98,11 @@ pub enum Action {
     TeraAction(TeraAction),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `last_move_on_field` is intentionally excluded from `PartialEq`, `Eq`, and `Hash`.
+/// That field tracks ephemeral "which move ran last" info for Copycat; including it in
+/// equality would prevent `coalesce_branches` from merging states that differ only in
+/// turn-order (e.g. two speed-tie orderings that otherwise produce identical game state).
+#[derive(Debug, Clone)]
 pub struct BattleState {
     pub active_per_side: u8,
 
@@ -148,6 +152,10 @@ pub struct BattleState {
     /// every `end_turn`. Items removed by theft (and, in future, Knock Off / Incinerate)
     /// are deliberately NOT recorded.
     pub items_consumed_this_turn: Vec<(FieldSlot, Item)>,
+
+    /// The last move successfully executed by any Pokémon on the field (either side).
+    /// Updated whenever `last_used_move` is set on a mon. Used by Copycat.
+    pub last_move_on_field: Option<PokemonMove>,
 }
 
 /// Format a single Pokémon's state as a multi-line string for display.
@@ -576,4 +584,76 @@ pub fn try_mega_evolution(
     mon.mega_species = None;
 
     true
+}
+
+// ── Custom PartialEq / Eq / Hash for BattleState ─────────────────────────────
+// `last_move_on_field` is excluded from equality and hashing so that
+// `coalesce_branches` can merge states that differ only in move-order tracking.
+
+impl PartialEq for BattleState {
+    fn eq(&self, other: &Self) -> bool {
+        self.active_per_side == other.active_per_side
+            && self.p1_active_mons == other.p1_active_mons
+            && self.p2_active_mons == other.p2_active_mons
+            && self.p1_back_mons == other.p1_back_mons
+            && self.p2_back_mons == other.p2_back_mons
+            && self.action_queue == other.action_queue
+            && self.turn_number == other.turn_number
+            && self.turn_started == other.turn_started
+            && self.turn_ended == other.turn_ended
+            && self.p1_has_tera == other.p1_has_tera
+            && self.p2_has_tera == other.p2_has_tera
+            && self.p1_has_mega == other.p1_has_mega
+            && self.p2_has_mega == other.p2_has_mega
+            && self.weather == other.weather
+            && self.weather_turns == other.weather_turns
+            && self.pseudo_weathers == other.pseudo_weathers
+            && self.pseudo_weather_turns == other.pseudo_weather_turns
+            && self.terrain == other.terrain
+            && self.terrain_turns == other.terrain_turns
+            && self.p1_side_conditions == other.p1_side_conditions
+            && self.p1_side_condition_turns == other.p1_side_condition_turns
+            && self.p2_side_conditions == other.p2_side_conditions
+            && self.p2_side_condition_turns == other.p2_side_condition_turns
+            && self.p1_slot_conditions == other.p1_slot_conditions
+            && self.p2_slot_conditions == other.p2_slot_conditions
+            && self.self_switch_pending == other.self_switch_pending
+            && self.items_consumed_this_turn == other.items_consumed_this_turn
+        // last_move_on_field intentionally excluded
+    }
+}
+
+impl Eq for BattleState {}
+
+impl std::hash::Hash for BattleState {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.active_per_side.hash(state);
+        self.p1_active_mons.hash(state);
+        self.p2_active_mons.hash(state);
+        self.p1_back_mons.hash(state);
+        self.p2_back_mons.hash(state);
+        self.action_queue.hash(state);
+        self.turn_number.hash(state);
+        self.turn_started.hash(state);
+        self.turn_ended.hash(state);
+        self.p1_has_tera.hash(state);
+        self.p2_has_tera.hash(state);
+        self.p1_has_mega.hash(state);
+        self.p2_has_mega.hash(state);
+        self.weather.hash(state);
+        self.weather_turns.hash(state);
+        self.pseudo_weathers.hash(state);
+        self.pseudo_weather_turns.hash(state);
+        self.terrain.hash(state);
+        self.terrain_turns.hash(state);
+        self.p1_side_conditions.hash(state);
+        self.p1_side_condition_turns.hash(state);
+        self.p2_side_conditions.hash(state);
+        self.p2_side_condition_turns.hash(state);
+        self.p1_slot_conditions.hash(state);
+        self.p2_slot_conditions.hash(state);
+        self.self_switch_pending.hash(state);
+        self.items_consumed_this_turn.hash(state);
+        // last_move_on_field intentionally excluded
+    }
 }

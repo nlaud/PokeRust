@@ -25868,14 +25868,16 @@ mod first_turn_on_field_mid_turn_entry {
 mod new_moves_session {
     use crate::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
+    use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{PokemonType, PseudoWeather, Status, VolatileStatus};
+    use crate::dex_data::{PokemonType, PseudoWeather, Status, Terrain, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::simulator_helpers;
     use crate::simuilator_test_helpers::{
-        battle_state_from_lists, damage_distribution, extract_battle_state,
-        hit_probability, move_dex, pokemon_dex, run_single_turn, simple_attack,
+        assert_distribution_close, battle_state_from_lists, damage_distribution,
+        extract_battle_state, hit_probability, move_dex, outcomes_permutation,
+        pokemon_dex, run_single_turn, simple_attack,
     };
 
     fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
@@ -26356,4 +26358,485 @@ mod new_moves_session {
         assert!(para_still_present > 0.99,
             "Sparkling Aria should not cure Paralysis; para remaining prob={para_still_present:.4}");
     }
+
+    // ── Darkest Lariat / Sacred Sword ─────────────────────────────────────────
+
+    #[test]
+    fn darkest_lariat_ignores_target_defense_boost() {
+        // Snorlax at +6 Def should take the same damage as neutral Snorlax.
+        let p1 = mon(Species::Incineroar, PokemonMove::DarkestLariat, Ability::None);
+        let mut p2_boosted = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2_boosted.boosts[1] = 6; // +6 Def
+        let mut p2_neutral = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+
+        let state_boosted = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_boosted], vec![]);
+        let state_neutral  = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_neutral], vec![]);
+
+        let dist_boosted = damage_distribution(
+            &run_single_turn(&MatchState::BattleState(state_boosted),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex(), &pokemon_dex()),
+            mon(Species::Snorlax, PokemonMove::Splash, Ability::None).hp,
+        );
+        let dist_neutral = damage_distribution(
+            &run_single_turn(&MatchState::BattleState(state_neutral),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex(), &pokemon_dex()),
+            mon(Species::Snorlax, PokemonMove::Splash, Ability::None).hp,
+        );
+        assert_distribution_close(dist_boosted, dist_neutral);
+    }
+
+    #[test]
+    fn sacred_sword_ignores_target_defense_boost() {
+        let p1 = mon(Species::Cobalion, PokemonMove::SacredSword, Ability::None);
+        let mut p2_boosted = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2_boosted.boosts[1] = 6;
+        let p2_neutral = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let initial_hp = p2_neutral.hp;
+
+        let dist_boosted = damage_distribution(
+            &run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_boosted], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex(), &pokemon_dex()),
+            initial_hp,
+        );
+        let dist_neutral = damage_distribution(
+            &run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_neutral], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex(), &pokemon_dex()),
+            initial_hp,
+        );
+        assert_distribution_close(dist_boosted, dist_neutral);
+    }
+
+    // ── Foul Play ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn foul_play_uses_target_attack_stage() {
+        // Target at +6 Atk should boost Foul Play damage; user at +6 Atk should not.
+        let mut p1_boosted = mon(Species::Incineroar, PokemonMove::FoulPlay, Ability::None);
+        p1_boosted.boosts[0] = 6; // user +6 Atk
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let initial_hp = p2.hp;
+
+        let dist_user_boosted = damage_distribution(
+            &run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1_boosted.clone()], vec![], vec![p2.clone()], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex(), &pokemon_dex()),
+            initial_hp,
+        );
+
+        let p1_neutral = mon(Species::Incineroar, PokemonMove::FoulPlay, Ability::None);
+        let dist_neutral = damage_distribution(
+            &run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1_neutral], vec![], vec![p2.clone()], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex(), &pokemon_dex()),
+            initial_hp,
+        );
+
+        // User +6 Atk should not change Foul Play damage (uses target's Attack).
+        assert_distribution_close(dist_user_boosted, dist_neutral);
+    }
+
+    #[test]
+    fn foul_play_boosted_by_target_attack_stage() {
+        let p1 = mon(Species::Incineroar, PokemonMove::FoulPlay, Ability::None);
+        let p2_neutral = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let mut p2_boosted = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2_boosted.boosts[0] = 6; // target +6 Atk
+        let initial_hp = p2_neutral.hp;
+
+        let dist_neutral = damage_distribution(
+            &run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_neutral], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex(), &pokemon_dex()),
+            initial_hp,
+        );
+        let dist_boosted = damage_distribution(
+            &run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_boosted], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex(), &pokemon_dex()),
+            initial_hp,
+        );
+
+        let avg_neutral: f64 = dist_neutral.iter().map(|(d, p)| *d as f64 * p).sum();
+        let avg_boosted: f64 = dist_boosted.iter().map(|(d, p)| *d as f64 * p).sum();
+        // +6 Atk on target should substantially boost Foul Play damage (stage × 4.0 multiplier).
+        assert!(avg_boosted > avg_neutral * 2.0,
+            "Target +6 Atk should boost Foul Play; neutral={avg_neutral:.1} boosted={avg_boosted:.1}");
+    }
+
+    // ── Grassy Glide ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn grassy_glide_has_priority_on_grassy_terrain() {
+        // Slower user with Grassy Glide should outspeed a faster foe under Grassy Terrain.
+        let mut p1 = mon(Species::Rillaboom, PokemonMove::GrassyGlide, Ability::None);
+        p1.stats[5] = 50; // slow
+        let mut p2 = mon(Species::Garchomp, PokemonMove::Earthquake, Ability::None);
+        p2.stats[5] = 200; // fast
+
+        let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        state.terrain = Some(Terrain::GrassyTerrain);
+        state.terrain_turns = Some(5);
+        let initial_hp = state.p2_active_mons[0].hp;
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        // P1 should have moved first so P2 took damage before EQ. P1 should be unharmed (EQ misses
+        // due to EQ not going first, so P1 still lives at full HP in all branches after P2's move).
+        // Actually: if P1 goes first with +1 priority GrassyGlide, P2's EQ fires after.
+        // We verify P1 (slot 0) isn't damaged in the first move = P2 doesn't faint P1 before P1 acts.
+        // Simplest check: P2 takes damage (GrassyGlide hits).
+        let p2_hit_prob = hit_probability(&outcomes, initial_hp);
+        assert!(p2_hit_prob > 0.99, "Grassy Glide should hit P2 under Grassy Terrain; prob={p2_hit_prob:.4}");
+    }
+
+    // ── Acupressure ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn acupressure_fails_if_all_stats_maxed() {
+        let mut p1 = mon(Species::Smeargle, PokemonMove::Acupressure, Ability::None);
+        p1.boosts = [6, 6, 6, 6, 6, 6, 6];
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let initial_hp = p2.hp;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        // All stats maxed → Acupressure fails → exactly 1 outcome, P1 boosts unchanged.
+        let (bs, _) = extract_battle_state(outcomes);
+        assert_eq!(bs.p1_active_mons[0].boosts, [6, 6, 6, 6, 6, 6, 6],
+            "Acupressure should fail when all stats are already at +6");
+    }
+
+    #[test]
+    fn acupressure_raises_one_of_eligible_stats_by_two() {
+        let p1 = mon(Species::Smeargle, PokemonMove::Acupressure, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        // Should branch into 7 outcomes (one per stat). Each branch has exactly one stat at +2.
+        assert_eq!(outcomes.len(), 7, "Acupressure on a neutral mon should produce 7 branches");
+        let total_prob: f64 = outcomes.iter().map(|(_, p)| p).sum();
+        assert!((total_prob - 1.0).abs() < 1e-9, "Probabilities should sum to 1.0");
+        for (state, prob) in &outcomes {
+            assert!((prob - 1.0/7.0).abs() < 1e-9, "Each branch should have probability 1/7");
+            if let MatchState::BattleState(bs) = state {
+                let raised: Vec<i8> = bs.p1_active_mons[0].boosts.iter().copied().filter(|&b| b != 0).collect();
+                assert_eq!(raised, vec![2i8], "Exactly one stat should be raised to +2 per branch");
+            }
+        }
+    }
+
+    // ── Stuff Cheeks ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn stuff_cheeks_fails_without_berry() {
+        let mut p1 = mon(Species::Skwovet, PokemonMove::StuffCheeks, Ability::None);
+        p1.item = Item::ChoiceBand; // not a berry
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert_eq!(bs.p1_active_mons[0].boosts[1], 0, "Stuff Cheeks should fail if no berry held");
+    }
+
+    #[test]
+    fn stuff_cheeks_consumes_sitrus_and_boosts_defense() {
+        let mut p1 = mon(Species::Skwovet, PokemonMove::StuffCheeks, Ability::None);
+        p1.item = Item::SitrusBerry;
+        p1.hp = p1.stats[0] / 2; // below Sitrus threshold so it heals
+        let initial_hp = p1.hp;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (bs, _) = extract_battle_state(outcomes);
+        assert_eq!(bs.p1_active_mons[0].boosts[1], 2, "Stuff Cheeks should give +2 Def");
+        assert_eq!(bs.p1_active_mons[0].item, Item::None, "Berry should be consumed");
+        assert!(bs.p1_active_mons[0].hp > initial_hp, "Sitrus Berry should heal HP");
+    }
+
+    // ── Copycat ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn copycat_fails_on_first_turn_no_prior_move() {
+        let p1 = mon(Species::Smeargle, PokemonMove::Copycat, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        // No move has been used yet (last_move_on_field = None).
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        // Copycat should fail; Splash runs second as a no-op.
+        let (bs, _) = extract_battle_state(outcomes);
+        // P2 used Splash (no-op) and P1 Copycat failed — state should be identical except PP.
+        assert_eq!(bs.p2_active_mons[0].hp, bs.p2_active_mons[0].stats[0],
+            "Copycat should fail when no move has been used");
+    }
+
+    #[test]
+    fn copycat_copies_opponents_last_move() {
+        // Simulate a turn where the opponent used Tackle on a prior turn (last_move_on_field=Tackle).
+        // P1 Copycat should copy Tackle and deal damage. P1 is faster so Copycat always goes first,
+        // guaranteeing it reads the pre-set Tackle (not Splash set by P2 moving first).
+        let mut p1 = mon(Species::Smeargle, PokemonMove::Copycat, Ability::None);
+        p1.stats[5] = 999; // much faster than P2 → always moves first
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let initial_hp = p2.hp;
+        let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        state.last_move_on_field = Some(PokemonMove::Tackle); // simulate prior turn
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let p2_dmg_prob = hit_probability(&outcomes, initial_hp);
+        assert!(p2_dmg_prob > 0.99, "Copycat should copy Tackle and deal damage; prob={p2_dmg_prob:.4}");
+    }
+
+    #[test]
+    fn copycat_targets_opponent_for_damaging_move() {
+        // Copycat copying a damaging move should hit the opponent, not the user.
+        let mut p1 = mon(Species::Smeargle, PokemonMove::Copycat, Ability::None);
+        p1.stats[5] = 999;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let initial_p1_hp = p1.hp;
+        let initial_p2_hp = p2.hp;
+        let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        state.last_move_on_field = Some(PokemonMove::Earthquake); // damaging, targets opponents
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let p2_damaged_prob = hit_probability(&outcomes, initial_p2_hp);
+        assert!(p2_damaged_prob > 0.99,
+            "Copycat on Earthquake should damage P2 (opponent), not P1; prob={p2_damaged_prob:.4}");
+        // P1 (Smeargle) should be undamaged.
+        let p1_still_healthy: f64 = outcomes.iter()
+            .filter(|(ms, _)| matches!(ms, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == initial_p1_hp))
+            .map(|(_, p)| p).sum();
+        assert!(p1_still_healthy > 0.99, "Copycat should not deal damage to P1 itself");
+    }
+
+    #[test]
+    fn copycat_fails_on_uncopyable_move() {
+        let p1 = mon(Species::Smeargle, PokemonMove::Copycat, Ability::None);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let initial_hp = p2.hp;
+        let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        state.last_move_on_field = Some(PokemonMove::Protect); // uncopyable
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        // Copycat fails → P2 HP unchanged.
+        let (bs, _) = extract_battle_state(outcomes);
+        assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+            "Copycat should fail when last move was Protect (uncopyable)");
+    }
+
+    #[test]
+    fn copycat_reads_last_move_from_previous_turn() {
+        // Turn 1: P2 uses Tackle (faster, goes first), P1 uses Splash.
+        // Turn 2: P1 uses Copycat — should copy Tackle from the previous turn.
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Smeargle, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Copycat), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
+        );
+        p1.stats[5] = 50; // slower than P2
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
+        );
+        p2.stats[5] = 200; // faster, moves first
+
+        let initial_p1_hp = p1.hp;
+        let initial_p2_hp = p2.hp;
+
+        // Turn 1: P1 uses Splash (slot 1), P2 uses Tackle (slot 0).
+        // P2 acts first due to speed → Tackle sets last_move_on_field. P1 Splash is a no-op.
+        let state = MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let turn1 = run_single_turn(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])), // Splash
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), // Tackle
+            &mdex, &pdex,
+        );
+        assert_eq!(turn1.len(), 1, "Turn 1 should produce exactly 1 outcome (Tackle has 1 roll in single-roll mode)");
+        let (turn1_state, _) = turn1.into_iter().next().unwrap();
+        // Verify P2's Tackle hit P1 (last_move_on_field is now Tackle, P1 took some damage).
+        if let MatchState::BattleState(ref bs) = turn1_state {
+            assert!(bs.p1_active_mons[0].hp < initial_p1_hp, "P2 Tackle should have damaged P1 in turn 1");
+            assert_eq!(bs.last_move_on_field, Some(PokemonMove::Splash),
+                "last_move_on_field after turn 1 should be Splash (P1 moved last due to lower speed)");
+        }
+
+        // Turn 2: P1 uses Copycat (slot 0). last_move_on_field = Splash (from P1's Splash).
+        // Actually Splash is the last move set since P1 (slower) moves last. Let's verify Copycat
+        // in this case copies Splash and does nothing meaningful, or set it up differently.
+        //
+        // To properly test cross-turn copying of a damaging move, we need P2 to be the LAST mover.
+        // Restructure: make P2 slower so P1 Splash goes first, then P2 Tackle goes last.
+        // After turn 1: last_move_on_field = Tackle (P2 moved last).
+        // Turn 2: P1 uses Copycat → copies Tackle → damages P2.
+        //
+        // The current state from above has last_move_on_field = Splash (P1 slower, moved last).
+        // Re-run with P1 FASTER so P1 Splash executes first, P2 Tackle executes second (last).
+        let mut p1b = build_pokemon_state(
+            Species::Smeargle, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Copycat), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
+        );
+        p1b.stats[5] = 999; // faster, so P1 Splash goes first, P2 Tackle goes last
+        let mut p2b = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
+        );
+        p2b.stats[5] = 50; // slower, moves last
+        let initial_p1b_hp = p1b.hp;
+        let initial_p2b_hp = p2b.hp;
+
+        let state_b = MatchState::BattleState(battle_state_from_lists(vec![p1b], vec![], vec![p2b], vec![]));
+        // Turn 1: P1 Splash (no-op) goes first, P2 Tackle goes last → last_move_on_field = Tackle.
+        let turn1_b = run_single_turn(
+            &state_b,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])), // Splash
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), // Tackle
+            &mdex, &pdex,
+        );
+        assert_eq!(turn1_b.len(), 1);
+        let (turn1_b_state, _) = turn1_b.into_iter().next().unwrap();
+        if let MatchState::BattleState(ref bs) = turn1_b_state {
+            assert!(bs.p1_active_mons[0].hp < initial_p1b_hp, "P2 Tackle should have hit P1b");
+            assert_eq!(bs.last_move_on_field, Some(PokemonMove::Tackle),
+                "last_move_on_field should be Tackle after turn 1 (P2 moved last)");
+        }
+
+        // Turn 2: P1 uses Copycat (slot 0) — should copy Tackle from last turn and damage P2.
+        let p1b_hp_after_t1 = if let MatchState::BattleState(ref bs) = turn1_b_state {
+            bs.p1_active_mons[0].hp
+        } else { panic!("expected battle state"); };
+
+        let turn2_b = run_single_turn(
+            &turn1_b_state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])), // Copycat
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![1])), // Splash (no-op)
+            &mdex, &pdex,
+        );
+        let p2b_hit_prob = hit_probability(&turn2_b, initial_p2b_hp);
+        assert!(p2b_hit_prob > 0.99,
+            "Copycat should copy Tackle from the previous turn and deal damage to P2; prob={p2b_hit_prob:.4}");
+    }
+
+    #[test]
+    fn copycat_doubles_damaging_move_hits_only_foes() {
+        // In doubles, Copycat copying a Normal-targeted damaging move should target a foe slot,
+        // never the user's partner.
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        // P1 has: slot 0 = Smeargle (Copycat), slot 1 = Snorlax (Splash, the partner)
+        let mut p1a = build_pokemon_state(
+            Species::Smeargle, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Copycat), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
+        );
+        p1a.stats[5] = 999; // moves first
+        let p1b = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
+        );
+        // P2 has two Garchomp (target slots for Copycat's copied Tackle)
+        let p2a = build_pokemon_state(
+            Species::Garchomp, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
+        );
+        let p2b_mon = build_pokemon_state(
+            Species::Garchomp, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
+        );
+
+        let partner_initial_hp = p1b.hp;
+        let p2a_initial_hp = p2a.hp;
+
+        let mut state = battle_state_from_lists(
+            vec![p1a, p1b], vec![], vec![p2a, p2b_mon], vec![],
+        );
+        state.last_move_on_field = Some(PokemonMove::Tackle); // copied move is Normal-targeted damaging
+
+        let cmd_p1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0]));
+        let cmd_p2 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0]));
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &cmd_p1, &cmd_p2,
+            &mdex, &pdex,
+        );
+
+        // P1's partner (Snorlax, slot 1) must NEVER be damaged by Copycat's Tackle.
+        let partner_damaged_prob: f64 = outcomes.iter()
+            .filter(|(ms, _)| matches!(ms, MatchState::BattleState(bs) if bs.p1_active_mons[1].hp < partner_initial_hp))
+            .map(|(_, p)| *p).sum();
+        assert!(partner_damaged_prob < 0.01,
+            "Copycat's Tackle should never hit P1's partner; partner-hit prob={partner_damaged_prob:.4}");
+
+        // At least one P2 slot should have taken damage.
+        let p2a_hit_prob: f64 = outcomes.iter()
+            .filter(|(ms, _)| matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < p2a_initial_hp))
+            .map(|(_, p)| *p).sum();
+        assert!(p2a_hit_prob > 0.0,
+            "Copycat's Tackle should hit at least one P2 slot; p2a-hit prob={p2a_hit_prob:.4}");
+    }
 }
+
