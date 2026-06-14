@@ -186,6 +186,10 @@ pub enum VolatileStatus {
     Ingrain,
     KingsShield,
     LaserFocus,
+    /// User has locked onto a specific target (from Lock-On / Mind Reader). Payload is the
+    /// target's `mon_id`. Stored as MoveStatus(_, 2) so it persists for exactly one active
+    /// turn after application (decremented to 1 at turn-start, then removed next decrement).
+    LockedOn(u8),
     LeechSeed,
     MagicCoat,
     MagnetRise,

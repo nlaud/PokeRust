@@ -858,6 +858,7 @@ fn move_terrain_bp_modifier(state: &BattleState, attacker: &PokemonState, target
         PokemonMove::Psyblade if pokemon_is_on_terrain(state, attacker, &Terrain::ElectricTerrain) => 1.5,
         PokemonMove::TerrainPulse if pokemon_is_grounded(state, attacker) && current_terrain(state).is_some() => 2.0,
         PokemonMove::RisingVoltage if pokemon_is_on_terrain(state, target, &Terrain::ElectricTerrain) => 2.0,
+        PokemonMove::GravApple if is_gravity_active(state) => 1.5,
         PokemonMove::Bulldoze | PokemonMove::Earthquake | PokemonMove::Magnitude
             if matches!(current_terrain(state), Some(Terrain::GrassyTerrain)) => 0.5,
         _ => 1.0,
@@ -1503,7 +1504,22 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let base_defense = apply_weather_defense_bonus(_state, target, defending_stat,
                            effective_stat(_state, target, defending_stat, false, false));
     let attack_type  = effective_move_type(_state, attacker, move_data);
-    let effectiveness = move_type_effectiveness(_state, &attack_type, target);
+    let effectiveness = {
+        let base = move_type_effectiveness(_state, &attack_type, target);
+        // Freeze-Dry: Water type is treated as super-effective (2×) regardless of the chart.
+        // The chart normally gives 0.5× (Water resists Ice), so the correction factor per Water
+        // type in the target's defensive type list is 2.0 / 0.5 = 4.0. This is additive per
+        // type, so Water/Ground correctly becomes Ice×Ground(2×) × Ice×Water(override 2×) = 4×.
+        if move_data.name == PokemonMove::FreezeDry && attack_type == PokemonType::Ice {
+            let water_count = defensive_types(_state, target)
+                .iter()
+                .filter(|t| **t == PokemonType::Water)
+                .count();
+            base * 4.0_f64.powi(water_count as i32)
+        } else {
+            base
+        }
+    };
 
     // Counter / Mirror Coat / Metal Burst / Comeuppance: return a multiple of damage taken
     // this turn. All four deal typeless damage — they bypass type immunity entirely (a Ghost
@@ -3318,6 +3334,21 @@ pub fn accuracy_hit_probability(
         && move_hits_minimized_harder(&move_data.name)
     {
         return 1.0;
+    }
+
+    // Lock-On / Mind Reader: if the attacker is locked onto this exact target, the move
+    // cannot miss (bypasses evasion and semi-invulnerability, but not Protect or immunity).
+    {
+        let locked_target_id = attacker.volatiles.iter().find_map(|v| match v {
+            VolatileStatusState::MoveStatus(VolatileStatus::LockedOn(id), _)
+            | VolatileStatusState::TurnStatus(VolatileStatus::LockedOn(id), _) => Some(*id),
+            _ => None,
+        });
+        if let Some(locked_id) = locked_target_id {
+            if locked_id == target.mon_id {
+                return 1.0;
+            }
+        }
     }
 
     // One-hit KO moves use a level-based accuracy that ignores accuracy/evasion stages
@@ -7602,6 +7633,23 @@ pub fn apply_secondary_effects(
         }
     }
 
+    // Sparkling Aria: cure burn on the target if they were successfully hit (signalled by the
+    // SparklingAria volatile that the 100%-secondary applied). The volatile is consumed here and
+    // then removed. Sheer Force suppresses the secondary → no volatile → no cure. Sound move flag
+    // (bypasssub) means the cure can happen through a Substitute as well.
+    if move_data.name == PokemonMove::SparklingAria {
+        for (bs, _) in branches.iter_mut() {
+            if let Some(tgt) = get_pokemon_at_slot_mut(bs, target_slot) {
+                if has_status_volatile(tgt, &VolatileStatus::SparklingAria) {
+                    remove_status_volatile(tgt, &VolatileStatus::SparklingAria);
+                    if matches!(tgt.status, Some(Status::Burn)) {
+                        tgt.status = None;
+                    }
+                }
+            }
+        }
+    }
+
     // Unconditional self-boosts
     if move_data.self_boost != [0; 7] {
         for (bs, _) in branches.iter_mut() {
@@ -7633,6 +7681,20 @@ pub fn apply_secondary_effects(
         branches = branch_on_secondary_effects(branches, chance, choices, |bs, eff| {
             apply_effect_to_attacker(bs, attacker_slot, eff);
         });
+    }
+
+    // Burn Up: after dealing damage the user loses their Fire type. If it was their only type,
+    // they become typeless (empty type list). Exempt when Terastallized as a Fire type (the
+    // Tera type replaces the original types, so the original Fire is not "exposed" to loss).
+    if move_data.name == PokemonMove::BurnUp {
+        for (bs, _) in branches.iter_mut() {
+            if let Some(user) = get_pokemon_at_slot_mut(bs, attacker_slot) {
+                let tera_fire = user.is_tera && user.tera_type == PokemonType::Fire;
+                if !tera_fire {
+                    user.types.retain(|t| *t != PokemonType::Fire);
+                }
+            }
+        }
     }
 
     // Healing moves (Rest, Synthesis, etc.)

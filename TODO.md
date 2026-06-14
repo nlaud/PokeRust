@@ -46,16 +46,9 @@ Each has significant individual complexity. Research all edge cases carefully.
 ### Complex moves — battle-state conditions
 These check or modify ongoing battle state. Each is individually moderate in complexity.
 - Acupressure — +2 to a random stat (user or random ally in doubles)
-- Body Slam — 30% paralyze; ×2 power and never misses vs. Minimized target
-- Burn Up — 130-power Fire move; user loses their Fire type after use
 - Copycat — use the most recent move used on the field
 - Darkest Lariat / Foul Play / Sacred Sword — ignore target's stat stages in damage calc
-- Freeze-Dry — Ice-type, but also super effective against Water types
-- Grav Apple — ×1.5 power in Gravity; also lower target's Defense by 1
 - Grassy Glide — gains +1 priority while Grassy Terrain is active
-- Helping Hand — boost an ally's move power by 50% this turn
-- Lock-On — user's next move is guaranteed to hit
-- Sparkling Aria — deal damage; cure any burn on targets hit
 - Stuff Cheeks — eat held Berry; +2 Defense
 - Tearful Look — −1 Atk and Sp. Atk to target; ignores evasion; hits through Protect
 
