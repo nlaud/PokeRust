@@ -995,12 +995,25 @@ fn effective_base_power(
         ov as f64
     } else if move_data.name == PokemonMove::WeatherBall {
         if current_weather(state).is_some() { 100.0 } else { 50.0 }
+    } else if move_data.name == PokemonMove::Fling {
+        // Fling's power is determined entirely by the held item being thrown.
+        attacker.item.fling_power().unwrap_or(0) as f64
     } else {
         move_data.base_power as f64
     };
 
     if move_data.name == PokemonMove::Facade && attacker.status.is_some() {
         bp = (move_data.base_power as f64 * 2.0).floor();
+    }
+
+    // Knock Off gains a 1.5× boost when the target holds an item that can be removed.
+    // The boost ignores Sticky Hold (which only prevents the actual removal) but not
+    // locked/untransferable items.
+    if move_data.name == PokemonMove::KnockOff
+        && target.item != Item::None
+        && !item_cannot_be_transferred(&target.item, target)
+    {
+        bp = (bp * 1.5).floor();
     }
 
     if matches!(move_data.name, PokemonMove::SolarBeam | PokemonMove::SolarBlade)
@@ -2494,10 +2507,41 @@ fn try_symbiosis_pass(state: &mut BattleState, receiver_slot: FieldSlot) {
     }
 }
 
-/// Items that can never change holder mid-battle: species-locked items and the
-/// holder's own Mega Stone (`has_mega_form` / `is_mega` imply the held item is it).
+/// Items that can never change holder or be removed mid-battle (Knock Off, Trick,
+/// Thief, Covet, Corrosive Gas, Magician, Pickpocket). Covers the holder's own Mega
+/// Stone, Booster Energy, Z-Crystals (always), and the species-locked type items /
+/// signature items when held by the species they belong to.
 pub(crate) fn item_cannot_be_transferred(item: &Item, holder: &PokemonState) -> bool {
-    matches!(item, Item::BoosterEnergy) || holder.has_mega_form || holder.is_mega
+    // The holder's own Mega Stone, and Paradox Booster Energy.
+    if holder.has_mega_form || holder.is_mega || matches!(item, Item::BoosterEnergy) {
+        return true;
+    }
+    // Z-Crystals can never be transferred or removed, regardless of holder.
+    if item.is_z_crystal() {
+        return true;
+    }
+    // Species-locked type items / signature items: only locked on their own species.
+    let species = holder.species.to_string();
+    if item.is_plate() && species.starts_with("Arceus") {
+        return true;
+    }
+    if item.is_drive() && species.starts_with("Genesect") {
+        return true;
+    }
+    if item.is_memory() && species.starts_with("Silvally") {
+        return true;
+    }
+    match item {
+        Item::GriseousOrb | Item::GriseousCore => species.starts_with("Giratina"),
+        Item::RedOrb => species.starts_with("Groudon"),
+        Item::BlueOrb => species.starts_with("Kyogre"),
+        Item::RustedSword => species.starts_with("Zacian"),
+        Item::RustedShield => species.starts_with("Zamazenta"),
+        Item::WellspringMask | Item::HearthflameMask | Item::CornerstoneMask => {
+            species.starts_with("Ogerpon")
+        }
+        _ => false,
+    }
 }
 
 /// Move the victim's held item to the (empty-handed, alive) thief, respecting Sticky Hold
@@ -2538,6 +2582,262 @@ pub(crate) fn try_steal_item(state: &mut BattleState, thief_slot: FieldSlot, vic
         on_item_obtained_or_enabled(t, &env);
     }
     true
+}
+
+/// Destroy/remove the held item of the Pokémon at `slot` (Knock Off, Corrosive Gas).
+/// Unlike consumption, the item is not recorded in `consumed_item` (it cannot be
+/// recovered by Recycle). Respects Sticky Hold and untransferable/locked items.
+/// Returns `true` if an item was removed.
+pub(crate) fn try_remove_item(state: &mut BattleState, slot: FieldSlot) -> bool {
+    let blocked = match get_pokemon_at_slot(state, slot) {
+        Some(v) => {
+            v.item == Item::None
+                || item_cannot_be_transferred(&v.item, v)
+                // Sticky Hold keeps the item (the holder must still be on the field).
+                || (!v.fainted
+                    && v.ability == Ability::StickyHold
+                    && !pokemon_ability_is_suppressed(state, v))
+        }
+        None => true,
+    };
+    if blocked {
+        return false;
+    }
+    if let Some(v) = get_pokemon_at_slot_mut(state, slot) {
+        v.item = Item::None;
+        v.item_lost = true; // item removal triggers Unburden
+    }
+    true
+}
+
+/// Swap the held items of two Pokémon (Trick / Switcheroo). Fails if neither holds an
+/// item, if either item is untransferable/locked, or if the target has Sticky Hold.
+/// (Substitute is checked by the caller.) Returns `true` on a successful swap.
+pub(crate) fn try_swap_items(state: &mut BattleState, user_slot: FieldSlot, target_slot: FieldSlot) -> bool {
+    let (user_item, target_item) = match (
+        get_pokemon_at_slot(state, user_slot),
+        get_pokemon_at_slot(state, target_slot),
+    ) {
+        (Some(u), Some(t)) => {
+            // Sticky Hold on the target blocks the swap entirely.
+            if !t.fainted && t.ability == Ability::StickyHold && !pokemon_ability_is_suppressed(state, t) {
+                return false;
+            }
+            // Neither side may hold a locked/untransferable item.
+            if (u.item != Item::None && item_cannot_be_transferred(&u.item, u))
+                || (t.item != Item::None && item_cannot_be_transferred(&t.item, t))
+            {
+                return false;
+            }
+            (u.item.clone(), t.item.clone())
+        }
+        _ => return false,
+    };
+    // Both empty-handed: nothing to swap.
+    if user_item == Item::None && target_item == Item::None {
+        return false;
+    }
+    let user_env = berry_env(state, user_slot);
+    let target_env = berry_env(state, target_slot);
+    if let Some(u) = get_pokemon_at_slot_mut(state, user_slot) {
+        u.item = target_item.clone();
+        u.item_lost = target_item == Item::None; // gaining an item clears Unburden; losing one sets it
+        if target_item != Item::None {
+            on_item_obtained_or_enabled(u, &user_env);
+        }
+    }
+    if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
+        t.item = user_item.clone();
+        t.item_lost = user_item == Item::None;
+        if user_item != Item::None {
+            on_item_obtained_or_enabled(t, &target_env);
+        }
+    }
+    true
+}
+
+/// Recover the user's most recently consumed item (Recycle). Fails if the user already
+/// holds an item or has no consumed item on record. Returns `true` on success.
+pub(crate) fn recover_consumed_item(state: &mut BattleState, slot: FieldSlot) -> bool {
+    let item = match get_pokemon_at_slot(state, slot) {
+        Some(m) if m.item == Item::None => match &m.consumed_item {
+            Some(i) => i.clone(),
+            None => return false,
+        },
+        _ => return false,
+    };
+    let env = berry_env(state, slot);
+    if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+        m.item = item;
+        m.consumed_item = None;
+        m.item_lost = false;
+        // A restored item may activate immediately (e.g. a status-cure berry).
+        on_item_obtained_or_enabled(m, &env);
+    }
+    true
+}
+
+/// Apply the full effects of eating `berry` to `mon` (HP/stat berries, status-cure
+/// berries, Cheek Pouch / Cud Chew) and record it as the consumed item. Does NOT touch
+/// `mon.item` — callers manage the held-item slot. Used by Teatime, Bug Bite / Pluck and
+/// Fling (berry thrown at the target).
+pub(crate) fn apply_eaten_berry_effects(mon: &mut PokemonState, berry: &Item, env: &BerryEnv) {
+    if env.suppressed {
+        return;
+    }
+    // Status-cure / confusion-cure berries (Lum, Cheri, Persim, …) act only if the
+    // matching condition is present; mirrors try_consume_status_cure_berry minus the
+    // item-slot clearing handled by the caller.
+    let cures_status = matches!(
+        (berry, &mon.status),
+        (Item::AspearBerry, Some(Status::Frozen(_)))
+      | (Item::CheriBerry,  Some(Status::Paralysis))
+      | (Item::ChestoBerry, Some(Status::Sleep(_)))
+      | (Item::PechaBerry,  Some(Status::Poison | Status::ToxicPoison(_)))
+      | (Item::RawstBerry,  Some(Status::Burn))
+      | (Item::LumBerry,    Some(_))
+    );
+    let cures_confusion = is_confused(mon) && matches!(berry, Item::PersimBerry | Item::LumBerry);
+    if cures_status {
+        mon.status = None;
+    }
+    if cures_confusion {
+        remove_status_volatile(mon, &VolatileStatus::Confusion);
+    }
+    // HP / stat / Focus Energy berries.
+    apply_berry_effect(mon, berry, env);
+    // Cheek Pouch healing and Cud Chew arming.
+    on_berry_eaten(mon, berry, env);
+    mon.consumed_item = Some(berry.clone());
+}
+
+/// Force the Pokémon at `slot` to eat its own held Berry (Teatime). `ignore_unnerve`
+/// bypasses opposing Unnerve (Teatime forces consumption). Returns `true` if a berry
+/// was eaten.
+pub(crate) fn force_eat_held_berry(state: &mut BattleState, slot: FieldSlot, ignore_unnerve: bool) -> bool {
+    let berry = match get_pokemon_at_slot(state, slot) {
+        Some(m) if !m.fainted && m.item.is_berry() => m.item.clone(),
+        _ => return false,
+    };
+    let mut env = berry_env(state, slot);
+    if ignore_unnerve {
+        // Teatime ignores Unnerve, but Magic Room / Klutz still suppress the item.
+        let item_inactive = get_pokemon_at_slot(state, slot)
+            .map(|m| !item_is_active(state, m))
+            .unwrap_or(true);
+        env.suppressed = item_inactive;
+    }
+    if env.suppressed {
+        return false;
+    }
+    if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+        m.item = Item::None;
+        m.item_lost = true;
+    }
+    if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+        apply_eaten_berry_effects(m, &berry, &env);
+    }
+    true
+}
+
+/// Bug Bite / Pluck: the attacker eats the target's held Berry and gains its effect
+/// (regardless of the berry's normal trigger conditions). The target loses the berry
+/// (not recorded as its consumed item). Sticky Hold does NOT prevent this. Returns
+/// `true` if a berry was eaten.
+pub(crate) fn try_eat_targets_berry(state: &mut BattleState, eater_slot: FieldSlot, holder_slot: FieldSlot) -> bool {
+    let berry = match get_pokemon_at_slot(state, holder_slot) {
+        Some(h) if h.item.is_berry() => h.item.clone(),
+        _ => return false,
+    };
+    // The eater must still be on the field (it eats the berry itself).
+    let eater_ok = get_pokemon_at_slot(state, eater_slot).map(|m| !m.fainted).unwrap_or(false);
+    if !eater_ok {
+        return false;
+    }
+    let env = berry_env(state, eater_slot);
+    if env.suppressed {
+        return false;
+    }
+    // Remove the berry from the target (Unburden triggers; not recoverable via Recycle).
+    if let Some(h) = get_pokemon_at_slot_mut(state, holder_slot) {
+        h.item = Item::None;
+        h.item_lost = true;
+    }
+    if let Some(eater) = get_pokemon_at_slot_mut(state, eater_slot) {
+        apply_eaten_berry_effects(eater, &berry, &env);
+    }
+    true
+}
+
+/// Apply Fling's item-dependent added effect to the target it hit. Berries are eaten by
+/// the target; status/flinch riders (from the item's Fling data) go through the normal
+/// secondary-effect path (respecting immunities and Shield Dust); Mental Herb / White
+/// Herb cure / restore the target. Called after the Fling damage connects.
+pub(crate) fn apply_fling_effect(
+    state: &mut BattleState,
+    attacker_slot: FieldSlot,
+    target_slot: FieldSlot,
+    item: &Item,
+) {
+    // A flung Berry is eaten by the target — applied via `onHit`, so Shield Dust does
+    // not block it.
+    if item.is_berry() {
+        let env = berry_env(state, target_slot);
+        if env.suppressed {
+            return;
+        }
+        if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
+            apply_eaten_berry_effects(t, item, &env);
+        }
+        return; // a flung berry produces no other rider
+    }
+
+    // Shield Dust blocks the remaining (secondary-style) riders.
+    let shield_dust = get_pokemon_at_slot(state, target_slot)
+        .map_or(false, |m| !pokemon_ability_is_suppressed(state, m) && m.ability == Ability::ShieldDust);
+    if shield_dust {
+        return;
+    }
+
+    // Mental Herb / White Herb fire their item callback on the target.
+    match item {
+        Item::WhiteHerb => {
+            if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
+                for b in t.boosts.iter_mut() {
+                    if *b < 0 { *b = 0; }
+                }
+            }
+            return;
+        }
+        Item::MentalHerb => {
+            let mental = [
+                VolatileStatus::Attract,
+                VolatileStatus::Taunt,
+                VolatileStatus::Encore(PokemonMove::Struggle),
+                VolatileStatus::Torment,
+                VolatileStatus::HealBlock,
+                VolatileStatus::Disable(PokemonMove::Struggle),
+            ];
+            if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
+                for v in &mental {
+                    remove_status_volatile(t, v);
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    // Status / flinch riders declared in the item's Fling data.
+    let effect = match item.fling_effect_id() {
+        Some("brn") => HitEffect { status: Some(Status::Burn), ..Default::default() },
+        Some("par") => HitEffect { status: Some(Status::Paralysis), ..Default::default() },
+        Some("psn") => HitEffect { status: Some(Status::Poison), ..Default::default() },
+        Some("tox") => HitEffect { status: Some(Status::ToxicPoison(0)), ..Default::default() },
+        Some("flinch") => HitEffect { volatile_status: Some(VolatileStatus::Flinch), ..Default::default() },
+        _ => return,
+    };
+    apply_effect_to_target(state, attacker_slot, target_slot, &effect, target_slot.player);
 }
 
 pub fn any_pokemon_has_neutralizing_gas(state: &BattleState) -> bool {

@@ -23614,4 +23614,292 @@ mod ability_manipulation_moves {
                 "A Soaked Pokémon's type should revert when it switches out");
         }
     }
+
+    mod item_manipulation_moves {
+        use super::*;
+        use crate::battle::BattleState;
+        use crate::data::item::Item;
+        use crate::dex_data::Status;
+
+        fn build(species: Species, m: PokemonMove, ability: Ability, item: Item) -> PokemonState {
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            build_pokemon_state(
+                species, &pdex, &mdex, Some(50), Some([Some(m), None, None, None]),
+                None, Some(ability), Some(Nature::Hardy), Some(item), None, Some([0; 6]), None, false,
+            )
+        }
+
+        fn splash(species: Species, ability: Ability, item: Item) -> PokemonState {
+            build(species, PokemonMove::Splash, ability, item)
+        }
+
+        /// P1 uses its move (slot 0); P2 uses Splash. Returns the single resulting state.
+        fn run(p1: PokemonState, p2: PokemonState) -> BattleState {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )).0
+        }
+
+        // ── Knock Off ──────────────────────────────────────────────────────────
+
+        #[test]
+        fn knock_off_removes_target_item() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::KnockOff, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::None, Item::Leftovers),
+            );
+            assert_eq!(bs.p2_active_mons[0].item, Item::None, "Knock Off should remove the target's item");
+            assert_eq!(bs.p2_active_mons[0].consumed_item, None,
+                "A knocked-off item must not be recorded as consumed (not Recycle-able)");
+        }
+
+        #[test]
+        fn knock_off_boosts_power_against_item_holder() {
+            let with_item = run(
+                build(Species::Snorlax, PokemonMove::KnockOff, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::None, Item::Leftovers),
+            );
+            let without_item = run(
+                build(Species::Snorlax, PokemonMove::KnockOff, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::None, Item::None),
+            );
+            let init = without_item.p2_active_mons[0].stats[0];
+            let dmg_with = init - with_item.p2_active_mons[0].hp;
+            let dmg_without = init - without_item.p2_active_mons[0].hp;
+            assert!(dmg_with as f64 >= dmg_without as f64 * 1.4,
+                "Knock Off should deal ~1.5× damage vs an item holder ({dmg_with} vs {dmg_without})");
+        }
+
+        #[test]
+        fn knock_off_sticky_hold_keeps_item_but_still_boosts() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::KnockOff, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::StickyHold, Item::Leftovers),
+            );
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers,
+                "Sticky Hold should prevent Knock Off from removing the item");
+        }
+
+        #[test]
+        fn knock_off_cannot_remove_locked_item() {
+            // Arceus holding its Plate: the Plate is locked and cannot be knocked off.
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::KnockOff, Ability::None, Item::None),
+                splash(Species::Arceus, Ability::None, Item::FlamePlate),
+            );
+            assert_eq!(bs.p2_active_mons[0].item, Item::FlamePlate,
+                "A Plate held by Arceus is locked and must not be knocked off");
+        }
+
+        // ── Thief / Covet ──────────────────────────────────────────────────────
+
+        #[test]
+        fn thief_steals_when_empty_handed() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::Thief, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::None, Item::Leftovers),
+            );
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers, "Thief should steal the target's item");
+            assert_eq!(bs.p2_active_mons[0].item, Item::None, "The target should lose its stolen item");
+        }
+
+        #[test]
+        fn thief_does_not_steal_when_already_holding() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::Thief, Ability::None, Item::Leftovers),
+                splash(Species::Blissey, Ability::None, Item::ChoiceScarf),
+            );
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers, "A holding Thief user keeps its own item");
+            assert_eq!(bs.p2_active_mons[0].item, Item::ChoiceScarf, "The target keeps its item when Thief can't steal");
+        }
+
+        #[test]
+        fn covet_steals_when_empty_handed() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::Covet, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::None, Item::Leftovers),
+            );
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers, "Covet should steal the target's item");
+            assert_eq!(bs.p2_active_mons[0].item, Item::None, "The target should lose its item to Covet");
+        }
+
+        #[test]
+        fn thief_sticky_hold_blocks_steal() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::Thief, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::StickyHold, Item::Leftovers),
+            );
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers, "Sticky Hold should block Thief");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Thief gains nothing against Sticky Hold");
+        }
+
+        // ── Bug Bite / Pluck ───────────────────────────────────────────────────
+
+        #[test]
+        fn bug_bite_eats_berry_and_heals_user() {
+            let mut attacker = build(Species::Snorlax, PokemonMove::BugBite, Ability::None, Item::None);
+            attacker.hp = 1; // so the Sitrus heal is observable
+            let bs = run(attacker, splash(Species::Blissey, Ability::None, Item::SitrusBerry));
+            assert!(bs.p1_active_mons[0].hp > 1, "Bug Bite should heal the user with the eaten Sitrus Berry");
+            assert_eq!(bs.p2_active_mons[0].item, Item::None, "Bug Bite should remove the target's berry");
+            assert_eq!(bs.p2_active_mons[0].consumed_item, None,
+                "A berry eaten via Bug Bite is not recoverable by the target");
+        }
+
+        #[test]
+        fn bug_bite_ignores_sticky_hold() {
+            let mut attacker = build(Species::Snorlax, PokemonMove::BugBite, Ability::None, Item::None);
+            attacker.hp = 1;
+            let bs = run(attacker, splash(Species::Blissey, Ability::StickyHold, Item::SitrusBerry));
+            assert!(bs.p1_active_mons[0].hp > 1, "Sticky Hold should NOT prevent Bug Bite from eating the berry");
+            assert_eq!(bs.p2_active_mons[0].item, Item::None, "Bug Bite eats the berry through Sticky Hold");
+        }
+
+        // ── Fling ──────────────────────────────────────────────────────────────
+
+        #[test]
+        fn fling_deals_damage_and_consumes_item() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::Fling, Ability::None, Item::IronBall),
+                splash(Species::Blissey, Ability::None, Item::None),
+            );
+            assert!(bs.p2_active_mons[0].hp < bs.p2_active_mons[0].stats[0], "Fling (Iron Ball) should deal damage");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Fling consumes the thrown item");
+            assert_eq!(bs.p1_active_mons[0].consumed_item, Some(Item::IronBall),
+                "A flung item is recorded as consumed (Recycle-able)");
+        }
+
+        #[test]
+        fn fling_flame_orb_burns_target() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::Fling, Ability::None, Item::FlameOrb),
+                splash(Species::Blissey, Ability::None, Item::None),
+            );
+            assert_eq!(bs.p2_active_mons[0].status, Some(Status::Burn), "Flinging a Flame Orb should burn the target");
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Fling consumes the Flame Orb");
+        }
+
+        #[test]
+        fn fling_fails_without_item() {
+            let target = splash(Species::Blissey, Ability::None, Item::None);
+            let init = target.hp;
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::Fling, Ability::None, Item::None),
+                target,
+            );
+            assert_eq!(bs.p2_active_mons[0].hp, init, "Fling with no item should fail and deal no damage");
+        }
+
+        // ── Trick / Switcheroo ─────────────────────────────────────────────────
+
+        /// As `build`, but with maximal Speed so P1 always moves first (avoids a
+        /// Speed-tie branch when items like Choice Scarf alter the user's Speed).
+        fn build_fast(species: Species, m: PokemonMove, ability: Ability, item: Item) -> PokemonState {
+            let mut mon = build(species, m, ability, item);
+            mon.stats[5] = 200;
+            mon
+        }
+
+        #[test]
+        fn trick_swaps_items() {
+            let bs = run(
+                build_fast(Species::Snorlax, PokemonMove::Trick, Ability::None, Item::ChoiceScarf),
+                splash(Species::Blissey, Ability::None, Item::Leftovers),
+            );
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers, "Trick should give the user the target's item");
+            assert_eq!(bs.p2_active_mons[0].item, Item::ChoiceScarf, "Trick should give the target the user's item");
+        }
+
+        #[test]
+        fn switcheroo_swaps_items() {
+            let bs = run(
+                build_fast(Species::Snorlax, PokemonMove::Switcheroo, Ability::None, Item::ChoiceScarf),
+                splash(Species::Blissey, Ability::None, Item::Leftovers),
+            );
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers);
+            assert_eq!(bs.p2_active_mons[0].item, Item::ChoiceScarf);
+        }
+
+        #[test]
+        fn trick_fails_against_sticky_hold() {
+            let bs = run(
+                build_fast(Species::Snorlax, PokemonMove::Trick, Ability::None, Item::ChoiceScarf),
+                splash(Species::Blissey, Ability::StickyHold, Item::Leftovers),
+            );
+            assert_eq!(bs.p1_active_mons[0].item, Item::ChoiceScarf, "Sticky Hold should block Trick (user keeps item)");
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers, "Sticky Hold should block Trick (target keeps item)");
+        }
+
+        // ── Recycle ────────────────────────────────────────────────────────────
+
+        #[test]
+        fn recycle_restores_consumed_item() {
+            let mut user = build(Species::Snorlax, PokemonMove::Recycle, Ability::None, Item::None);
+            user.consumed_item = Some(Item::SitrusBerry);
+            let bs = run(user, splash(Species::Blissey, Ability::None, Item::None));
+            assert_eq!(bs.p1_active_mons[0].item, Item::SitrusBerry, "Recycle should restore the consumed item");
+            assert_eq!(bs.p1_active_mons[0].consumed_item, None, "Recycle clears the consumed-item record");
+        }
+
+        #[test]
+        fn recycle_fails_when_holding_item() {
+            let mut user = build(Species::Snorlax, PokemonMove::Recycle, Ability::None, Item::Leftovers);
+            user.consumed_item = Some(Item::SitrusBerry);
+            let bs = run(user, splash(Species::Blissey, Ability::None, Item::None));
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers, "Recycle fails (and keeps the held item) when already holding one");
+        }
+
+        // ── Teatime ────────────────────────────────────────────────────────────
+
+        #[test]
+        fn teatime_makes_everyone_eat_berries() {
+            let mut user = build(Species::Snorlax, PokemonMove::Teatime, Ability::None, Item::SitrusBerry);
+            user.hp = 1;
+            let mut target = splash(Species::Blissey, Ability::None, Item::SitrusBerry);
+            target.hp = 1;
+            let bs = run(user, target);
+            assert_eq!(bs.p1_active_mons[0].item, Item::None, "Teatime: the user eats its berry");
+            assert_eq!(bs.p2_active_mons[0].item, Item::None, "Teatime: the opponent eats its berry too");
+            assert!(bs.p1_active_mons[0].hp > 1 && bs.p2_active_mons[0].hp > 1, "Both should heal from their Sitrus Berries");
+        }
+
+        #[test]
+        fn teatime_fails_with_no_berries() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::Teatime, Ability::None, Item::Leftovers),
+                splash(Species::Blissey, Ability::None, Item::Leftovers),
+            );
+            assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers, "Teatime should not consume non-berry items");
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers, "Teatime fails when no berries are held");
+        }
+
+        // ── Corrosive Gas ──────────────────────────────────────────────────────
+
+        #[test]
+        fn corrosive_gas_destroys_target_item() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::CorrosiveGas, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::None, Item::Leftovers),
+            );
+            assert_eq!(bs.p2_active_mons[0].item, Item::None, "Corrosive Gas should destroy the target's item");
+            assert_eq!(bs.p2_active_mons[0].consumed_item, None,
+                "A destroyed item cannot be recovered (not recorded as consumed)");
+        }
+
+        #[test]
+        fn corrosive_gas_blocked_by_sticky_hold() {
+            let bs = run(
+                build(Species::Snorlax, PokemonMove::CorrosiveGas, Ability::None, Item::None),
+                splash(Species::Blissey, Ability::StickyHold, Item::Leftovers),
+            );
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers, "Sticky Hold should protect against Corrosive Gas");
+        }
+    }
 }
