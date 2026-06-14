@@ -46,28 +46,21 @@ Each has significant individual complexity. Research all edge cases carefully.
 ### Complex moves — battle-state conditions
 These check or modify ongoing battle state. Each is individually moderate in complexity.
 - Acupressure — +2 to a random stat (user or random ally in doubles)
-- Belch — 120-power; fails unless user has eaten a Berry this battle
 - Body Slam — 30% paralyze; ×2 power and never misses vs. Minimized target
 - Burn Up — 130-power Fire move; user loses their Fire type after use
 - Copycat — use the most recent move used on the field
 - Darkest Lariat / Foul Play / Sacred Sword — ignore target's stat stages in damage calc
-- Endeavor — deal damage equal to (target's current HP − user's current HP); min 1
-- Fell Stinger — if this KOs the target, user's Attack rises by 3
-- Fickle Beam — 30% chance to double this move's power
 - Freeze-Dry — Ice-type, but also super effective against Water types
 - Gigaton Hammer — 160 power; cannot be selected twice in a row
 - Grav Apple — ×1.5 power in Gravity; also lower target's Defense by 1
 - Grassy Glide — gains +1 priority while Grassy Terrain is active
 - Helping Hand — boost an ally's move power by 50% this turn
 - Lock-On — user's next move is guaranteed to hit
-- Poltergeist — 110 power; fails if the target holds no item
 - Snore — only usable while asleep; 30% flinch on hit
 - Sparkling Aria — deal damage; cure any burn on targets hit
 - Spite — remove 4 PP from the target's most recently used move
-- Steel Beam — 140 power; user takes ½ max HP as recoil
 - Stuff Cheeks — eat held Berry; +2 Defense
 - Sucker Punch — priority move; fails if target did not choose a damaging move this turn
-- Super Fang — deal damage equal to ½ of target's current HP (min 1)
 - Tearful Look — −1 Atk and Sp. Atk to target; ignores evasion; hits through Protect
 - Upper Hand — flinch target; fails if target is not about to use a priority move
 

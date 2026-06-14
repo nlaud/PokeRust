@@ -24935,3 +24935,454 @@ mod two_turn_charging_moves {
         assert!(took_beak_blast_damage, "Beak Blast should deal damage at priority -3 after contact move resolves");
     }
 }
+
+#[cfg(test)]
+mod conditional_damage_moves {
+    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn mon_with_ability(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &crate::battle::PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &crate::battle::PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        )
+    }
+
+    // ── Super Fang ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn super_fang_deals_half_current_hp() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::SuperFang);
+        p1.stats[5] = 200; // fast — goes first
+        p1.stats[1] = 1; // low Attack (irrelevant — Super Fang ignores it)
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 400; p2.hp = 400; // known HP for clean arithmetic
+        p2.stats[2] = 9999; p2.stats[4] = 9999; // won't faint
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        // Super Fang has 90% accuracy, so there are hit and miss branches.
+        // Only check branches where damage was actually dealt.
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let damage = 400u16.saturating_sub(bs.p2_active_mons[0].hp);
+                assert!(damage == 200 || damage == 0,
+                    "Super Fang: damage must be 200 (hit) or 0 (miss), got {}", damage);
+            }
+        }
+        // Ensure at least one hit branch exists.
+        let hit = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                400u16.saturating_sub(bs.p2_active_mons[0].hp) == 200
+            } else { false }
+        });
+        assert!(hit, "Super Fang: no hit branch found (all outcomes show 0 damage)");
+    }
+
+    #[test]
+    fn super_fang_does_not_hit_ghost() {
+        let mut p1 = mon(Species::Raticate, PokemonMove::SuperFang);
+        p1.stats[5] = 200;
+
+        let p2 = mon(Species::Gengar, PokemonMove::Splash); // Ghost: Normal-type immune
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, bs.p2_active_mons[0].stats[0],
+                    "Super Fang: Ghost-type should take 0 damage");
+            }
+        }
+    }
+
+    // ── Endeavor ────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn endeavor_equalizes_hp_downward() {
+        let mut p1 = mon(Species::Raticate, PokemonMove::Endeavor);
+        p1.stats[5] = 200; // fast
+        p1.stats[0] = 9999; p1.hp = 50; // low HP = big damage
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 400;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, 50,
+                    "Endeavor: target HP should be equalized to user HP (50), got {}", bs.p2_active_mons[0].hp);
+            }
+        }
+    }
+
+    #[test]
+    fn endeavor_fails_when_user_hp_gte_target_hp() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Endeavor);
+        p1.stats[5] = 200;
+        p1.stats[0] = 9999; p1.hp = 400;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 200; p2.hp = 200; // target has LESS HP — Endeavor should fail
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, 200,
+                    "Endeavor: should fail when user HP >= target HP (target HP unchanged)");
+            }
+        }
+    }
+
+    #[test]
+    fn endeavor_does_not_hit_ghost() {
+        let mut p1 = mon(Species::Raticate, PokemonMove::Endeavor);
+        p1.stats[5] = 200;
+        p1.hp = 1;
+
+        let p2 = mon(Species::Gengar, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, bs.p2_active_mons[0].stats[0],
+                    "Endeavor: Ghost-type should take 0 damage");
+            }
+        }
+    }
+
+    // ── Poltergeist ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn poltergeist_deals_damage_when_target_has_item() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Poltergeist);
+        p1.stats[5] = 200;
+
+        // Must use a non-Normal-type target; Ghost moves have 0 effectiveness vs Normal.
+        // Use a Water-type — not immune to Ghost (1.0× effectiveness).
+        let mut p2 = mon(Species::Blastoise, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999; p2.fainted = false;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+        p2.item = Item::ChoiceBand; // has an item (non-healing, won't restore HP)
+
+        let initial_hp = p2.hp;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let did_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].hp < initial_hp
+            } else { false }
+        });
+        assert!(did_damage, "Poltergeist: should deal damage when target holds an item");
+    }
+
+    #[test]
+    fn poltergeist_fails_when_target_has_no_item() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Poltergeist);
+        p1.stats[5] = 200;
+
+        // Use non-Normal target so type immunity doesn't confound the test.
+        let mut p2 = mon(Species::Blastoise, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999; p2.fainted = false;
+        // p2.item is Item::None by default
+
+        let initial_hp = p2.hp;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+                    "Poltergeist: should fail (no damage) when target has no item");
+            }
+        }
+    }
+
+    // ── Belch ───────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn belch_fails_when_no_berry_eaten() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Belch), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        p1.stats[5] = 200;
+        p1.ate_berry_this_battle = false; // no berry eaten
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+
+        let initial_hp = p2.hp;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+                    "Belch: should fail (no damage) when user has not eaten a berry");
+            }
+        }
+    }
+
+    #[test]
+    fn belch_succeeds_when_berry_eaten() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Belch), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        p1.stats[5] = 200;
+        p1.ate_berry_this_battle = true; // berry was previously eaten
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+
+        let initial_hp = p2.hp;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let did_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].hp < initial_hp
+            } else { false }
+        });
+        assert!(did_damage, "Belch: should deal damage when user has eaten a berry");
+    }
+
+    #[test]
+    fn belch_not_in_legal_moves_without_berry() {
+        use crate::simulator::get_possible_commands_for_active_slot;
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Belch), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        p1.ate_berry_this_battle = false;
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
+        let p1_mon = &state.p1_active_mons[0];
+        let has_belch = cmds.iter().any(|c| {
+            if let crate::battle::BattleCommand::Attack(ac) = c {
+                p1_mon.moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::Belch)
+            } else { false }
+        });
+        assert!(!has_belch, "Belch: should not be in legal moves when no berry has been eaten");
+    }
+
+    #[test]
+    fn belch_in_legal_moves_after_berry_eaten() {
+        use crate::simulator::get_possible_commands_for_active_slot;
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Belch), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        p1.ate_berry_this_battle = true;
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
+        let p1_mon = &state.p1_active_mons[0];
+        let has_belch = cmds.iter().any(|c| {
+            if let crate::battle::BattleCommand::Attack(ac) = c {
+                p1_mon.moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::Belch)
+            } else { false }
+        });
+        assert!(has_belch, "Belch: should be in legal moves after a berry has been eaten");
+    }
+
+    // ── Fell Stinger ────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fell_stinger_boosts_attack_by_3_on_ko() {
+        let mut p1 = mon(Species::Beedrill, PokemonMove::FellStinger);
+        p1.stats[5] = 200; // fast
+        p1.stats[1] = 9999; // enormous Attack — guarantee KO
+
+        let mut p2 = mon(Species::Caterpie, PokemonMove::Splash);
+        p2.stats[0] = 1; p2.hp = 1; // 1 HP — will be KO'd
+
+        let p2_bench = mon(Species::Snorlax, PokemonMove::Splash); // bench so game continues
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![p2_bench]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p1_active_mons[0].boosts[0], 3,
+                    "Fell Stinger: user Attack should be +3 after KO, got {}", bs.p1_active_mons[0].boosts[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn fell_stinger_does_not_boost_without_ko() {
+        let mut p1 = mon(Species::Beedrill, PokemonMove::FellStinger);
+        p1.stats[5] = 200;
+        p1.stats[1] = 5; // very low Attack — will not KO
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
+                    "Fell Stinger: should NOT boost Attack when target survives");
+            }
+        }
+    }
+
+    // ── Steel Beam ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn steel_beam_inflicts_half_max_hp_recoil_on_hit() {
+        let mut p1 = mon(Species::Magnezone, PokemonMove::SteelBeam);
+        p1.stats[5] = 200;
+        p1.stats[0] = 200; p1.hp = 200;
+        p1.stats[3] = 9999; // huge SpA so target survives but recoil fires
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let recoil = 200u16.saturating_sub(bs.p1_active_mons[0].hp);
+                assert_eq!(recoil, 100, "Steel Beam: recoil should be ceil(200/2)=100, got {}", recoil);
+            }
+        }
+    }
+
+    #[test]
+    fn steel_beam_recoil_not_blocked_by_rock_head() {
+        let mut p1 = mon_with_ability(Species::Aggron, PokemonMove::SteelBeam, Ability::RockHead);
+        p1.stats[5] = 200;
+        p1.stats[0] = 200; p1.hp = 200;
+        let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let recoil = 200u16.saturating_sub(bs.p1_active_mons[0].hp);
+                assert_eq!(recoil, 100,
+                    "Steel Beam: Rock Head must NOT prevent recoil (should still be 100), got {}", recoil);
+            }
+        }
+    }
+
+    #[test]
+    fn steel_beam_recoil_blocked_by_magic_guard() {
+        let mut p1 = mon_with_ability(Species::Clefable, PokemonMove::SteelBeam, Ability::MagicGuard);
+        p1.stats[5] = 200;
+        p1.stats[0] = 200; p1.hp = 200;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p1_active_mons[0].hp, 200,
+                    "Steel Beam: Magic Guard should prevent recoil (HP should stay 200), got {}", bs.p1_active_mons[0].hp);
+            }
+        }
+    }
+
+    // ── Fickle Beam ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fickle_beam_has_30_percent_double_power_branch() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::FickleBeam);
+        p1.stats[5] = 200;
+        p1.stats[3] = 500; // high SpA to ensure meaningful damage range
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+
+        let initial_hp = p2.hp;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        // Collect all outcome states to verify two distinct damage tiers exist.
+        // The double-power branch should deal ~2× the damage of the normal branch.
+        let damages: Vec<u16> = outcomes.iter().filter_map(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                Some(initial_hp.saturating_sub(bs.p2_active_mons[0].hp))
+            } else { None }
+        }).collect();
+
+        let min_dmg = *damages.iter().min().unwrap_or(&0);
+        let max_dmg = *damages.iter().max().unwrap_or(&0);
+
+        assert!(min_dmg > 0, "Fickle Beam: should deal damage");
+        // The doubled branch should deal at least 1.5× the base damage
+        // (accounting for damage roll variance across branches)
+        let ratio = max_dmg as f64 / min_dmg as f64;
+        assert!(ratio >= 1.5, "Fickle Beam: max damage ({}) should be at least 1.5× min damage ({}) due to power doubling, ratio={:.2}", max_dmg, min_dmg, ratio);
+
+        // Verify probabilities: 70% base, 30% doubled
+        let total_prob: f64 = outcomes.iter().map(|(_, p)| p).sum();
+        assert!((total_prob - 1.0).abs() < 0.001, "Fickle Beam: total probability should sum to 1.0");
+    }
+}

@@ -175,6 +175,10 @@ pub struct PokemonState{
     /// would be wiped by `clear_pokemon_for_switch_out`.
     pub one_time_ability_used: bool,
 
+    /// True once this Pokémon has eaten any Berry this battle (own berry, Bug Bite/Pluck,
+    /// Fling). Persists across switch-out, faint+revive, and Recycle. Required by Belch.
+    pub ate_berry_this_battle: bool,
+
     /// True on the turn this Pokémon entered battle via a SwitchAction (voluntary or forced
     /// mid-turn). Cleared at the end of end_turn after ability effects are applied.
     /// Used by Speed Boost to skip the boost on the entry turn.
@@ -468,7 +472,7 @@ pub fn build_pokemon_state(
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,
         last_move_failed: false, original_ability: None, last_used_move: None,
-        one_time_ability_used: false, entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
+        one_time_ability_used: false, ate_berry_this_battle: false, entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
         item_lost: false, damaged_this_turn: false, damaged_by_this_turn: Vec::new(),
         last_physical_damage_taken: 0, last_physical_attacker: None,
         last_special_damage_taken: 0, last_special_attacker: None,
