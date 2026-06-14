@@ -179,6 +179,11 @@ pub struct PokemonState{
     /// Fling). Persists across switch-out, faint+revive, and Recycle. Required by Belch.
     pub ate_berry_this_battle: bool,
 
+    /// True when this Pokémon has not yet used any move since entering the field.
+    /// Set to true on any entry (including faint-replacement), cleared the first time a move
+    /// resolves. Gates Fake Out and First Impression. Cleared on switch-out.
+    pub first_move_on_field: bool,
+
     /// True on the turn this Pokémon entered battle via a SwitchAction (voluntary or forced
     /// mid-turn). Cleared at the end of end_turn after ability effects are applied.
     /// Used by Speed Boost to skip the boost on the entry turn.
@@ -472,7 +477,8 @@ pub fn build_pokemon_state(
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,
         last_move_failed: false, original_ability: None, last_used_move: None,
-        one_time_ability_used: false, ate_berry_this_battle: false, entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
+        one_time_ability_used: false, ate_berry_this_battle: false, first_move_on_field: false,
+        entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
         item_lost: false, damaged_this_turn: false, damaged_by_this_turn: Vec::new(),
         last_physical_damage_taken: 0, last_physical_attacker: None,
         last_special_damage_taken: 0, last_special_attacker: None,

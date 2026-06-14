@@ -51,18 +51,13 @@ These check or modify ongoing battle state. Each is individually moderate in com
 - Copycat — use the most recent move used on the field
 - Darkest Lariat / Foul Play / Sacred Sword — ignore target's stat stages in damage calc
 - Freeze-Dry — Ice-type, but also super effective against Water types
-- Gigaton Hammer — 160 power; cannot be selected twice in a row
 - Grav Apple — ×1.5 power in Gravity; also lower target's Defense by 1
 - Grassy Glide — gains +1 priority while Grassy Terrain is active
 - Helping Hand — boost an ally's move power by 50% this turn
 - Lock-On — user's next move is guaranteed to hit
-- Snore — only usable while asleep; 30% flinch on hit
 - Sparkling Aria — deal damage; cure any burn on targets hit
-- Spite — remove 4 PP from the target's most recently used move
 - Stuff Cheeks — eat held Berry; +2 Defense
-- Sucker Punch — priority move; fails if target did not choose a damaging move this turn
 - Tearful Look — −1 Atk and Sp. Atk to target; ignores evasion; hits through Protect
-- Upper Hand — flinch target; fails if target is not about to use a priority move
 
 ### Complex moves — transformation, substitution, and doubles
 More architecturally significant; each likely needs its own research pass.
@@ -70,7 +65,6 @@ More architecturally significant; each likely needs its own research pass.
 - Destiny Bond — if user faints from an opponent's move this turn, that opponent also faints
 - Dragon Darts — two hits; splits between two opponents when both are present
 - Eerie Spell — deal damage + remove 3 PP from target's last-used move
-- Fake Out / First Impression — only usable on the very first turn after entering battle
 - Feint — hits through and removes Protect/Detect for this turn
 - Flying Press — damage uses both Fighting and Flying type effectiveness combined
 - Instruct — make the target immediately repeat their last move

@@ -162,6 +162,9 @@ pub enum VolatileStatus {
     DestinyBond,
     Protect,
     Disable(PokemonMove),
+    /// The holder cannot select the named move on consecutive turns (e.g. Gigaton Hammer, Blood Moon).
+    /// Set as MoveStatus with duration 2 so `decrement_move_statuses` clears it after one turn.
+    CantUseRepeatedly(PokemonMove),
     /// Critical-hit boost from Dragon Cheer. The payload stores the crit-stage bonus
     /// (1, or 2 when the boosted ally was Dragon-type at the time the move was used);
     /// it is locked in at application and does not change if the ally's type changes.

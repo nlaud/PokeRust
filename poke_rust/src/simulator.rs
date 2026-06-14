@@ -118,6 +118,21 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             if *move_name != PokemonMove::Struggle {
                 mon.last_used_move = Some(move_name.clone());
             }
+            // Gigaton Hammer / Blood Moon etc.: apply the "can't use repeatedly" volatile.
+            // Applied on any use attempt (hit, miss, or blocked) per Bulbapedia.
+            if matches!(move_name, PokemonMove::GigatonHammer | PokemonMove::BloodMoon) {
+                let already_blocked = mon.volatiles.iter().any(|v| matches!(
+                    v,
+                    crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::CantUseRepeatedly(m), _) if m == move_name
+                ));
+                if !already_blocked {
+                    // Duration 1: blocks exactly the next turn's selection, then drops during
+                    // that turn's decrement_move_statuses. (decrement runs after selection.)
+                    mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+                        VolatileStatus::CantUseRepeatedly(move_name.clone()), 1,
+                    ));
+                }
+            }
         }
     }
 }
@@ -1655,6 +1670,117 @@ fn possible_damage_outcomes_for_move(
         if !has_eaten {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
+    }
+
+    // Fake Out / First Impression: only usable on the user's very first move after entering
+    // battle. `first_move_on_field` covers both regular switch-ins and faint-replacements
+    // (unlike `entered_this_turn` which is intentionally false for faint-replacements).
+    if matches!(move_name, PokemonMove::FakeOut | PokemonMove::FirstImpression) {
+        let eligible = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| m.first_move_on_field)
+            .unwrap_or(false);
+        if !eligible {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
+    // Snore: only usable while the user is asleep. Mirrors Sleep Talk's gate.
+    if move_name == PokemonMove::Snore {
+        let is_asleep = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| matches!(m.status, Some(crate::dex_data::Status::Sleep(_))))
+            .unwrap_or(false);
+        if !is_asleep {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
+    // Sucker Punch: fails if the target chose a non-damaging (status) move, chose a
+    // non-move action (switch), or has already executed their action this turn.
+    if move_name == PokemonMove::SuckerPunch {
+        let target_slot = target_slots[0];
+        let target_queued_move: Option<PokemonMove> = next_state.action_queue.iter().find_map(|a| {
+            if let Action::MoveAction(ma) = a {
+                if ma.user_slot == target_slot { Some(ma.move_name.clone()) } else { None }
+            } else { None }
+        });
+        let succeeds = match &target_queued_move {
+            None => false, // target already acted or chose switch
+            Some(mv) => {
+                move_dex.get(mv).map_or(false, |d| !matches!(d.category, MoveCategory::Status))
+            }
+        };
+        if !succeeds {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
+    // Upper Hand: succeeds only if the target's queued move has positive effective priority
+    // and is a damaging move that the target has not yet executed this turn.
+    // Per Bulbapedia, ability-granted priority (Prankster, Gale Wings) counts.
+    if move_name == PokemonMove::UpperHand {
+        let target_slot = target_slots[0];
+        let target_queued_move: Option<PokemonMove> = next_state.action_queue.iter().find_map(|a| {
+            if let Action::MoveAction(ma) = a {
+                if ma.user_slot == target_slot { Some(ma.move_name.clone()) } else { None }
+            } else { None }
+        });
+        let succeeds = match &target_queued_move {
+            None => false, // target already acted
+            Some(mv) => {
+                let Some(md) = move_dex.get(mv) else { return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes); };
+                if matches!(md.category, MoveCategory::Status) { false }
+                else {
+                    let target_mon = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
+                    let eff_priority = target_mon.map_or(md.priority, |tm| {
+                        simulator_helpers::effective_move_priority(&next_state, tm, md)
+                    });
+                    eff_priority >= 1
+                }
+            }
+        };
+        if !succeeds {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
+    // Spite: remove 4 PP from the target's most recently used move.
+    // Status-move path: apply effect and return (no damage).
+    if move_name == PokemonMove::Spite {
+        let target_slot = target_slots[0];
+        // Protect check: Spite is a status move and does NOT bypass Protect.
+        let protected = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|t| simulator_helpers::protect_blocks_move(&next_state, action.user_slot, target_slot, t, move_data, false).is_some())
+            .unwrap_or(false);
+        if protected {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+
+        let last_mv = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .and_then(|t| t.last_used_move.clone());
+        let Some(last_mv) = last_mv else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        // Find the PP slot and verify it has PP remaining.
+        let slot_idx = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .and_then(|t| t.moves.iter().position(|m| m.as_ref() == Some(&last_mv)));
+        let Some(slot_idx) = slot_idx else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let current_pp = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|t| t.move_pp[slot_idx])
+            .unwrap_or(0);
+        if current_pp == 0 {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        // Apply: decrement the target's PP by 4 (saturating at 0).
+        if let Some(target_mon) = match target_slot.player {
+            Player::P1 => next_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
+            Player::P2 => next_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+        } {
+            target_mon.move_pp[slot_idx] = current_pp.saturating_sub(4);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
     // Fling fails outright if the user has no flingable item (or its item is suppressed by
@@ -3572,6 +3698,14 @@ fn generate_commands_for_active(
         // Belch: cannot be selected unless the user has eaten a Berry this battle.
         if *move_name == PokemonMove::Belch && !mon.ate_berry_this_battle { continue; }
 
+        // CantUseRepeatedly volatile (e.g. Gigaton Hammer): the named move cannot be selected
+        // on consecutive turns. Cleared by switch-out (volatile wipe) or after 2 turns.
+        let cant_repeat = mon.volatiles.iter().any(|v| matches!(
+            v,
+            crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::CantUseRepeatedly(m), _) if m == move_name
+        ));
+        if cant_repeat { continue; }
+
         // Gravity: airborne and jump moves cannot be selected while Gravity is active.
         if simulator_helpers::is_gravity_active(state) && move_is_disabled_by_gravity(move_name) {
             continue;
@@ -4573,8 +4707,9 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     if mon.species == Species::MorpekoHangry {
         mon.species = Species::Morpeko;
     }
-    // Clear the entry flag so it doesn't persist on the bench.
+    // Clear the entry flags so they don't persist on the bench.
     mon.entered_this_turn = false;
+    mon.first_move_on_field = false;
     mon.cud_chew_pending = None;
     // Unburden's boost ends on switch-out.
     mon.item_lost = false;
