@@ -25386,3 +25386,381 @@ mod conditional_damage_moves {
         assert!((total_prob - 1.0).abs() < 0.001, "Fickle Beam: total probability should sum to 1.0");
     }
 }
+
+#[cfg(test)]
+mod turn_state_moves {
+    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::Status;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn mon2(species: Species, mv1: PokemonMove, mv2: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv1), Some(mv2), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        )
+    }
+
+    // ── Snore ───────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn snore_fails_when_user_is_awake() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Snore);
+        p1.stats[5] = 200;
+        // No status — awake.
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+                    "Snore: should fail (no damage) when user is awake");
+            }
+        }
+    }
+
+    #[test]
+    fn snore_succeeds_when_user_is_asleep() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Snore);
+        p1.stats[5] = 200;
+        // Sleep(n>=2) wakes the user before move execution. Use Sleep(1) so the user stays
+        // asleep during execution (2/3 stay asleep → execute move branch; 1/3 wake → don't).
+        p1.status = Some(Status::Sleep(1));
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        // Snore has 100% accuracy so it always hits when the user is asleep.
+        let did_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { bs.p2_active_mons[0].hp < initial_hp } else { false }
+        });
+        assert!(did_damage, "Snore: should deal damage when user is asleep");
+    }
+
+    // ── Fake Out ────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fake_out_succeeds_on_first_turn() {
+        // Both use Splash so we can check if Fake Out's flinch lands.
+        // Easier: just check it deals damage on turn 1 (first_move_on_field = true after entry).
+        let mut p1 = mon(Species::Ambipom, PokemonMove::FakeOut);
+        p1.stats[5] = 200;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let did_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { bs.p2_active_mons[0].hp < initial_hp } else { false }
+        });
+        assert!(did_damage, "Fake Out: should deal damage on turn 1 (first move after entry)");
+    }
+
+    #[test]
+    fn fake_out_fails_on_second_turn() {
+        let mut p1 = mon2(Species::Ambipom, PokemonMove::Splash, PokemonMove::FakeOut);
+        p1.stats[5] = 200;
+        // Turn 1: use Splash (move slot 0) — this clears first_move_on_field.
+        // Turn 2: use Fake Out (move slot 1) — should fail.
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+        // Turn 1: use Splash (slot 0).
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state1, _) = outcomes1.into_iter().next().expect("should have outcome");
+
+        // Turn 2: try Fake Out (slot 1).
+        let initial_hp = match &state1 { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => panic!() };
+        let outcomes2 = run_single_turn(
+            &state1,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        for (s, _) in &outcomes2 {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+                    "Fake Out: should fail on second turn (first_move_on_field cleared after Splash)");
+            }
+        }
+    }
+
+    // ── First Impression ────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn first_impression_deals_damage_on_first_turn() {
+        let mut p1 = mon(Species::Golisopod, PokemonMove::FirstImpression);
+        p1.stats[5] = 200;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let did_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { bs.p2_active_mons[0].hp < initial_hp } else { false }
+        });
+        assert!(did_damage, "First Impression: should deal damage on first move after entry");
+    }
+
+    #[test]
+    fn first_impression_fails_on_second_turn() {
+        let mut p1 = mon2(Species::Golisopod, PokemonMove::Splash, PokemonMove::FirstImpression);
+        p1.stats[5] = 200;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state1, _) = outcomes1.into_iter().next().expect("should have outcome");
+        let initial_hp = match &state1 { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => panic!() };
+
+        let outcomes2 = run_single_turn(
+            &state1,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        for (s, _) in &outcomes2 {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+                    "First Impression: should fail on second turn");
+            }
+        }
+    }
+
+    // ── Sucker Punch ────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sucker_punch_deals_damage_when_target_chose_damaging_move() {
+        let mut p1 = mon(Species::Bisharp, PokemonMove::SuckerPunch);
+        p1.stats[5] = 200; // fast — goes first
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Tackle); // p2 chose a damaging move
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let did_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { bs.p2_active_mons[0].hp < initial_hp } else { false }
+        });
+        assert!(did_damage, "Sucker Punch: should deal damage when target chose a damaging move");
+    }
+
+    #[test]
+    fn sucker_punch_fails_when_target_chose_status_move() {
+        let mut p1 = mon(Species::Bisharp, PokemonMove::SuckerPunch);
+        p1.stats[5] = 200;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash); // status move
+        p2.stats[0] = 9999; p2.hp = 9999;
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+                    "Sucker Punch: should fail when target chose a status move (Splash)");
+            }
+        }
+    }
+
+    // ── Upper Hand ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn upper_hand_succeeds_when_target_chose_quick_attack() {
+        // Upper Hand (+3) must act before Quick Attack (+1), so Upper Hand fires first.
+        let mut p1 = mon(Species::Incineroar, PokemonMove::UpperHand);
+        p1.stats[5] = 50; // slower than p2 for speed tie, but +3 vs +1 means Upper Hand wins
+
+        let mut p2 = mon(Species::Pikachu, PokemonMove::QuickAttack); // +1 priority
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        let did_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { bs.p2_active_mons[0].hp < initial_hp } else { false }
+        });
+        assert!(did_damage, "Upper Hand: should deal damage when target chose a +1 priority move (Quick Attack)");
+    }
+
+    #[test]
+    fn upper_hand_fails_when_target_chose_normal_priority_move() {
+        let mut p1 = mon(Species::Incineroar, PokemonMove::UpperHand);
+        p1.stats[5] = 200; // fast — goes first despite +3 vs 0
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Tackle); // 0 priority
+        p2.stats[0] = 9999; p2.hp = 9999;
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+                    "Upper Hand: should fail when target chose a 0-priority move");
+            }
+        }
+    }
+
+    // ── Gigaton Hammer ──────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn gigaton_hammer_selectable_on_first_use() {
+        use crate::simulator::get_possible_commands_for_active_slot;
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let p1 = mon(Species::Tinkaton, PokemonMove::GigatonHammer);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
+        let has_hammer = cmds.iter().any(|c| {
+            if let crate::battle::BattleCommand::Attack(ac) = c {
+                state.p1_active_mons[0].moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::GigatonHammer)
+            } else { false }
+        });
+        assert!(has_hammer, "Gigaton Hammer: should be selectable on first use");
+    }
+
+    #[test]
+    fn gigaton_hammer_not_selectable_on_second_consecutive_turn() {
+        use crate::simulator::get_possible_commands_for_active_slot;
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let mut p1 = mon(Species::Tinkaton, PokemonMove::GigatonHammer);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 9999; p2.hp = 9999;
+        p2.stats[2] = 9999; p2.stats[4] = 9999;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+        // Turn 1: use Gigaton Hammer.
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let (state1, _) = outcomes1.into_iter().next().expect("should have outcome");
+
+        // Turn 2 selection: Gigaton Hammer should NOT be available.
+        let bs1 = match &state1 { MatchState::BattleState(bs) => bs, _ => panic!() };
+        let cmds2 = get_possible_commands_for_active_slot(bs1, Player::P1, 0, &mdex, &pdex);
+        let has_hammer = cmds2.iter().any(|c| {
+            if let crate::battle::BattleCommand::Attack(ac) = c {
+                bs1.p1_active_mons[0].moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::GigatonHammer)
+            } else { false }
+        });
+        assert!(!has_hammer, "Gigaton Hammer: should NOT be selectable the turn after using it");
+    }
+
+    // ── Spite ───────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn spite_removes_4_pp_from_targets_last_move() {
+        let mut p1 = mon(Species::Gengar, PokemonMove::Spite);
+        p1.stats[5] = 50; // slower — acts after p2
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p2.stats[5] = 200; // fast — acts first so Tackle gets set as last_used_move
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let initial_pp = state.p2_active_mons[0].move_pp[0];
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let pp_after = bs.p2_active_mons[0].move_pp[0];
+                // p2 spent 1 PP using Tackle, then Spite removed 4 more.
+                let expected = initial_pp.saturating_sub(5); // 1 for use + 4 from Spite
+                assert_eq!(pp_after, expected,
+                    "Spite: target's Tackle PP should be initial-5 (1 used + 4 removed by Spite), got {}", pp_after);
+            }
+        }
+    }
+
+    #[test]
+    fn spite_fails_when_target_has_no_last_move() {
+        // p2 hasn't moved yet — last_used_move is None. Spite should fail.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Spite);
+        p1.stats[5] = 200; // fast — acts before p2
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let initial_pp = state.p2_active_mons[0].move_pp[0]; // read from actual state
+
+        let outcomes = run(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                // p2 uses Splash (loses 1 PP). Spite should fail — no additional PP loss.
+                let expected = initial_pp.saturating_sub(1);
+                assert_eq!(bs.p2_active_mons[0].move_pp[0], expected,
+                    "Spite: should fail (no PP lost beyond the 1 from Splash) when target has no last move");
+            }
+        }
+    }
+}

@@ -3704,6 +3704,11 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
             mon_mut.entered_this_turn = true;
         }
     }
+    // Always mark the Pokémon as not having moved since entry (for Fake Out / First Impression).
+    // Unlike `entered_this_turn`, this applies to faint-replacements too.
+    if let Some(mon_mut) = get_pokemon_at_slot_mut(state, slot) {
+        mon_mut.first_move_on_field = true;
+    }
 
     // Entry hazards resolve before the switch-in ability. A Pokémon that faints to hazards (e.g.
     // Stealth Rock) never gets to trigger its entry ability (Intimidate, weather setters, …).
@@ -4692,6 +4697,7 @@ pub fn end_turn(
     for (bs, _) in branches.iter_mut() {
         for mon in bs.p1_active_mons.iter_mut().chain(bs.p2_active_mons.iter_mut()) {
             mon.entered_this_turn = false;
+            mon.first_move_on_field = false; // only valid for the turn of entry
             mon.damaged_this_turn = false;
             mon.damaged_by_this_turn.clear();
             mon.last_physical_damage_taken = 0;
@@ -5895,6 +5901,7 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             let is_move_status = matches!(
                 volatile,
                 VolatileStatus::Disable(_)
+                    | VolatileStatus::CantUseRepeatedly(_)
                     | VolatileStatus::Encore(_)
                     | VolatileStatus::GlaiveRush
                     | VolatileStatus::Taunt
@@ -5905,6 +5912,7 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
 
         let duration = match volatile {
             VolatileStatus::Disable(_) => 4,
+            VolatileStatus::CantUseRepeatedly(_) => 1,
             VolatileStatus::Encore(_) => 3,
             VolatileStatus::Taunt => 3,
             VolatileStatus::ThroatChop => 2,
