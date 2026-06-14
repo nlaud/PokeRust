@@ -58,6 +58,7 @@ pub fn battle_state_from_lists(
         p2_slot_conditions: vec![Vec::new(); active_per_side as usize],
         self_switch_pending: None,
         items_consumed_this_turn: vec![],
+        last_move_on_field: None,
     };
 
     // Assign each side a stable, party-unique `mon_id` (active slots first, then bench).

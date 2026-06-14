@@ -45,11 +45,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ### Complex moves — battle-state conditions
 These check or modify ongoing battle state. Each is individually moderate in complexity.
-- Acupressure — +2 to a random stat (user or random ally in doubles)
-- Copycat — use the most recent move used on the field
-- Darkest Lariat / Foul Play / Sacred Sword — ignore target's stat stages in damage calc
-- Grassy Glide — gains +1 priority while Grassy Terrain is active
-- Stuff Cheeks — eat held Berry; +2 Defense
 - Tearful Look — −1 Atk and Sp. Atk to target; ignores evasion; hits through Protect
 
 ### Complex moves — transformation, substitution, and doubles

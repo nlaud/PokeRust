@@ -278,6 +278,30 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
     val
 }
 
+/// Foul Play attack stat (non-crit): target's base Atk × target's stage multiplier,
+/// then run through the *attacker*'s ability/item/burn multipliers.
+fn foul_play_attack_stat(state: &BattleState, attacker: &PokemonState, target: &PokemonState) -> f64 {
+    foul_play_attack_stat_inner(state, attacker, target, false)
+}
+
+/// Foul Play attack stat (crit): same as above but ignores negative Atk stages on the target.
+fn foul_play_attack_stat_crit(state: &BattleState, attacker: &PokemonState, target: &PokemonState) -> f64 {
+    foul_play_attack_stat_inner(state, attacker, target, true)
+}
+
+fn foul_play_attack_stat_inner(state: &BattleState, attacker: &PokemonState, target: &PokemonState, is_crit: bool) -> f64 {
+    let target_stage = target.boosts[0];
+    let applied_stage = if is_crit && target_stage < 0 { 0 } else { target_stage };
+    let base = target.stats[1] as f64 * stage_multiplier(applied_stage);
+    // Apply attacker-side multipliers only (ability, item, burn).
+    let val = apply_ability_stat_boost(state, attacker, PokemonStat::Atk, PokemonStat::Atk, Ability::Guts, attacker.status.is_some(), 1.5, base);
+    let val = apply_ability_stat_boost(state, attacker, PokemonStat::Atk, PokemonStat::Atk, Ability::HugePower, true, 2.0, val);
+    let val = apply_ability_stat_boost(state, attacker, PokemonStat::Atk, PokemonStat::Atk, Ability::PurePower, true, 2.0, val);
+    let val = apply_ability_stat_boost(state, attacker, PokemonStat::Atk, PokemonStat::Atk, Ability::Hustle, true, 1.5, val);
+    let val = if item_is_active(state, attacker) && attacker.item == Item::ChoiceBand { val * 1.5 } else { val };
+    val
+}
+
 pub fn pokemon_has_type(mon: &PokemonState, pokemon_type: &PokemonType) -> bool {
     mon.types.iter().any(|current_type| std::mem::discriminant(current_type) == std::mem::discriminant(pokemon_type))
 }
@@ -1499,10 +1523,19 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     };
 
     // Pre-compute values that don't change per crit branch.
-    let base_attack  = apply_weather_attack_boost(_state, attacker, attacking_stat,
-                           effective_stat(_state, attacker, attacking_stat, false, false));
+    // Foul Play: use the target's Attack stages but the user's ability/item multipliers.
+    let base_attack = if move_data.foul_play {
+        apply_weather_attack_boost(_state, attacker, attacking_stat,
+            foul_play_attack_stat(_state, attacker, target))
+    } else {
+        apply_weather_attack_boost(_state, attacker, attacking_stat,
+            effective_stat(_state, attacker, attacking_stat, false, false))
+    };
+    // ignore_defense_boosts (Sacred Sword, Darkest Lariat): ignore positive defensive stages.
     let base_defense = apply_weather_defense_bonus(_state, target, defending_stat,
-                           effective_stat(_state, target, defending_stat, false, false));
+                           effective_stat(_state, target, defending_stat,
+                               false,
+                               move_data.ignore_defense_boosts));
     let attack_type  = effective_move_type(_state, attacker, move_data);
     let effectiveness = {
         let base = move_type_effectiveness(_state, &attack_type, target);
@@ -1719,12 +1752,21 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
 
         // On a crit, re-compute attack/defense ignoring unfavourable boosts.
         let attack_stat = if is_crit {
-            apply_weather_attack_boost(_state, attacker, attacking_stat,
-                effective_stat(_state, attacker, attacking_stat, true, false))
+            if move_data.foul_play {
+                // Crits ignore negative attack stages on the target (the "attacker" for Foul Play).
+                apply_weather_attack_boost(_state, attacker, attacking_stat,
+                    foul_play_attack_stat_crit(_state, attacker, target))
+            } else {
+                apply_weather_attack_boost(_state, attacker, attacking_stat,
+                    effective_stat(_state, attacker, attacking_stat, true, false))
+            }
         } else { base_attack };
         let defense_stat = if is_crit {
+            // ignore_defense_boosts: positive stages already ignored; crit also ignores positive.
             apply_weather_defense_bonus(_state, target, defending_stat,
-                effective_stat(_state, target, defending_stat, false, true))
+                effective_stat(_state, target, defending_stat,
+                    move_data.ignore_defense_boosts,
+                    true))
         } else { base_defense };
 
         let this_screen_mult = if is_crit { 1.0 } else { screen_mult };
@@ -3254,14 +3296,16 @@ fn compute_accuracy_modifier_fp(
     modifier.max(0)
 }
 
-fn adjusted_accuracy_stage(state: &BattleState, attacker: &PokemonState, target: &PokemonState) -> i8 {
+fn adjusted_accuracy_stage(state: &BattleState, attacker: &PokemonState, target: &PokemonState, ignore_evasion: bool) -> i8 {
     let attacker_accuracy = attacker.boosts[5];
     // Keen Eye / Illuminate: when the attacker has either ability (unsuppressed), the
     // target's evasiveness stages are ignored entirely.  Non-stage accuracy modifiers
     // (Sand Veil, Wonder Skin, etc.) are NOT ignored — this only zeroes the stage term.
     // Mold Breaker does not apply here (this protects the attacker's own accuracy calc).
-    let target_evasion = if !pokemon_ability_is_suppressed(state, attacker)
-        && matches!(attacker.ability, Ability::KeenEye | Ability::Illuminate)
+    // ignore_evasion flag (Sacred Sword, Darkest Lariat): also zeroes target evasion stage.
+    let target_evasion = if ignore_evasion
+        || (!pokemon_ability_is_suppressed(state, attacker)
+            && matches!(attacker.ability, Ability::KeenEye | Ability::Illuminate))
     {
         0
     } else {
@@ -3385,7 +3429,7 @@ pub fn accuracy_hit_probability(
 
             let accuracy_after_modifiers = round_div_half_down(base.saturating_mul(modifier_fp), 4096);
 
-            let stage = adjusted_accuracy_stage(state, attacker, target);
+            let stage = adjusted_accuracy_stage(state, attacker, target, move_data.ignore_evasion);
             let stage_adjusted = (accuracy_after_modifiers as f64 * accuracy_stage_multiplier(stage)).floor() as i32;
 
             let micle_adjusted = round_div_half_down(
