@@ -24699,3 +24699,239 @@ mod side_and_field_condition_moves {
         assert!(any_burned, "Infiltrator should bypass Safeguard and allow burn");
     }
 }
+
+#[cfg(test)]
+mod two_turn_charging_moves {
+    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{Status, VolatileStatus};
+    use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
+        simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> crate::pokemon::PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, pdex, mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), None, Some(Item::None), None, None, None, false,
+        )
+    }
+
+    fn simple_mon(species: Species, mv: PokemonMove) -> crate::pokemon::PokemonState {
+        mon(species, mv, Ability::None)
+    }
+
+    // ── Phantom Force ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn phantom_force_charge_turn_user_is_semi_invulnerable() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let gengar = simple_mon(Species::Gengar, PokemonMove::PhantomForce);
+        let mut snorlax = simple_mon(Species::Snorlax, PokemonMove::Tackle);
+        // Give Snorlax full HP so it doesn't faint before the test can check volatiles
+        let full_hp = snorlax.stats[0];
+        snorlax.hp = full_hp;
+        let state = battle_state_from_lists(vec![gengar], vec![], vec![snorlax], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        let (bs, prob) = extract_battle_state(outcomes);
+        assert!((prob - 1.0).abs() < 1e-9, "Should be a single deterministic outcome");
+        // Gengar should have the SemiInvulnerable(PhantomForce) volatile
+        let is_invuln = bs.p1_active_mons[0].volatiles.iter().any(|v| matches!(v,
+            VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(PokemonMove::PhantomForce), _)
+        ));
+        assert!(is_invuln, "PhantomForce user should be semi-invulnerable on charge turn");
+        // Snorlax's Tackle should have missed — Gengar takes no damage
+        let gengar_initial_hp = bs.p1_active_mons[0].stats[0];
+        assert_eq!(bs.p1_active_mons[0].hp, gengar_initial_hp, "Tackle should miss the semi-invulnerable Gengar");
+    }
+
+    #[test]
+    fn phantom_force_breaks_through_protect() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        // Gengar already in charge turn (we set the volatile manually to skip turn 1).
+        // Use Garchomp (Dragon/Ground) as target — not Normal type, so Ghost is effective.
+        let mut gengar = simple_mon(Species::Gengar, PokemonMove::PhantomForce);
+        gengar.move_pp[0] -= 1; // PP was spent on charge turn
+        gengar.volatiles.push(VolatileStatusState::MoveStatus(
+            VolatileStatus::SemiInvulnerable(PokemonMove::PhantomForce), 0,
+        ));
+        let mut garchomp = simple_mon(Species::Garchomp, PokemonMove::Protect);
+        let full_hp = garchomp.stats[0];
+        garchomp.hp = full_hp;
+        let state = battle_state_from_lists(vec![gengar], vec![], vec![garchomp], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        // Garchomp used Protect but PhantomForce should bypass it and deal damage
+        let any_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].hp < full_hp
+            } else { true }
+        });
+        assert!(any_damage, "Phantom Force should break through Protect and deal damage");
+
+        // Garchomp's Protect volatile should be cleared after PhantomForce hits
+        let protect_remains = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].volatiles.iter().any(|v| matches!(v,
+                    VolatileStatusState::TurnStatus(VolatileStatus::Protect, _)
+                ))
+            } else { false }
+        });
+        assert!(!protect_remains, "Phantom Force should remove the Protect volatile");
+    }
+
+    #[test]
+    fn phantom_force_blocked_by_earthquake_during_charge() {
+        // Unlike Dig, PhantomForce cannot be hit by Earthquake during its charge turn
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let gengar = simple_mon(Species::Gengar, PokemonMove::PhantomForce);
+        let snorlax = simple_mon(Species::Snorlax, PokemonMove::Earthquake);
+        let state = battle_state_from_lists(vec![gengar], vec![], vec![snorlax], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        let (bs, _) = extract_battle_state(outcomes);
+        let gengar_full_hp = bs.p1_active_mons[0].stats[0];
+        assert_eq!(bs.p1_active_mons[0].hp, gengar_full_hp,
+            "Earthquake should not hit PhantomForce user during charge turn");
+    }
+
+    // ── Beak Blast ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn beak_blast_burns_contact_attacker() {
+        // Beak Blast fires at priority -3; Tackle (priority 0) from a faster mon resolves first.
+        // The Beak Blast user already has BeakBlastCharging before any action; Tackle is contact
+        // → attacker (Snorlax) should get burned.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        // Use Decidueye (Beak Blast mon) vs fast Snorlax with Tackle
+        // Give Decidueye high speed so Beak Blast still fires (priority beats speed);
+        // actually Snorlax needs higher speed OR lower priority to go first. Since Beak Blast is -3,
+        // Snorlax's Tackle (0) always goes first regardless of speed.
+        let mut beak_blaster = simple_mon(Species::Toucannon, PokemonMove::BeakBlast);
+        let full_hp = beak_blaster.stats[0];
+        beak_blaster.hp = full_hp;
+        let snorlax = simple_mon(Species::Snorlax, PokemonMove::Tackle);
+        let state = battle_state_from_lists(vec![beak_blaster], vec![], vec![snorlax], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        // All outcomes: Snorlax (Tackle user) should be burned after hitting the BeakBlast user
+        let (bs, _) = extract_battle_state(outcomes);
+        assert!(
+            matches!(bs.p2_active_mons[0].status, Some(Status::Burn)),
+            "Contact attacker should be burned by Beak Blast's charging volatile"
+        );
+    }
+
+    #[test]
+    fn beak_blast_no_burn_on_non_contact_move() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let beak_blaster = simple_mon(Species::Toucannon, PokemonMove::BeakBlast);
+        // Earth Power is a non-contact special move
+        let attacker = simple_mon(Species::Garchomp, PokemonMove::EarthPower);
+        let state = battle_state_from_lists(vec![beak_blaster], vec![], vec![attacker], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        let no_burn = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                !matches!(bs.p2_active_mons[0].status, Some(Status::Burn))
+            } else { true }
+        });
+        assert!(no_burn, "Non-contact move should not trigger Beak Blast burn");
+    }
+
+    #[test]
+    fn beak_blast_no_burn_fire_type_attacker() {
+        // Fire types are immune to burn; their contact moves should not trigger a burn from Beak Blast
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let beak_blaster = simple_mon(Species::Toucannon, PokemonMove::BeakBlast);
+        // Charizard is Fire type — immune to burn
+        let fire_attacker = simple_mon(Species::Charizard, PokemonMove::Tackle);
+        let state = battle_state_from_lists(vec![beak_blaster], vec![], vec![fire_attacker], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        let no_burn = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                !matches!(bs.p2_active_mons[0].status, Some(Status::Burn))
+            } else { true }
+        });
+        assert!(no_burn, "Fire-type attacker should be immune to Beak Blast burn");
+    }
+
+    #[test]
+    fn beak_blast_also_deals_damage_at_low_priority() {
+        // After the contact attacker moves (priority 0), Beak Blast (priority -3) should also
+        // deal damage to the target.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let beak_blaster = simple_mon(Species::Toucannon, PokemonMove::BeakBlast);
+        let mut target = simple_mon(Species::Snorlax, PokemonMove::Tackle);
+        let full_hp = target.stats[0];
+        target.hp = full_hp;
+        let state = battle_state_from_lists(vec![beak_blaster], vec![], vec![target], vec![]);
+
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+
+        // Snorlax should have taken damage from Beak Blast in addition to being burned
+        let took_beak_blast_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_active_mons[0].hp < full_hp
+            } else { true }
+        });
+        assert!(took_beak_blast_damage, "Beak Blast should deal damage at priority -3 after contact move resolves");
+    }
+}

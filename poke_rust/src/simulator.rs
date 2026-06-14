@@ -154,6 +154,31 @@ fn resolve_confusion_self_hit_outcomes(
     outcomes
 }
 
+/// Before any action resolves this turn, give Beak Blast users a `BeakBlastCharging` volatile.
+/// Any contact move that hits the holder while the volatile is active burns the attacker (100%).
+/// The volatile auto-expires at end-of-turn; it is also explicitly removed after Beak Blast fires.
+fn apply_priority_charge_volatiles(bs: &mut BattleState) {
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::VolatileStatusState;
+    let beak_blast_users: Vec<FieldSlot> = bs.action_queue.iter().filter_map(|a| {
+        if let Action::MoveAction(ma) = a {
+            if ma.move_name == PokemonMove::BeakBlast { Some(ma.user_slot) } else { None }
+        } else { None }
+    }).collect();
+
+    for slot in beak_blast_users {
+        if let Some(mon) = mon_at_slot_mut(bs, slot) {
+            if mon.fainted { continue; }
+            let already_has = mon.volatiles.iter().any(|v| matches!(v,
+                VolatileStatusState::TurnStatus(VolatileStatus::BeakBlastCharging, _)
+            ));
+            if !already_has {
+                mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::BeakBlastCharging, 1));
+            }
+        }
+    }
+}
+
 /// Resolve the targets for a charging or semi-invulnerable move, returning `None` (→ no-op branch)
 /// if there are none.
 fn resolve_charge_targets(
@@ -2820,6 +2845,19 @@ fn possible_damage_outcomes_for_move(
             continue;
         }
 
+        // Phantom Force / Shadow Force: breaks_protect moves also *remove* the target's protect
+        // volatile so that follow-up moves in the same turn (doubles) can hit the target freely.
+        if move_data.breaks_protect {
+            if let Some(tgt_mon) = mon_at_slot_mut(&mut next_state, *target_slot) {
+                tgt_mon.volatiles.retain(|v| !matches!(v,
+                    crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Protect, _)
+                    | crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::KingsShield, _)
+                    | crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpikyShield, _)
+                    | crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::BanefulBunker, _)
+                ));
+            }
+        }
+
         let weather_blocks_move = matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special)
             && ((simulator_helpers::weather_is_heavy_rain(&next_state) && matches!(move_data.pokemon_type, PokemonType::Fire))
                 || (simulator_helpers::weather_is_harsh_sunlight(&next_state) && matches!(move_data.pokemon_type, PokemonType::Water)));
@@ -4085,6 +4123,14 @@ fn apply_post_damage_move_effects(
         }
     }
 
+    // Beak Blast: remove the charging volatile after the move resolves so that
+    // subsequent contacts this same turn (doubles) don't still trigger burns.
+    if move_data.name == PokemonMove::BeakBlast {
+        if let Some(user) = mon_at_slot_mut(&mut bs, attacker_slot) {
+            simulator_helpers::remove_status_volatile(user, &VolatileStatus::BeakBlastCharging);
+        }
+    }
+
     if let Some(winner) = forced_winner {
         MatchState::GameOverState { winner }
     } else if let Some(game_over) = game_over_state_if_battle_finished(&bs) {
@@ -4369,6 +4415,19 @@ pub fn simulate_turn(
                     bs.turn_started = replacement_needed(bs);
                     bs.turn_ended = bs.turn_started;
                 }
+            }
+            (st, prob)
+        })
+        .collect();
+    let initial_branches = simulator_helpers::coalesce_branches(initial_branches);
+
+    // Beak Blast: before any action resolves, give the user a BeakBlastCharging volatile.
+    // Any contact move hitting them this turn will burn the attacker (see apply_contact_hit_reactions).
+    let initial_branches: Vec<(MatchState, f64)> = initial_branches
+        .into_iter()
+        .map(|(mut st, prob)| {
+            if let MatchState::BattleState(ref mut bs) = st {
+                apply_priority_charge_volatiles(bs);
             }
             (st, prob)
         })
