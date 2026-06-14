@@ -42,16 +42,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 ---
 
 ## Moves
-### Item manipulation moves
-Steal, swap, remove, or force consumption of held items.
-- Bug Bite / Pluck — eat target's Berry and apply its effect to user
-- Corrosive Gas — all Pokémon on the field lose their held item
-- Covet / Thief — steal target's item if user is empty-handed
-- Fling — throw held item at target; power and effect depend on the item
-- Knock Off — 1.5× power if target holds an item; target loses its item
-- Recycle — recover the most recent item the user consumed
-- Switcheroo / Trick — swap held items with the target
-- Teatime — all Pokémon on the field eat their held Berry
 
 ### Side and field condition moves
 Set multi-turn conditions on one or both sides of the field.

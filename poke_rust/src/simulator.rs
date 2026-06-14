@@ -1513,6 +1513,99 @@ fn possible_damage_outcomes_for_move(
         return simulator_helpers::coalesce_branches(result);
     }
 
+    // Trick / Switcheroo: swap held items with the target. Fails if neither holds an item,
+    // if the target is behind a Substitute or has Sticky Hold, or if either item is locked.
+    if matches!(move_name, PokemonMove::Trick | PokemonMove::Switcheroo) {
+        let target_slot = target_slots[0];
+        let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        if simulator_helpers::protect_blocks_move(
+            &next_state, action.user_slot, target_slot, &target, move_data, false,
+        ).is_some()
+            || simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute)
+        {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if !simulator_helpers::try_swap_items(&mut next_state, action.user_slot, target_slot) {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Recycle: restore the user's most recently consumed item. Fails if the user already
+    // holds an item or has nothing to recover.
+    if move_name == PokemonMove::Recycle {
+        if !simulator_helpers::recover_consumed_item(&mut next_state, action.user_slot) {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Teatime: every Pokémon on the field eats its held Berry (bypassing Substitute and
+    // Unnerve). Fails only if no Pokémon on the field is holding a Berry.
+    if move_name == PokemonMove::Teatime {
+        let mut any_ate = false;
+        let n_p1 = next_state.p1_active_mons.len();
+        let n_p2 = next_state.p2_active_mons.len();
+        for (player, n) in [(Player::P1, n_p1), (Player::P2, n_p2)] {
+            for i in 0..n {
+                let slot = FieldSlot { player, slot_index: i as u8 };
+                if simulator_helpers::force_eat_held_berry(&mut next_state, slot, true) {
+                    any_ate = true;
+                }
+            }
+        }
+        if !any_ate {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Corrosive Gas: destroy the held items of all adjacent foes (respecting Sticky Hold,
+    // Substitute, Protect and locked items). The move itself always executes.
+    if move_name == PokemonMove::CorrosiveGas {
+        let opposing_player = match action.user_slot.player {
+            Player::P1 => Player::P2,
+            Player::P2 => Player::P1,
+        };
+        let n_opposing = match opposing_player {
+            Player::P1 => next_state.p1_active_mons.len(),
+            Player::P2 => next_state.p2_active_mons.len(),
+        };
+        for i in 0..n_opposing {
+            let slot = FieldSlot { player: opposing_player, slot_index: i as u8 };
+            let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, slot).cloned() else {
+                continue;
+            };
+            if simulator_helpers::protect_blocks_move(
+                &next_state, action.user_slot, slot, &target, move_data, false,
+            ).is_some()
+                || simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute)
+            {
+                continue;
+            }
+            simulator_helpers::try_remove_item(&mut next_state, slot);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Fling fails outright if the user has no flingable item (or its item is suppressed by
+    // Magic Room / Klutz / Neutralizing Gas). Otherwise it proceeds as a normal damaging
+    // move whose power and added effect come from the thrown item.
+    if move_name == PokemonMove::Fling {
+        let can_fling = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| simulator_helpers::item_is_active(&next_state, m) && m.item.fling_power().is_some())
+            .unwrap_or(false);
+        if !can_fling {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
     // Encore: lock the target into repeating its last move for 3 turns. If the target still has a
     // pending move action this turn (it acts after the Encore user), rewrite that queued action to
     // the encored move so it is forced THIS turn.
@@ -3782,6 +3875,85 @@ fn apply_post_damage_move_effects(
                 };
                 if damaged && simulator_helpers::try_steal_item(&mut bs, attacker_slot, slot) {
                     break; // only one item can be held
+                }
+            }
+        }
+    }
+
+    // Item-manipulation damaging moves apply their item effect after damage, on the foe
+    // they hit. Detection mirrors Magician: a foe whose HP dropped vs the pre-move
+    // baseline was hit directly (a Substitute that absorbed the hit leaves HP unchanged,
+    // so the item effect is correctly skipped). Sticky Hold and untransferable items are
+    // enforced inside the helpers.
+    if !attacker_fainted
+        && total_dmg > 0
+        && matches!(
+            move_data.name,
+            PokemonMove::KnockOff
+                | PokemonMove::Thief
+                | PokemonMove::Covet
+                | PokemonMove::BugBite
+                | PokemonMove::Pluck
+        )
+    {
+        let n_opposing = match opposing_player {
+            Player::P1 => bs.p1_active_mons.len(),
+            Player::P2 => bs.p2_active_mons.len(),
+        };
+        for i in 0..n_opposing {
+            let slot = FieldSlot { player: opposing_player, slot_index: i as u8 };
+            let damaged = {
+                let before = simulator_helpers::get_pokemon_at_slot(baseline, slot).map(|m| m.hp);
+                let after = simulator_helpers::get_pokemon_at_slot(&bs, slot).map(|m| m.hp);
+                matches!((before, after), (Some(b), Some(a)) if a < b)
+            };
+            if !damaged {
+                continue;
+            }
+            match move_data.name {
+                PokemonMove::KnockOff => {
+                    simulator_helpers::try_remove_item(&mut bs, slot);
+                }
+                PokemonMove::Thief | PokemonMove::Covet => {
+                    simulator_helpers::try_steal_item(&mut bs, attacker_slot, slot);
+                }
+                PokemonMove::BugBite | PokemonMove::Pluck => {
+                    simulator_helpers::try_eat_targets_berry(&mut bs, attacker_slot, slot);
+                }
+                _ => {}
+            }
+            break; // single-target moves
+        }
+    }
+
+    // Fling: the thrown item is consumed whenever the move is used (even on a miss), and
+    // its item-dependent added effect lands on the foe it hit.
+    if !attacker_fainted && move_data.name == PokemonMove::Fling {
+        let item = simulator_helpers::get_pokemon_at_slot(&bs, attacker_slot)
+            .map(|m| m.item.clone())
+            .unwrap_or(Item::None);
+        if item != Item::None {
+            if let Some(user) = mon_at_slot_mut(&mut bs, attacker_slot) {
+                user.consumed_item = Some(item.clone());
+                user.item = Item::None;
+                user.item_lost = true;
+            }
+            if total_dmg > 0 {
+                let n_opposing = match opposing_player {
+                    Player::P1 => bs.p1_active_mons.len(),
+                    Player::P2 => bs.p2_active_mons.len(),
+                };
+                for i in 0..n_opposing {
+                    let slot = FieldSlot { player: opposing_player, slot_index: i as u8 };
+                    let damaged = {
+                        let before = simulator_helpers::get_pokemon_at_slot(baseline, slot).map(|m| m.hp);
+                        let after = simulator_helpers::get_pokemon_at_slot(&bs, slot).map(|m| m.hp);
+                        matches!((before, after), (Some(b), Some(a)) if a < b)
+                    };
+                    if damaged {
+                        simulator_helpers::apply_fling_effect(&mut bs, attacker_slot, slot, &item);
+                        break;
+                    }
                 }
             }
         }

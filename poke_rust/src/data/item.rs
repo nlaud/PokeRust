@@ -1180,4 +1180,563 @@ impl Item {
             _ => Item::Unknown(s.to_string()),
         }
     }
+
+    /// Base power when thrown by Fling, or `None` if the item cannot be flung.
+    pub fn fling_power(&self) -> Option<u16> {
+        match self {
+            Item::AbilityShield => Some(30),
+            Item::AbsorbBulb => Some(30),
+            Item::AdamantOrb => Some(60),
+            Item::AdrenalineOrb => Some(30),
+            Item::AguavBerry => Some(10),
+            Item::AirBalloon => Some(10),
+            Item::ApicotBerry => Some(10),
+            Item::ArmorFossil => Some(100),
+            Item::AspearBerry => Some(10),
+            Item::AssaultVest => Some(80),
+            Item::AuspiciousArmor => Some(30),
+            Item::BabiriBerry => Some(10),
+            Item::BelueBerry => Some(10),
+            Item::Berry => Some(10),
+            Item::BerryJuice => Some(30),
+            Item::BerrySweet => Some(10),
+            Item::BigNugget => Some(130),
+            Item::BigRoot => Some(10),
+            Item::BindingBand => Some(30),
+            Item::BitterBerry => Some(10),
+            Item::BlackBelt => Some(30),
+            Item::BlackGlasses => Some(30),
+            Item::BlackSludge => Some(30),
+            Item::BlukBerry => Some(10),
+            Item::BlunderPolicy => Some(80),
+            Item::BoosterEnergy => Some(30),
+            Item::BottleCap => Some(30),
+            Item::BrightPowder => Some(10),
+            Item::BurntBerry => Some(10),
+            Item::CellBattery => Some(30),
+            Item::Charcoal => Some(30),
+            Item::ChartiBerry => Some(10),
+            Item::CheriBerry => Some(10),
+            Item::ChestoBerry => Some(10),
+            Item::ChilanBerry => Some(10),
+            Item::ChippedPot => Some(80),
+            Item::ChoiceBand => Some(10),
+            Item::ChoiceScarf => Some(10),
+            Item::ChoiceSpecs => Some(10),
+            Item::ChopleBerry => Some(10),
+            Item::ClawFossil => Some(100),
+            Item::ClearAmulet => Some(30),
+            Item::CloverSweet => Some(10),
+            Item::CobaBerry => Some(10),
+            Item::ColburBerry => Some(10),
+            Item::CornerstoneMask => Some(60),
+            Item::CornnBerry => Some(10),
+            Item::CoverFossil => Some(100),
+            Item::CovertCloak => Some(30),
+            Item::CrackedPot => Some(80),
+            Item::CustapBerry => Some(10),
+            Item::DampRock => Some(60),
+            Item::DawnStone => Some(80),
+            Item::DeepSeaScale => Some(30),
+            Item::DeepSeaTooth => Some(90),
+            Item::DestinyKnot => Some(10),
+            Item::DomeFossil => Some(100),
+            Item::DragonFang => Some(70),
+            Item::DragonScale => Some(30),
+            Item::DubiousDisc => Some(50),
+            Item::DurinBerry => Some(10),
+            Item::DuskStone => Some(80),
+            Item::EjectButton => Some(30),
+            Item::EjectPack => Some(50),
+            Item::Electirizer => Some(80),
+            Item::ElectricSeed => Some(10),
+            Item::EnigmaBerry => Some(10),
+            Item::Eviolite => Some(40),
+            Item::ExpertBelt => Some(10),
+            Item::FairyFeather => Some(10),
+            Item::FigyBerry => Some(10),
+            Item::FireStone => Some(30),
+            Item::FlameOrb => Some(30),
+            Item::FloatStone => Some(30),
+            Item::FlowerSweet => Some(0),
+            Item::FocusBand => Some(10),
+            Item::FocusSash => Some(10),
+            Item::FossilizedBird => Some(100),
+            Item::FossilizedDino => Some(100),
+            Item::FossilizedDrake => Some(100),
+            Item::FossilizedFish => Some(100),
+            Item::FullIncense => Some(10),
+            Item::GalaricaCuff => Some(30),
+            Item::GalaricaWreath => Some(30),
+            Item::GanlonBerry => Some(10),
+            Item::GoldBerry => Some(10),
+            Item::GoldBottleCap => Some(30),
+            Item::GrassySeed => Some(10),
+            Item::GrepaBerry => Some(10),
+            Item::GripClaw => Some(90),
+            Item::GriseousOrb => Some(60),
+            Item::HabanBerry => Some(10),
+            Item::HardStone => Some(100),
+            Item::HearthflameMask => Some(60),
+            Item::HeatRock => Some(60),
+            Item::HeavyDutyBoots => Some(80),
+            Item::HelixFossil => Some(100),
+            Item::HondewBerry => Some(10),
+            Item::IapapaBerry => Some(10),
+            Item::IceBerry => Some(10),
+            Item::IceStone => Some(30),
+            Item::IcyRock => Some(40),
+            Item::IronBall => Some(130),
+            Item::JabocaBerry => Some(10),
+            Item::JawFossil => Some(100),
+            Item::KasibBerry => Some(10),
+            Item::KebiaBerry => Some(10),
+            Item::KeeBerry => Some(10),
+            Item::KelpsyBerry => Some(10),
+            Item::KingsRock => Some(30),
+            Item::LaggingTail => Some(10),
+            Item::LansatBerry => Some(10),
+            Item::LaxIncense => Some(10),
+            Item::LeafStone => Some(30),
+            Item::Leek => Some(60),
+            Item::Leftovers => Some(10),
+            Item::LeppaBerry => Some(10),
+            Item::LiechiBerry => Some(10),
+            Item::LifeOrb => Some(30),
+            Item::LightBall => Some(30),
+            Item::LightClay => Some(30),
+            Item::LoadedDice => Some(30),
+            Item::LoveSweet => Some(10),
+            Item::LuckyPunch => Some(40),
+            Item::LumBerry => Some(10),
+            Item::LuminousMoss => Some(30),
+            Item::LustrousOrb => Some(60),
+            Item::MachoBrace => Some(60),
+            Item::Magmarizer => Some(80),
+            Item::Magnet => Some(30),
+            Item::MagoBerry => Some(10),
+            Item::MagostBerry => Some(10),
+            Item::MaliciousArmor => Some(30),
+            Item::MarangaBerry => Some(10),
+            Item::MasterpieceTeacup => Some(80),
+            Item::MentalHerb => Some(10),
+            Item::MetalCoat => Some(30),
+            Item::MetalPowder => Some(10),
+            Item::Metronome => Some(30),
+            Item::MicleBerry => Some(10),
+            Item::MintBerry => Some(10),
+            Item::MiracleBerry => Some(10),
+            Item::MiracleSeed => Some(30),
+            Item::MirrorHerb => Some(30),
+            Item::MistySeed => Some(10),
+            Item::MoonStone => Some(30),
+            Item::MuscleBand => Some(10),
+            Item::MysteryBerry => Some(10),
+            Item::MysticWater => Some(30),
+            Item::NanabBerry => Some(10),
+            Item::NeverMeltIce => Some(30),
+            Item::NomelBerry => Some(10),
+            Item::OccaBerry => Some(10),
+            Item::OddIncense => Some(10),
+            Item::OldAmber => Some(100),
+            Item::OranBerry => Some(10),
+            Item::OvalStone => Some(80),
+            Item::PRZCureBerry => Some(10),
+            Item::PSNCureBerry => Some(10),
+            Item::PamtreBerry => Some(10),
+            Item::PasshoBerry => Some(10),
+            Item::PayapaBerry => Some(10),
+            Item::PechaBerry => Some(10),
+            Item::PersimBerry => Some(10),
+            Item::PetayaBerry => Some(10),
+            Item::PinapBerry => Some(10),
+            Item::PlumeFossil => Some(100),
+            Item::PoisonBarb => Some(70),
+            Item::PomegBerry => Some(10),
+            Item::PowerAnklet => Some(70),
+            Item::PowerBand => Some(70),
+            Item::PowerBelt => Some(70),
+            Item::PowerBracer => Some(70),
+            Item::PowerHerb => Some(10),
+            Item::PowerLens => Some(70),
+            Item::PowerWeight => Some(70),
+            Item::PrettyFeather => Some(20),
+            Item::PrismScale => Some(30),
+            Item::ProtectivePads => Some(30),
+            Item::Protector => Some(80),
+            Item::PsychicSeed => Some(10),
+            Item::PunchingGlove => Some(30),
+            Item::QualotBerry => Some(10),
+            Item::QuickClaw => Some(80),
+            Item::QuickPowder => Some(10),
+            Item::RabutaBerry => Some(10),
+            Item::RareBone => Some(100),
+            Item::RawstBerry => Some(10),
+            Item::RazorClaw => Some(80),
+            Item::RazorFang => Some(30),
+            Item::RazzBerry => Some(10),
+            Item::ReaperCloth => Some(10),
+            Item::RedCard => Some(10),
+            Item::RibbonSweet => Some(10),
+            Item::RindoBerry => Some(10),
+            Item::RingTarget => Some(10),
+            Item::RockIncense => Some(10),
+            Item::RockyHelmet => Some(60),
+            Item::RoomService => Some(100),
+            Item::RootFossil => Some(100),
+            Item::RoseIncense => Some(10),
+            Item::RoseliBerry => Some(10),
+            Item::RowapBerry => Some(10),
+            Item::Sachet => Some(80),
+            Item::SafetyGoggles => Some(80),
+            Item::SailFossil => Some(100),
+            Item::SalacBerry => Some(10),
+            Item::ScopeLens => Some(30),
+            Item::SeaIncense => Some(10),
+            Item::SharpBeak => Some(50),
+            Item::ShedShell => Some(10),
+            Item::ShellBell => Some(30),
+            Item::ShinyStone => Some(80),
+            Item::ShucaBerry => Some(10),
+            Item::SilkScarf => Some(10),
+            Item::SilverPowder => Some(10),
+            Item::SitrusBerry => Some(10),
+            Item::SkullFossil => Some(100),
+            Item::SmoothRock => Some(10),
+            Item::Snowball => Some(30),
+            Item::SoftSand => Some(10),
+            Item::SoulDew => Some(30),
+            Item::SpellTag => Some(30),
+            Item::SpelonBerry => Some(10),
+            Item::StarSweet => Some(10),
+            Item::StarfBerry => Some(10),
+            Item::Stick => Some(60),
+            Item::StickyBarb => Some(80),
+            Item::StrawberrySweet => Some(10),
+            Item::SunStone => Some(30),
+            Item::SweetApple => Some(30),
+            Item::SyrupyApple => Some(30),
+            Item::TR00 => Some(10),
+            Item::TR01 => Some(85),
+            Item::TR02 => Some(90),
+            Item::TR03 => Some(110),
+            Item::TR04 => Some(90),
+            Item::TR05 => Some(90),
+            Item::TR06 => Some(110),
+            Item::TR07 => Some(10),
+            Item::TR08 => Some(90),
+            Item::TR09 => Some(110),
+            Item::TR10 => Some(100),
+            Item::TR11 => Some(90),
+            Item::TR12 => Some(10),
+            Item::TR13 => Some(10),
+            Item::TR14 => Some(10),
+            Item::TR15 => Some(110),
+            Item::TR16 => Some(80),
+            Item::TR17 => Some(10),
+            Item::TR18 => Some(80),
+            Item::TR19 => Some(80),
+            Item::TR20 => Some(10),
+            Item::TR21 => Some(10),
+            Item::TR22 => Some(90),
+            Item::TR23 => Some(10),
+            Item::TR24 => Some(120),
+            Item::TR25 => Some(80),
+            Item::TR26 => Some(10),
+            Item::TR27 => Some(10),
+            Item::TR28 => Some(120),
+            Item::TR29 => Some(10),
+            Item::TR30 => Some(10),
+            Item::TR31 => Some(100),
+            Item::TR32 => Some(80),
+            Item::TR33 => Some(80),
+            Item::TR34 => Some(120),
+            Item::TR35 => Some(90),
+            Item::TR36 => Some(95),
+            Item::TR37 => Some(10),
+            Item::TR38 => Some(10),
+            Item::TR39 => Some(120),
+            Item::TR40 => Some(10),
+            Item::TR41 => Some(85),
+            Item::TR42 => Some(90),
+            Item::TR43 => Some(130),
+            Item::TR44 => Some(10),
+            Item::TR45 => Some(90),
+            Item::TR46 => Some(10),
+            Item::TR47 => Some(80),
+            Item::TR48 => Some(10),
+            Item::TR49 => Some(10),
+            Item::TR50 => Some(90),
+            Item::TR51 => Some(10),
+            Item::TR52 => Some(10),
+            Item::TR53 => Some(120),
+            Item::TR54 => Some(10),
+            Item::TR55 => Some(120),
+            Item::TR56 => Some(80),
+            Item::TR57 => Some(80),
+            Item::TR58 => Some(80),
+            Item::TR59 => Some(80),
+            Item::TR60 => Some(80),
+            Item::TR61 => Some(90),
+            Item::TR62 => Some(85),
+            Item::TR63 => Some(80),
+            Item::TR64 => Some(120),
+            Item::TR65 => Some(90),
+            Item::TR66 => Some(120),
+            Item::TR67 => Some(90),
+            Item::TR68 => Some(10),
+            Item::TR69 => Some(80),
+            Item::TR70 => Some(80),
+            Item::TR71 => Some(130),
+            Item::TR72 => Some(120),
+            Item::TR73 => Some(120),
+            Item::TR74 => Some(80),
+            Item::TR75 => Some(100),
+            Item::TR76 => Some(10),
+            Item::TR77 => Some(10),
+            Item::TR78 => Some(95),
+            Item::TR79 => Some(10),
+            Item::TR80 => Some(10),
+            Item::TR81 => Some(95),
+            Item::TR82 => Some(20),
+            Item::TR83 => Some(10),
+            Item::TR84 => Some(80),
+            Item::TR85 => Some(10),
+            Item::TR86 => Some(90),
+            Item::TR87 => Some(80),
+            Item::TR88 => Some(10),
+            Item::TR89 => Some(110),
+            Item::TR90 => Some(90),
+            Item::TR91 => Some(10),
+            Item::TR92 => Some(80),
+            Item::TR93 => Some(85),
+            Item::TR94 => Some(95),
+            Item::TR95 => Some(80),
+            Item::TR96 => Some(90),
+            Item::TR97 => Some(85),
+            Item::TR98 => Some(85),
+            Item::TR99 => Some(80),
+            Item::TamatoBerry => Some(10),
+            Item::TangaBerry => Some(10),
+            Item::TartApple => Some(30),
+            Item::TerrainExtender => Some(60),
+            Item::ThickClub => Some(90),
+            Item::ThroatSpray => Some(30),
+            Item::ThunderStone => Some(30),
+            Item::ToxicOrb => Some(30),
+            Item::TwistedSpoon => Some(30),
+            Item::UnremarkableTeacup => Some(80),
+            Item::UpGrade => Some(30),
+            Item::UtilityUmbrella => Some(60),
+            Item::VileVial => Some(60),
+            Item::WacanBerry => Some(10),
+            Item::WaterStone => Some(30),
+            Item::WatmelBerry => Some(10),
+            Item::WaveIncense => Some(10),
+            Item::WeaknessPolicy => Some(80),
+            Item::WellspringMask => Some(60),
+            Item::WepearBerry => Some(10),
+            Item::WhippedDream => Some(80),
+            Item::WhiteHerb => Some(10),
+            Item::WideLens => Some(10),
+            Item::WikiBerry => Some(10),
+            Item::WiseGlasses => Some(10),
+            Item::YacheBerry => Some(10),
+            Item::ZoomLens => Some(10),
+            _ => None,
+        }
+    }
+
+    /// Status/volatile rider applied to the Fling target, as a Showdown id.
+    pub fn fling_effect_id(&self) -> Option<&'static str> {
+        match self {
+            Item::FlameOrb => Some("brn"),
+            Item::KingsRock => Some("flinch"),
+            Item::LightBall => Some("par"),
+            Item::PoisonBarb => Some("psn"),
+            Item::RazorFang => Some("flinch"),
+            Item::ToxicOrb => Some("tox"),
+            _ => None,
+        }
+    }
+
+    /// Whether this item is a Berry.
+    pub fn is_berry(&self) -> bool {
+        matches!(self,
+            Item::AguavBerry
+            | Item::ApicotBerry
+            | Item::AspearBerry
+            | Item::BabiriBerry
+            | Item::BelueBerry
+            | Item::Berry
+            | Item::BitterBerry
+            | Item::BlukBerry
+            | Item::BurntBerry
+            | Item::ChartiBerry
+            | Item::CheriBerry
+            | Item::ChestoBerry
+            | Item::ChilanBerry
+            | Item::ChopleBerry
+            | Item::CobaBerry
+            | Item::ColburBerry
+            | Item::CornnBerry
+            | Item::CustapBerry
+            | Item::DurinBerry
+            | Item::EnigmaBerry
+            | Item::FigyBerry
+            | Item::GanlonBerry
+            | Item::GoldBerry
+            | Item::GrepaBerry
+            | Item::HabanBerry
+            | Item::HondewBerry
+            | Item::IapapaBerry
+            | Item::IceBerry
+            | Item::JabocaBerry
+            | Item::KasibBerry
+            | Item::KebiaBerry
+            | Item::KeeBerry
+            | Item::KelpsyBerry
+            | Item::LansatBerry
+            | Item::LeppaBerry
+            | Item::LiechiBerry
+            | Item::LumBerry
+            | Item::MagoBerry
+            | Item::MagostBerry
+            | Item::MarangaBerry
+            | Item::MicleBerry
+            | Item::MintBerry
+            | Item::MiracleBerry
+            | Item::MysteryBerry
+            | Item::NanabBerry
+            | Item::NomelBerry
+            | Item::OccaBerry
+            | Item::OranBerry
+            | Item::PRZCureBerry
+            | Item::PSNCureBerry
+            | Item::PamtreBerry
+            | Item::PasshoBerry
+            | Item::PayapaBerry
+            | Item::PechaBerry
+            | Item::PersimBerry
+            | Item::PetayaBerry
+            | Item::PinapBerry
+            | Item::PomegBerry
+            | Item::QualotBerry
+            | Item::RabutaBerry
+            | Item::RawstBerry
+            | Item::RazzBerry
+            | Item::RindoBerry
+            | Item::RoseliBerry
+            | Item::RowapBerry
+            | Item::SalacBerry
+            | Item::ShucaBerry
+            | Item::SitrusBerry
+            | Item::SpelonBerry
+            | Item::StarfBerry
+            | Item::TamatoBerry
+            | Item::TangaBerry
+            | Item::WacanBerry
+            | Item::WatmelBerry
+            | Item::WepearBerry
+            | Item::WikiBerry
+            | Item::YacheBerry
+        )
+    }
+
+    /// Whether this item is a Z-Crystal.
+    pub fn is_z_crystal(&self) -> bool {
+        matches!(self,
+            Item::AloraichiumZ
+            | Item::BuginiumZ
+            | Item::DarkiniumZ
+            | Item::DecidiumZ
+            | Item::DragoniumZ
+            | Item::EeviumZ
+            | Item::ElectriumZ
+            | Item::FairiumZ
+            | Item::FightiniumZ
+            | Item::FiriumZ
+            | Item::FlyiniumZ
+            | Item::GhostiumZ
+            | Item::GrassiumZ
+            | Item::GroundiumZ
+            | Item::IciumZ
+            | Item::InciniumZ
+            | Item::KommoniumZ
+            | Item::LunaliumZ
+            | Item::LycaniumZ
+            | Item::MarshadiumZ
+            | Item::MewniumZ
+            | Item::MimikiumZ
+            | Item::NormaliumZ
+            | Item::PikaniumZ
+            | Item::PikashuniumZ
+            | Item::PoisoniumZ
+            | Item::PrimariumZ
+            | Item::PsychiumZ
+            | Item::RockiumZ
+            | Item::SnorliumZ
+            | Item::SolganiumZ
+            | Item::SteeliumZ
+            | Item::TapuniumZ
+            | Item::UltranecroziumZ
+            | Item::WateriumZ
+        )
+    }
+
+    /// Whether this item is a Plate (Arceus type item).
+    pub fn is_plate(&self) -> bool {
+        matches!(self,
+            Item::DracoPlate
+            | Item::DreadPlate
+            | Item::EarthPlate
+            | Item::FistPlate
+            | Item::FlamePlate
+            | Item::IciclePlate
+            | Item::InsectPlate
+            | Item::IronPlate
+            | Item::MeadowPlate
+            | Item::MindPlate
+            | Item::PixiePlate
+            | Item::SkyPlate
+            | Item::SplashPlate
+            | Item::SpookyPlate
+            | Item::StonePlate
+            | Item::ToxicPlate
+            | Item::ZapPlate
+        )
+    }
+
+    /// Whether this item is a Drive (Genesect type item).
+    pub fn is_drive(&self) -> bool {
+        matches!(self,
+            Item::BurnDrive
+            | Item::ChillDrive
+            | Item::DouseDrive
+            | Item::ShockDrive
+        )
+    }
+
+    /// Whether this item is a Memory (Silvally type item).
+    pub fn is_memory(&self) -> bool {
+        matches!(self,
+            Item::BugMemory
+            | Item::DarkMemory
+            | Item::DragonMemory
+            | Item::ElectricMemory
+            | Item::FairyMemory
+            | Item::FightingMemory
+            | Item::FireMemory
+            | Item::FlyingMemory
+            | Item::GhostMemory
+            | Item::GrassMemory
+            | Item::GroundMemory
+            | Item::IceMemory
+            | Item::PoisonMemory
+            | Item::PsychicMemory
+            | Item::RockMemory
+            | Item::SteelMemory
+            | Item::WaterMemory
+        )
+    }
 }
