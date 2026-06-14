@@ -1388,6 +1388,7 @@ fn resist_berry_multiplier(
 /// Must be called with the current item-suppression state.
 /// Called after any successful berry consumption. Centralises post-eat side-effects.
 pub(crate) fn on_berry_eaten(mon: &mut PokemonState, _eaten: &Item, env: &BerryEnv) {
+    mon.ate_berry_this_battle = true;
     // Cheek Pouch: heal ⅓ max HP on top of the berry effect, suppressed by Heal Block.
     if env.ability_active
         && mon.ability == Ability::CheekPouch
@@ -1539,6 +1540,26 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
         }
     }
 
+    // Super Fang: deals damage equal to ½ of the target's current HP (rounded down, min 1).
+    // Ghost-type immunity applies (Normal-type move). No crit / spread / roll scaling.
+    if move_data.name == crate::data::pokemon_move::PokemonMove::SuperFang {
+        let dmg = if effectiveness > 0.0 && invulnerability_multiplier > 0.0 {
+            (target.hp / 2).max(1)
+        } else { 0 };
+        return vec![(dmg, false, 1.0)];
+    }
+
+    // Endeavor: reduces the target's HP to match the user's. Deals (target.hp − user.hp)
+    // damage; fails (no damage) if user HP ≥ target HP. Ghost immunity applies (Normal-type).
+    if move_data.name == crate::data::pokemon_move::PokemonMove::Endeavor {
+        let dmg = if effectiveness > 0.0 && invulnerability_multiplier > 0.0
+            && target.hp > attacker.hp
+        {
+            target.hp - attacker.hp
+        } else { 0 };
+        return vec![(dmg, false, 1.0)];
+    }
+
     // Final Gambit: deals fixed damage equal to the user's current HP. Type immunity (e.g.
     // Ghost vs Fighting) and invulnerability still zero out the damage. No crit / spread /
     // roll scaling. The user faint is handled in apply_post_damage_move_effects via the
@@ -1595,6 +1616,23 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let base_power_override = base_power_override.or_else(||
         variable_move_base_power(_state, attacker, target, _user_slot, _target_slot, move_data));
     let bp            = effective_base_power(_state, attacker, target, move_data, base_power_override);
+
+    // Fickle Beam: 30% chance to double power (80 → 160). Fork into two weighted branches.
+    // Only when base_power_override is None to avoid infinite recursion on re-entry.
+    if move_data.name == crate::data::pokemon_move::PokemonMove::FickleBeam && base_power_override.is_none() {
+        let normal_outcomes = calculate_damage_outcomes_for_target_with_options(
+            _state, attacker, target, _user_slot, _target_slot, move_data,
+            config, targets_multiplier, invulnerability_multiplier,
+            Some(move_data.base_power), forced_damage_roll);
+        let double_outcomes = calculate_damage_outcomes_for_target_with_options(
+            _state, attacker, target, _user_slot, _target_slot, move_data,
+            config, targets_multiplier, invulnerability_multiplier,
+            Some(move_data.base_power * 2), forced_damage_roll);
+        let mut combined = Vec::with_capacity(normal_outcomes.len() + double_outcomes.len());
+        for (d, c, p) in normal_outcomes { combined.push((d, c, p * 0.7)); }
+        for (d, c, p) in double_outcomes { combined.push((d, c, p * 0.3)); }
+        return combined;
+    }
 
     // A genuinely 0-BP hit deals 0 damage — no phantom +2 from the formula,
     // and no min-1 clamp. This covers moves with basePower: 0 and no override.

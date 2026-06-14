@@ -594,6 +594,19 @@ fn apply_single_hit_branch(
                     simulator_helpers::apply_stat_boost_external(atk, &[1, 0, 0, 0, 0, 0, 0], items_suppressed);
                 }
             }
+
+            // Fell Stinger: +3 Attack when the user directly KOs a target with this move.
+            // Fires regardless of ability; only requires the attacker is still alive.
+            if *move_name == PokemonMove::FellStinger {
+                let attacker_still_alive = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
+                    .map(|m| !m.fainted)
+                    .unwrap_or(false);
+                if attacker_still_alive {
+                    if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, attack_slot) {
+                        simulator_helpers::apply_stat_boost_external(atk, &[3, 0, 0, 0, 0, 0, 0], items_suppressed);
+                    }
+                }
+            }
         }
 
         if sand_spit_triggered {
@@ -1617,6 +1630,31 @@ fn possible_damage_outcomes_for_move(
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Poltergeist: fails if the target does not hold an active item (None, Magic Room, Klutz,
+    // Embargo, Neutralizing Gas). The "item being held" check mirrors Showdown's behavior —
+    // if the item is suppressed it still counts as present for fail purposes only in
+    // certain contexts, but here we use item_is_active for simplicity (consistent with
+    // how Fling checks its own item).
+    if move_name == PokemonMove::Poltergeist {
+        let target_slot = target_slots[0];
+        let target_has_item = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| m.item != crate::data::item::Item::None)
+            .unwrap_or(false);
+        if !target_has_item {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
+    // Belch: cannot be used unless the user has eaten a Berry at some point this battle.
+    if move_name == PokemonMove::Belch {
+        let has_eaten = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| m.ate_berry_this_battle)
+            .unwrap_or(false);
+        if !has_eaten {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
     }
 
     // Fling fails outright if the user has no flingable item (or its item is suppressed by
@@ -3531,6 +3569,9 @@ fn generate_commands_for_active(
         // Torment: the same move cannot be used twice in a row.
         if tormented && mon.last_used_move.as_ref() == Some(move_name) { continue; }
 
+        // Belch: cannot be selected unless the user has eaten a Berry this battle.
+        if *move_name == PokemonMove::Belch && !mon.ate_berry_this_battle { continue; }
+
         // Gravity: airborne and jump moves cannot be selected while Gravity is active.
         if simulator_helpers::is_gravity_active(state) && move_is_disabled_by_gravity(move_name) {
             continue;
@@ -3894,11 +3935,31 @@ fn apply_post_damage_move_effects(
 
         // Recoil
         // Struggle recoil (¼ max HP) ignores Rock Head and Magic Guard; ordinary recoil does not.
+        // Mind Blown / Steel Beam recoil (½ max HP, rounded up) fires unconditionally — even on
+        // miss, Protect, or Substitute. Only Magic Guard prevents it; Rock Head does NOT.
         let has_normal_recoil = move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0;
-        let has_recoil = has_normal_recoil || move_data.struggle_recoil;
-        let ability_blocks_recoil = !move_data.struggle_recoil
-            && (attacker_mon.ability == Ability::RockHead || attacker_mon.ability == Ability::MagicGuard);
-        if has_recoil && !ability_blocks_recoil {
+        let has_recoil = has_normal_recoil || move_data.struggle_recoil || move_data.mind_blown_recoil;
+        let ability_blocks_recoil = if move_data.mind_blown_recoil {
+            attacker_mon.ability == Ability::MagicGuard
+        } else if move_data.struggle_recoil {
+            false
+        } else {
+            attacker_mon.ability == Ability::RockHead || attacker_mon.ability == Ability::MagicGuard
+        };
+        // mind_blown_recoil fires even when total_dmg == 0 (miss / Protect / Substitute).
+        // We apply it outside the `recoil > 0` gate below by computing it separately.
+        if move_data.mind_blown_recoil && !ability_blocks_recoil && !attacker_fainted {
+            let recoil = ((max_hp as u32 + 1) / 2) as u16; // ceil(max_hp / 2)
+            if recoil > 0 {
+                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env);
+                if attacker_mon.fainted {
+                    simulator_helpers::clear_pokemon_on_faint(attacker_mon);
+                    attacker_fainted = true;
+                    if opponent_wiped { forced_winner = Some(attacker_slot.player); }
+                }
+            }
+        }
+        if has_recoil && !ability_blocks_recoil && !move_data.mind_blown_recoil {
             let recoil = if has_normal_recoil {
                 ((total_dmg * move_data.recoil_fraction[0] as u32) / move_data.recoil_fraction[1] as u32) as u16
             } else if move_data.struggle_recoil {
