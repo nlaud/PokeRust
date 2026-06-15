@@ -43,24 +43,14 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ## Moves
 
-### Complex moves — battle-state conditions
-These check or modify ongoing battle state. Each is individually moderate in complexity.
-- Tearful Look — −1 Atk and Sp. Atk to target; ignores evasion; hits through Protect
-
 ### Complex moves — transformation, substitution, and doubles
 More architecturally significant; each likely needs its own research pass.
 - Ally Switch — user swaps field position with an ally; success rate degrades each use
-- Destiny Bond — if user faints from an opponent's move this turn, that opponent also faints
 - Dragon Darts — two hits; splits between two opponents when both are present
-- Eerie Spell — deal damage + remove 3 PP from target's last-used move
-- Feint — hits through and removes Protect/Detect for this turn
 - Flying Press — damage uses both Fighting and Flying type effectiveness combined
 - Instruct — make the target immediately repeat their last move
-- Last Resort — 140 power; fails unless the user has already used all other known moves
-- Pollen Puff — deal damage to opponents; restore ½ max HP to allies instead
 - Round — power doubles for each additional Round user acting in the same turn
 - Shell Side Arm — use whichever calculation (physical or special) deals more damage; 20% poison
-- Smack Down — hits airborne targets; give them Landed status (grounded, loses Flying immunity)
 - Substitute — lose ¼ max HP to create a substitute that absorbs incoming damage
 
 ## Refactors

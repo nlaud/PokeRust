@@ -10,7 +10,7 @@ use crate::pokemon::{
     PokemonState, parse_team_sheet
 };
 use crate::dex_data::{MoveData, MoveTarget, PokemonData};
-use crate::dex_data::{MoveCategory, SelfDestructType, SelfSwitchType, Status, VolatileStatus};
+use crate::dex_data::{MoveCategory, SelfDestructType, SelfSwitchType, SideCondition, Status, VolatileStatus};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::species::Species;
@@ -117,6 +117,17 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             // Track the last move used (for Disable targeting); Struggle is excluded.
             if *move_name != PokemonMove::Struggle {
                 mon.last_used_move = Some(move_name.clone());
+            }
+
+            // Track which move slots have been used for Last Resort.
+            if let Some(slot) = mon.moves.iter().position(|m| m.as_ref() == Some(move_name)) {
+                if slot < 4 { mon.used_moves_this_field[slot] = true; }
+            }
+
+            // Destiny Bond: remove the volatile at the start of any subsequent action
+            // that is not Destiny Bond itself (mirrors Showdown's onBeforeMove removal).
+            if *move_name != PokemonMove::DestinyBond {
+                simulator_helpers::remove_status_volatile(mon, &VolatileStatus::DestinyBond);
             }
 
             // Gigaton Hammer / Blood Moon etc.: apply the "can't use repeatedly" volatile.
@@ -591,9 +602,49 @@ fn apply_single_hit_branch(
                 simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::SkyDrop);
             }
 
+            // Smack Down: knock the target out of Fly/Bounce invulnerability, remove
+            // MagnetRise and Telekinesis. The SmackDown grounded volatile is applied
+            // through the normal secondaries pipeline.
+            if *move_name == PokemonMove::SmackDown && eff_damage > 0 {
+                let was_airborne = target_mon.volatiles.iter().any(|v| matches!(v,
+                    crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(m), _)
+                    if matches!(m, PokemonMove::Fly | PokemonMove::Bounce)
+                ));
+                if was_airborne {
+                    target_mon.volatiles.retain(|v| !matches!(v,
+                        crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(m), _)
+                        if matches!(m, PokemonMove::Fly | PokemonMove::Bounce)
+                    ));
+                    bs.action_queue.retain(|a| {
+                        if let Action::MoveAction(ma) = a {
+                            !(ma.user_slot == target_slot && matches!(ma.move_name, PokemonMove::Fly | PokemonMove::Bounce))
+                        } else { true }
+                    });
+                }
+                simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::MagnetRise);
+                simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::Telekinesis);
+            }
+
+            let had_destiny_bond = target_mon.fainted
+                && simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::DestinyBond);
             if target_mon.fainted {
                 simulator_helpers::clear_pokemon_on_faint(target_mon);
                 target_fainted = true;
+            }
+            if had_destiny_bond {
+                // Destiny Bond: attacker also faints if they're alive and on the opposing side.
+                if attack_slot.player != target_slot.player {
+                    if let Some(attacker) = match attack_slot.player {
+                        Player::P1 => bs.p1_active_mons.get_mut(attack_slot.slot_index as usize),
+                        Player::P2 => bs.p2_active_mons.get_mut(attack_slot.slot_index as usize),
+                    } {
+                        if !attacker.fainted {
+                            attacker.hp = 0;
+                            attacker.fainted = true;
+                            simulator_helpers::clear_pokemon_on_faint(attacker);
+                        }
+                    }
+                }
             }
         }
 
@@ -627,6 +678,16 @@ fn apply_single_hit_branch(
                     }
                 }
             }
+
+            // Destiny Bond: if the attacker was taken down by the target's Destiny Bond,
+            // process their faint now (after all KO bonuses so Moxie/Fell Stinger can't
+            // fire on a mon that killed itself via Destiny Bond).
+            let attacker_destiny_bonded = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
+                .map(|m| m.fainted)
+                .unwrap_or(false);
+            if attacker_destiny_bonded {
+                simulator_helpers::handle_pokemon_faint(&mut bs, attack_slot.player, attack_slot.slot_index);
+            }
         }
 
         if sand_spit_triggered {
@@ -639,6 +700,29 @@ fn apply_single_hit_branch(
 
         if matches!(move_name, PokemonMove::IceSpinner | PokemonMove::SteelRoller) {
             simulator_helpers::clear_terrain(&mut bs);
+        }
+
+        // Eerie Spell: 80 BP Psychic; on hit remove 3 PP from target's last-used move.
+        // The secondary: { onHit } is a JS function body the parser skips; applied here.
+        if *move_name == PokemonMove::EerieSpell && eff_damage > 0 {
+            if let Some(last_mv) = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+                .and_then(|t| t.last_used_move.clone())
+            {
+                let slot_idx = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+                    .and_then(|t| t.moves.iter().position(|m| m.as_ref() == Some(&last_mv)));
+                if let Some(idx) = slot_idx {
+                    let current_pp = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+                        .map(|t| t.move_pp[idx]).unwrap_or(0);
+                    if current_pp > 0 {
+                        if let Some(tgt) = match target_slot.player {
+                            Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
+                            Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
+                        } {
+                            tgt.move_pp[idx] = current_pp.saturating_sub(3);
+                        }
+                    }
+                }
+            }
         }
 
         let sec_branches = simulator_helpers::apply_secondary_effects(&bs, attack_slot, target_slot, move_data);
@@ -1743,6 +1827,25 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
+    // Last Resort: 140 BP Normal; fails unless the user has ≥2 moves AND has used every
+    // move other than Last Resort at least once since being sent in this battle.
+    if move_name == PokemonMove::LastResort {
+        let fails = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| {
+                let move_slots: Vec<_> = m.moves.iter().enumerate()
+                    .filter_map(|(i, slot)| slot.as_ref().map(|mv| (i, mv)))
+                    .collect();
+                if move_slots.len() < 2 { return true; }
+                move_slots.iter().any(|(i, mv)| {
+                    **mv != PokemonMove::LastResort && !m.used_moves_this_field[*i]
+                })
+            })
+            .unwrap_or(true);
+        if fails {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+    }
+
     // Sucker Punch: fails if the target chose a non-damaging (status) move, chose a
     // non-move action (switch), or has already executed their action this turn.
     if move_name == PokemonMove::SuckerPunch {
@@ -2130,6 +2233,39 @@ fn possible_damage_outcomes_for_move(
 
     // Heal Pulse: restore the target's HP by 1/2 (3/4 with Mega Launcher). Fails if the target
     // is already at full HP or behind a Substitute, or if the user or target is under Heal Block.
+    // Pollen Puff (ally-heal branch): when targeting an ally, heal 50% of their max HP.
+    // Heal Block on the ATTACKER fails the move entirely; on the TARGET, the heal is skipped
+    // but the move still succeeds (NOT_FAIL). Substitute blocks the heal.
+    // When targeting a foe, falls through to the normal 90 BP Bug Special damage pipeline.
+    if move_name == PokemonMove::PollenPuff && !target_slots.is_empty() {
+        let target_slot = target_slots[0];
+        if target_slot.player == action.user_slot.player
+            && target_slot.slot_index != action.user_slot.slot_index
+        {
+            let user_hb = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(simulator_helpers::heal_is_blocked).unwrap_or(false);
+            if user_hb {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+            let target_env = simulator_helpers::berry_env(&next_state, target_slot);
+            if let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot) {
+                let max_hp = target.stats[0].max(1);
+                let full = target.hp >= max_hp;
+                let sub = simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute);
+                let target_hb = simulator_helpers::heal_is_blocked(target);
+                if !full && !sub && !target_hb {
+                    let amount = (max_hp as u32 / 2) as u16;
+                    if let Some(t) = mon_at_slot_mut(&mut next_state, target_slot) {
+                        simulator_helpers::gain_hp(t, amount, target_env);
+                    }
+                }
+            }
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+            return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+        }
+        // Foe-targeting falls through to the normal damage pipeline.
+    }
+
     if move_name == PokemonMove::HealPulse {
         let target_slot = target_slots[0];
         let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&next_state);
@@ -2285,6 +2421,26 @@ fn possible_damage_outcomes_for_move(
             // Skip if already afflicted.
             if simulator_helpers::has_status_volatile(mon, &VolatileStatus::PerishSong) { continue; }
             simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, mon, &VolatileStatus::PerishSong);
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Destiny Bond: the user is flagged so that if they faint from a direct move this turn,
+    // the attacker also faints. Fails if used consecutively (volatile already present).
+    if move_name == PokemonMove::DestinyBond {
+        let already_has = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::DestinyBond))
+            .unwrap_or(false);
+        if already_has {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let state_snapshot = next_state.clone();
+        if let Some(user) = match action.user_slot.player {
+            Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+            Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+        } {
+            simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, user, &VolatileStatus::DestinyBond);
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
@@ -3189,8 +3345,8 @@ fn possible_damage_outcomes_for_move(
             continue;
         }
 
-        // Phantom Force / Shadow Force: breaks_protect moves also *remove* the target's protect
-        // volatile so that follow-up moves in the same turn (doubles) can hit the target freely.
+        // Feint / Phantom Force / Shadow Force: breaks_protect moves remove the target's protect
+        // volatile and the target's side QuickGuard/WideGuard so follow-up moves can hit freely.
         if move_data.breaks_protect {
             if let Some(tgt_mon) = mon_at_slot_mut(&mut next_state, *target_slot) {
                 tgt_mon.volatiles.retain(|v| !matches!(v,
@@ -3200,6 +3356,14 @@ fn possible_damage_outcomes_for_move(
                     | crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::BanefulBunker, _)
                 ));
             }
+            // Remove QuickGuard and WideGuard from the target's side (Feint lifts these).
+            let target_side = match target_slot.player {
+                Player::P1 => &mut next_state.p1_side_conditions,
+                Player::P2 => &mut next_state.p2_side_conditions,
+            };
+            target_side.retain(|c| !matches!(c,
+                SideCondition::QuickGuard | SideCondition::WideGuard
+            ));
         }
 
         let weather_blocks_move = matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special)

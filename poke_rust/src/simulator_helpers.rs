@@ -3788,6 +3788,7 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     if let Some(mon_mut) = get_pokemon_at_slot_mut(state, slot) {
         mon_mut.first_move_on_field = true;
         mon_mut.first_turn_on_field_pending = is_mid_turn_pre_eot;
+        mon_mut.used_moves_this_field = [false; 4];
     }
 
     // Entry hazards resolve before the switch-in ability. A Pokémon that faints to hazards (e.g.
