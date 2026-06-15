@@ -71,6 +71,15 @@ pub fn move_has_flag(move_data: &MoveData, flag: &MoveFlag) -> bool {
     move_data.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(flag))
 }
 
+/// Returns true if Sheer Force should trigger for this move — i.e., the move has at least one
+/// target secondary that Sheer Force can remove (status, stat drop on target, volatile, or flinch).
+/// User-stat-decrease secondaries (e.g. Draco Meteor's −2 SpA, stored in self_secondaries) are
+/// NOT eligible per Gen VI+ rules; the `secondaries` vec only holds target-facing effects,
+/// so `!move_data.secondaries.is_empty()` is the correct predicate here.
+pub(crate) fn move_has_sheer_force_secondary(move_data: &MoveData) -> bool {
+    !move_data.secondaries.is_empty()
+}
+
 /// Which protection is blocking an incoming move. Carries the *kind* so callers can apply both
 /// the right coverage (King's Shield = damaging-only) and the right contact punishment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,18 +289,13 @@ pub fn effective_stat(state: &BattleState, mon: &PokemonState, stat: PokemonStat
 
 /// Foul Play attack stat (non-crit): target's base Atk × target's stage multiplier,
 /// then run through the *attacker*'s ability/item/burn multipliers.
-fn foul_play_attack_stat(state: &BattleState, attacker: &PokemonState, target: &PokemonState) -> f64 {
-    foul_play_attack_stat_inner(state, attacker, target, false)
-}
-
-/// Foul Play attack stat (crit): same as above but ignores negative Atk stages on the target.
-fn foul_play_attack_stat_crit(state: &BattleState, attacker: &PokemonState, target: &PokemonState) -> f64 {
-    foul_play_attack_stat_inner(state, attacker, target, true)
-}
-
-fn foul_play_attack_stat_inner(state: &BattleState, attacker: &PokemonState, target: &PokemonState, is_crit: bool) -> f64 {
+/// Foul Play attack stat: reads target's Atk but applies attacker's ability/item/burn multipliers.
+/// `is_crit` ignores negative Atk stages on the target; `zero_target_atk` zeroes all stages
+/// (used when the defending Pokémon has Unaware).
+fn foul_play_attack_stat_inner(state: &BattleState, attacker: &PokemonState, target: &PokemonState, is_crit: bool, zero_target_atk: bool) -> f64 {
     let target_stage = target.boosts[0];
-    let applied_stage = if is_crit && target_stage < 0 { 0 } else { target_stage };
+    // Crits ignore negative target Atk stages; Unaware (defender) zeroes all target Atk stages.
+    let applied_stage = if zero_target_atk || (is_crit && target_stage < 0) { 0 } else { target_stage };
     let base = target.stats[1] as f64 * stage_multiplier(applied_stage);
     // Apply attacker-side multipliers only (ability, item, burn).
     let val = apply_ability_stat_boost(state, attacker, PokemonStat::Atk, PokemonStat::Atk, Ability::Guts, attacker.status.is_some(), 1.5, base);
@@ -486,6 +490,9 @@ pub(crate) fn effective_crit_ratio(state: &BattleState, attacker: &PokemonState,
         ratio = ratio.saturating_add(2);
     }
     ratio = ratio.saturating_add(dragon_cheer_crit_bonus(attacker));
+    if !pokemon_ability_is_suppressed(state, attacker) && attacker.ability == Ability::SuperLuck {
+        ratio = ratio.saturating_add(1);
+    }
     ratio
 }
 
@@ -1121,6 +1128,21 @@ fn effective_base_power(
         {
             bp = (bp * 2.0).floor();
         }
+        // Sand Force: ×1.3 for Rock/Ground/Steel moves in sandstorm.
+        if attacker.ability == Ability::SandForce
+            && weather_is_sandstorm(state)
+            && matches!(
+                effective_move_type(state, attacker, move_data),
+                PokemonType::Rock | PokemonType::Ground | PokemonType::Steel
+            )
+        {
+            bp = (bp * 1.3).floor();
+        }
+        // Sheer Force: ×(5325/4096) ≈ 1.3× for moves with eligible target secondaries;
+        // the secondary effects are suppressed separately in apply_secondary_effects.
+        if attacker.ability == Ability::SheerForce && move_has_sheer_force_secondary(move_data) {
+            bp = ((bp * 5325.0) / 4096.0).floor();
+        }
     }
 
     // HydroSteam in sun: BP boost (no accompanying damage-type penalty)
@@ -1550,19 +1572,26 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     };
 
     // Pre-compute values that don't change per crit branch.
+    // Unaware: when defending, a Pokémon with Unaware ignores the attacker's Atk/SpA stages;
+    // when attacking, it ignores the target's Def/SpD stages. Mold Breaker TODO.
+    let defender_unaware = !pokemon_ability_is_suppressed(_state, target)
+        && target.ability == Ability::Unaware;
+    let attacker_unaware = !pokemon_ability_is_suppressed(_state, attacker)
+        && attacker.ability == Ability::Unaware;
     // Foul Play: use the target's Attack stages but the user's ability/item multipliers.
     let base_attack = if move_data.foul_play {
         apply_weather_attack_boost(_state, attacker, attacking_stat,
-            foul_play_attack_stat(_state, attacker, target))
+            foul_play_attack_stat_inner(_state, attacker, target, false, defender_unaware))
     } else {
         apply_weather_attack_boost(_state, attacker, attacking_stat,
-            effective_stat(_state, attacker, attacking_stat, false, false))
+            effective_stat(_state, attacker, attacking_stat, defender_unaware, defender_unaware))
     };
     // ignore_defense_boosts (Sacred Sword, Darkest Lariat): ignore positive defensive stages.
+    // Unaware (attacker): also zero all defensive stages (positive and negative).
     let base_defense = apply_weather_defense_bonus(_state, target, defending_stat,
                            effective_stat(_state, target, defending_stat,
-                               false,
-                               move_data.ignore_defense_boosts));
+                               attacker_unaware,
+                               move_data.ignore_defense_boosts || attacker_unaware));
     let attack_type  = effective_move_type(_state, attacker, move_data);
     let effectiveness = {
         let base = if move_data.name == PokemonMove::FlyingPress {
@@ -1785,19 +1814,20 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
         // On a crit, re-compute attack/defense ignoring unfavourable boosts.
         let attack_stat = if is_crit {
             if move_data.foul_play {
-                // Crits ignore negative attack stages on the target (the "attacker" for Foul Play).
+                // Crits ignore negative Atk stages on target; Unaware (defender) zeroes all stages.
                 apply_weather_attack_boost(_state, attacker, attacking_stat,
-                    foul_play_attack_stat_crit(_state, attacker, target))
+                    foul_play_attack_stat_inner(_state, attacker, target, true, defender_unaware))
             } else {
+                // Crit: ignore negative attacker stages. Unaware (defender): also ignore positive.
                 apply_weather_attack_boost(_state, attacker, attacking_stat,
-                    effective_stat(_state, attacker, attacking_stat, true, false))
+                    effective_stat(_state, attacker, attacking_stat, true, defender_unaware))
             }
         } else { base_attack };
         let defense_stat = if is_crit {
-            // ignore_defense_boosts: positive stages already ignored; crit also ignores positive.
+            // Crit always ignores positive defensive stages. Unaware (attacker): also ignore negative.
             apply_weather_defense_bonus(_state, target, defending_stat,
                 effective_stat(_state, target, defending_stat,
-                    move_data.ignore_defense_boosts,
+                    move_data.ignore_defense_boosts || attacker_unaware,
                     true))
         } else { base_defense };
 
@@ -2311,6 +2341,7 @@ pub(crate) fn compute_endure_outcomes(
     target: &PokemonState,
     damage: u16,
     items_suppressed: bool,
+    ability_suppressed: bool,
 ) -> Vec<(u16, bool, f64)> {
     // Endure (volatile): survive any lethal *move* damage at 1 HP, deterministically. It is not an
     // item, so it ignores items_suppressed / Klutz and takes precedence over Focus Sash / Band.
@@ -2324,6 +2355,14 @@ pub(crate) fn compute_endure_outcomes(
     }
     // damage >= target.hp: this hit would KO the target
     let survive_damage = target.hp.saturating_sub(1); // leaves 1 HP after taking this amount
+    // Sturdy: survive any lethal hit when at full HP (no item consumed; cannot be bypassed
+    // by Mold Breaker — that is handled at the call site via ability_suppressed).
+    if !ability_suppressed
+        && target.ability == Ability::Sturdy
+        && target.hp == target.stats[0].max(1)
+    {
+        return vec![(survive_damage, false, 1.0)];
+    }
     match target.item {
         Item::FocusSash if target.hp == target.stats[0].max(1) => {
             // Full-HP requirement: Sash only activates when the holder is at max HP
@@ -3363,13 +3402,21 @@ fn compute_accuracy_modifier_fp(
 }
 
 fn adjusted_accuracy_stage(state: &BattleState, attacker: &PokemonState, target: &PokemonState, ignore_evasion: bool) -> i8 {
-    let attacker_accuracy = attacker.boosts[5];
-    // Keen Eye / Illuminate: when the attacker has either ability (unsuppressed), the
+    // Unaware (attacker): ignore target's evasion stage.
+    // Unaware (target/defender): ignore attacker's accuracy stage.
+    let attacker_unaware = !pokemon_ability_is_suppressed(state, attacker)
+        && attacker.ability == Ability::Unaware;
+    let defender_unaware = !pokemon_ability_is_suppressed(state, target)
+        && target.ability == Ability::Unaware;
+
+    let attacker_accuracy = if defender_unaware { 0 } else { attacker.boosts[5] };
+    // Keen Eye / Illuminate / Unaware: when the attacker has one of these (unsuppressed), the
     // target's evasiveness stages are ignored entirely.  Non-stage accuracy modifiers
     // (Sand Veil, Wonder Skin, etc.) are NOT ignored — this only zeroes the stage term.
     // Mold Breaker does not apply here (this protects the attacker's own accuracy calc).
     // ignore_evasion flag (Sacred Sword, Darkest Lariat): also zeroes target evasion stage.
     let target_evasion = if ignore_evasion
+        || attacker_unaware
         || (!pokemon_ability_is_suppressed(state, attacker)
             && matches!(attacker.ability, Ability::KeenEye | Ability::Illuminate))
     {
@@ -7664,6 +7711,14 @@ pub fn apply_secondary_effects(
         !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::ShieldDust
     });
 
+    // Sheer Force: when the attacker has Sheer Force (unsuppressed) and the move has
+    // eligible target secondaries, those secondaries are suppressed in exchange for the BP
+    // boost already applied in base_power_for_move. Self-effects (self_boost, self_secondaries)
+    // are NOT suppressed.
+    let attacker_has_sheer_force = get_pokemon_at_slot(state, attacker_slot).map_or(false, |mon| {
+        !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SheerForce
+    }) && move_has_sheer_force_secondary(move_data);
+
     // Burning Jealousy: the burn applies only to targets whose stats were actually raised
     // earlier this turn. The Showdown source stores this as an `onHit` callback, so the
     // parsed `secondaries` carry no status — apply it explicitly. The 70 BP is unconditional.
@@ -7671,7 +7726,7 @@ pub fn apply_secondary_effects(
         && get_pokemon_at_slot(state, target_slot).is_some_and(|m| m.stats_raised_this_turn);
 
     // Branch target secondaries
-    if !target_has_shield_dust {
+    if !target_has_shield_dust && !attacker_has_sheer_force {
         for secondary in &move_data.secondaries {
             // Shed Tail's auto-parsed Substitute secondary carries duration 0 (the generic
             // "permanent" value), which would create a sub with HP = 0 under the new model
