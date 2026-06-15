@@ -93,12 +93,24 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             .map(|m| !simulator_helpers::item_is_active(next_state, m))
             .unwrap_or(true);
         let leppa_env = simulator_helpers::berry_env(next_state, user_slot);
+        // Pressure: drain 1 extra PP when any unsuppressed active opponent holds Pressure.
+        let pressure_extra = {
+            let opp_mons = match user_slot.player {
+                Player::P1 => &next_state.p2_active_mons,
+                Player::P2 => &next_state.p1_active_mons,
+            };
+            opp_mons.iter().any(|m| {
+                !m.fainted
+                    && m.ability == Ability::Pressure
+                    && !simulator_helpers::pokemon_ability_is_suppressed(next_state, m)
+            })
+        };
         if let Some(mon) = match user_slot.player {
             Player::P1 => next_state.p1_active_mons.get_mut(user_slot.slot_index as usize),
             Player::P2 => next_state.p2_active_mons.get_mut(user_slot.slot_index as usize),
         } {
             if let Some(pp) = mon.move_pp.get_mut(move_index) {
-                *pp = pp.saturating_sub(1);
+                *pp = pp.saturating_sub(1 + pressure_extra as u8);
             }
             simulator_helpers::try_consume_leppa_berry(mon, &leppa_env);
 
@@ -543,15 +555,18 @@ fn apply_single_hit_branch(
         }
     }
 
-    // Focus Sash / Focus Band endure outcomes. Each entry is (eff_damage, consume_item, prob).
+    // Focus Sash / Focus Band / Sturdy endure outcomes. Each entry is (eff_damage, consume_item, prob).
     // - Normal case:   one entry  (damage, false, 1.0)
+    // - Sturdy KO:     one entry  (hp-1,   false, 1.0)   no item consumed
     // - Focus Sash KO: one entry  (hp-1,   true,  1.0)
     // - Focus Band KO: two entries (damage, false, 0.9) and (hp-1, false, 0.1)
-    // Multi-hit calls us once per hit, so Band's 10% is rolled independently each hit.
+    // Multi-hit calls us once per hit, so Band's 10% / Sturdy/Sash full-HP check is re-evaluated.
+    let target_ability_suppressed = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
+        .map_or(false, |t| simulator_helpers::pokemon_ability_is_suppressed(&branch_state, t));
     let endure_outcomes = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
         .map_or_else(
             || vec![(damage, false, 1.0)],
-            |t| simulator_helpers::compute_endure_outcomes(t, damage, items_suppressed),
+            |t| simulator_helpers::compute_endure_outcomes(t, damage, items_suppressed, target_ability_suppressed),
         );
 
     let n = endure_outcomes.len();
@@ -1193,7 +1208,12 @@ fn possible_damage_outcomes_for_move(
                 }
             }
             Status::Sleep(n) => {
-                if *n >= 2 {
+                // Early Bird halves the sleep duration (round down), effectively waking at n>=1
+                // instead of n>=2. Rest is also affected: 2 turns → 1 turn.
+                let early_bird = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
+                    && attacker.ability == Ability::EarlyBird;
+                let wake_threshold: u8 = if early_bird { 1 } else { 2 };
+                if *n >= wake_threshold {
                     if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                         mon.status = None;
                     }

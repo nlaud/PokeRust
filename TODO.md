@@ -15,7 +15,6 @@ hook and should be researchable, plannable, and implementable in a single focuse
 ### Complex abilities — mechanics modifiers
 Each has significant individual complexity. Research all edge cases carefully.
 - Contrary — all stat stage changes are inverted
-- Early Bird — halve sleep turn counter
 - Heavy Metal / Light Metal — double or halve holder's weight for weight-based moves
 - Infiltrator — bypass Light Screen, Reflect, Aurora Veil, Safeguard, and Substitute
 - Innards Out — when KO'd by a move, deal the damage that brought HP to 0 back to attacker
@@ -26,21 +25,12 @@ Each has significant individual complexity. Research all edge cases carefully.
 - Minus / Plus — +50% Sp. Atk when an ally with the opposite ability is present
 - Mold Breaker / Turboblaze / Teravolt — moves ignore the target's ability
 - Parental Bond — attack twice; second hit at ¼ power
-- Pressure — opponents expend 1 extra PP per move used against the holder
 - Protean / Libero — change type to match the move being used (once per switch-in)
-- Sand Force — +30% power for Rock/Ground/Steel in sandstorm
 - Shadow Tag — opponents cannot switch out (does not affect other Shadow Tag users)
-- Sheer Force — remove secondary effects from moves; gain 1.3× power on those moves
 - Stalwart — ignore move and ability redirection
 - Stench — 10% flinch chance on any damaging hit
-- Sturdy — survive any OHKO at full HP; immune to one-hit KO moves
-- Super Luck — +1 critical-hit ratio stage
 - Synchronize — spread burn, paralysis, or poison back to the Pokémon that inflicted it
 - Toxic Debris — set Toxic Spikes on opponent's side when holder is hit by a physical move
-- Unaware — ignore target's stat changes when attacking; ignore attacker's when defending
-
----
-
 
 ## Refactors
 - use thaws_target move bool and defrost move flag instead of fixed lists.

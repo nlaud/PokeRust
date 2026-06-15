@@ -27446,3 +27446,406 @@ mod substitute_move {
     }
 }
 
+// ── New abilities: Super Luck, Sand Force, Early Bird, Sturdy, Pressure, Unaware, Sheer Force ──
+#[cfg(test)]
+mod new_ability_tests {
+    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{Status, Weather};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, damage_distribution, move_dex, pokemon_dex,
+        run_single_turn, simple_attack,
+    };
+    use crate::simulator;
+
+    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn run_state(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(),
+        )
+    }
+
+    fn avg_damage(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        damage_distribution(outcomes, initial_hp)
+            .iter()
+            .map(|(d, p)| *d as f64 * p)
+            .sum()
+    }
+
+    // ── Super Luck ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn super_luck_raises_crit_stage_by_1() {
+        // At base stage 0: crit prob = 1/24. Super Luck adds +1 stage → 1/8.
+        let mut p1_sl = mon(Species::Togekiss, PokemonMove::Tackle, Ability::SuperLuck);
+        let mut p1_no = mon(Species::Togekiss, PokemonMove::Tackle, Ability::None);
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p1_sl.stats[5] = 200;
+        p1_no.stats[5] = 200;
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state_sl = battle_state_from_lists(vec![p1_sl], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let p2cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+        let p1cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+
+        let outcomes_sl = simulator::simulate_turn(
+            &MatchState::BattleState(state_sl), &p1cmd, &p2cmd,
+            move_dex(), pokemon_dex(), true, 1,
+        );
+        let outcomes_no = simulator::simulate_turn(
+            &MatchState::BattleState(state_no), &p1cmd, &p2cmd,
+            move_dex(), pokemon_dex(), true, 1,
+        );
+
+        let crit_prob = |outcomes: &[(MatchState, f64)]| -> f64 {
+            let mut dist: Vec<(u16, f64)> = damage_distribution(outcomes, 1000)
+                .into_iter().collect();
+            dist.sort_by_key(|(d, _)| *d);
+            dist.last().map(|(_, p)| *p).unwrap_or(0.0)
+        };
+
+        let crit_sl = crit_prob(&outcomes_sl);
+        let crit_no = crit_prob(&outcomes_no);
+
+        assert!((crit_sl - 0.125).abs() < 0.01,
+            "Super Luck: expected crit prob 1/8=0.125, got {crit_sl:.4}");
+        assert!((crit_no - 1.0 / 24.0).abs() < 0.01,
+            "No Super Luck: expected crit prob 1/24≈0.0417, got {crit_no:.4}");
+    }
+
+    // ── Sand Force ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn sand_force_boosts_ground_move_in_sandstorm() {
+        // Earthquake (Ground-type) should deal 1.3× damage under Sand Force.
+        // Use MagicGuard on P2 so EOT sandstorm chip damage doesn't contaminate the ratio.
+        let mut p1_sf = mon(Species::Garchomp, PokemonMove::Earthquake, Ability::SandForce);
+        let mut p1_no = mon(Species::Garchomp, PokemonMove::Earthquake, Ability::None);
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::MagicGuard);
+        p1_sf.stats[5] = 200;
+        p1_no.stats[5] = 200;
+        p2.stats[0] = 800; p2.hp = 800;
+
+        let mut state_sf = battle_state_from_lists(vec![p1_sf], vec![], vec![p2.clone()], vec![]);
+        let mut state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+        state_sf.weather = Some(Weather::Sandstorm);
+        state_no.weather = Some(Weather::Sandstorm);
+
+        let avg_sf = avg_damage(&run_state(state_sf), 800);
+        let avg_no = avg_damage(&run_state(state_no), 800);
+        let ratio = avg_sf / avg_no;
+
+        assert!((ratio - 1.3).abs() < 0.05,
+            "Sand Force: expected 1.3× damage ratio, got {ratio:.3}");
+    }
+
+    #[test]
+    fn sand_force_grants_sandstorm_chip_immunity() {
+        let mut p1 = mon(Species::Garchomp, PokemonMove::Splash, Ability::SandForce);
+        // Garchomp is Dragon/Ground; dragon isn't sand-immune by type, but SandForce is.
+        let initial_hp = p1.hp;
+        let mut p2 = mon(Species::Tyranitar, PokemonMove::Splash, Ability::None); // Rock type, immune naturally
+        let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        state.weather = Some(Weather::Sandstorm);
+
+        let outcomes = run_state(state);
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p1_active_mons[0].hp, initial_hp,
+                    "Sand Force holder should take no sandstorm chip damage");
+            }
+        }
+    }
+
+    // ── Early Bird ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn early_bird_guarantees_wake_at_sleep_turn_1() {
+        // Sleep(1) normally has 2/3 fail chance. Early Bird threshold = 1, so guaranteed wake.
+        let mut p1 = mon(Species::Noctowl, PokemonMove::Tackle, Ability::EarlyBird);
+        p1.stats[5] = 200;
+        p1.status = Some(Status::Sleep(1));
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        let damage_prob: f64 = outcomes.iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p2_active_mons[0].hp < 1000 { *p } else { 0.0 }
+            } else { 0.0 }
+        }).sum();
+        assert!((damage_prob - 1.0).abs() < 0.01,
+            "Early Bird: guaranteed wake at Sleep(1); damage_prob={damage_prob:.3}");
+    }
+
+    #[test]
+    fn without_early_bird_sleep_turn_1_is_partial_wake() {
+        let mut p1 = mon(Species::Noctowl, PokemonMove::Tackle, Ability::None);
+        p1.stats[5] = 200;
+        p1.status = Some(Status::Sleep(1));
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        let damage_prob: f64 = outcomes.iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p2_active_mons[0].hp < 1000 { *p } else { 0.0 }
+            } else { 0.0 }
+        }).sum();
+        // 1/3 chance to wake and execute move at Sleep(1)
+        assert!((damage_prob - 1.0 / 3.0).abs() < 0.05,
+            "No Early Bird: expected ~1/3 wake at Sleep(1), got {damage_prob:.3}");
+    }
+
+    // ── Sturdy ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sturdy_survives_lethal_hit_at_full_hp() {
+        let mut p1 = mon(Species::Mewtwo, PokemonMove::Tackle, Ability::None);
+        p1.stats[5] = 200;
+        p1.stats[1] = 1000; // huge Atk to guarantee KO
+
+        let mut p2 = mon(Species::Shuckle, PokemonMove::Splash, Ability::Sturdy);
+        p2.stats[0] = 10; p2.hp = 10; // tiny HP at full HP
+        p2.stats[2] = 1; // tiny Def
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, 1,
+                    "Sturdy should leave target at exactly 1 HP from full HP");
+            }
+        }
+    }
+
+    #[test]
+    fn sturdy_does_not_trigger_below_full_hp() {
+        let mut p1 = mon(Species::Mewtwo, PokemonMove::Tackle, Ability::None);
+        p1.stats[5] = 200;
+        p1.stats[1] = 1000;
+
+        let mut p2 = mon(Species::Shuckle, PokemonMove::Splash, Ability::Sturdy);
+        p2.stats[0] = 10;
+        p2.hp = 9; // one below max HP — Sturdy should not fire
+        p2.stats[2] = 1;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        let all_fainted = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { bs.p2_active_mons[0].fainted }
+            else { true }
+        });
+        assert!(all_fainted, "Sturdy should NOT protect when target is not at full HP");
+    }
+
+    #[test]
+    fn sturdy_blocks_ohko_moves() {
+        let mut p1 = mon(Species::Donphan, PokemonMove::Fissure, Ability::None);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Shuckle, PokemonMove::Splash, Ability::Sturdy);
+        let initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, initial_hp,
+                    "Fissure should deal 0 damage to a Sturdy holder (OHKO blocked)");
+            }
+        }
+    }
+
+    // ── Pressure ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pressure_drains_extra_pp_from_opponent() {
+        let mut p1 = mon(Species::Machamp, PokemonMove::Earthquake, Ability::None);
+        p1.stats[5] = 200;
+        let initial_pp = p1.move_pp[0];
+
+        let mut p2 = mon(Species::Entei, PokemonMove::Splash, Ability::Pressure);
+        p2.stats[0] = 1000; p2.hp = 1000; // won't faint
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let pp = bs.p1_active_mons[0].move_pp[0];
+                assert_eq!(pp, initial_pp.saturating_sub(2),
+                    "Pressure: PP should drop by 2 (initial={initial_pp}, got={pp})");
+            }
+        }
+    }
+
+    #[test]
+    fn without_pressure_pp_decrements_by_one() {
+        let mut p1 = mon(Species::Machamp, PokemonMove::Earthquake, Ability::None);
+        p1.stats[5] = 200;
+        let initial_pp = p1.move_pp[0];
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let pp = bs.p1_active_mons[0].move_pp[0];
+                assert_eq!(pp, initial_pp.saturating_sub(1),
+                    "Without Pressure: PP should drop by 1 (initial={initial_pp}, got={pp})");
+            }
+        }
+    }
+
+    // ── Unaware ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn unaware_defender_ignores_attacker_atk_boost() {
+        // P1 with +6 Atk vs Unaware P2 should deal the same damage as P1 at +0 Atk vs no-ability P2.
+        let mut p1_boosted = mon(Species::Machamp, PokemonMove::Strength, Ability::None);
+        let mut p1_unboosted = mon(Species::Machamp, PokemonMove::Strength, Ability::None);
+        p1_boosted.stats[5] = 200;
+        p1_unboosted.stats[5] = 200;
+        p1_boosted.boosts[0] = 6;
+
+        let mut p2_aware = mon(Species::Snorlax, PokemonMove::Splash, Ability::Unaware);
+        p2_aware.stats[0] = 800; p2_aware.hp = 800;
+        let mut p2_normal = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2_normal.stats[0] = 800; p2_normal.hp = 800;
+
+        let avg_boosted_vs_unaware = avg_damage(
+            &run_state(battle_state_from_lists(vec![p1_boosted], vec![], vec![p2_aware], vec![])),
+            800);
+        let avg_base = avg_damage(
+            &run_state(battle_state_from_lists(vec![p1_unboosted], vec![], vec![p2_normal], vec![])),
+            800);
+        let ratio = avg_boosted_vs_unaware / avg_base;
+        assert!((ratio - 1.0).abs() < 0.05,
+            "Unaware defender: +6 Atk should be ignored (ratio={ratio:.3})");
+    }
+
+    #[test]
+    fn unaware_attacker_ignores_target_spd_boost() {
+        // P1 Unaware + special move vs P2 +6 SpD should equal P1 no-ability vs P2 +0 SpD.
+        let mut p1_ua = mon(Species::Quagsire, PokemonMove::Surf, Ability::Unaware);
+        let mut p1_no = mon(Species::Quagsire, PokemonMove::Surf, Ability::None);
+        p1_ua.stats[5] = 200;
+        p1_no.stats[5] = 200;
+
+        let mut p2_boosted = mon(Species::Blissey, PokemonMove::Splash, Ability::None);
+        p2_boosted.stats[0] = 1200; p2_boosted.hp = 1200;
+        p2_boosted.boosts[3] = 6; // +6 SpD
+
+        let mut p2_base = mon(Species::Blissey, PokemonMove::Splash, Ability::None);
+        p2_base.stats[0] = 1200; p2_base.hp = 1200;
+
+        let avg_ua = avg_damage(
+            &run_state(battle_state_from_lists(vec![p1_ua], vec![], vec![p2_boosted], vec![])),
+            1200);
+        let avg_no = avg_damage(
+            &run_state(battle_state_from_lists(vec![p1_no], vec![], vec![p2_base], vec![])),
+            1200);
+        let ratio = avg_ua / avg_no;
+        assert!((ratio - 1.0).abs() < 0.05,
+            "Unaware attacker: +6 SpD on target should be ignored (ratio={ratio:.3})");
+    }
+
+    // ── Sheer Force ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn sheer_force_boosts_rock_slide_damage() {
+        // Rock Slide (75 BP, 30% flinch) → Sheer Force gives ~1.3× and removes flinch.
+        let mut p1_sf = mon(Species::Rhyperior, PokemonMove::RockSlide, Ability::SheerForce);
+        let mut p1_no = mon(Species::Rhyperior, PokemonMove::RockSlide, Ability::None);
+        p1_sf.stats[5] = 200;
+        p1_no.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let avg_sf = avg_damage(
+            &run_state(battle_state_from_lists(vec![p1_sf], vec![], vec![p2.clone()], vec![])),
+            1000);
+        let avg_no = avg_damage(
+            &run_state(battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![])),
+            1000);
+        let ratio = avg_sf / avg_no;
+        assert!((ratio - 1.3).abs() < 0.05,
+            "Sheer Force: expected ~1.3× for Rock Slide, got {ratio:.3}");
+    }
+
+    #[test]
+    fn sheer_force_suppresses_flinch_from_rock_slide() {
+        // P1 (faster) uses Rock Slide with Sheer Force. P2 uses Tackle.
+        // With flinch suppressed, P2 should always retaliate → P1 HP drops in 100% of branches.
+        let mut p1 = mon(Species::Rhyperior, PokemonMove::RockSlide, Ability::SheerForce);
+        p1.stats[5] = 200; // faster
+        p1.stats[0] = 1000; p1.hp = 1000; // bulky so Snorlax Tackle won't KO
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None);
+        p2.stats[5] = 1; // slow so P1 moves first
+        p2.stats[0] = 800; p2.hp = 800;
+
+        let initial_p1_hp = 1000u16;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        let frac_p1_damaged: f64 = outcomes.iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p1_active_mons[0].hp < initial_p1_hp { *p } else { 0.0 }
+            } else { 0.0 }
+        }).sum();
+
+        // With Sheer Force: 0% flinch, P2 always retaliates → 100% of branches P1 takes damage.
+        assert!((frac_p1_damaged - 1.0).abs() < 0.01,
+            "Sheer Force: flinch suppressed, P2 should always retaliate (frac={frac_p1_damaged:.3})");
+    }
+
+    #[test]
+    fn sheer_force_does_not_boost_moves_without_secondary() {
+        // Stone Edge has no target secondary (high crit ratio is a move flag, not a secondary).
+        // Sheer Force should not boost it.
+        let mut p1_sf = mon(Species::Rhyperior, PokemonMove::StoneEdge, Ability::SheerForce);
+        let mut p1_no = mon(Species::Rhyperior, PokemonMove::StoneEdge, Ability::None);
+        p1_sf.stats[5] = 200;
+        p1_no.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let avg_sf = avg_damage(
+            &run_state(battle_state_from_lists(vec![p1_sf], vec![], vec![p2.clone()], vec![])),
+            1000);
+        let avg_no = avg_damage(
+            &run_state(battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![])),
+            1000);
+        let ratio = avg_sf / avg_no;
+        assert!((ratio - 1.0).abs() < 0.05,
+            "Sheer Force should NOT boost Stone Edge (no target secondary); ratio={ratio:.3}");
+    }
+}
+
