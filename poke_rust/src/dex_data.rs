@@ -219,7 +219,8 @@ pub enum VolatileStatus {
     RagePowder,
     Roost,
     SaltCure,
-    Substitute,
+    /// Stores the substitute's current HP. Zero means absent/broken (should be removed).
+    Substitute(u16),
     SilkTrap,
     SmackDown,
     Snatch,
@@ -607,7 +608,7 @@ fn parse_volatile(s: &str) -> Option<VolatileStatus> {
         "ragepowder" => Some(VolatileStatus::RagePowder),
         "roost" => Some(VolatileStatus::Roost),
         "saltcure" => Some(VolatileStatus::SaltCure),
-        "substitute" => Some(VolatileStatus::Substitute),
+        "substitute" => Some(VolatileStatus::Substitute(0)), // HP set by code, not parser
         "silktrap" => Some(VolatileStatus::SilkTrap),
         "smackdown" => Some(VolatileStatus::SmackDown),
         "snatch" => Some(VolatileStatus::Snatch),

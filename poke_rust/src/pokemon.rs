@@ -42,8 +42,10 @@ fn move_name(mov: &PokemonMove) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VolatileStatusState{
-    TurnStatus(VolatileStatus, u8),
-    MoveStatus(VolatileStatus, u8),
+    /// Turn-counter volatile. Payload is decremented each EOT; 0 = permanent; 1 = removed
+    /// next EOT. EXCEPTION: `Substitute` stores sub HP in the payload (never decremented).
+    TurnStatus(VolatileStatus, u16),
+    MoveStatus(VolatileStatus, u16),
     Charging(PokemonMove, Vec<crate::battle::FieldSlot>),
 }
 
@@ -150,6 +152,10 @@ pub struct PokemonState{
     /// Baneful Bunker) uses. Drives the 1/3^n success decay. Reset by any non-stalling move, a
     /// failed stall, switch-out, and (best-effort) "couldn't act" cases.
     pub stall_counter: u8,
+    /// Consecutive successful Ally Switch uses. Independent from stall_counter (the two
+    /// decay chains are separate per Bulbapedia). Reset on non-Ally-Switch move, failed
+    /// Ally Switch, or switch-out.
+    pub ally_switch_counter: u8,
     pub nature: Nature,
 
     pub boosts: PokemonBoostTable,
@@ -623,7 +629,7 @@ pub fn build_pokemon_state(
         last_special_damage_taken: 0, last_special_attacker: None,
         last_damage_taken: 0, last_damage_attacker: None,
         stats_raised_this_turn: false, stats_lowered_this_turn: false,
-        switched_in_this_turn: false, stall_counter: 0,
+        switched_in_this_turn: false, stall_counter: 0, ally_switch_counter: 0,
         pre_transform: None, evs, ivs,
     }
 }

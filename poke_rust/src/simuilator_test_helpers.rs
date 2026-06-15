@@ -59,6 +59,8 @@ pub fn battle_state_from_lists(
         self_switch_pending: None,
         items_consumed_this_turn: vec![],
         last_move_on_field: None,
+        sub_damage_dealt: 0,
+        round_used_this_turn: false,
     };
 
     // Assign each side a stable, party-unique `mon_id` (active slots first, then bench).
@@ -174,7 +176,7 @@ pub fn has_charging_volatile(mon: &PokemonState, move_name: PokemonMove) -> bool
         .any(|volatile| matches!(volatile, VolatileStatusState::Charging(charged_move, _) if *charged_move == move_name))
 }
 
-pub fn confusion_turns(mon: &PokemonState) -> Option<u8> {
+pub fn confusion_turns(mon: &PokemonState) -> Option<u16> {
     mon.volatiles.iter().find_map(|volatile| match volatile {
         VolatileStatusState::MoveStatus(VolatileStatus::Confusion, turns) => Some(*turns),
         VolatileStatusState::TurnStatus(VolatileStatus::Confusion, turns) => Some(*turns),

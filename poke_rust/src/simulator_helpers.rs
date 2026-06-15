@@ -418,6 +418,14 @@ pub fn move_type_effectiveness(state: &BattleState, move_type: &PokemonType, tar
     })
 }
 
+/// Flying Press effectiveness = Fighting chart × Flying chart against the target.
+/// Strong-winds tempering applies to the Flying component (already inside `move_type_effectiveness`).
+/// STAB remains Fighting-only; call this only when the move name is FlyingPress.
+pub fn flying_press_type_effectiveness(state: &BattleState, target: &PokemonState) -> f64 {
+    move_type_effectiveness(state, &PokemonType::Fighting, target)
+        * move_type_effectiveness(state, &PokemonType::Flying, target)
+}
+
 pub fn stab_multiplier(attacker: &PokemonState, move_type: &PokemonType) -> f64 {
     if !pokemon_has_type(attacker, move_type) && (!attacker.is_tera || attacker.tera_type != *move_type) {
         return 1.0;
@@ -1016,6 +1024,8 @@ fn variable_move_base_power(
         // are consumed afterwards in apply_post_damage_move_effects, so the level is still
         // readable here.
         M::SpitUp => Some(100 * stockpile_level(attacker) as u16),
+        // Round: BP 60 on first cast this turn; 120 for every subsequent Round same turn.
+        M::Round => Some(if state.round_used_this_turn { bp * 2 } else { bp }),
         _ => None,
     }
 }
@@ -1515,11 +1525,28 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     base_power_override: Option<u16>,
     forced_damage_roll: Option<u8>,
 ) -> Vec<(u16, bool, f64)> {
-    let Some(attacking_stat) = move_offensive_stat(move_data) else {
-        return vec![(0, false, 1.0)];
-    };
-    let Some(defending_stat) = move_defensive_stat(move_data) else {
-        return vec![(0, false, 1.0)];
+    // Shell Side Arm: forecasts physical vs special and uses whichever would deal more.
+    // Compares staged Atk/Def vs SpA/SpD via cross-multiplication (no item/ability multipliers
+    // per Bulbapedia). Ties resolve deterministically Physical (50/50 tie-branching is a
+    // TODO; ties are rare in practice and the damage value is identical either way).
+    let (attacking_stat, defending_stat) = if move_data.name == PokemonMove::ShellSideArm {
+        let phys_a = effective_stat(_state, attacker, PokemonStat::Atk, false, false);
+        let phys_d = effective_stat(_state, target, PokemonStat::Def, false, false).max(1.0);
+        let spec_a = effective_stat(_state, attacker, PokemonStat::SpA, false, false);
+        let spec_d = effective_stat(_state, target, PokemonStat::SpD, false, false).max(1.0);
+        if spec_a * phys_d > phys_a * spec_d {
+            (PokemonStat::SpA, PokemonStat::SpD) // special wins
+        } else {
+            (PokemonStat::Atk, PokemonStat::Def) // physical wins (or tie → physical)
+        }
+    } else {
+        let Some(atk) = move_offensive_stat(move_data) else {
+            return vec![(0, false, 1.0)];
+        };
+        let Some(def) = move_defensive_stat(move_data) else {
+            return vec![(0, false, 1.0)];
+        };
+        (atk, def)
     };
 
     // Pre-compute values that don't change per crit branch.
@@ -1538,7 +1565,12 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
                                move_data.ignore_defense_boosts));
     let attack_type  = effective_move_type(_state, attacker, move_data);
     let effectiveness = {
-        let base = move_type_effectiveness(_state, &attack_type, target);
+        let base = if move_data.name == PokemonMove::FlyingPress {
+            // Flying Press: Fighting chart × Flying chart (both with Strong Winds tempering).
+            flying_press_type_effectiveness(_state, target)
+        } else {
+            move_type_effectiveness(_state, &attack_type, target)
+        };
         // Freeze-Dry: Water type is treated as super-effective (2×) regardless of the chart.
         // The chart normally gives 0.5× (Water resists Ice), so the correction factor per Water
         // type in the target's defensive type list is 2.0 / 0.5 = 4.0. This is additive per
@@ -1850,7 +1882,7 @@ fn move_can_hit_sky_drop_target(attacker: &PokemonState, target: &PokemonState, 
 pub fn sky_drop_first_turn_fails(state: &BattleState, target: &PokemonState) -> bool {
     is_gravity_active(state)
         || (item_is_active(state, target) && matches!(target.item, Item::IronBall))
-        || has_status_volatile(target, &VolatileStatus::Substitute)
+        || has_status_volatile(target, &VolatileStatus::Substitute(0))
 }
 
 pub fn move_causes_invulnerability(move_name: &PokemonMove) -> bool {
@@ -1983,6 +2015,40 @@ pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus)
     }) {
         mon.volatiles.remove(pos);
     }
+}
+
+/// Returns the Substitute's current HP (payload of `TurnStatus(Substitute, hp)`), or 0 if
+/// the holder has no Substitute. Zero means the sub is absent or has already broken.
+pub fn get_substitute_hp(mon: &PokemonState) -> u16 {
+    mon.volatiles.iter().find_map(|v| {
+        if let VolatileStatusState::TurnStatus(VolatileStatus::Substitute(hp), _) = v { Some(*hp) } else { None }
+    }).unwrap_or(0)
+}
+
+/// Update the Substitute HP stored in the VolatileStatus variant. No-op if the holder has no sub.
+pub fn set_substitute_hp(mon: &mut PokemonState, hp: u16) {
+    for volatile in mon.volatiles.iter_mut() {
+        if let VolatileStatusState::TurnStatus(VolatileStatus::Substitute(old_hp), _) = volatile {
+            *old_hp = hp;
+            return;
+        }
+    }
+}
+
+/// True when the incoming attack (from `attacker_slot`) bypasses the target's Substitute.
+/// Sound moves, moves with the `bypasssub` flag, and moves used by Infiltrator users all
+/// bypass the sub. Self-targeting damage is handled at the call site (never routed to sub).
+pub fn attack_bypasses_substitute(
+    state: &BattleState,
+    attacker_slot: crate::battle::FieldSlot,
+    move_data: &crate::dex_data::MoveData,
+) -> bool {
+    if move_has_flag(move_data, &crate::dex_data::MoveFlag::Sound) { return true; }
+    if move_has_flag(move_data, &crate::dex_data::MoveFlag::BypassSub) { return true; }
+    get_pokemon_at_slot(state, attacker_slot)
+        .filter(|m| !pokemon_ability_is_suppressed(state, m))
+        .map(|m| m.ability == crate::data::ability::Ability::Infiltrator)
+        .unwrap_or(false)
 }
 
 /// Returns true when `mon` is prevented from switching out voluntarily.
@@ -3116,7 +3182,7 @@ pub(crate) fn is_confused(mon: &PokemonState) -> bool {
     })
 }
 
-pub fn confusion_turns_remaining(mon: &PokemonState) -> Option<u8> {
+pub fn confusion_turns_remaining(mon: &PokemonState) -> Option<u16> {
     mon.volatiles.iter().find_map(|volatile_status| match volatile_status {
         VolatileStatusState::MoveStatus(VolatileStatus::Confusion, turns) => Some(*turns),
         VolatileStatusState::TurnStatus(VolatileStatus::Confusion, turns) => Some(*turns),
@@ -3880,7 +3946,7 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
 /// - Target has Illusion or Imposter ability.
 pub fn transform_into(transformer: &mut PokemonState, target: &PokemonState) -> bool {
     // Fail if target is behind a Substitute.
-    if has_status_volatile(target, &VolatileStatus::Substitute) {
+    if has_status_volatile(target, &VolatileStatus::Substitute(0)) {
         return false;
     }
     // Fail if target is already transformed.
@@ -4634,7 +4700,8 @@ fn decrement_volatile_statuses(mons: &mut [PokemonState]) {
         let mut kept = Vec::with_capacity(mon.volatiles.len());
 
         for volatile in mon.volatiles.drain(..) {
-            match volatile {                VolatileStatusState::TurnStatus(effect, turns) => {
+            match volatile {
+                VolatileStatusState::TurnStatus(effect, turns) => {
                     if turns == 0 {
                         kept.push(VolatileStatusState::TurnStatus(effect, 0));
                     } else if turns > 1 {
@@ -4812,13 +4879,14 @@ pub fn end_turn(
             }
         }
         bs.items_consumed_this_turn.clear();
+        bs.round_used_this_turn = false;
     }
 
     coalesce_branches(branches)
 }
 
 /// Determine the duration for a volatile status condition.
-fn get_volatile_duration(volatile: &VolatileStatus) -> u8 {
+fn get_volatile_duration(volatile: &VolatileStatus) -> u16 {
     match volatile {
         // End-of-turn only (lasts 1 turn)
         VolatileStatus::Flinch
@@ -5954,7 +6022,7 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
         // Leech Seed cannot be planted on Grass-type Pokémon or through a Substitute.
         if matches!(volatile, VolatileStatus::LeechSeed)
             && (pokemon_has_type(mon, &PokemonType::Grass)
-                || has_status_volatile(mon, &VolatileStatus::Substitute))
+                || has_status_volatile(mon, &VolatileStatus::Substitute(0)))
         {
             return;
         }
@@ -6643,7 +6711,7 @@ fn apply_hazard_removal_move(bs: &mut BattleState, attacker_slot: FieldSlot, mov
             // apply it here to the directly-opposing foe, unless that foe is behind a Substitute.
             let foe_target = FieldSlot { player: foe, slot_index: attacker_slot.slot_index };
             let blocked_by_sub = get_pokemon_at_slot(bs, foe_target)
-                .map(|m| has_status_volatile(m, &VolatileStatus::Substitute))
+                .map(|m| has_status_volatile(m, &VolatileStatus::Substitute(0)))
                 .unwrap_or(true);
             if !blocked_by_sub {
                 let items_suppressed = items_are_suppressed(bs);
@@ -6673,7 +6741,7 @@ fn apply_hazard_removal_move(bs: &mut BattleState, attacker_slot: FieldSlot, mov
                 .chain(bs.p2_active_mons.iter_mut())
                 .chain(bs.p2_back_mons.iter_mut())
             {
-                remove_status_volatile(mon, &VolatileStatus::Substitute);
+                remove_status_volatile(mon, &VolatileStatus::Substitute(0));
             }
             // Tidy Up's +1 Atk / +1 Spe live in Showdown's onHit JS, so they aren't parsed into
             // `self_boost` — apply them here.
@@ -7453,7 +7521,7 @@ fn apply_binding_trap(
         let already_bound = get_pokemon_at_slot(&bs, target_slot)
             .map_or(false, |m| has_status_volatile(m, &VolatileStatus::PartiallyTrapped(0)));
         let has_sub = get_pokemon_at_slot(&bs, target_slot)
-            .map_or(false, |m| has_status_volatile(m, &VolatileStatus::Substitute));
+            .map_or(false, |m| has_status_volatile(m, &VolatileStatus::Substitute(0)));
         if already_bound || has_sub {
             new_branches.push((bs, prob));
             continue;
@@ -7476,7 +7544,7 @@ fn apply_binding_trap(
             new_branches.push((applied, prob));
         } else {
             // 50/50 branch: 4 turns or 5 turns.
-            for duration in [4u8, 5u8] {
+            for duration in [4u16, 5u16] {
                 let mut applied = bs.clone();
                 if let Some(mon) = get_pokemon_at_slot_mut(&mut applied, target_slot) {
                     mon.volatiles.push(VolatileStatusState::TurnStatus(
@@ -7516,7 +7584,7 @@ fn apply_trapping_move(
                 .map_or(false, |m| pokemon_has_type(m, &PokemonType::Ghost));
             // Substitute blocks the trapping effect.
             let target_has_sub = get_pokemon_at_slot(bs, target_slot)
-                .map_or(false, |m| has_status_volatile(m, &VolatileStatus::Substitute));
+                .map_or(false, |m| has_status_volatile(m, &VolatileStatus::Substitute(0)));
             if target_is_ghost || target_has_sub { return; }
             if let Some(mon) = get_pokemon_at_slot_mut(bs, target_slot) {
                 if !has_status_volatile(mon, &VolatileStatus::Trapped(0)) {
@@ -7568,7 +7636,7 @@ pub fn apply_secondary_effects(
             no_bench || get_pokemon_at_slot(bs, attacker_slot).map_or(true, |m| {
                 let max_hp = m.stats[0].max(1);
                 m.volatiles.iter().any(|v|
-                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
                 ) || m.hp <= max_hp / 2
             })
         });
@@ -7605,11 +7673,24 @@ pub fn apply_secondary_effects(
     // Branch target secondaries
     if !target_has_shield_dust {
         for secondary in &move_data.secondaries {
-            // Shed Tail: skip the auto-added Substitute secondary when the move fails its HP check.
-            if shed_tail_failed
-                && secondary.random_choices.is_empty()
-                && secondary.effect.volatile_status == Some(VolatileStatus::Substitute)
+            // Shed Tail's auto-parsed Substitute secondary carries duration 0 (the generic
+            // "permanent" value), which would create a sub with HP = 0 under the new model
+            // where the payload stores sub HP.  Always skip the generic path and, on success,
+            // manually create the sub with the correct HP (max_hp / 4 of the user).
+            if secondary.random_choices.is_empty()
+                && matches!(secondary.effect.volatile_status, Some(VolatileStatus::Substitute(_)))
+                && move_data.self_switch == SelfSwitchType::ShedTail
             {
+                if !shed_tail_failed {
+                    for (bs, _) in branches.iter_mut() {
+                        if let Some(m) = get_pokemon_at_slot_mut(bs, attacker_slot) {
+                            let sub_hp = (m.stats[0].max(1) / 4).max(1);
+                            m.volatiles.push(VolatileStatusState::TurnStatus(
+                                VolatileStatus::Substitute(sub_hp), 0,
+                            ));
+                        }
+                    }
+                }
                 continue;
             }
             // PartiallyTrapped sentinel: handled separately below with duration branching.
@@ -7655,7 +7736,7 @@ pub fn apply_secondary_effects(
         // already-has guard handles that).
         if move_data.name == PokemonMove::ThroatChop {
             let target_has_sub = get_pokemon_at_slot(state, target_slot)
-                .is_some_and(|m| has_status_volatile(m, &VolatileStatus::Substitute));
+                .is_some_and(|m| has_status_volatile(m, &VolatileStatus::Substitute(0)));
             if !target_has_sub {
                 let eff = HitEffect { volatile_status: Some(VolatileStatus::ThroatChop), ..Default::default() };
                 for (bs, _) in branches.iter_mut() {
@@ -7776,7 +7857,7 @@ pub fn apply_secondary_effects(
     // The onHit effect is blocked if the target was behind a Substitute (no bypasssub flag).
     if move_data.name == PokemonMove::ClearSmog {
         let target_had_sub = get_pokemon_at_slot(state, target_slot)
-            .map(|m| has_status_volatile(m, &VolatileStatus::Substitute))
+            .map(|m| has_status_volatile(m, &VolatileStatus::Substitute(0)))
             .unwrap_or(false);
         if !target_had_sub {
             for (bs, _) in branches.iter_mut() {
