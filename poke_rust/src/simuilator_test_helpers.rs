@@ -195,6 +195,10 @@ pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(Match
         // Persists across turns by design (Stomping Tantrum / Micle Berry), but is
         // transient bookkeeping for state-equality purposes.
         mon.last_move_failed = false;
+        // Tests that compare full states generically (smoke_test, simple_damage, etc.)
+        // should not fail just because the mover's used_moves_this_field changed.
+        // Tests that care about Last Resort gating should check the field explicitly.
+        mon.used_moves_this_field = [false; 4];
     }
     outcomes.into_iter().map(|(state, prob)| {
         let state = match state {

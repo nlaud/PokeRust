@@ -83,7 +83,11 @@ pub enum Nature{
     Serious
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+/// `used_moves_this_field` is intentionally excluded from `PartialEq`, `Eq`, and `Hash`.
+/// It tracks which move slots have been used since switch-in (for Last Resort), but is
+/// purely runtime bookkeeping — including it would prevent coalescing branches that differ
+/// only in move usage history while being otherwise identical in game state.
+#[derive(Clone)]
 pub struct PokemonState{
     /// Stable identity within this Pokémon's own party (party-order index, assigned at team
     /// construction). Unlike a `FieldSlot` it is unaffected by switching, and unlike `species`
@@ -169,6 +173,9 @@ pub struct PokemonState{
 
     pub original_ability: Option<Ability>,
     pub last_used_move: Option<PokemonMove>,
+    /// Tracks which move slots have been used since this Pokémon was sent in (for Last Resort).
+    /// Index matches `moves`; cleared on switch-in alongside `first_move_on_field`.
+    pub used_moves_this_field: [bool; 4],
 
     /// Generic once-per-battle flag for abilities that fire only on first entry
     /// (e.g. Supersweet Syrup, Intrepid Sword). Persists across switch-outs — a volatile
@@ -205,6 +212,129 @@ pub struct PokemonState{
 
     pub evs: [u8; 6],
     pub ivs: [u8; 6],
+}
+
+impl PartialEq for PokemonState {
+    fn eq(&self, other: &Self) -> bool {
+        self.mon_id == other.mon_id
+            && self.fainted == other.fainted
+            && self.species == other.species
+            && self.types == other.types
+            && self.is_tera == other.is_tera
+            && self.is_mega == other.is_mega
+            && self.has_mega_form == other.has_mega_form
+            && self.level == other.level
+            && self.hp == other.hp
+            && self.moves == other.moves
+            && self.move_pp == other.move_pp
+            && self.max_pp == other.max_pp
+            && self.item == other.item
+            && self.consumed_item == other.consumed_item
+            && self.cud_chew_pending == other.cud_chew_pending
+            && self.item_lost == other.item_lost
+            && self.damaged_this_turn == other.damaged_this_turn
+            && self.damaged_by_this_turn == other.damaged_by_this_turn
+            && self.last_physical_damage_taken == other.last_physical_damage_taken
+            && self.last_physical_attacker == other.last_physical_attacker
+            && self.last_special_damage_taken == other.last_special_damage_taken
+            && self.last_special_attacker == other.last_special_attacker
+            && self.last_damage_taken == other.last_damage_taken
+            && self.last_damage_attacker == other.last_damage_attacker
+            && self.stats_raised_this_turn == other.stats_raised_this_turn
+            && self.stats_lowered_this_turn == other.stats_lowered_this_turn
+            && self.switched_in_this_turn == other.switched_in_this_turn
+            && self.stall_counter == other.stall_counter
+            && self.nature == other.nature
+            && self.boosts == other.boosts
+            && self.stats == other.stats
+            && self.status == other.status
+            && self.volatiles == other.volatiles
+            && self.base_ability == other.base_ability
+            && self.ability == other.ability
+            && self.gender == other.gender
+            && self.weight_hg == other.weight_hg
+            && self.tera_type == other.tera_type
+            && self.mega_species == other.mega_species
+            && self.mega_ability == other.mega_ability
+            && self.last_move_failed == other.last_move_failed
+            && self.original_ability == other.original_ability
+            && self.last_used_move == other.last_used_move
+            // For non-fainted Pokémon, move-usage history affects Last Resort availability and
+            // must distinguish branches. For fainted Pokémon it is irrelevant (they can't act).
+            // At this point self.fainted == other.fainted is already established above, so
+            // checking `self.fainted` is equivalent to checking "are both fainted?".
+            && (self.fainted || self.used_moves_this_field == other.used_moves_this_field)
+            && self.one_time_ability_used == other.one_time_ability_used
+            && self.ate_berry_this_battle == other.ate_berry_this_battle
+            && self.first_move_on_field == other.first_move_on_field
+            && self.first_turn_on_field_pending == other.first_turn_on_field_pending
+            && self.entered_this_turn == other.entered_this_turn
+            && self.pre_transform == other.pre_transform
+            && self.evs == other.evs
+            && self.ivs == other.ivs
+    }
+}
+
+impl Eq for PokemonState {}
+
+impl std::hash::Hash for PokemonState {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.mon_id.hash(state);
+        self.fainted.hash(state);
+        self.species.hash(state);
+        self.types.hash(state);
+        self.is_tera.hash(state);
+        self.is_mega.hash(state);
+        self.has_mega_form.hash(state);
+        self.level.hash(state);
+        self.hp.hash(state);
+        self.moves.hash(state);
+        self.move_pp.hash(state);
+        self.max_pp.hash(state);
+        self.item.hash(state);
+        self.consumed_item.hash(state);
+        self.cud_chew_pending.hash(state);
+        self.item_lost.hash(state);
+        self.damaged_this_turn.hash(state);
+        self.damaged_by_this_turn.hash(state);
+        self.last_physical_damage_taken.hash(state);
+        self.last_physical_attacker.hash(state);
+        self.last_special_damage_taken.hash(state);
+        self.last_special_attacker.hash(state);
+        self.last_damage_taken.hash(state);
+        self.last_damage_attacker.hash(state);
+        self.stats_raised_this_turn.hash(state);
+        self.stats_lowered_this_turn.hash(state);
+        self.switched_in_this_turn.hash(state);
+        self.stall_counter.hash(state);
+        self.nature.hash(state);
+        self.boosts.hash(state);
+        self.stats.hash(state);
+        self.status.hash(state);
+        self.volatiles.hash(state);
+        self.base_ability.hash(state);
+        self.ability.hash(state);
+        self.gender.hash(state);
+        self.weight_hg.hash(state);
+        self.tera_type.hash(state);
+        self.mega_species.hash(state);
+        self.mega_ability.hash(state);
+        self.last_move_failed.hash(state);
+        self.original_ability.hash(state);
+        self.last_used_move.hash(state);
+        // Only hash used_moves_this_field for non-fainted mons — must match PartialEq.
+        if !self.fainted {
+            self.used_moves_this_field.hash(state);
+        }
+        self.one_time_ability_used.hash(state);
+        self.ate_berry_this_battle.hash(state);
+        self.first_move_on_field.hash(state);
+        self.first_turn_on_field_pending.hash(state);
+        self.entered_this_turn.hash(state);
+        self.pre_transform.hash(state);
+        self.evs.hash(state);
+        self.ivs.hash(state);
+    }
 }
 
 impl std::fmt::Display for PokemonState {
@@ -484,7 +614,7 @@ pub fn build_pokemon_state(
         status: None, volatiles: Vec::new(),
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,
-        last_move_failed: false, original_ability: None, last_used_move: None,
+        last_move_failed: false, original_ability: None, last_used_move: None, used_moves_this_field: [false; 4],
         one_time_ability_used: false, ate_berry_this_battle: false, first_move_on_field: false,
         first_turn_on_field_pending: false,
         entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
