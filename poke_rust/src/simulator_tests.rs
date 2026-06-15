@@ -3441,7 +3441,8 @@ mod tests {
                         state.p2_active_mons[0].item = Item::IronBall;
                     }
                     "substitute" => {
-                        state.p2_active_mons[0].volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute, 0));
+                        // HP=300: large enough that the sub won't break from a single hit in this test.
+                        state.p2_active_mons[0].volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(300), 0));
                     }
                     _ => unreachable!(),
                 }
@@ -9644,8 +9645,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let mut target = mon(Species::Snorlax, Ability::Pressure, None, None);
-            // Give target a Substitute volatile.
-            target.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute, 0));
+            // Give target a Substitute volatile (HP=300 so it won't break during this test).
+            target.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(300), 0));
 
             let ditto = build_pokemon_state(
                 Species::Ditto,
@@ -11724,7 +11725,7 @@ mod tests {
 
             // Slowpoke has a Substitute volatile
             let has_sub = replacement.volatiles.iter().any(|v|
-                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+                matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
             );
             assert!(has_sub, "Shed Tail replacement should have a Substitute volatile");
 
@@ -11770,7 +11771,7 @@ mod tests {
             assert!(bs.self_switch_pending.is_none(), "Shed Tail with HP ≤ 50% should fail — no switch pending");
             // No substitute on active mon
             let no_sub = bs.p1_active_mons[0].volatiles.iter().all(|v|
-                !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+                !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
             );
             assert!(no_sub, "No Substitute should have been created when Shed Tail fails");
         }
@@ -11788,7 +11789,7 @@ mod tests {
             );
             let initial_hp = p1_active.hp;
             // Pre-existing Substitute (HP value doesn't matter since blocking is unimplemented)
-            p1_active.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute, 30));
+            p1_active.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(30), 0));
 
             let p1_bench = build_pokemon_state(
                 Species::Slowpoke, &pokemon_dex, &move_dex, None,
@@ -11818,7 +11819,7 @@ mod tests {
                 "No HP cost should be taken when Shed Tail fails due to existing Substitute");
             // Still exactly one Substitute volatile (the original; no second one created)
             let sub_count = bs.p1_active_mons[0].volatiles.iter()
-                .filter(|v| matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _)))
+                .filter(|v| matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)))
                 .count();
             assert_eq!(sub_count, 1, "Should still have exactly the original Substitute, not a new one");
         }
@@ -11860,7 +11861,7 @@ mod tests {
                 "No HP cost should be taken when Shed Tail fails due to no healthy bench");
             // No Substitute should have been created
             let no_sub = bs.p1_active_mons[0].volatiles.iter().all(|v|
-                !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+                !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
             );
             assert!(no_sub, "No Substitute should have been created when Shed Tail fails");
             // Turn completes normally (both flags reset)
@@ -20295,8 +20296,8 @@ mod binding_trapping {
         let pdex = pokemon_dex();
         let user = mon(Species::Onix, Ability::Pressure, PokemonMove::Bind);
         let mut foe  = mon(Species::Snorlax, Ability::Pressure, PokemonMove::Splash);
-        // Manually give the foe a Substitute volatile.
-        foe.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute, 0));
+        // Manually give the foe a Substitute volatile (HP=300 so it won't break from Bind).
+        foe.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(300), 0));
         let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
         let outcomes = run_single_turn(
             &MatchState::BattleState(state),
@@ -21017,7 +21018,7 @@ mod volatile_status_debuffs {
         simulator_helpers::has_status_volatile(mon, v)
     }
 
-    fn vol_turns(mon: &PokemonState, v: &VolatileStatus) -> Option<u8> {
+    fn vol_turns(mon: &PokemonState, v: &VolatileStatus) -> Option<u16> {
         mon.volatiles.iter().find_map(|vs| match vs {
             VolatileStatusState::TurnStatus(x, n) if x == v => Some(*n),
             _ => None,
@@ -27113,6 +27114,335 @@ mod seven_new_moves {
             MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < bs.p2_active_mons[0].stats[0]
         ));
         assert!(any_damaged, "Eerie Spell should deal damage to the target");
+    }
+}
+
+mod flying_press_tests {
+    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+
+    fn attacker() -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut m = build_pokemon_state(
+            Species::Hawlucha, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::FlyingPress), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        m.stats[5] = 200; // fast
+        m
+    }
+
+    fn target(species: Species) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    // Flying Press should deal damage to Normal-type targets (not immune to either Fighting or Flying)
+    #[test]
+    fn flying_press_deals_damage_to_normal_type() {
+        let p1 = attacker();
+        let p2 = target(Species::Snorlax); // Normal type
+        let max_hp = p2.stats[0];
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let any_damage = outcomes.iter().any(|(s, _)| {
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < max_hp)
+        });
+        assert!(any_damage, "Flying Press should deal damage to Normal-type targets");
+    }
+
+    // Flying Press vs Ghost-type = 0 effectiveness (Ghost immune to Fighting)
+    #[test]
+    fn flying_press_zero_vs_ghost() {
+        let p1 = attacker();
+        let p2 = target(Species::Gengar);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2.clone()], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let any_damage = outcomes.iter().any(|(s, _)| {
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < p2.stats[0])
+        });
+        assert!(!any_damage, "Flying Press should deal 0 damage to Ghost-type (Fighting immunity)");
+    }
+}
+
+mod substitute_move {
+    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+    use crate::simulator_helpers::get_substitute_hp;
+
+    fn mon_with(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        mon_with(species, mv, Ability::None)
+    }
+
+    // Substitute creates a volatile with HP = max_hp / 4
+    #[test]
+    fn substitute_creates_volatile_with_correct_hp() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Substitute);
+        p1.stats[5] = 200; // fast, moves first
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let max_hp = p1.stats[0];
+        let expected_sub_hp = max_hp / 4;
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let user = &bs.p1_active_mons[0];
+                let sub_hp = get_substitute_hp(user);
+                assert_eq!(sub_hp, expected_sub_hp,
+                    "Substitute HP should equal max_hp / 4");
+                assert_eq!(user.hp, max_hp - expected_sub_hp,
+                    "User should have paid the HP cost");
+            }
+        }
+    }
+
+    // Substitute fails when the user already has one
+    #[test]
+    fn substitute_fails_when_already_present() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Substitute);
+        p1.stats[5] = 200;
+        let existing_sub_hp = p1.stats[0] / 4;
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(existing_sub_hp), 0));
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let user = &bs.p1_active_mons[0];
+                // Sub HP must remain the original (no second sub created)
+                assert_eq!(get_substitute_hp(user), existing_sub_hp,
+                    "Substitute should not stack");
+                // HP should not have changed (move failed before deducting cost)
+                assert_eq!(user.hp, p1.hp,
+                    "No HP should be lost when Substitute fails (already has one)");
+            }
+        }
+    }
+
+    // Substitute fails when HP <= cost (at 25% HP exactly)
+    #[test]
+    fn substitute_fails_when_insufficient_hp() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Substitute);
+        p1.stats[5] = 200;
+        let max_hp = p1.stats[0];
+        p1.hp = max_hp / 4; // exactly at the cost threshold → fails
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let user = &bs.p1_active_mons[0];
+                assert_eq!(get_substitute_hp(user), 0,
+                    "No substitute should be created when HP <= cost");
+                assert_eq!(user.hp, max_hp / 4,
+                    "HP should be unchanged when Substitute fails");
+            }
+        }
+    }
+
+    // Damage dealt to a substitute is absorbed — the real HP is unchanged
+    #[test]
+    fn substitute_absorbs_damage_protecting_real_hp() {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        // Give p1 a substitute with generous HP so it won't break
+        let sub_hp: u16 = 500;
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(sub_hp), 0));
+        let real_hp = p1.stats[0]; // still at max
+
+        let mut p2 = build_pokemon_state(
+            Species::Machamp, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::KarateChop), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        p2.stats[5] = 200; // fast
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let target = &bs.p1_active_mons[0];
+                assert_eq!(target.hp, real_hp,
+                    "Real HP should be unchanged when Substitute absorbs the hit");
+                // Sub HP should have decreased
+                let remaining = get_substitute_hp(target);
+                assert!(remaining < sub_hp,
+                    "Substitute HP should have decreased after absorbing a hit");
+            }
+        }
+    }
+
+    // When a substitute breaks, the mon survives and the volatile is removed
+    #[test]
+    fn substitute_breaks_when_hp_depleted() {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        // Tiny sub that breaks from even a weak hit
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(1), 0));
+
+        let mut p2 = build_pokemon_state(
+            Species::Machamp, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::KarateChop), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        p2.stats[5] = 200; // fast
+
+        let state = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let all_broke = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                get_substitute_hp(&bs.p1_active_mons[0]) == 0
+                    && !crate::simulator_helpers::has_status_volatile(
+                        &bs.p1_active_mons[0], &VolatileStatus::Substitute(0))
+            } else { false }
+        });
+        assert!(all_broke, "Sub with 1 HP should always break from any damaging hit");
+    }
+
+    // Sound moves bypass the Substitute
+    #[test]
+    fn sound_move_bypasses_substitute() {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash);
+        let sub_hp: u16 = 500;
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(sub_hp), 0));
+        let real_hp = p1.stats[0];
+
+        let mut p2 = build_pokemon_state(
+            Species::Exploud, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Boomburst), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        p2.stats[5] = 200; // fast
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex, &pdex,
+        );
+        let any_real_damage = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p1_active_mons[0].hp < real_hp
+            } else { false }
+        });
+        assert!(any_real_damage,
+            "Sound move (Boomburst) should bypass Substitute and deal real HP damage");
+    }
+
+    // Rocky Helmet does NOT trigger when damage is absorbed by the Substitute
+    #[test]
+    fn rocky_helmet_does_not_trigger_through_sub() {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            Some(Item::RockyHelmet), None, Some([0; 6]), None, false,
+        );
+        let sub_hp: u16 = 500;
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(sub_hp), 0));
+
+        let pdex2 = pokemon_dex();
+        let mdex2 = move_dex();
+        let mut p2 = build_pokemon_state(
+            Species::Machamp, &pdex2, &mdex2, Some(50),
+            Some([Some(PokemonMove::KarateChop), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        p2.stats[5] = 200; // fast
+        let attacker_hp = p2.stats[0];
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &mdex2, &pdex2,
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, attacker_hp,
+                    "Rocky Helmet should NOT damage attacker when sub absorbed the hit");
+            }
+        }
     }
 }
 

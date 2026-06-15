@@ -41,17 +41,6 @@ Each has significant individual complexity. Research all edge cases carefully.
 
 ---
 
-## Moves
-
-### Complex moves — transformation, substitution, and doubles
-More architecturally significant; each likely needs its own research pass.
-- Ally Switch — user swaps field position with an ally; success rate degrades each use
-- Dragon Darts — two hits; splits between two opponents when both are present
-- Flying Press — damage uses both Fighting and Flying type effectiveness combined
-- Instruct — make the target immediately repeat their last move
-- Round — power doubles for each additional Round user acting in the same turn
-- Shell Side Arm — use whichever calculation (physical or special) deals more damage; 20% poison
-- Substitute — lose ¼ max HP to create a substitute that absorbs incoming damage
 
 ## Refactors
 - use thaws_target move bool and defrost move flag instead of fixed lists.

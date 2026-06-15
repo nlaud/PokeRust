@@ -475,6 +475,34 @@ fn apply_single_hit_branch(
             }
         }
     }
+    // Substitute absorption: if the target has a Substitute and this attack doesn't bypass
+    // it, route all damage into the sub. Sub breaks when its HP hits 0; for single-hit moves
+    // excess damage is lost (does NOT fall through to the mon). For multi-hit, the sub breaking
+    // on one hit is reflected in the state, and subsequent per-hit calls see no sub.
+    // This block returns early: no secondary effects, no contact abilities, no endure/sash.
+    // Recoil still fires — tracked via `sub_damage_dealt` consumed by apply_post_damage_move_effects.
+    if damage > 0 && attack_slot.player != target_slot.player {
+        let sub_hp = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
+            .map(|m| simulator_helpers::get_substitute_hp(m))
+            .unwrap_or(0);
+        let bypasses = simulator_helpers::attack_bypasses_substitute(
+            &branch_state, attack_slot, move_data,
+        );
+        if sub_hp > 0 && !bypasses {
+            branch_state.sub_damage_dealt += damage as u32;
+            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, target_slot) {
+                if damage >= sub_hp {
+                    // Sub breaks; remove it
+                    simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Substitute(0));
+                } else {
+                    simulator_helpers::set_substitute_hp(mon, sub_hp - damage);
+                }
+            }
+            outcomes.push((branch_state, branch_probability));
+            return outcomes;
+        }
+    }
+
     let items_suppressed = simulator_helpers::items_are_suppressed(&branch_state);
     // Per-mon item gate for the target (Magic Room + Klutz).
     let target_item_active = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
@@ -491,7 +519,11 @@ fn apply_single_hit_branch(
         ) {
             (Some(atk), Some(tgt)) => {
                 let at = simulator_helpers::effective_move_type(&branch_state, atk, move_data);
-                let eff = simulator_helpers::move_type_effectiveness(&branch_state, &at, tgt);
+                let eff = if *move_name == PokemonMove::FlyingPress {
+                    simulator_helpers::flying_press_type_effectiveness(&branch_state, tgt)
+                } else {
+                    simulator_helpers::move_type_effectiveness(&branch_state, &at, tgt)
+                };
                 simulator_helpers::resist_berry_triggers(tgt, &at, eff)
             }
             _ => false,
@@ -970,6 +1002,12 @@ fn possible_damage_outcomes_for_move(
             mon.stall_counter = 0;
         }
     }
+    // Ally Switch counter resets when any move OTHER than Ally Switch is used.
+    if action.move_name != PokemonMove::AllySwitch {
+        if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.ally_switch_counter = 0;
+        }
+    }
 
     // Check Flinch
     if attacker.volatiles.iter().any(|v| matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Flinch, _))) {
@@ -1371,6 +1409,89 @@ fn possible_damage_outcomes_for_move(
         // Out-of-scope stalling move (e.g. Max Guard) — fall through to generic handling.
     }
 
+    // Ally Switch: swap the user with their adjacent ally. Success decays 1/3^n per
+    // consecutive use (independent from stall_counter). Fails in singles (no ally).
+    if move_name == PokemonMove::AllySwitch {
+        let user_slot = action.user_slot;
+        // Find the ally slot (same player, different slot_index, non-fainted)
+        let ally_slot: Option<FieldSlot> = {
+            let actives = match user_slot.player {
+                Player::P1 => &next_state.p1_active_mons,
+                Player::P2 => &next_state.p2_active_mons,
+            };
+            actives.iter().enumerate()
+                .find(|(i, m)| *i as u8 != user_slot.slot_index && !m.fainted)
+                .map(|(i, _)| FieldSlot { player: user_slot.player, slot_index: i as u8 })
+        };
+        let Some(ally_slot) = ally_slot else {
+            // Singles or no valid ally — move fails
+            if let Some(m) = mon_at_slot_mut(&mut next_state, user_slot) {
+                m.last_move_failed = true;
+            }
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+
+        let counter = simulator_helpers::get_pokemon_at_slot(&next_state, user_slot)
+            .map(|m| m.ally_switch_counter)
+            .unwrap_or(0);
+        let p_success = 1.0 / 3f64.powi(counter as i32);
+
+        let mut result: Vec<(MatchState, f64)> = Vec::new();
+
+        // Success branch: swap the two active PokémonState entries
+        let mut succ = next_state.clone();
+        decrement_move_pp(&mut succ, user_slot, &action.move_name);
+        {
+            let actives = match user_slot.player {
+                Player::P1 => &mut succ.p1_active_mons,
+                Player::P2 => &mut succ.p2_active_mons,
+            };
+            actives.swap(user_slot.slot_index as usize, ally_slot.slot_index as usize);
+        }
+        // Update counters on both mons (they swapped, so each is now at the other's index)
+        {
+            let actives = match user_slot.player {
+                Player::P1 => &mut succ.p1_active_mons,
+                Player::P2 => &mut succ.p2_active_mons,
+            };
+            // After the swap, the user's mon is now at ally_slot.slot_index
+            if let Some(m) = actives.get_mut(ally_slot.slot_index as usize) {
+                m.ally_switch_counter = m.ally_switch_counter.saturating_add(1);
+                m.last_move_failed = false;
+            }
+        }
+        // Retarget queued foe actions: if a foe's queued move was targeting user_slot,
+        // it now hits the ally (who slid into user_slot after the swap).
+        for queued in succ.action_queue.iter_mut() {
+            if let Action::MoveAction(ma) = queued {
+                if let Some(ref mut ts) = ma.target_slot {
+                    if *ts == user_slot { *ts = ally_slot; }
+                    else if *ts == ally_slot { *ts = user_slot; }
+                }
+            }
+        }
+        result.push((MatchState::BattleState(succ), p_success));
+
+        // Failure branch
+        if p_success < 1.0 {
+            let mut fail = next_state.clone();
+            decrement_move_pp(&mut fail, user_slot, &action.move_name);
+            if let Some(m) = mon_at_slot_mut(&mut fail, user_slot) {
+                m.ally_switch_counter = 0;
+                m.last_move_failed = true;
+            }
+            result.push((MatchState::BattleState(fail), 1.0 - p_success));
+        }
+
+        if let Some(c) = &confusion_self_hit_outcomes {
+            let mut folded: Vec<(MatchState, f64)> =
+                c.iter().map(|(s, p)| (s.clone(), p * 0.5)).collect();
+            folded.extend(result.into_iter().map(|(s, p)| (s, p * 0.5)));
+            return simulator_helpers::coalesce_branches(folded);
+        }
+        return simulator_helpers::coalesce_branches(result);
+    }
+
     // Resolve target list based on move's targeting type
     let mut target_slots = if move_name == PokemonMove::ExpandingForce
         && simulator_helpers::pokemon_is_on_terrain(&next_state, &attacker, &crate::dex_data::Terrain::PsychicTerrain)
@@ -1413,6 +1534,34 @@ fn possible_damage_outcomes_for_move(
         && !(move_name == PokemonMove::ExpandingForce && simulator_helpers::pokemon_is_on_terrain(&next_state, &attacker, &crate::dex_data::Terrain::PsychicTerrain))
     {
         target_slots = simulator_helpers::check_and_apply_redirection(&next_state, action.user_slot, target_slots, Some(move_data));
+    }
+
+    // Substitute: lose ¼ max HP to create a dummy that absorbs incoming damage.
+    // Fails if the user already has a Substitute, HP ≤ cost, or max HP < 4 (Shedinja / tiny).
+    if move_name == PokemonMove::Substitute {
+        let attacker_slot = action.user_slot;
+        let check = simulator_helpers::get_pokemon_at_slot(&next_state, attacker_slot)
+            .map(|m| {
+                let max_hp = m.stats[0].max(1);
+                let cost = max_hp / 4;
+                let already_has = simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute(0));
+                (cost, m.hp, already_has)
+            });
+        if let Some((cost, hp, already_has)) = check {
+            if cost == 0 || hp <= cost || already_has {
+                // Failure: last_move_failed is set by the status-move diff check below.
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+            let attacker_env = simulator_helpers::berry_env(&next_state, attacker_slot);
+            if let Some(m) = mon_at_slot_mut(&mut next_state, attacker_slot) {
+                simulator_helpers::take_damage(m, cost, attacker_env);
+                m.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Substitute(cost), 0,
+                ));
+            }
+        }
+        decrement_move_pp(&mut next_state, attacker_slot, &action.move_name);
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
     // Life Dew: restore 1/4 max HP to the user and every ally currently in battle. Heal Block
@@ -1666,7 +1815,7 @@ fn possible_damage_outcomes_for_move(
         if simulator_helpers::protect_blocks_move(
             &next_state, action.user_slot, target_slot, &target, move_data, false,
         ).is_some()
-            || simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute)
+            || simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0))
         {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
@@ -1727,7 +1876,7 @@ fn possible_damage_outcomes_for_move(
             if simulator_helpers::protect_blocks_move(
                 &next_state, action.user_slot, slot, &target, move_data, false,
             ).is_some()
-                || simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute)
+                || simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0))
             {
                 continue;
             }
@@ -2066,6 +2215,97 @@ fn possible_damage_outcomes_for_move(
         return simulator_helpers::coalesce_branches(all_branches);
     }
 
+    // Instruct: make the target immediately re-execute its most recent move.
+    // PP is deducted from the TARGET's move slot. The instructed move's semantics
+    // (including whether it hits, crits, etc.) are fully independent of Instruct.
+    if move_name == PokemonMove::Instruct {
+        use crate::data::pokemon_move::PokemonMove as M;
+        const INSTRUCT_UNCALLABLE: &[M] = &[
+            M::Instruct, M::Bide, M::FocusPunch, M::BeakBlast, M::ShellTrap,
+            M::Sketch, M::Transform, M::Mimic, M::KingsShield, M::Struggle,
+            // Recharge moves
+            M::HyperBeam, M::GigaImpact, M::FrenzyPlant, M::BlastBurn,
+            M::HydroCannon, M::RockWrecker, M::RoarofTime, M::PrismaticLaser,
+            M::Eternabeam, M::MeteorAssault,
+            // Two-turn charge moves
+            M::SolarBeam, M::SolarBlade, M::SkyAttack, M::Dig, M::Fly,
+            M::Bounce, M::Dive, M::PhantomForce, M::ShadowForce, M::SkullBash,
+            M::SkyDrop, M::RazorWind, M::Geomancy, M::ElectroShot, M::MeteorBeam,
+            // Move-callers
+            M::Metronome, M::Assist, M::SleepTalk, M::MirrorMove,
+            M::Copycat, M::NaturePower, M::MeFirst,
+        ];
+        let target_slot = target_slots.first().copied().unwrap_or(action.user_slot);
+        // Gather what we need from the target before any mutable borrows
+        let (instructed_move, pp_slot_idx) = {
+            let Some(tgt) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot) else {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            };
+            let Some(ref mv) = tgt.last_used_move.clone() else {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            };
+            if INSTRUCT_UNCALLABLE.contains(mv) {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+            // Check charge/recharge flags
+            let md = move_dex.get(mv);
+            if let Some(md) = md {
+                if simulator_helpers::move_has_flag(md, &crate::dex_data::MoveFlag::Charge)
+                    || simulator_helpers::move_has_flag(md, &crate::dex_data::MoveFlag::Recharge)
+                {
+                    return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+                }
+            }
+            let slot_idx = tgt.moves.iter().position(|m| m.as_ref() == Some(mv));
+            let pp = slot_idx.and_then(|i| tgt.move_pp.get(i).copied()).unwrap_or(0);
+            if pp == 0 {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+            (mv.clone(), slot_idx)
+        };
+
+        let Some(instructed_data) = move_dex.get(&instructed_move) else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+
+        // Debit Instruct's own PP
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+
+        // Debit one PP from the target's instructed move slot
+        if let Some(idx) = pp_slot_idx {
+            if let Some(tgt_mon) = mon_at_slot_mut(&mut next_state, target_slot) {
+                if let Some(pp) = tgt_mon.move_pp.get_mut(idx) {
+                    *pp = pp.saturating_sub(1);
+                }
+            }
+        }
+
+        // Build a synthetic action: the TARGET executes the instructed move
+        let target_of_instructed = simulator_helpers::resolve_move_targets(
+            &next_state, target_slot, &instructed_data.target,
+        );
+        let target_of_instructed_slot = target_of_instructed.first().copied();
+        let synthetic_action = MoveAction {
+            move_name: instructed_move,
+            user_slot: target_slot,
+            target_slot: target_of_instructed_slot,
+            priority: instructed_data.priority,
+            moves_first: false,
+            moves_last: false,
+        };
+
+        let results = possible_damage_outcomes_for_move(
+            &next_state,
+            &synthetic_action,
+            instructed_data,
+            config,
+            move_dex,
+            pokemon_dex,
+            true,
+        );
+        return simulator_helpers::coalesce_branches(results);
+    }
+
     // Fling fails outright if the user has no flingable item (or its item is suppressed by
     // Magic Room / Klutz / Neutralizing Gas). Otherwise it proceeds as a normal damaging
     // move whose power and added effect come from the thrown item.
@@ -2251,7 +2491,7 @@ fn possible_damage_outcomes_for_move(
             if let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot) {
                 let max_hp = target.stats[0].max(1);
                 let full = target.hp >= max_hp;
-                let sub = simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute);
+                let sub = simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute(0));
                 let target_hb = simulator_helpers::heal_is_blocked(target);
                 if !full && !sub && !target_hb {
                     let amount = (max_hp as u32 / 2) as u16;
@@ -2279,7 +2519,7 @@ fn possible_damage_outcomes_for_move(
         if let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot) {
             let max_hp = target.stats[0].max(1);
             let full = target.hp >= max_hp;
-            let sub = simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute);
+            let sub = simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute(0));
             if !user_hb && !simulator_helpers::heal_is_blocked(target) && !full && !sub {
                 heal = Some(if mega_launcher {
                     (max_hp as u32 * 3 / 4) as u16
@@ -2306,7 +2546,7 @@ fn possible_damage_outcomes_for_move(
     if move_name == PokemonMove::PainSplit {
         let target_slot = target_slots[0];
         let sub = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute))
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute(0)))
             .unwrap_or(false);
         if sub {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -2700,7 +2940,7 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         let target_has_sub = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute))
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute(0)))
             .unwrap_or(false);
         if !target_has_sub {
             let user_def = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[2]).unwrap_or(0);
@@ -2755,7 +2995,7 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         let target_has_sub = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute))
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute(0)))
             .unwrap_or(false);
         if !target_has_sub {
             let user_atk = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[1]).unwrap_or(0);
@@ -2910,7 +3150,7 @@ fn possible_damage_outcomes_for_move(
         ).is_some() {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute) {
+        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0)) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let (user_ability, target_ability) = {
@@ -2950,7 +3190,7 @@ fn possible_damage_outcomes_for_move(
         ).is_some() {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute) {
+        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0)) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         if simulator_helpers::ability_cannot_be_suppressed(&target.ability) {
@@ -2981,7 +3221,7 @@ fn possible_damage_outcomes_for_move(
         ).is_some() {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute) {
+        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0)) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         if target.ability == Ability::Truant
@@ -3017,7 +3257,7 @@ fn possible_damage_outcomes_for_move(
         ).is_some() {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute) {
+        if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0)) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         if target.ability == Ability::Simple
@@ -3055,10 +3295,139 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
+    // Round: pull later-queued Round actions to move immediately after this one by
+    // setting moves_first. round_used_this_turn is set in apply_post_damage_move_effects
+    // AFTER damage resolves, so the first Round still gets BP 60 and subsequent ones 120.
+    if move_name == PokemonMove::Round {
+        for queued in next_state.action_queue.iter_mut() {
+            if let Action::MoveAction(ma) = queued {
+                if ma.move_name == PokemonMove::Round {
+                    ma.moves_first = true;
+                }
+            }
+        }
+    }
+
+    // Dragon Darts: two-strike move. In doubles with both foes valid, one strike lands
+    // on each foe (no 0.75× spread penalty since each hit is single-target).
+    // "Valid" = non-fainted, not Fairy-immune, not ability-immune to Dragon, not in a
+    // semi-invulnerable state, not Protect-protected. Follow Me / Rage Powder already
+    // redirected target_slots before we get here. In singles, falls through to the
+    // standard 2-hit multi-hit path via the `is_multihit_move` flag.
+    if move_name == PokemonMove::DragonDarts {
+        let opposing_player = match action.user_slot.player {
+            Player::P1 => Player::P2,
+            Player::P2 => Player::P1,
+        };
+        let foe_slots: Vec<FieldSlot> = {
+            let mons = match opposing_player {
+                Player::P1 => &next_state.p1_active_mons,
+                Player::P2 => &next_state.p2_active_mons,
+            };
+            mons.iter().enumerate()
+                .filter(|(_, m)| !m.fainted)
+                .map(|(i, _)| FieldSlot { player: opposing_player, slot_index: i as u8 })
+                .collect()
+        };
+
+        if foe_slots.len() >= 2 {
+            // Check type-effectiveness to see if either slot is immune (Fairy-immune etc.)
+            let is_valid = |slot: FieldSlot| -> bool {
+                let Some(tgt) = simulator_helpers::get_pokemon_at_slot(&next_state, slot) else { return false; };
+                let eff = simulator_helpers::move_type_effectiveness(&next_state, &move_data.pokemon_type, tgt);
+                eff > 0.0
+            };
+            let slot0_valid = is_valid(foe_slots[0]);
+            let slot1_valid = is_valid(foe_slots[1]);
+
+            let dart_targets: [FieldSlot; 2] = match (slot0_valid, slot1_valid) {
+                (true, true) => [foe_slots[0], foe_slots[1]], // split
+                (true, false) => [foe_slots[0], foe_slots[0]], // both to slot0
+                (false, true) => [foe_slots[1], foe_slots[1]], // both to slot1
+                (false, false) => {
+                    // Both immune — move fails
+                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                    return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+                }
+            };
+
+            // Execute two sequential single-hit branches, one per dart target (no spread multiplier)
+            let mut outcomes: Vec<(BattleState, f64)> = vec![(next_state.clone(), 1.0)];
+            for dart_slot in &dart_targets {
+                let mut next_outcomes = Vec::new();
+                for (bs, prob) in outcomes {
+                    let Some(current_target) = simulator_helpers::get_pokemon_at_slot(&bs, *dart_slot).cloned() else {
+                        next_outcomes.push((bs, prob));
+                        continue;
+                    };
+                    let (invuln_mult, ok) = check_invulnerability_status(&attacker, &current_target, &move_name);
+                    if !ok { next_outcomes.push((bs, prob)); continue; }
+                    let hit_p = simulator_helpers::accuracy_hit_probability(&bs, &attacker, &current_target, action.user_slot, *dart_slot, move_data).clamp(0.0, 1.0);
+                    if hit_p < 1.0 {
+                        next_outcomes.push((bs.clone(), prob * (1.0 - hit_p)));
+                    }
+                    if hit_p > 0.0 {
+                        let dmg_outcomes = simulator_helpers::calculate_damage_outcomes_for_target(&bs, &attacker, &current_target, action.user_slot, *dart_slot, move_data, config, 1.0, invuln_mult);
+                        for (dmg, is_crit, dp) in dmg_outcomes {
+                            for (new_bs, new_p) in apply_single_hit_branch(bs.clone(), *dart_slot, &move_name, move_data, dmg, action.user_slot, prob * hit_p * dp, is_crit) {
+                                next_outcomes.push((new_bs, new_p));
+                            }
+                        }
+                    }
+                }
+                outcomes = simulator_helpers::coalesce_branches(next_outcomes);
+            }
+
+            let all_outcomes: Vec<(MatchState, f64)> = outcomes.into_iter()
+                .map(|(bs, p)| (
+                    apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player),
+                    p,
+                ))
+                .collect();
+
+            let all_outcomes: Vec<(MatchState, f64)> = all_outcomes.into_iter()
+                .map(|(state, prob)| (state, prob))
+                .collect();
+
+            let move_has_recharge = simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Recharge);
+            let mut all_outcomes = all_outcomes;
+            if move_has_recharge {
+                for (state, _) in &mut all_outcomes {
+                    if let MatchState::BattleState(bs) = state {
+                        if let Some(mon) = mon_at_slot_mut(bs, action.user_slot) {
+                            mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MustRecharge, 2));
+                        }
+                    }
+                }
+            }
+            for (state, _) in &mut all_outcomes {
+                if let MatchState::BattleState(bs) = state {
+                    decrement_move_pp(bs, action.user_slot, &action.move_name);
+                }
+            }
+
+            let has_confusion = confusion_self_hit_outcomes.is_some();
+            let mut final_outcomes: Vec<(MatchState, f64)> = Vec::new();
+            if let Some(ref confusion_outcomes) = confusion_self_hit_outcomes {
+                for (state, prob) in confusion_outcomes {
+                    final_outcomes.push((state.clone(), prob * 0.5));
+                }
+            }
+            for (state, prob) in all_outcomes {
+                final_outcomes.push((state, prob * if has_confusion { 0.5 } else { 1.0 }));
+            }
+            if !final_outcomes.is_empty() {
+                return simulator_helpers::coalesce_branches(final_outcomes);
+            }
+        }
+        // Single target or not doubles — fall through to normal 2-hit multi-hit path
+    }
+
     // Calculate targets multiplier (0.75x for 2+ targets, 1.0x for 1 target)
     let targets_mult = simulator_helpers::damage_targets_multiplier(target_slots.len());
 
     let is_multihit_move = move_name == PokemonMove::BeatUp
+        || move_name == PokemonMove::DragonDarts // singles: both hits same target
         || move_data.multihit_range != [0, 0]
         || move_data.multihit_accuracy;
 
@@ -3842,7 +4211,7 @@ fn locked_semi_invulnerable_commands(mon: &PokemonState, player: Player) -> Vec<
 /// volatile, making this the last locked turn.
 fn disrupt_rampage_lock(
     mon: &mut PokemonState,
-    post_decrement_turns: u8,
+    post_decrement_turns: u16,
     is_misty_terrain: bool,
 ) {
     simulator_helpers::remove_status_volatile(mon, &VolatileStatus::LockedMove(
@@ -3850,7 +4219,7 @@ fn disrupt_rampage_lock(
     ));
     let is_final_turn = post_decrement_turns == 1;
     if is_final_turn && !simulator_helpers::is_confused(mon) && !is_misty_terrain {
-        let duration = rand::thread_rng().gen_range(2u8..=5u8);
+        let duration = rand::thread_rng().gen_range(2u16..=5u16);
         mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
             VolatileStatus::Confusion,
             duration,
@@ -4233,7 +4602,7 @@ fn has_healthy_bench(bs: &BattleState, player: Player) -> bool {
 fn slot_has_substitute(bs: &BattleState, slot: FieldSlot) -> bool {
     simulator_helpers::get_pokemon_at_slot(bs, slot).map_or(false, |m| {
         m.volatiles.iter().any(|v|
-            matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+            matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
         )
     })
 }
@@ -4368,6 +4737,11 @@ fn apply_post_damage_move_effects(
     opposing_player: Player,
 ) -> MatchState {
     let total_dmg = total_damage_to_opponent(baseline, &bs, opposing_player);
+    // sub_damage_dealt tracks the full damage roll sent into a Substitute this action.
+    // Recoil is based on all damage dealt (to HP or sub); drain and Shell Bell are not.
+    let sub_dmg = bs.sub_damage_dealt;
+    bs.sub_damage_dealt = 0; // consumed here
+    let total_effective_dmg = total_dmg + sub_dmg; // for recoil / last_move_failed / move_connected
     let opponent_wiped = !simulator_helpers::team_has_remaining_pokemon(&bs, opposing_player) && total_dmg > 0;
     let attacker_item_active = simulator_helpers::get_pokemon_at_slot(&bs, attacker_slot)
         .map(|m| simulator_helpers::item_is_active(&bs, m))
@@ -4383,7 +4757,7 @@ fn apply_post_damage_move_effects(
         // effect) counts as the last move failing; dealing damage clears the flag.
         // Status moves keep their explicit fail paths (e.g. failed Aura Wheel).
         if !matches!(move_data.category, MoveCategory::Status) {
-            attacker_mon.last_move_failed = total_dmg == 0;
+            attacker_mon.last_move_failed = total_effective_dmg == 0;
         }
 
         let max_hp = attacker_mon.stats[0].max(1);
@@ -4439,7 +4813,8 @@ fn apply_post_damage_move_effects(
         }
         if has_recoil && !ability_blocks_recoil && !move_data.mind_blown_recoil {
             let recoil = if has_normal_recoil {
-                ((total_dmg * move_data.recoil_fraction[0] as u32) / move_data.recoil_fraction[1] as u32) as u16
+                // Recoil is based on total damage dealt, including damage absorbed by a Substitute.
+                ((total_effective_dmg * move_data.recoil_fraction[0] as u32) / move_data.recoil_fraction[1] as u32) as u16
             } else if move_data.struggle_recoil {
                 (max_hp as u32 / 4) as u16
             } else { 0 };
@@ -4480,7 +4855,7 @@ fn apply_post_damage_move_effects(
             PokemonMove::Thrash | PokemonMove::Outrage | PokemonMove::PetalDance | PokemonMove::RagingFury
         );
         if is_rampaging_move && !attacker_fainted {
-            let existing_lock: Option<u8> = attacker_mon.volatiles.iter().find_map(|v| {
+            let existing_lock: Option<u16> = attacker_mon.volatiles.iter().find_map(|v| {
                 if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v {
                     Some(*t)
                 } else {
@@ -4491,7 +4866,7 @@ fn apply_post_damage_move_effects(
                 None => {
                     // First use. Only start the lock if the move actually connected.
                     if total_dmg > 0 {
-                        let extra_turns = rand::thread_rng().gen_range(2u8..=3u8);
+                        let extra_turns = rand::thread_rng().gen_range(2u16..=3u16);
                         attacker_mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
                             VolatileStatus::LockedMove(move_data.name.clone()),
                             extra_turns,
@@ -4508,7 +4883,7 @@ fn apply_post_damage_move_effects(
                     // Disrupted mid-rampage (not final turn) → no confusion.
                     if !disrupted || is_final_turn {
                         if !simulator_helpers::is_confused(attacker_mon) && !attacker_env.misty_terrain {
-                            let duration = rand::thread_rng().gen_range(2u8..=5u8);
+                            let duration = rand::thread_rng().gen_range(2u16..=5u16);
                             attacker_mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
                                 VolatileStatus::Confusion,
                                 duration,
@@ -4688,7 +5063,7 @@ fn apply_post_damage_move_effects(
                 Player::P1 => bs.p1_active_mons.get(attacker_slot.slot_index as usize).map(|m| !m.fainted).unwrap_or(false),
                 Player::P2 => bs.p2_active_mons.get(attacker_slot.slot_index as usize).map(|m| !m.fainted).unwrap_or(false),
             };
-            let move_connected = total_dmg > 0 || matches!(move_data.category, MoveCategory::Status);
+            let move_connected = total_effective_dmg > 0 || matches!(move_data.category, MoveCategory::Status);
             // For ShedTail: success ⇔ attacker now has a Substitute AND did not have one before
             // the move (baseline). Using baseline comparison instead of an HP check means items
             // like Sitrus Berry healing after the HP cost cannot mask a successful switch.
@@ -4697,6 +5072,11 @@ fn apply_post_damage_move_effects(
             if attacker_alive && move_connected && shed_tail_sub_created {
                 bs.self_switch_pending = Some((attacker_slot, move_data.self_switch));
             }
+        }
+        // Round: once this Round's damage is applied, mark the flag so subsequent Rounds
+        // in the same turn compute doubled BP.
+        if move_data.name == PokemonMove::Round {
+            bs.round_used_this_turn = true;
         }
         MatchState::BattleState(bs)
     }
@@ -5070,8 +5450,9 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     mon.stats_raised_this_turn = false;
     mon.stats_lowered_this_turn = false;
     mon.switched_in_this_turn = false;
-    // The consecutive-protect streak ends when the Pokémon leaves the field.
+    // Both consecutive-use streaks reset on switch-out.
     mon.stall_counter = 0;
+    mon.ally_switch_counter = 0;
 }
 
 fn perform_switch_out_in(
@@ -5167,7 +5548,7 @@ fn perform_self_switch(
                         | VolatileStatusState::TurnStatus(PartiallyTrapped(_), _)
                         | VolatileStatusState::TurnStatus(LeechSeed, _)
                         | VolatileStatusState::TurnStatus(Curse, _)
-                        | VolatileStatusState::TurnStatus(Substitute, _)
+                        | VolatileStatusState::TurnStatus(Substitute(_), _)
                         | VolatileStatusState::TurnStatus(Ingrain, _)
                         | VolatileStatusState::TurnStatus(HealBlock, _)
                         | VolatileStatusState::TurnStatus(Embargo, _)
@@ -5190,7 +5571,7 @@ fn perform_self_switch(
             };
             let sub = mons.get(slot_idx).and_then(|mon| {
                 mon.volatiles.iter().find(|v|
-                    matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute, _))
+                    matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
                 ).cloned()
             });
             (None, sub.into_iter().collect())
@@ -5353,6 +5734,8 @@ fn battle_state_from_preview_branching(
         self_switch_pending: None,
         items_consumed_this_turn: vec![],
         last_move_on_field: None,
+        sub_damage_dealt: 0,
+        round_used_this_turn: false,
     };
 
     // Collect all active send-out slots

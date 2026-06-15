@@ -156,6 +156,16 @@ pub struct BattleState {
     /// The last move successfully executed by any Pokémon on the field (either side).
     /// Updated whenever `last_used_move` is set on a mon. Used by Copycat.
     pub last_move_on_field: Option<PokemonMove>,
+
+    /// Damage dealt to a Substitute this action (the full damage roll, not the sub HP
+    /// absorbed). Used by `apply_post_damage_move_effects` to compute recoil correctly
+    /// when the sub had less HP than the damage roll. Excluded from PartialEq/Hash.
+    /// Reset to 0 after recoil is applied.
+    pub sub_damage_dealt: u32,
+
+    /// Set to true after the first Round resolves this turn; causes subsequent Rounds
+    /// to deal doubled base power. Cleared at end of turn. Excluded from PartialEq/Hash.
+    pub round_used_this_turn: bool,
 }
 
 /// Format a single Pokémon's state as a multi-line string for display.
@@ -619,7 +629,7 @@ impl PartialEq for BattleState {
             && self.p2_slot_conditions == other.p2_slot_conditions
             && self.self_switch_pending == other.self_switch_pending
             && self.items_consumed_this_turn == other.items_consumed_this_turn
-        // last_move_on_field intentionally excluded
+        // last_move_on_field, sub_damage_dealt, round_used_this_turn intentionally excluded
     }
 }
 
@@ -654,6 +664,6 @@ impl std::hash::Hash for BattleState {
         self.p2_slot_conditions.hash(state);
         self.self_switch_pending.hash(state);
         self.items_consumed_this_turn.hash(state);
-        // last_move_on_field intentionally excluded
+        // last_move_on_field, sub_damage_dealt, round_used_this_turn intentionally excluded
     }
 }
