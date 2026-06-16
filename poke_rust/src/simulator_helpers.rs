@@ -1279,24 +1279,27 @@ fn dry_skin_fire_multiplier(target: &PokemonState, attack_type: &PokemonType) ->
 // ──── Defender-side damage reduction abilities ─────────────────────────────
 
 /// Filter / Solid Rock: ×0.75 damage from super-effective hits.
-fn filter_solidrock_mult(state: &BattleState, target: &PokemonState, effectiveness: f64) -> f64 {
+fn filter_solidrock_mult(state: &BattleState, target: &PokemonState, effectiveness: f64, mold_breaker: bool) -> f64 {
     if effectiveness > 1.0
         && !pokemon_ability_is_suppressed(state, target)
+        && !mold_breaker
         && matches!(target.ability, Ability::Filter | Ability::SolidRock | Ability::PrismArmor)
     { 0.75 } else { 1.0 }
 }
 
 /// Multiscale / Shadow Shield: ×0.5 damage when the holder is at full HP.
-fn multiscale_mult(state: &BattleState, target: &PokemonState) -> f64 {
+fn multiscale_mult(state: &BattleState, target: &PokemonState, mold_breaker: bool) -> f64 {
     if !pokemon_ability_is_suppressed(state, target)
+        && !mold_breaker
         && matches!(target.ability, Ability::Multiscale | Ability::ShadowShield)
         && target.hp == target.stats[0].max(1)
     { 0.5 } else { 1.0 }
 }
 
 /// Fur Coat: ×0.5 damage from Physical moves.
-fn fur_coat_mult(state: &BattleState, target: &PokemonState, move_data: &MoveData) -> f64 {
+fn fur_coat_mult(state: &BattleState, target: &PokemonState, move_data: &MoveData, mold_breaker: bool) -> f64 {
     if !pokemon_ability_is_suppressed(state, target)
+        && !mold_breaker
         && target.ability == Ability::FurCoat
         && matches!(move_data.category, MoveCategory::Physical)
     { 0.5 } else { 1.0 }
@@ -1309,8 +1312,8 @@ fn fur_coat_mult(state: &BattleState, target: &PokemonState, move_data: &MoveDat
 /// - Thick Fat       → ×0.5 vs Fire and ×0.5 vs Ice
 /// - Water Bubble    → ×0.5 vs Fire (defensive half; offensive ×2 Water is in base-power)
 /// - Purifying Salt  → ×0.5 vs Ghost
-fn defender_type_reduction_mult(state: &BattleState, target: &PokemonState, attack_type: &PokemonType) -> f64 {
-    if pokemon_ability_is_suppressed(state, target) {
+fn defender_type_reduction_mult(state: &BattleState, target: &PokemonState, attack_type: &PokemonType, mold_breaker: bool) -> f64 {
+    if pokemon_ability_is_suppressed(state, target) || mold_breaker {
         return 1.0;
     }
     let mut mult = 1.0f64;
@@ -1586,6 +1589,16 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
         apply_weather_attack_boost(_state, attacker, attacking_stat,
             effective_stat(_state, attacker, attacking_stat, defender_unaware, defender_unaware))
     };
+    // Plus / Minus: ×1.5 SpA when an ally carries Plus or Minus (either; Gen 9+: same counts).
+    let base_attack = if matches!(attacking_stat, PokemonStat::SpA)
+        && !pokemon_ability_is_suppressed(_state, attacker)
+        && matches!(attacker.ability, Ability::Plus | Ability::Minus)
+        && has_plus_minus_partner(_state, _user_slot)
+    {
+        (base_attack * 1.5).floor()
+    } else {
+        base_attack
+    };
     // ignore_defense_boosts (Sacred Sword, Darkest Lariat): ignore positive defensive stages.
     // Unaware (attacker): also zero all defensive stages (positive and negative).
     let base_defense = apply_weather_defense_bonus(_state, target, defending_stat,
@@ -1790,14 +1803,16 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     } else { 1.0 };
 
     // ── Defender-side damage reduction abilities ──────────────────────────────
+    // Mold Breaker / Turboblaze / Teravolt: suppress ignorable target abilities.
+    let mold_breaker = attacker_breaks_mold(_state, attacker);
     // Filter / Solid Rock / Prism Armor: ×0.75 from super-effective hits.
-    let filter_solidrock_mult = filter_solidrock_mult(_state, target, effectiveness);
+    let filter_solidrock_mult = filter_solidrock_mult(_state, target, effectiveness, mold_breaker);
     // Multiscale / Shadow Shield: ×0.5 when the target is at full HP.
-    let multiscale_mult = multiscale_mult(_state, target);
+    let multiscale_mult = multiscale_mult(_state, target, mold_breaker);
     // Fur Coat: ×0.5 from Physical moves.
-    let fur_coat_mult = fur_coat_mult(_state, target, move_data);
+    let fur_coat_mult = fur_coat_mult(_state, target, move_data, mold_breaker);
     // Heatproof / Thick Fat / Water Bubble / Purifying Salt: type-keyed ×0.5.
-    let defender_type_mult = defender_type_reduction_mult(_state, target, &attack_type);
+    let defender_type_mult = defender_type_reduction_mult(_state, target, &attack_type, mold_breaker);
     // Friend Guard: ×0.75 per unsuppressed, non-fainted ally carrying the ability.
     let friend_guard_mult = friend_guard_mult(_state, _target_slot);
 
@@ -2107,7 +2122,36 @@ pub fn is_trapped(state: &BattleState, mon: &PokemonState) -> bool {
     {
         return true;
     }
+    // Shadow Tag: adjacent opponents cannot voluntarily switch.
+    // Immune: Ghost-types, Shed Shell holders (already returned false above), other Shadow Tag users.
+    let mon_has_shadow_tag = !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::ShadowTag;
+    if !pokemon_has_type(mon, &PokemonType::Ghost) && !mon_has_shadow_tag {
+        let opp_player = match find_player_of_mon(state, mon) {
+            Some(p) => match p { Player::P1 => Player::P2, Player::P2 => Player::P1 },
+            None => return false,
+        };
+        let opponents = collect_active_slots(state, opp_player, None);
+        if opponents.iter().any(|slot| {
+            get_pokemon_at_slot(state, *slot).is_some_and(|opp|
+                !pokemon_ability_is_suppressed(state, opp)
+                && opp.ability == Ability::ShadowTag
+            )
+        }) {
+            return true;
+        }
+    }
     false
+}
+
+/// Find which player owns `mon` by searching active slots.
+fn find_player_of_mon(state: &BattleState, mon: &PokemonState) -> Option<Player> {
+    if state.p1_active_mons.iter().any(|m| m.mon_id == mon.mon_id) {
+        Some(Player::P1)
+    } else if state.p2_active_mons.iter().any(|m| m.mon_id == mon.mon_id) {
+        Some(Player::P2)
+    } else {
+        None
+    }
 }
 
 /// When a Pokémon leaves the field (switch-out or faint), release any trapping volatiles
@@ -3081,6 +3125,98 @@ pub(crate) fn pokemon_ability_is_suppressed(state: &BattleState, mon: &PokemonSt
     }
     // Per-Pokémon suppression via the Gastro Acid volatile.
     has_status_volatile(mon, &VolatileStatus::GastroAcid)
+}
+
+/// Returns true if the attacker's active ability is one of the Mold Breaker family,
+/// meaning it suppresses the *target's* ignorable abilities during its move.
+pub(crate) fn attacker_breaks_mold(state: &BattleState, attacker: &PokemonState) -> bool {
+    if pokemon_ability_is_suppressed(state, attacker) { return false; }
+    matches!(attacker.ability, Ability::MoldBreaker | Ability::Turboblaze | Ability::Teravolt)
+}
+
+/// True when the ability is on the canonical Bulbapedia "ignorable" list — i.e. an ability
+/// that Mold Breaker / Turboblaze / Teravolt can suppress on the target. Dark Aura /
+/// Fairy Aura and partner abilities are intentionally excluded (not ignored since Gen 8).
+pub(crate) fn ability_is_ignorable(ability: &Ability) -> bool {
+    matches!(ability,
+        // Type immunities / absorbtion
+        Ability::Levitate | Ability::WaterAbsorb | Ability::VoltAbsorb | Ability::FlashFire
+        | Ability::EarthEater | Ability::SapSipper | Ability::MotorDrive | Ability::LightningRod
+        | Ability::StormDrain | Ability::DrySkin | Ability::WindRider
+        // Hazard landing
+        | Ability::MagicGuard
+        // Endure / full-HP survival
+        | Ability::Sturdy
+        // Defensive damage reductions
+        | Ability::ThickFat | Ability::Heatproof | Ability::WaterBubble | Ability::Fluffy
+        | Ability::PunkRock | Ability::IceScales | Ability::Filter | Ability::SolidRock
+        | Ability::PrismArmor | Ability::Multiscale | Ability::ShadowShield
+        // Wonder Guard / immunities
+        | Ability::WonderGuard | Ability::Bulletproof | Ability::Soundproof
+        | Ability::Damp | Ability::Overcoat
+        // Status / volatile immunity
+        | Ability::Limber | Ability::Insomnia | Ability::VitalSpirit | Ability::SweetVeil
+        | Ability::Immunity | Ability::PastelVeil | Ability::WaterVeil | Ability::MagmaArmor
+        | Ability::Oblivious | Ability::OwnTempo | Ability::InnerFocus | Ability::AromaVeil
+        | Ability::Comatose | Ability::FlowerVeil
+        // Crit prevention
+        | Ability::BattleArmor | Ability::ShellArmor
+        // Move-use prevention
+        | Ability::ShadowTag | Ability::MagicBounce
+        // Evasion / accuracy
+        | Ability::SandVeil | Ability::SnowCloak | Ability::TangledFeet
+        // Contact punish (target side) — Mold Breaker suppresses these on the target
+        | Ability::RoughSkin | Ability::IronBarbs | Ability::FlameBody | Ability::Static
+        | Ability::PoisonPoint | Ability::CuteCharm | Ability::Gooey
+        | Ability::CursedBody | Ability::Mummy | Ability::WanderingSpirit | Ability::Pickpocket
+        | Ability::Aftermath
+    )
+}
+
+/// True when the move is in the "non-bounceable" exception list for Magic Bounce / Magic Coat.
+/// Moves that are Status-category, opponent-targeted, BUT not bounced.
+pub fn is_magic_bounce_exempt(move_name: &PokemonMove) -> bool {
+    matches!(move_name,
+        // Moves that affect the user or have non-opponent semantics
+        PokemonMove::Memento | PokemonMove::Curse | PokemonMove::Bestow
+        | PokemonMove::Transform | PokemonMove::Conversion2 | PokemonMove::FollowMe
+        | PokemonMove::RagePowder | PokemonMove::HealPulse | PokemonMove::HelpingHand
+        | PokemonMove::AromaticMist | PokemonMove::HoldHands | PokemonMove::FloralHealing
+        | PokemonMove::PowerTrick | PokemonMove::Imprison | PokemonMove::Telekinesis
+        | PokemonMove::Gravity | PokemonMove::IonDeluge | PokemonMove::MagneticFlux
+        | PokemonMove::PlasmaFists | PokemonMove::CraftyShield
+        // Phazing moves do bounce in Gen 9 (Roar/Whirlwind) but Mean Look/Block do not
+        | PokemonMove::Block | PokemonMove::MeanLook | PokemonMove::SpiderWeb
+    )
+}
+
+/// True when an ally of `user_slot` on the same side has Plus or Minus (and is alive, unsuppressed).
+/// Gen 9+: same-ability allies count (Plus+Plus triggers, Minus+Minus triggers).
+pub(crate) fn has_plus_minus_partner(state: &BattleState, user_slot: FieldSlot) -> bool {
+    let allies = collect_active_slots(state, user_slot.player, Some(user_slot.slot_index));
+    allies.iter().any(|ally_slot| {
+        get_pokemon_at_slot(state, *ally_slot).is_some_and(|ally| {
+            !pokemon_ability_is_suppressed(state, ally)
+                && matches!(ally.ability, Ability::Plus | Ability::Minus)
+        })
+    })
+}
+
+/// Return the effective ability of `target` as seen by `attacker`. If the attacker
+/// has a Mold-Breaker ability and the target's ability is ignorable, returns
+/// `Ability::None` (as if the target had no ability).
+pub(crate) fn target_ability_as_seen_by(
+    state: &BattleState,
+    attacker: &PokemonState,
+    target: &PokemonState,
+) -> Ability {
+    if pokemon_ability_is_suppressed(state, target) {
+        return Ability::None;
+    }
+    if attacker_breaks_mold(state, attacker) && ability_is_ignorable(&target.ability) {
+        return Ability::None;
+    }
+    target.ability.clone()
 }
 
 fn terrain_matches(state: &BattleState, terrain: &Terrain) -> bool {
@@ -6478,6 +6614,20 @@ fn apply_effect_to_target(
     let attacker_has_light_clay = get_pokemon_at_slot(state, attacker_slot)
         .map_or(false, |a| item_is_active(state, a) && a.item == Item::LightClay);
 
+    // Synchronize: snapshot pre-apply conditions so we can trigger after the mutable borrow.
+    let synchronize_status_to_bounce: Option<Status> = if attacker_slot != target_slot {
+        if let (Some(effect_status), Some(target)) = (&effect.status, get_pokemon_at_slot(state, target_slot)) {
+            let target_has_synchronize = !pokemon_ability_is_suppressed(state, target)
+                && target.ability == Ability::Synchronize
+                && target.status.is_none(); // will only land if target has no status
+            if target_has_synchronize && matches!(effect_status,
+                Status::Burn | Status::Paralysis | Status::Poison | Status::ToxicPoison(_)
+            ) {
+                Some(effect_status.clone())
+            } else { None }
+        } else { None }
+    } else { None };
+
     if let Some(target_mon) = get_pokemon_at_slot_mut(state, target_slot) {
         if let Some(status) = &effect.status {
             // Sweet Veil: block sleep on the entire side (including Rest).
@@ -6555,6 +6705,25 @@ fn apply_effect_to_target(
         // A single call handles Aspear/Cheri/etc. (status just set) and Persim/Lum (confusion just pushed).
         try_consume_status_cure_berry(target_mon, &target_berry_env);
 
+    }
+
+    // Synchronize: after status is applied to the target, bounce Burn/Paralysis/Poison/Toxic
+    // back at the source. The bounce goes through the normal apply_effect_to_target path so
+    // type/ability/Safeguard immunities are respected on the source. The `from_synchronize`
+    // flag prevents recursive ping-pong (the second call will not see a Synchronize target
+    // because the source has no Synchronize context — we simply call apply_status_to_pokemon
+    // directly here to skip another full apply_effect_to_target call).
+    if let Some(synch_status) = synchronize_status_to_bounce {
+        // Verify the status actually landed (was not blocked by type immunity etc.)
+        let status_landed = get_pokemon_at_slot(state, target_slot)
+            .map_or(false, |t| matches!(&t.status, Some(s) if std::mem::discriminant(s) == std::mem::discriminant(&synch_status)));
+        if status_landed {
+            // Apply the same status to the source, going through type/ability checks.
+            let synch_effect = HitEffect { status: Some(synch_status), ..Default::default() };
+            // Use target_slot as the "attacker" so the source is the "target" — this means
+            // Safeguard on the source's side is checked, type immunity is checked, etc.
+            apply_effect_to_target(state, target_slot, attacker_slot, &synch_effect, attacker_slot.player);
+        }
     }
 
     // Handle opponent-sourced stat changes OUTSIDE the target_mon mutable borrow so that
@@ -7180,8 +7349,10 @@ pub fn apply_contact_hit_reactions(
     let holder_ability = {
         let ability_opt = {
             let first_bs = &branches[0].0;
+            let attacker_opt = get_pokemon_at_slot(first_bs, attacker_slot);
             get_pokemon_at_slot(first_bs, holder_slot)
                 .filter(|m| !pokemon_ability_is_suppressed(first_bs, m))
+                .filter(|m| !attacker_opt.is_some_and(|a| attacker_breaks_mold(first_bs, a) && ability_is_ignorable(&m.ability)))
                 .map(|m| m.ability.clone())
         };
         match ability_opt {
@@ -7463,11 +7634,12 @@ pub(crate) fn try_absorb_move(
     move_data: &MoveData,
     items_suppressed: bool,
 ) -> bool {
-    // Fetch the target's ability; if suppressed the move hits normally.
+    // Fetch the target's ability; if suppressed (or bypassed by Mold Breaker) the move hits normally.
     let target_ability = match get_pokemon_at_slot(state, target_slot) {
-        Some(t) if !pokemon_ability_is_suppressed(state, t) => t.ability.clone(),
+        Some(t) => target_ability_as_seen_by(state, attacker, t),
         _ => return false,
     };
+    if target_ability == Ability::None { return false; }
 
     // Use the canonical move type (respects -ate abilities, Liquid Voice, etc.).
     let move_type = effective_move_type(state, attacker, move_data);
@@ -7521,8 +7693,6 @@ pub(crate) fn try_absorb_move(
 ///
 /// Returns `true` if a draw-in ability fires (caller should push no-effect outcome and skip
 /// the rest of target processing for this slot).  Returns `false` otherwise.
-///
-/// Note: Mold Breaker bypass is not yet implemented (separate TODO).
 pub(crate) fn try_drawin_negate(
     state: &mut BattleState,
     target_slot: FieldSlot,
@@ -7531,9 +7701,10 @@ pub(crate) fn try_drawin_negate(
     items_suppressed: bool,
 ) -> bool {
     let target_ability = match get_pokemon_at_slot(state, target_slot) {
-        Some(t) if !pokemon_ability_is_suppressed(state, t) => t.ability.clone(),
+        Some(t) => target_ability_as_seen_by(state, attacker, t),
         _ => return false,
     };
+    if target_ability == Ability::None { return false; }
 
     let move_type = effective_move_type(state, attacker, move_data);
 
@@ -7706,8 +7877,10 @@ pub fn apply_secondary_effects(
     // target — status riders, stat-drop chances, flinch, King's Rock / Razor Fang flinch,
     // Poison Touch / Toxic Chain procs, etc.  Self-effects on the attacker (self_boost,
     // self_secondaries) are intentionally NOT blocked; those are applied further below.
-    // Mold Breaker: TODO
-    let target_has_shield_dust = get_pokemon_at_slot(state, target_slot).map_or(false, |mon| {
+    // Mold Breaker bypasses Shield Dust.
+    let attacker_breaks = get_pokemon_at_slot(state, attacker_slot)
+        .map_or(false, |a| attacker_breaks_mold(state, a));
+    let target_has_shield_dust = !attacker_breaks && get_pokemon_at_slot(state, target_slot).map_or(false, |mon| {
         !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::ShieldDust
     });
 

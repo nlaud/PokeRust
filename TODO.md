@@ -19,17 +19,10 @@ Each has significant individual complexity. Research all edge cases carefully.
 - Infiltrator — bypass Light Screen, Reflect, Aurora Veil, Safeguard, and Substitute
 - Innards Out — when KO'd by a move, deal the damage that brought HP to 0 back to attacker
 - Inner Focus / Oblivious / Own Tempo / Scrappy — Intimidate immunity + specific extra
-- Magic Bounce — reflect status moves back at the user
 - Mega Sol — moves always act as if in harsh sunlight
 - Mimicry — change type to match the active terrain
-- Minus / Plus — +50% Sp. Atk when an ally with the opposite ability is present
-- Mold Breaker / Turboblaze / Teravolt — moves ignore the target's ability
-- Parental Bond — attack twice; second hit at ¼ power
-- Protean / Libero — change type to match the move being used (once per switch-in)
-- Shadow Tag — opponents cannot switch out (does not affect other Shadow Tag users)
 - Stalwart — ignore move and ability redirection
 - Stench — 10% flinch chance on any damaging hit
-- Synchronize — spread burn, paralysis, or poison back to the Pokémon that inflicted it
 - Toxic Debris — set Toxic Spikes on opponent's side when holder is hit by a physical move
 
 ## Refactors

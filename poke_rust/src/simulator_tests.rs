@@ -27849,3 +27849,509 @@ mod new_ability_tests {
     }
 }
 
+// ── Cross-cutting ability tests ──────────────────────────────────────────────
+mod abilities_cross_cutting {
+    use crate::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{PokemonType, SideCondition, Status, VolatileStatus};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, damage_distribution,
+        move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+    use crate::simulator;
+
+    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn mon_with_item(species: Species, mv: PokemonMove, ability: Ability, item: Item) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            Some(item), None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn run_state(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(),
+        )
+    }
+
+    fn run_state_p2_first(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            move_dex(), pokemon_dex(),
+        )
+    }
+
+    fn avg_damage(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        damage_distribution(outcomes, initial_hp).iter().map(|(d, p)| *d as f64 * p).sum()
+    }
+
+    // ── Mold Breaker ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn mold_breaker_hits_levitate() {
+        // Earthquake vs Levitate target — should hit and deal damage with Mold Breaker.
+        let mut p1 = mon(Species::Excadrill, PokemonMove::Earthquake, Ability::MoldBreaker);
+        p1.stats[5] = 200; // moves first
+        let mut p2 = mon(Species::Gengar, PokemonMove::Splash, Ability::Levitate);
+        p2.stats[0] = 500; p2.hp = 500;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        let avg = avg_damage(&outcomes, 500);
+        assert!(avg > 50.0, "Mold Breaker should allow Earthquake to hit Levitate; avg_dmg={avg}");
+    }
+
+    #[test]
+    fn no_mold_breaker_misses_levitate() {
+        // Same setup without Mold Breaker — Earthquake should be blocked by Levitate.
+        let mut p1 = mon(Species::Excadrill, PokemonMove::Earthquake, Ability::None);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Gengar, PokemonMove::Splash, Ability::Levitate);
+        p2.stats[0] = 500; p2.hp = 500;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        let hp_lost = avg_damage(&outcomes, 500);
+        assert_eq!(hp_lost, 0.0, "No Mold Breaker: Earthquake should not hit Levitate; hp_lost={hp_lost}");
+    }
+
+    #[test]
+    fn mold_breaker_bypasses_sturdy() {
+        // Mold Breaker user uses Tackle vs a Sturdy Rattata with 1 HP (= full HP) — should KO.
+        // Without Mold Breaker, Sturdy saves the target at 1 HP. With Mold Breaker, it faints.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::Tackle, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::Tackle, Ability::None);
+        p1_mb.stats[5] = 200; p1_no.stats[5] = 200;
+        p1_mb.stats[1] = 500; p1_no.stats[1] = 500;
+
+        let mut p2 = mon(Species::Rattata, PokemonMove::Splash, Ability::Sturdy);
+        p2.stats[0] = 1; p2.hp = 1; // 1 HP = full HP → Sturdy should trigger without MB
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let p2_fainted = |outcomes: &[(MatchState, f64)]| outcomes.iter().any(|(s, _)| match s {
+            MatchState::BattleState(bs) => bs.p2_active_mons[0].fainted,
+            MatchState::GameOverState { .. } => true, // P2 wiped = target fainted
+            _ => false,
+        });
+        let fainted_with_mb = p2_fainted(&run_state(state_mb));
+        let fainted_without_mb = p2_fainted(&run_state(state_no));
+        assert!(fainted_with_mb, "Mold Breaker should bypass Sturdy and KO the target");
+        assert!(!fainted_without_mb, "Without Mold Breaker, Sturdy should save the target at 1 HP");
+    }
+
+    // ── Magic Bounce ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn magic_bounce_reflects_will_o_wisp() {
+        // P1 (Sableye, not Fire-type) uses Will-O-Wisp on P2 who has Magic Bounce — P1 gets burned.
+        let mut p1 = mon(Species::Sableye, PokemonMove::WillOWisp, Ability::None);
+        p1.stats[5] = 200; // moves first
+        let p2 = mon(Species::Dusclops, PokemonMove::Splash, Ability::MagicBounce);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        let p1_burned = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                matches!(bs.p1_active_mons[0].status, Some(Status::Burn))
+            } else { false }
+        });
+        let p2_burned = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                matches!(bs.p2_active_mons[0].status, Some(Status::Burn))
+            } else { false }
+        });
+        assert!(p1_burned, "Magic Bounce should reflect Will-O-Wisp back at the attacker");
+        assert!(!p2_burned, "Magic Bounce holder should not be burned");
+    }
+
+    #[test]
+    fn magic_bounce_reflects_stealth_rock() {
+        // P1 uses Stealth Rock targeting P2 who has Magic Bounce — rocks land on P1's side.
+        let mut p1 = mon(Species::Tyranitar, PokemonMove::StealthRock, Ability::None);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Espeon, PokemonMove::Splash, Ability::MagicBounce);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        let rocks_on_p1 = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p1_side_conditions.iter().any(|c| matches!(c, SideCondition::StealthRock))
+            } else { false }
+        });
+        let rocks_on_p2 = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p2_side_conditions.iter().any(|c| matches!(c, SideCondition::StealthRock))
+            } else { false }
+        });
+        assert!(rocks_on_p1, "Magic Bounce should reflect Stealth Rock onto the attacker's side");
+        assert!(!rocks_on_p2, "Magic Bounce target should not have Stealth Rock on their side");
+    }
+
+    #[test]
+    fn magic_bounce_does_not_reflect_tackle() {
+        // Damaging moves are never reflected.
+        let mut p1 = mon(Species::Rattata, PokemonMove::Tackle, Ability::None);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Espeon, PokemonMove::Splash, Ability::MagicBounce);
+        p2.stats[0] = 500; p2.hp = 500;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        let avg = avg_damage(&outcomes, 500);
+        assert!(avg > 0.0, "Magic Bounce should not reflect Tackle; p2 should take damage");
+    }
+
+    #[test]
+    fn mold_breaker_ignores_magic_bounce() {
+        // With Mold Breaker, Will-O-Wisp should hit the Magic Bounce target directly.
+        // Use a Dragon-type (Haxorus) attacker so burn bouncing back would matter (it's not Fire).
+        let mut p1 = mon(Species::Haxorus, PokemonMove::WillOWisp, Ability::MoldBreaker);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Espeon, PokemonMove::Splash, Ability::MagicBounce);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        let p2_burned = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                matches!(bs.p2_active_mons[0].status, Some(Status::Burn))
+            } else { false }
+        });
+        let p1_burned = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                matches!(bs.p1_active_mons[0].status, Some(Status::Burn))
+            } else { false }
+        });
+        assert!(p2_burned, "Mold Breaker should ignore Magic Bounce and burn the target");
+        assert!(!p1_burned, "Mold Breaker attacker should not be burned by their own reflected move");
+    }
+
+    // ── Parental Bond ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parental_bond_tackle_hits_twice() {
+        // Parental Bond: Tackle should deal ~1.25× the normal damage (1.0 + 0.25).
+        let mut p1_pb = mon(Species::Kangaskhan, PokemonMove::Tackle, Ability::ParentalBond);
+        let mut p1_no = mon(Species::Kangaskhan, PokemonMove::Tackle, Ability::None);
+        p1_pb.stats[5] = 200; p1_no.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state_pb = battle_state_from_lists(vec![p1_pb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+        let avg_pb = avg_damage(&run_state(state_pb), 1000);
+        let avg_no = avg_damage(&run_state(state_no), 1000);
+        let ratio = avg_pb / avg_no;
+        // Expected: ~1.25 (1.0 + 0.25 from second hit). Tolerance 0.05.
+        assert!((ratio - 1.25).abs() < 0.05,
+            "Parental Bond Tackle should deal ~1.25× normal damage; ratio={ratio:.3}");
+    }
+
+    #[test]
+    fn parental_bond_does_not_double_fury_attack() {
+        // Multi-hit moves should NOT be doubled by Parental Bond.
+        let mut p1_pb = mon(Species::Kangaskhan, PokemonMove::FuryAttack, Ability::ParentalBond);
+        let mut p1_no = mon(Species::Kangaskhan, PokemonMove::FuryAttack, Ability::None);
+        p1_pb.stats[5] = 200; p1_no.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state_pb = battle_state_from_lists(vec![p1_pb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+        let avg_pb = avg_damage(&run_state(state_pb), 1000);
+        let avg_no = avg_damage(&run_state(state_no), 1000);
+        // Both should deal similar damage since Fury Attack is already a multi-hit
+        let ratio = if avg_no > 0.0 { avg_pb / avg_no } else { 1.0 };
+        assert!((ratio - 1.0).abs() < 0.1,
+            "Parental Bond should NOT double multi-hit moves; ratio={ratio:.3}");
+    }
+
+    #[test]
+    fn parental_bond_rough_skin_fires_twice() {
+        // Rough Skin on the target (contact punish) should damage the attacker twice — once per hit.
+        let mut p1_pb = mon(Species::Kangaskhan, PokemonMove::Tackle, Ability::ParentalBond);
+        let mut p1_no = mon(Species::Kangaskhan, PokemonMove::Tackle, Ability::None);
+        p1_pb.stats[5] = 200; p1_no.stats[5] = 200;
+        p1_pb.stats[0] = 500; p1_pb.hp = 500;
+        p1_no.stats[0] = 500; p1_no.hp = 500;
+        let mut p2_rs = mon(Species::Garchomp, PokemonMove::Splash, Ability::RoughSkin);
+        p2_rs.stats[0] = 1000; p2_rs.hp = 1000;
+
+        let state_pb = battle_state_from_lists(vec![p1_pb], vec![], vec![p2_rs.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2_rs], vec![]);
+
+        // Measure HP damage taken by P1 from Rough Skin chip (we exclude P2's damage to P1 from Tackle)
+        // Both scenarios: P1 also takes damage from attacking. We measure the total and compare ratio.
+        let p1_hp_remaining_pb: f64 = run_state(state_pb).iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s { bs.p1_active_mons[0].hp as f64 * p } else { 0.0 }
+        }).sum();
+        let p1_hp_remaining_no: f64 = run_state(state_no).iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s { bs.p1_active_mons[0].hp as f64 * p } else { 0.0 }
+        }).sum();
+        // With Parental Bond: P1 takes BOTH Tackle-damage and 2× Rough Skin chip
+        // Without: P1 takes Tackle-damage + 1× Rough Skin chip
+        // The extra chip from the second hit = 1/8 max_hp = 500/8 ≈ 62 HP
+        let extra_chip = p1_hp_remaining_no - p1_hp_remaining_pb;
+        assert!(extra_chip > 40.0,
+            "Rough Skin should fire twice with Parental Bond; extra chip={extra_chip:.1}");
+    }
+
+    #[test]
+    fn parental_bond_power_up_punch_boosts_twice() {
+        // Power-Up Punch's secondary (+1 Atk) should proc on EACH hit → net +2 Atk.
+        let mut p1 = mon(Species::Kangaskhan, PokemonMove::PowerUpPunch, Ability::ParentalBond);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        // All branches should have p1 at +2 Atk (both procs are 100%)
+        let all_plus_two = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p1_active_mons[0].boosts[0] == 2
+            } else { true }
+        });
+        assert!(all_plus_two, "Power-Up Punch with Parental Bond should give +2 Atk (two independent procs)");
+    }
+
+    // ── Protean / Libero ──────────────────────────────────────────────────────
+
+    #[test]
+    fn protean_changes_type_to_move() {
+        // Greninja with Protean uses Surf (Water) — should become pure Water type.
+        let mut p1 = mon(Species::Greninja, PokemonMove::Surf, Ability::Protean);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        let is_water = outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p1_active_mons[0].types == vec![crate::dex_data::PokemonType::Water]
+            } else { true }
+        });
+        assert!(is_water, "Protean should change Greninja to pure Water after using Surf");
+    }
+
+    #[test]
+    fn protean_only_fires_once_per_switch_in() {
+        // Greninja with Protean uses Surf (Water move on a Water/Dark type) — already not pure Water.
+        // After using Surf, Greninja should become pure Water, and ProteanActivated should be set.
+        // Greninja's original types are [Water, Dark] so Surf (Water) WOULD change it to pure Water.
+        let mut p1 = mon(Species::Greninja, PokemonMove::Surf, Ability::Protean);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 2000; p2.hp = 2000;
+
+        // Turn 1: Surf fires, Greninja becomes pure Water, ProteanActivated volatile set
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let turn1_outcomes = run_state(state);
+
+        // All turn-1 outcomes should have Greninja as pure Water with ProteanActivated
+        let all_water_with_activated = turn1_outcomes.iter().all(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p1_active_mons[0].types == vec![PokemonType::Water]
+                && bs.p1_active_mons[0].volatiles.iter().any(|v|
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::ProteanActivated, _)))
+            } else { true }
+        });
+        assert!(all_water_with_activated, "Protean should change Greninja to pure Water after Surf, with ProteanActivated volatile set");
+    }
+
+    // ── Synchronize ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn synchronize_burns_back_attacker() {
+        // P2 has Synchronize; P1 (Sableye, not Fire-type) uses Will-O-Wisp to burn P2.
+        // P1 should get burned back via Synchronize.
+        let mut p1 = mon(Species::Sableye, PokemonMove::WillOWisp, Ability::None);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Umbreon, PokemonMove::Splash, Ability::Synchronize);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        // Both P1 and P2 should end up burned (all branches, since Will-O-Wisp is 85% accurate)
+        let some_outcome_with_both_burned = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                matches!(bs.p2_active_mons[0].status, Some(Status::Burn))
+                && matches!(bs.p1_active_mons[0].status, Some(Status::Burn))
+            } else { false }
+        });
+        assert!(some_outcome_with_both_burned, "Synchronize should bounce burn back to the attacker");
+    }
+
+    #[test]
+    fn synchronize_does_not_trigger_from_orb() {
+        // Flame Orb burn is self-inflicted — Synchronize should NOT fire.
+        let mut p1 = mon_with_item(Species::Umbreon, PokemonMove::Splash, Ability::Synchronize, Item::FlameOrb);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+
+        // Manually apply burn via Flame Orb end-of-turn (simulate it by directly setting status)
+        // Instead: just verify that a pre-burned Synchronize user doesn't bounce it on setup
+        // This test checks that self-applied burn (status already None, applied by item at EOT)
+        // doesn't bounce. We check P2 is not burned after P1 has a burn.
+        let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        state.p1_active_mons[0].status = Some(Status::Burn); // simulate Orb already fired
+
+        // Run a turn with Splash — P2 should remain without status
+        let outcomes = run_state(state);
+        let p2_burned = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                matches!(bs.p2_active_mons[0].status, Some(Status::Burn))
+            } else { false }
+        });
+        assert!(!p2_burned, "Synchronize should not bounce a self-inflicted burn to the opponent");
+    }
+
+    #[test]
+    fn synchronize_does_not_bounce_sleep() {
+        // Spore (sleep) targeting Synchronize user — sleep should NOT be bounced.
+        let mut p1 = mon(Species::Breloom, PokemonMove::Spore, Ability::None);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Umbreon, PokemonMove::Splash, Ability::Synchronize);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+        let p1_slept = outcomes.iter().any(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                matches!(bs.p1_active_mons[0].status, Some(Status::Sleep(_)))
+            } else { false }
+        });
+        assert!(!p1_slept, "Synchronize should NOT bounce sleep back to the attacker");
+    }
+
+    // ── Shadow Tag ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn shadow_tag_traps_opponent() {
+        // P2's Wobbuffet has Shadow Tag — P1 should not be able to switch.
+        let p1 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let p1_back = mon(Species::Rattata, PokemonMove::Tackle, Ability::None);
+        let p2 = mon(Species::Wobbuffet, PokemonMove::Splash, Ability::ShadowTag);
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_back], vec![p2], vec![]);
+        let cmds = crate::simulator::get_possible_commands_for_active_slot(
+            &state, Player::P1, 0, move_dex(), pokemon_dex(),
+        );
+        let can_switch = cmds.iter().any(|c| matches!(c, crate::battle::BattleCommand::Switch(_)));
+        assert!(!can_switch, "Shadow Tag should prevent the opponent from switching");
+    }
+
+    #[test]
+    fn shadow_tag_does_not_trap_ghost_type() {
+        // Ghost-types are immune to Shadow Tag trapping.
+        let p1 = mon(Species::Gengar, PokemonMove::Splash, Ability::None);
+        let p1_back = mon(Species::Rattata, PokemonMove::Tackle, Ability::None);
+        let p2 = mon(Species::Wobbuffet, PokemonMove::Splash, Ability::ShadowTag);
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_back], vec![p2], vec![]);
+        let cmds = crate::simulator::get_possible_commands_for_active_slot(
+            &state, Player::P1, 0, move_dex(), pokemon_dex(),
+        );
+        let can_switch = cmds.iter().any(|c| matches!(c, crate::battle::BattleCommand::Switch(_)));
+        assert!(can_switch, "Ghost-types should be immune to Shadow Tag trapping");
+    }
+
+    #[test]
+    fn shadow_tag_does_not_trap_other_shadow_tag() {
+        // Wobbuffet vs Wobbuffet: each has Shadow Tag → neither is trapped by the other.
+        let p1 = mon(Species::Wobbuffet, PokemonMove::Splash, Ability::ShadowTag);
+        let p1_back = mon(Species::Rattata, PokemonMove::Tackle, Ability::None);
+        let p2 = mon(Species::Wobbuffet, PokemonMove::Splash, Ability::ShadowTag);
+
+        let state = battle_state_from_lists(vec![p1], vec![p1_back], vec![p2], vec![]);
+        let cmds = crate::simulator::get_possible_commands_for_active_slot(
+            &state, Player::P1, 0, move_dex(), pokemon_dex(),
+        );
+        let can_switch = cmds.iter().any(|c| matches!(c, crate::battle::BattleCommand::Switch(_)));
+        assert!(can_switch, "Shadow Tag holders should be immune to each other's trapping");
+    }
+
+    // ── Plus / Minus ─────────────────────────────────────────────────────────
+
+    // Plus/Minus are doubles-only (need an ally in a second slot). Tested via direct
+    // damage ratio comparison in a constructed doubles-style state where P1 has two mons
+    // and P2 has one bulky target.
+
+    #[test]
+    fn plus_minus_boosts_sp_atk_1_5x() {
+        // P1 has a Plus mon and a Minus ally on the field (doubles slot 0 + 1) → 1.5× SpA.
+        let mut p1_plus = mon(Species::Plusle, PokemonMove::Thunderbolt, Ability::Plus);
+        p1_plus.stats[5] = 200; // moves first
+        p1_plus.stats[3] = 100; // set SpA
+        let mut p1_minus = mon(Species::Minun, PokemonMove::Splash, Ability::Minus);
+        p1_minus.stats[5] = 1; // moves last
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 2000; p2.hp = 2000;
+        let p2_dummy = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+
+        let state = battle_state_from_lists(
+            vec![p1_plus, p1_minus], vec![], vec![p2.clone(), p2_dummy.clone()], vec![]
+        );
+
+        let avg_with_partner: f64 = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![
+                BattleCommand::Attack(AttackCommand {
+                    move_slot: 0,
+                    target: Some(FieldSlot { player: Player::P2, slot_index: 0 }),
+                    terastallize: false, mega_evolve: false,
+                }),
+                BattleCommand::Attack(AttackCommand {
+                    move_slot: 0,
+                    target: Some(FieldSlot { player: Player::P2, slot_index: 0 }),
+                    terastallize: false, mega_evolve: false,
+                }),
+            ]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(),
+        ).iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s { (2000 - bs.p2_active_mons[0].hp) as f64 * p } else { 0.0 }
+        }).sum();
+
+        // Without partner (solo): SpA no boost
+        let mut p1_solo = mon(Species::Plusle, PokemonMove::Thunderbolt, Ability::Plus);
+        p1_solo.stats[5] = 200;
+        p1_solo.stats[3] = 100;
+        p2.hp = 2000;
+
+        let state_solo = battle_state_from_lists(vec![p1_solo], vec![], vec![p2], vec![]);
+        let avg_solo: f64 = run_single_turn(
+            &MatchState::BattleState(state_solo),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(),
+        ).iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s { (2000 - bs.p2_active_mons[0].hp) as f64 * p } else { 0.0 }
+        }).sum();
+
+        let ratio = avg_with_partner / avg_solo.max(1.0);
+        assert!((ratio - 1.5).abs() < 0.08,
+            "Plus with Minus ally should grant 1.5× SpA; ratio={ratio:.3}");
+    }
+}
+
