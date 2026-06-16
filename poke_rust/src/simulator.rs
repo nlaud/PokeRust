@@ -309,7 +309,7 @@ fn handle_charging_and_semi_invulnerability(
 ) -> Option<Vec<(MatchState, f64)>> {
     let mut move_has_charge = simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Charge);
     if matches!(action.move_name, PokemonMove::SolarBeam | PokemonMove::SolarBlade)
-        && simulator_helpers::weather_is_sunlight(state)
+        && simulator_helpers::weather_is_sunlight_for_slot(state, action.user_slot)
     {
         move_has_charge = false;
     }
@@ -532,7 +532,7 @@ fn apply_single_hit_branch(
             (Some(atk), Some(tgt)) => {
                 let at = simulator_helpers::effective_move_type(&branch_state, atk, move_data);
                 let eff = if *move_name == PokemonMove::FlyingPress {
-                    simulator_helpers::flying_press_type_effectiveness(&branch_state, tgt)
+                    simulator_helpers::flying_press_type_effectiveness(&branch_state, Some(atk), tgt)
                 } else {
                     simulator_helpers::move_type_effectiveness(&branch_state, &at, tgt)
                 };
@@ -554,6 +554,12 @@ fn apply_single_hit_branch(
             return outcomes;
         }
     }
+
+    // Snapshot the holder's HP before endure/damage so Innards Out can report the correct value.
+    // Innards Out deals back the HP the holder had before the killing hit, which is
+    // min(computed_damage, pre_hit_hp). We pass this clamped value as `damage_dealt`.
+    let target_pre_hit_hp = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
+        .map_or(0, |m| m.hp);
 
     // Focus Sash / Focus Band / Sturdy endure outcomes. Each entry is (eff_damage, consume_item, prob).
     // - Normal case:   one entry  (damage, false, 1.0)
@@ -785,8 +791,11 @@ fn apply_single_hit_branch(
     }
 
     // Fire reactive-ability effects on the holder (target_slot) caused by the attacker's hit.
+    // `damage_dealt` is the HP actually lost by the holder (min(raw_damage, pre_hit_hp)),
+    // which is what Innards Out and other "deal back damage" abilities need.
+    let damage_dealt_clamped = damage.min(target_pre_hit_hp);
     outcomes = simulator_helpers::apply_contact_hit_reactions(
-        outcomes, target_slot, attack_slot, move_name, move_data, damage, is_crit,
+        outcomes, target_slot, attack_slot, move_name, move_data, damage_dealt_clamped, is_crit,
     );
 
     outcomes
@@ -939,11 +948,18 @@ fn resolve_multihit_move_for_target(
             sequence_branches = next_sequence_branches;
         }
 
-        // Apply King's Rock flinch once per move per target using the combined chance
-        // P(flinch) = 1 - 0.9^hits_landed, avoiding per-hit tree blowup.
+        // Apply King's Rock and Stench flinch once per move per target using the combined
+        // chance P(flinch) = 1 - 0.9^hits_landed, avoiding per-hit tree blowup.
         for (branch_state, branch_probability, _, hits_landed) in sequence_branches {
             let branches = simulator_helpers::apply_kings_rock_flinch(
                 vec![(branch_state, branch_probability)],
+                attack_slot,
+                target_slot,
+                move_data,
+                hits_landed,
+            );
+            let branches = simulator_helpers::apply_stench_flinch(
+                branches,
                 attack_slot,
                 target_slot,
                 move_data,
@@ -4007,9 +4023,10 @@ fn possible_damage_outcomes_for_move(
                 if *hit {
                     // Delegate to the already-extracted single-hit helper.
                     let hit_branches = apply_single_hit_branch(branch_state, *target_slot, &move_name, move_data, *damage, action.user_slot, combined_prob, *is_crit);
-                    // King's Rock: 10% flinch on damaging hits (combined chance = 1 - 0.9^hits).
+                    // King's Rock / Stench: 10% flinch on damaging hits (combined chance = 1 - 0.9^hits).
                     let hit_branches = if *damage > 0 {
-                        simulator_helpers::apply_kings_rock_flinch(hit_branches, action.user_slot, *target_slot, move_data, 1)
+                        let b = simulator_helpers::apply_kings_rock_flinch(hit_branches, action.user_slot, *target_slot, move_data, 1);
+                        simulator_helpers::apply_stench_flinch(b, action.user_slot, *target_slot, move_data, 1)
                     } else {
                         hit_branches
                     };
@@ -4064,7 +4081,8 @@ fn possible_damage_outcomes_for_move(
                                         s_dmg, action.user_slot, first_prob * s_prob, s_crit,
                                     );
                                     let second_branches = if s_dmg > 0 {
-                                        simulator_helpers::apply_kings_rock_flinch(second_branches, action.user_slot, *target_slot, move_data, 1)
+                                        let b = simulator_helpers::apply_kings_rock_flinch(second_branches, action.user_slot, *target_slot, move_data, 1);
+                                        simulator_helpers::apply_stench_flinch(b, action.user_slot, *target_slot, move_data, 1)
                                     } else { second_branches };
                                     pb_branches.extend(second_branches);
                                 }

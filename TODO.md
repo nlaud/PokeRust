@@ -12,18 +12,7 @@ hook and should be researchable, plannable, and implementable in a single focuse
 
 ## Abilities
 
-### Complex abilities — mechanics modifiers
-Each has significant individual complexity. Research all edge cases carefully.
-- Contrary — all stat stage changes are inverted
-- Heavy Metal / Light Metal — double or halve holder's weight for weight-based moves
-- Infiltrator — bypass Light Screen, Reflect, Aurora Veil, Safeguard, and Substitute
-- Innards Out — when KO'd by a move, deal the damage that brought HP to 0 back to attacker
-- Inner Focus / Oblivious / Own Tempo / Scrappy — Intimidate immunity + specific extra
-- Mega Sol — moves always act as if in harsh sunlight
-- Mimicry — change type to match the active terrain
-- Stalwart — ignore move and ability redirection
-- Stench — 10% flinch chance on any damaging hit
-- Toxic Debris — set Toxic Spikes on opponent's side when holder is hit by a physical move
+(All previously listed complex abilities have been implemented.)
 
 ## Refactors
 - use thaws_target move bool and defrost move flag instead of fixed lists.

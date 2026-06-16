@@ -216,6 +216,10 @@ pub struct PokemonState{
     /// an infinite-size struct (recursive types require indirection in Rust).
     pub pre_transform: Option<Box<PokemonState>>,
 
+    /// Original types saved when Mimicry overwrites them. Restored when terrain ends or
+    /// the holder switches out. `None` when Mimicry is not active.
+    pub pre_mimicry_types: Option<Vec<crate::dex_data::PokemonType>>,
+
     pub evs: [u8; 6],
     pub ivs: [u8; 6],
 }
@@ -276,6 +280,7 @@ impl PartialEq for PokemonState {
             && self.first_turn_on_field_pending == other.first_turn_on_field_pending
             && self.entered_this_turn == other.entered_this_turn
             && self.pre_transform == other.pre_transform
+            && self.pre_mimicry_types == other.pre_mimicry_types
             && self.evs == other.evs
             && self.ivs == other.ivs
     }
@@ -338,6 +343,7 @@ impl std::hash::Hash for PokemonState {
         self.first_turn_on_field_pending.hash(state);
         self.entered_this_turn.hash(state);
         self.pre_transform.hash(state);
+        self.pre_mimicry_types.hash(state);
         self.evs.hash(state);
         self.ivs.hash(state);
     }
@@ -630,7 +636,7 @@ pub fn build_pokemon_state(
         last_damage_taken: 0, last_damage_attacker: None,
         stats_raised_this_turn: false, stats_lowered_this_turn: false,
         switched_in_this_turn: false, stall_counter: 0, ally_switch_counter: 0,
-        pre_transform: None, evs, ivs,
+        pre_transform: None, pre_mimicry_types: None, evs, ivs,
     }
 }
 

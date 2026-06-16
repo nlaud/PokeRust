@@ -404,12 +404,33 @@ pub fn defensive_types(state: &BattleState, mon: &PokemonState) -> Vec<PokemonTy
 }
 
 pub fn move_type_effectiveness(state: &BattleState, move_type: &PokemonType, target: &PokemonState) -> f64 {
+    move_type_effectiveness_with_attacker(state, move_type, None, target)
+}
+
+/// Type-effectiveness calculation with optional attacker context. When `attacker` is provided,
+/// Scrappy (and the equivalent Foresight/Odor Sleuth volatile and Mind's Eye ability) can
+/// cause Normal- and Fighting-type moves to treat Ghost-types as non-immune.
+pub fn move_type_effectiveness_with_attacker(state: &BattleState, move_type: &PokemonType, attacker: Option<&PokemonState>, target: &PokemonState) -> f64 {
+    let scrappy_applies = attacker.is_some_and(|a| {
+        !pokemon_ability_is_suppressed(state, a)
+            && matches!(a.ability, Ability::Scrappy | Ability::MindsEye)
+    }) || attacker.is_some_and(|a| {
+        has_status_volatile(a, &VolatileStatus::Foresight)
+    });
+
     let target_types = defensive_types(state, target);
     if target_types.is_empty() {
         return 1.0;
     }
 
     target_types.iter().fold(1.0, |effectiveness, target_type| {
+        // Scrappy / Mind's Eye / Foresight: Normal and Fighting hit Ghost-types normally.
+        if scrappy_applies
+            && matches!(target_type, PokemonType::Ghost)
+            && matches!(move_type, PokemonType::Normal | PokemonType::Fighting)
+        {
+            return effectiveness * 1.0;
+        }
         let mut type_effectiveness = single_type_effectiveness(move_type, target_type);
         if weather_is_strong_winds(state)
             && matches!(target_type, PokemonType::Flying)
@@ -425,8 +446,9 @@ pub fn move_type_effectiveness(state: &BattleState, move_type: &PokemonType, tar
 /// Flying Press effectiveness = Fighting chart × Flying chart against the target.
 /// Strong-winds tempering applies to the Flying component (already inside `move_type_effectiveness`).
 /// STAB remains Fighting-only; call this only when the move name is FlyingPress.
-pub fn flying_press_type_effectiveness(state: &BattleState, target: &PokemonState) -> f64 {
-    move_type_effectiveness(state, &PokemonType::Fighting, target)
+/// `attacker` is optional — provide it so Scrappy can bypass Ghost immunity on the Fighting component.
+pub fn flying_press_type_effectiveness(state: &BattleState, attacker: Option<&PokemonState>, target: &PokemonState) -> f64 {
+    move_type_effectiveness_with_attacker(state, &PokemonType::Fighting, attacker, target)
         * move_type_effectiveness(state, &PokemonType::Flying, target)
 }
 
@@ -565,7 +587,7 @@ pub fn critical_hit_probability(
     vec![(false, 1.0 - crit_chance), (true, crit_chance)]
 }
 
-fn screen_damage_multiplier(state: &BattleState, target_slot: FieldSlot, move_data: &MoveData, is_crit: bool) -> f64 {
+fn screen_damage_multiplier(state: &BattleState, target_slot: FieldSlot, move_data: &MoveData, is_crit: bool, attacker_has_infiltrator: bool) -> f64 {
     if is_crit {
         return 1.0;
     }
@@ -574,6 +596,11 @@ fn screen_damage_multiplier(state: &BattleState, target_slot: FieldSlot, move_da
     if matches!(move_data.name,
         PokemonMove::BrickBreak | PokemonMove::PsychicFangs | PokemonMove::RagingBull
     ) {
+        return 1.0;
+    }
+
+    // Infiltrator bypasses Reflect, Light Screen, and Aurora Veil entirely.
+    if attacker_has_infiltrator {
         return 1.0;
     }
 
@@ -704,7 +731,7 @@ pub fn damage_targets_multiplier(target_count: usize) -> f64 {
 /// Pulse, etc.), but *before* any ability-based type conversion (Aerilate, Liquid Voice, …).
 fn natural_move_type(state: &BattleState, attacker: &PokemonState, move_data: &MoveData) -> PokemonType {
     match move_data.name {
-        PokemonMove::WeatherBall => match current_weather(state) {
+        PokemonMove::WeatherBall => match weather_for(state, attacker) {
             Some(Weather::Sun | Weather::ExtremeSunlight) => PokemonType::Fire,
             Some(Weather::Rain | Weather::HeavyRain) => PokemonType::Water,
             Some(Weather::Sandstorm) => PokemonType::Rock,
@@ -850,13 +877,13 @@ fn apply_weather_attack_boost(state: &BattleState, attacker: &PokemonState, atta
     let mut stat = stat;
     if matches!(attacking_stat, PokemonStat::SpA)
         && attacker.ability == Ability::SolarPower
-        && weather_is_sunlight(state)
+        && weather_is_sunlight_for(state, attacker)
     {
         stat = (stat * 1.5).floor();
     }
     if matches!(attacking_stat, PokemonStat::Atk)
         && attacker.ability == Ability::OrichalcumPulse
-        && weather_is_sunlight(state)
+        && weather_is_sunlight_for(state, attacker)
     {
         stat = (stat * 5461.0 / 4096.0).floor();
     }
@@ -960,10 +987,10 @@ fn variable_move_base_power(
                 _ => 20,
             })
         }
-        // Target-weight table (weight_hg = kg × 10).
-        // TODO: respect Heavy Metal / Light Metal / Float Stone once implemented.
+        // Target-weight table (weight_hg = kg × 10). Heavy Metal / Light Metal are respected.
         M::GrassKnot | M::LowKick => {
-            let hg = target.weight_hg;
+            let attacker_breaks = attacker_breaks_mold(state, attacker);
+            let hg = effective_weight_hg(state, target, attacker_breaks);
             Some(if hg >= 2000 { 120 }
                 else if hg >= 1000 { 100 }
                 else if hg >= 500 { 80 }
@@ -978,8 +1005,12 @@ fn variable_move_base_power(
         // Weight-ratio table. (×2 damage + accuracy bypass vs Minimized targets is applied
         // generically in calculate_damage_outcomes_for_target_with_options / accuracy_hit_probability.)
         M::HeatCrash | M::HeavySlam => {
-            let user_w = attacker.weight_hg as u32;
-            let target_w = target.weight_hg.max(1) as u32;
+            let attacker_breaks = attacker_breaks_mold(state, attacker);
+            // Heavy Metal / Light Metal on the attacker affect the attacker's own weight.
+            // Attacker's own ability is never suppressed by its own Mold Breaker.
+            let user_w = effective_weight_hg(state, attacker, false);
+            // For the target, Mold Breaker on the attacker suppresses target's weight ability.
+            let target_w = effective_weight_hg(state, target, attacker_breaks).max(1);
             Some(if user_w >= 5 * target_w { 120 }
                 else if user_w >= 4 * target_w { 100 }
                 else if user_w >= 3 * target_w { 80 }
@@ -1037,6 +1068,23 @@ fn variable_move_base_power(
     }
 }
 
+/// Effective weight (in hectograms, kg × 10) of a Pokémon after applying Heavy Metal
+/// and Light Metal. `mold_break` is true when an opposing Mold Breaker attacker is using
+/// a weight-based move against this Pokémon (so its weight ability is ignored).
+/// Autotomize (not yet implemented) would also modify the result here.
+/// Float Stone halves weight but is not yet implemented.
+fn effective_weight_hg(state: &BattleState, mon: &PokemonState, mold_break: bool) -> u32 {
+    let base = mon.weight_hg as u32;
+    if mold_break || pokemon_ability_is_suppressed(state, mon) {
+        return base;
+    }
+    match mon.ability {
+        Ability::HeavyMetal => base.saturating_mul(2),
+        Ability::LightMetal => (base / 2).max(1),
+        _ => base,
+    }
+}
+
 /// Compute the effective base power considering all modifiers (weather, terrain, abilities, etc.).
 /// Does NOT include the weather damage multiplier (Fire/Water in sun/rain) — that is separate.
 fn effective_base_power(
@@ -1072,9 +1120,9 @@ fn effective_base_power(
     }
 
     if matches!(move_data.name, PokemonMove::SolarBeam | PokemonMove::SolarBlade)
-        && !weather_is_sunlight(state)
+        && !weather_is_sunlight_for(state, attacker)
         && !weather_is_strong_winds(state)
-        && current_weather(state).is_some()
+        && weather_for(state, attacker).is_some()
     {
         bp = (bp * 0.5).floor();
     }
@@ -1146,7 +1194,7 @@ fn effective_base_power(
     }
 
     // HydroSteam in sun: BP boost (no accompanying damage-type penalty)
-    if move_data.name == PokemonMove::HydroSteam && weather_is_sunlight(state) {
+    if move_data.name == PokemonMove::HydroSteam && weather_is_sunlight_for(state, attacker) {
         bp = (bp * 1.5).floor();
     }
 
@@ -1240,8 +1288,9 @@ fn effective_base_power(
 /// Takes `attack_type` (the *effective* type after ability conversion) so that e.g. Liquid Voice
 /// sound moves get the rain boost after becoming Water-type, and Weather Ball gets the correct
 /// multiplier for its own active-weather type.
-fn weather_damage_multiplier(state: &BattleState, move_data: &MoveData, attack_type: &PokemonType) -> f64 {
-    let Some(weather) = current_weather(state) else { return 1.0; };
+/// Uses `weather_for(state, attacker)` so Mega Sol is respected for the attacker's moves.
+fn weather_damage_multiplier(state: &BattleState, attacker: &PokemonState, move_data: &MoveData, attack_type: &PokemonType) -> f64 {
+    let Some(weather) = weather_for(state, attacker) else { return 1.0; };
     match weather {
         Weather::Sun | Weather::ExtremeSunlight => {
             if move_data.name == PokemonMove::HydroSteam { 1.0 }
@@ -1609,9 +1658,10 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let effectiveness = {
         let base = if move_data.name == PokemonMove::FlyingPress {
             // Flying Press: Fighting chart × Flying chart (both with Strong Winds tempering).
-            flying_press_type_effectiveness(_state, target)
+            // Scrappy applies to the Fighting component; pass attacker for that check.
+            flying_press_type_effectiveness(_state, Some(attacker), target)
         } else {
-            move_type_effectiveness(_state, &attack_type, target)
+            move_type_effectiveness_with_attacker(_state, &attack_type, Some(attacker), target)
         };
         // Freeze-Dry: Water type is treated as super-effective (2×) regardless of the chart.
         // The chart normally gives 0.5× (Water resists Ice), so the correction factor per Water
@@ -1762,7 +1812,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     if bp == 0.0 {
         return vec![(0, false, 1.0)];
     }
-    let weather_mult  = weather_damage_multiplier(_state, move_data, &attack_type);
+    let weather_mult  = weather_damage_multiplier(_state, attacker, move_data, &attack_type);
     let burn_mult     = burn_damage_multiplier(attacker, move_data);
     let dry_skin_mult = dry_skin_fire_multiplier(target, &attack_type);
     let type_boost_mult = if !item_is_active(_state, attacker) { 1.0 }
@@ -1776,7 +1826,9 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
                 && target.ability == Ability::Ripen
             { base / 2.0 } else { base }
         };
-    let screen_mult   = screen_damage_multiplier(_state, _target_slot, move_data, false); // overridden per-crit below
+    let attacker_infiltrator = !pokemon_ability_is_suppressed(_state, attacker)
+        && attacker.ability == Ability::Infiltrator;
+    let screen_mult   = screen_damage_multiplier(_state, _target_slot, move_data, false, attacker_infiltrator); // overridden per-crit below
 
     // Minimize: a handful of moves (Body Slam, Stomp, …) deal double damage to a Minimized
     // target. The accompanying accuracy bypass lives in accuracy_hit_probability.
@@ -3159,6 +3211,8 @@ pub(crate) fn ability_is_ignorable(ability: &Ability) -> bool {
         | Ability::Immunity | Ability::PastelVeil | Ability::WaterVeil | Ability::MagmaArmor
         | Ability::Oblivious | Ability::OwnTempo | Ability::InnerFocus | Ability::AromaVeil
         | Ability::Comatose | Ability::FlowerVeil
+        // Stat-change inversion / doubling
+        | Ability::Contrary | Ability::Simple
         // Crit prevention
         | Ability::BattleArmor | Ability::ShellArmor
         // Move-use prevention
@@ -3260,6 +3314,7 @@ pub fn pokemon_is_on_terrain(state: &BattleState, mon: &PokemonState, terrain: &
 pub fn clear_terrain(state: &mut BattleState) {
     state.terrain = None;
     state.terrain_turns = None;
+    update_mimicry_forms(state);
 }
 
 pub fn terrain_replacement_move(state: &BattleState) -> Option<PokemonMove> {
@@ -3347,6 +3402,45 @@ fn weather_is_snow(state: &BattleState) -> bool {
 
 fn weather_is_strong_winds(state: &BattleState) -> bool {
     matches!(current_weather(state), Some(Weather::StrongWinds))
+}
+
+// ── Per-mon weather perception (Mega Sol) ────────────────────────────────────
+//
+// Mega Sol makes the holder perceive harsh sunlight regardless of the actual field
+// weather. Cloud Nine / Air Lock do NOT suppress it (it's not actual weather).
+// For all other mons, these delegates to the global helpers above.
+
+/// The weather as perceived by `mon` for the purpose of damage/accuracy/speed/status checks.
+fn weather_for(state: &BattleState, mon: &PokemonState) -> Option<Weather> {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::MegaSol {
+        return Some(Weather::Sun);
+    }
+    current_weather(state)
+}
+
+fn weather_is_sunlight_for(state: &BattleState, mon: &PokemonState) -> bool {
+    matches!(weather_for(state, mon), Some(Weather::Sun) | Some(Weather::ExtremeSunlight))
+}
+
+/// Public variant for call sites that have a `FieldSlot` but no direct `&PokemonState`.
+pub fn weather_is_sunlight_for_slot(state: &BattleState, slot: FieldSlot) -> bool {
+    if let Some(mon) = get_pokemon_at_slot(state, slot) {
+        weather_is_sunlight_for(state, mon)
+    } else {
+        weather_is_sunlight(state)
+    }
+}
+
+fn weather_is_rain_for(state: &BattleState, mon: &PokemonState) -> bool {
+    matches!(weather_for(state, mon), Some(Weather::Rain) | Some(Weather::HeavyRain))
+}
+
+fn weather_is_sandstorm_for(state: &BattleState, mon: &PokemonState) -> bool {
+    matches!(weather_for(state, mon), Some(Weather::Sandstorm))
+}
+
+fn weather_is_snow_for(state: &BattleState, mon: &PokemonState) -> bool {
+    matches!(weather_for(state, mon), Some(Weather::Snow))
 }
 
 pub(crate) fn is_confused(mon: &PokemonState) -> bool {
@@ -3585,7 +3679,7 @@ fn affection_adjustment(_target: &PokemonState) -> i32 {
     0
 }
 
-fn weather_forced_accuracy(state: &BattleState, move_name: &PokemonMove) -> Option<f64> {
+fn weather_forced_accuracy(state: &BattleState, attacker: &PokemonState, move_name: &PokemonMove) -> Option<f64> {
     if weather_is_rain(state)
         && matches!(
             move_name,
@@ -3603,7 +3697,8 @@ fn weather_forced_accuracy(state: &BattleState, move_name: &PokemonMove) -> Opti
         return Some(1.0);
     }
 
-    if weather_is_sunlight(state) && matches!(move_name, PokemonMove::Thunder | PokemonMove::Hurricane) {
+    // Thunder / Hurricane accuracy is halved in sun; Mega Sol counts as sun for the attacker.
+    if weather_is_sunlight_for(state, attacker) && matches!(move_name, PokemonMove::Thunder | PokemonMove::Hurricane) {
         return Some(0.5);
     }
 
@@ -3618,7 +3713,7 @@ pub fn accuracy_hit_probability(
     target_slot: FieldSlot,
     move_data: &MoveData,
 ) -> f64 {
-    if let Some(forced_accuracy) = weather_forced_accuracy(state, &move_data.name) {
+    if let Some(forced_accuracy) = weather_forced_accuracy(state, attacker, &move_data.name) {
         return forced_accuracy;
     }
 
@@ -3742,16 +3837,16 @@ fn side_has_tailwind(state: &BattleState, player: Player) -> bool {
 pub fn effective_speed_for_slot(state: &BattleState, slot: FieldSlot, mon: &PokemonState) -> f32 {
     let mut speed = get_effective_speed(state, mon);
 
-    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::Chlorophyll && weather_is_sunlight(state) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::Chlorophyll && weather_is_sunlight_for(state, mon) {
         speed *= 2.0;
     }
-    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SwiftSwim && weather_is_rain(state) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SwiftSwim && weather_is_rain_for(state, mon) {
         speed *= 2.0;
     }
-    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SandRush && weather_is_sandstorm(state) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SandRush && weather_is_sandstorm_for(state, mon) {
         speed *= 2.0;
     }
-    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SlushRush && weather_is_snow(state) {
+    if !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SlushRush && weather_is_snow_for(state, mon) {
         speed *= 2.0;
     }
     // Unburden: ×2 Speed once the held item has been consumed or lost (and no new item
@@ -4004,7 +4099,7 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
                 let snapshot = state.clone();
                 let sun_blocks_freeze = weather_is_sunlight(&snapshot);
                 if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
-                    apply_status_to_pokemon(&snapshot, sun_blocks_freeze, m, &status);
+                    apply_status_to_pokemon(&snapshot, sun_blocks_freeze, false, m, &status);
                 }
             }
         }
@@ -4190,8 +4285,17 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
         };
         let items_suppressed = items_are_suppressed(state);
         for target in collect_active_slots(state, opposing_player, None) {
-            // apply_opponent_stat_drop handles immunity (Clear Body / Hyper Cutter / …),
-            // Mirror Armor reflection, and Defiant / Competitive reactions.
+            // InnerFocus / OwnTempo / Oblivious / Scrappy grant immunity to Intimidate.
+            // Intimidate is ability-sourced (not a move), so Mold Breaker does not apply.
+            let immune = get_pokemon_at_slot(state, target).map_or(false, |m| {
+                !pokemon_ability_is_suppressed(state, m)
+                    && matches!(m.ability,
+                        Ability::InnerFocus | Ability::OwnTempo
+                        | Ability::Oblivious | Ability::Scrappy)
+            });
+            if immune { continue; }
+            // apply_opponent_stat_drop handles Clear Body / Hyper Cutter / Mirror Armor /
+            // Defiant / Competitive reactions and the new Contrary inversion.
             apply_opponent_stat_drop(state, target, slot, [-1, 0, 0, 0, 0, 0, 0], items_suppressed, false);
         }
     }
@@ -4340,6 +4444,12 @@ fn apply_send_out_only_ability_effects(state: &mut BattleState, slot: FieldSlot,
                     }
                 }
             }
+        }
+
+        // ── Mimicry ───────────────────────────────────────────────────────────────
+        // On switch-in, immediately adopt the type matching the active terrain (if any).
+        Ability::Mimicry => {
+            update_mimicry_forms(state);
         }
 
         _ => {}
@@ -4533,6 +4643,10 @@ fn apply_switch_out_ability_effects(mon: &mut PokemonState, env: BerryEnv) {
     if let Some(original) = mon.original_ability.take() {
         mon.ability = original;
     }
+    // Mimicry: restore original types on switch-out if they were overwritten by terrain.
+    if let Some(orig) = mon.pre_mimicry_types.take() {
+        mon.types = orig;
+    }
     match mon.ability {
         Ability::NaturalCure => {
             mon.status = None;
@@ -4607,6 +4721,50 @@ pub fn update_forecast_forms(state: &mut BattleState) {
     }
 }
 
+/// Mimicry: change each active Mimicry holder's type to match the current terrain
+/// (Electric→Electric, Grassy→Grass, Misty→Fairy, Psychic→Psychic). When terrain ends,
+/// revert to the saved `pre_mimicry_types`. Mirrors `update_forecast_forms`.
+/// Call after any terrain change (set_terrain, clear_terrain) and on send-in.
+pub fn update_mimicry_forms(state: &mut BattleState) {
+    let terrain = state.terrain.clone();
+    let new_type = match &terrain {
+        Some(Terrain::ElectricTerrain) => Some(PokemonType::Electric),
+        Some(Terrain::GrassyTerrain)   => Some(PokemonType::Grass),
+        Some(Terrain::MistyTerrain)    => Some(PokemonType::Fairy),
+        Some(Terrain::PsychicTerrain)  => Some(PokemonType::Psychic),
+        _ => None,
+    };
+
+    let mut slots = collect_active_slots(state, Player::P1, None);
+    slots.extend(collect_active_slots(state, Player::P2, None));
+
+    for slot in slots {
+        let has_mimicry = get_pokemon_at_slot(state, slot)
+            .map_or(false, |m| !m.fainted && !pokemon_ability_is_suppressed(state, m) && m.ability == Ability::Mimicry);
+        if !has_mimicry { continue; }
+
+        if let Some(t) = &new_type {
+            // Terrain is active: store original types (if not already stored) and overwrite.
+            if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+                if mon.pre_mimicry_types.is_none() {
+                    mon.pre_mimicry_types = Some(mon.types.clone());
+                }
+                mon.types = vec![t.clone()];
+            }
+        } else {
+            // No terrain: restore original types if we saved them.
+            let saved = get_pokemon_at_slot(state, slot)
+                .and_then(|m| m.pre_mimicry_types.clone());
+            if let Some(orig) = saved {
+                if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+                    mon.types = orig;
+                    mon.pre_mimicry_types = None;
+                }
+            }
+        }
+    }
+}
+
 /// Return true if any non-fainted active Pokémon has `ability`.
 fn active_mons_have_ability(state: &BattleState, ability: &Ability) -> bool {
     state
@@ -4648,6 +4806,7 @@ pub fn set_terrain(state: &mut BattleState, terrain: Terrain, duration: u8) {
     state.terrain_turns = Some(duration);
 
     trigger_terrain_seed_items(state);
+    update_mimicry_forms(state);
 }
 
 /// Add pseudo-weather, avoiding duplicates and handling duration.
@@ -4845,7 +5004,7 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
                 Player::P2 => &mut state.p2_active_mons,
             };
             if let Some(mon) = mons.get_mut(idx) {
-                apply_status_to_pokemon(&state_snapshot, sun_blocks_freeze, mon, &crate::dex_data::Status::Sleep(0));
+                apply_status_to_pokemon(&state_snapshot, sun_blocks_freeze, false, mon, &crate::dex_data::Status::Sleep(0));
             }
         }
     }
@@ -5128,7 +5287,9 @@ fn get_pseudo_weather_duration(pseudo_weather: &PseudoWeather) -> u8 {
 }
 
 /// Apply a status condition to a pokemon (only if it doesn't already have one).
-fn apply_status_to_pokemon(state: &BattleState, sun_blocks_freeze: bool, mon: &mut PokemonState, status: &crate::dex_data::Status) {
+/// `mold_break` is true when the source is a Mold Breaker / Turboblaze / Teravolt attacker,
+/// which suppresses ignorable abilities (SweetVeil, etc.) on the target.
+fn apply_status_to_pokemon(state: &BattleState, sun_blocks_freeze: bool, mold_break: bool, mon: &mut PokemonState, status: &crate::dex_data::Status) {
     // Prevent statuses if ability blocks all non-volatile statuses
     if mon.ability == Ability::Comatose || mon.ability == Ability::PurifyingSalt {
         return;
@@ -5141,8 +5302,8 @@ fn apply_status_to_pokemon(state: &BattleState, sun_blocks_freeze: bool, mon: &m
     // Sweet Veil: the holder cannot fall asleep (including self-induced sleep from Rest).
     // Ally protection (Sweet Veil protecting teammates) is handled at the apply_effect_to_target
     // call site where side context is available.
-    // Mold Breaker: TODO
     if matches!(status, Status::Sleep(_))
+        && !mold_break
         && !pokemon_ability_is_suppressed(state, mon)
         && mon.ability == Ability::SweetVeil
     {
@@ -6003,7 +6164,8 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                             .filter(|it| format!("{:?}", it).ends_with("Berry"))
                             .cloned();
                         let empty = mon.item == Item::None;
-                        (if empty && !mon.fainted { berry } else { None }, weather_is_sunlight(bs))
+                        // Mega Sol: holder perceives sun, so Harvest always restores.
+                        (if empty && !mon.fainted { berry } else { None }, weather_is_sunlight_for(bs, mon))
                     } else { (None, false) }
                 } else { (None, false) };
 
@@ -6217,6 +6379,14 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             return;
         }
 
+        // Oblivious: blocks Taunt and Attract (Mold Breaker bypass handled in apply_effect_to_target).
+        if matches!(volatile, VolatileStatus::Taunt | VolatileStatus::Attract)
+            && !pokemon_ability_is_suppressed(state, mon)
+            && mon.ability == Ability::Oblivious
+        {
+            return;
+        }
+
         if matches!(volatile, VolatileStatus::Confusion) && pokemon_is_on_terrain(state, mon, &Terrain::MistyTerrain) {
             return;
         }
@@ -6298,6 +6468,24 @@ fn apply_stat_boosts_to_pokemon(
     items_suppressed: bool,
     defer_white_herb: bool,
 ) {
+    // Contrary inverts all stat changes; Simple doubles them. Suppression via
+    // Neutralizing Gas cannot be checked here (no state); per-mon GastroAcid is used instead.
+    let modified: [i8; 7];
+    let boosts = if !has_status_volatile(mon, &VolatileStatus::GastroAcid) {
+        match mon.ability {
+            Ability::Contrary => {
+                modified = std::array::from_fn(|i| -boosts[i]);
+                &modified
+            }
+            Ability::Simple => {
+                modified = std::array::from_fn(|i| boosts[i].saturating_mul(2));
+                &modified
+            }
+            _ => boosts,
+        }
+    } else {
+        boosts
+    };
     for i in 0..7 {
         let before = mon.boosts[i];
         mon.boosts[i] = (before + boosts[i]).clamp(-6, 6);
@@ -6349,13 +6537,15 @@ fn side_has_veil(state: &BattleState, player: Player, veil_ability: Ability) -> 
 /// - `HyperCutter`         — block only Attack (index 0) being lowered.
 /// - `BigPecks`            — block only Defense (index 1) being lowered.
 /// - `KeenEye | Illuminate`— block only accuracy (index 5) being lowered.
-///   (Mold Breaker: TODO)
+///
+/// `mold_break` skips all filtering (Mold Breaker / Turboblaze / Teravolt ignores
+/// these protective abilities on the target).
 ///
 /// Positive entries and self-inflicted drops (those going through the attacker/self_boost
 /// paths) are never touched.  Callers must pass the pre-computed suppression flag so that
 /// Mold Breaker and Neutralizing Gas are respected when they land.
-fn filter_opponent_stat_drops(mon: &PokemonState, boosts: &[i8; 7], ability_suppressed: bool) -> [i8; 7] {
-    if ability_suppressed {
+fn filter_opponent_stat_drops(mon: &PokemonState, boosts: &[i8; 7], ability_suppressed: bool, mold_break: bool) -> [i8; 7] {
+    if ability_suppressed || mold_break {
         return *boosts;
     }
     let mut filtered = *boosts;
@@ -6372,7 +6562,6 @@ fn filter_opponent_stat_drops(mon: &PokemonState, boosts: &[i8; 7], ability_supp
             if filtered[1] < 0 { filtered[1] = 0; }
         }
         // Keen Eye / Illuminate: the holder's accuracy stage cannot be lowered by opponents.
-        // Mold Breaker: TODO
         Ability::KeenEye | Ability::Illuminate => {
             if filtered[5] < 0 { filtered[5] = 0; }
         }
@@ -6398,7 +6587,6 @@ fn filter_opponent_stat_drops(mon: &PokemonState, boosts: &[i8; 7], ability_supp
 /// Flower Veil zeroing (if applicable) must be applied to `raw_boosts` by the caller
 /// *before* calling this function.
 /// Sticky Web and Octolock are not yet implemented; add Mirror Armor interactions when they are.
-/// Mold Breaker: TODO (consistent with existing abilities — all currently ignore it).
 pub(crate) fn apply_opponent_stat_drop(
     state: &mut BattleState,
     target_slot: FieldSlot,
@@ -6409,11 +6597,31 @@ pub(crate) fn apply_opponent_stat_drop(
 ) {
     if raw_boosts == [0; 7] { return; }
 
-    // Snapshot the target's ability and suppression before taking any mutable borrow.
+    // Snapshot the target's ability, suppression, and source's Mold Breaker status before
+    // taking any mutable borrow.
     let (target_ability, target_suppressed) = match get_pokemon_at_slot(state, target_slot) {
         Some(m) => (m.ability.clone(), pokemon_ability_is_suppressed(state, m)),
         None => return,
     };
+    let source_breaks_mold = get_pokemon_at_slot(state, source_slot)
+        .map_or(false, |a| attacker_breaks_mold(state, a));
+
+    // ── 0. Contrary / Simple pre-processing ────────────────────────────────────────────────
+    // Contrary inverts all opponent-sourced stat changes; Simple doubles them.
+    // Bypassed when the source is a Mold Breaker attacker (Contrary/Simple are ignorable).
+    let raw_boosts: [i8; 7] = if !target_suppressed
+        && !source_breaks_mold
+        && ability_is_ignorable(&target_ability)
+    {
+        match target_ability {
+            Ability::Contrary => std::array::from_fn(|i| -raw_boosts[i]),
+            Ability::Simple   => std::array::from_fn(|i| raw_boosts[i].saturating_mul(2)),
+            _ => raw_boosts,
+        }
+    } else {
+        raw_boosts
+    };
+    if raw_boosts == [0; 7] { return; }
 
     // ── 1. Mirror Armor ────────────────────────────────────────────────────────────────────
     // Bounce the negative portion back to the source.  Only the holder's portion bounces;
@@ -6443,7 +6651,7 @@ pub(crate) fn apply_opponent_stat_drop(
     // ── 2. Immunity filter (Clear Body / Hyper Cutter / Big Pecks / Keen Eye / …) ─────────
     let filtered = {
         let Some(mon) = get_pokemon_at_slot(state, target_slot) else { return; };
-        filter_opponent_stat_drops(mon, &raw_boosts, target_suppressed)
+        filter_opponent_stat_drops(mon, &raw_boosts, target_suppressed, source_breaks_mold)
     };
     if filtered == [0; 7] { return; }
 
@@ -6581,25 +6789,27 @@ fn apply_effect_to_target(
     effect: &HitEffect,
     side_condition_player: Player,
 ) {
-    // Extract attacker ability before taking a mutable borrow of the target
+    // Extract attacker ability and Mold Breaker status before taking a mutable borrow.
     let attacker_ability = get_pokemon_at_slot(state, attacker_slot).map(|a| a.ability.clone());
-    // Also snapshot target suppression before the mutable borrow (needed for stat-drop filtering).
-    let target_ability_suppressed = get_pokemon_at_slot(state, target_slot)
-        .map(|m| pokemon_ability_is_suppressed(state, m))
-        .unwrap_or(false);
+    let attacker_mold_break = get_pokemon_at_slot(state, attacker_slot)
+        .map_or(false, |a| attacker_breaks_mold(state, a));
+    // Snapshot target ability and suppression before the mutable borrow.
+    let (target_ability, target_ability_suppressed) = get_pokemon_at_slot(state, target_slot)
+        .map(|m| (m.ability.clone(), pokemon_ability_is_suppressed(state, m)))
+        .unwrap_or((Ability::None, false));
     let sun_blocks_freeze = weather_is_sunlight(state);
     let items_suppressed = items_are_suppressed(state);
     let target_berry_env = berry_env(state, target_slot);
     let terrain_snapshot = state.clone();
 
     // Pre-compute veil protections before taking the mutable borrow.
-    // Sweet Veil: block sleep for the target's entire side (Mold Breaker: TODO).
-    let sweet_veil_on_side = side_has_veil(state, target_slot.player, Ability::SweetVeil);
-    // Flower Veil: block all non-volatile status and opponent stat drops on Grass-type targets
-    // on the protected side (Mold Breaker: TODO).
-    let flower_veil_on_side = side_has_veil(state, target_slot.player, Ability::FlowerVeil);
-    // Aroma Veil: block mental volatile statuses for the target's entire side (Mold Breaker: TODO).
-    let aroma_veil_on_side = side_has_veil(state, target_slot.player, Ability::AromaVeil);
+    // Mold Breaker suppresses veil abilities on the holder (not side-wide), but the
+    // side-wide protection (Sweet/Flower/Aroma Veil) still applies unless the veil
+    // HOLDER is suppressed. In practice, the conservative approach is to skip the
+    // veil gate when the attacker breaks mold, matching the Bulbapedia "ignorable" list.
+    let sweet_veil_on_side = !attacker_mold_break && side_has_veil(state, target_slot.player, Ability::SweetVeil);
+    let flower_veil_on_side = !attacker_mold_break && side_has_veil(state, target_slot.player, Ability::FlowerVeil);
+    let aroma_veil_on_side = !attacker_mold_break && side_has_veil(state, target_slot.player, Ability::AromaVeil);
     // Snapshot target type for Flower Veil (Grass-only protection) before the mutable borrow.
     let target_is_grass = get_pokemon_at_slot(state, target_slot)
         .map_or(false, |mon| pokemon_has_type(mon, &PokemonType::Grass));
@@ -6652,24 +6862,24 @@ fn apply_effect_to_target(
                         match status {
                             Status::Poison => { target_mon.status = Some(Status::Poison); }
                             Status::ToxicPoison(_) => { target_mon.status = Some(Status::ToxicPoison(0)); }
-                            other => { apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, target_mon, other); }
+                            other => { apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, attacker_mold_break, target_mon, other); }
                         }
                     }
                 } else {
-                    apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, target_mon, status);
+                    apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, attacker_mold_break, target_mon, status);
                 }
             }
         }
 
         if let Some(volatile) = &effect.volatile_status {
             // Sweet Veil: block Yawn on the target's side.
-            // Mold Breaker: TODO
+            // (Mold Breaker gate already applied to sweet_veil_on_side above.)
             let yawn_blocked_by_sweet_veil =
                 matches!(volatile, VolatileStatus::Yawn) && sweet_veil_on_side;
             // Aroma Veil: block mental volatile statuses for the target's entire side.
             // Protects against Taunt, Torment, Encore, Disable, Attract, Heal Block.
             // Does NOT block Imprison (Bulbapedia explicitly excludes it).
-            // Mold Breaker: TODO
+            // (Mold Breaker gate already applied to aroma_veil_on_side above.)
             let aroma_veil_blocked = aroma_veil_on_side && matches!(
                 volatile,
                 VolatileStatus::Taunt
@@ -6684,14 +6894,25 @@ fn apply_effect_to_target(
                 && !attacker_has_infiltrator
                 && attacker_slot.player != target_slot.player
                 && matches!(volatile, VolatileStatus::Confusion | VolatileStatus::Yawn);
-            if !yawn_blocked_by_sweet_veil && !aroma_veil_blocked && !volatile_blocked_by_safeguard {
+            // Oblivious: blocks Taunt and Attract individually (Mold Breaker bypasses this).
+            let oblivious_blocks = matches!(volatile, VolatileStatus::Taunt | VolatileStatus::Attract)
+                && !attacker_mold_break
+                && !target_ability_suppressed
+                && target_ability == Ability::Oblivious;
+            // Inner Focus: blocks flinching (Mold Breaker bypasses this).
+            let inner_focus_blocks_flinch = matches!(volatile, VolatileStatus::Flinch)
+                && !attacker_mold_break
+                && !target_ability_suppressed
+                && target_ability == Ability::InnerFocus;
+            if !yawn_blocked_by_sweet_veil && !aroma_veil_blocked && !volatile_blocked_by_safeguard
+                && !oblivious_blocks && !inner_focus_blocks_flinch
+            {
                 apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile);
 
                 // Steadfast: +1 Speed when the holder flinches.
                 // The flinch volatile has just been pushed; fire immediately so the boost
                 // lands in the same "apply flinch" moment (consistent with how the ability
                 // resolves in-game before the flinched Pokémon would move).
-                // Suppressed abilities are skipped; Inner Focus prevents flinching (separate TODO).
                 if matches!(volatile, VolatileStatus::Flinch)
                     && target_mon.ability == Ability::Steadfast
                     && !has_status_volatile(target_mon, &VolatileStatus::GastroAcid)
@@ -6735,7 +6956,7 @@ fn apply_effect_to_target(
         // Flower Veil: zero all opponent-sourced stat drops on Grass-type targets.
         // Self-inflicted drops (Leaf Storm, Weak Armor, etc.) go through apply_effect_to_attacker,
         // not this path, so they are correctly unaffected.
-        // Mold Breaker: TODO
+        // (Mold Breaker gate already applied to flower_veil_on_side above.)
         if flower_veil_on_side && target_is_grass {
             for b in &mut incoming { if *b < 0 { *b = 0; } }
         }
@@ -6782,7 +7003,7 @@ fn apply_effect_to_attacker(
     let terrain_snapshot = state.clone();
     if let Some(attacker_mon) = get_pokemon_at_slot_mut(state, attacker_slot) {
         if let Some(status) = &effect.status {
-            apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, attacker_mon, status);
+            apply_status_to_pokemon(&terrain_snapshot, sun_blocks_freeze, false, attacker_mon, status);
         }
 
         if let Some(volatile) = &effect.volatile_status {
@@ -6861,8 +7082,12 @@ where
 
 /// Apply a healing/recovery move effect to the attacker in-place.
 fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name: &PokemonMove, terrain_snapshot: &BattleState) -> bool {
-    let branch_weather = current_weather(bs);
-    let branch_harsh_sun = matches!(branch_weather, Some(Weather::ExtremeSunlight));
+    // Use weather_for so Mega Sol counts as sun for the move user's recovery.
+    let attacker_snapshot = get_pokemon_at_slot(bs, attacker_slot).cloned();
+    let branch_weather = attacker_snapshot.as_ref()
+        .map(|m| weather_for(bs, m))
+        .unwrap_or_else(|| current_weather(bs));
+    let branch_sun = matches!(branch_weather, Some(Weather::Sun | Weather::ExtremeSunlight));
     let branch_sandstorm = matches!(branch_weather, Some(Weather::Sandstorm));
     let env = berry_env(bs, attacker_slot); // compute before the mutable borrow below
 
@@ -6880,7 +7105,7 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
             gain_hp(attacker_mon, heal, env);
         }
         PokemonMove::Synthesis | PokemonMove::MorningSun | PokemonMove::Moonlight => {
-            let (num, den) = if branch_harsh_sun { (2u32, 3u32) }
+            let (num, den) = if branch_sun { (2u32, 3u32) }
                              else if matches!(branch_weather, None | Some(Weather::StrongWinds)) { (1u32, 2u32) }
                              else { (1u32, 4u32) };
             let max_hp = attacker_mon.stats[0].max(1);
@@ -7013,12 +7238,67 @@ pub fn apply_kings_rock_flinch(
     });
     if !eligible { return branches; }
 
+    // Shield Dust / Covert Cloak on the target blocks King's Rock flinch.
+    let blocked_by_shield_dust = branches.first().map_or(false, |(bs, _)| {
+        let attacker_breaks = get_pokemon_at_slot(bs, attacker_slot).map_or(false, |a| attacker_breaks_mold(bs, a));
+        !attacker_breaks && get_pokemon_at_slot(bs, target_slot).map_or(false, |m|
+            !pokemon_ability_is_suppressed(bs, m) && m.ability == Ability::ShieldDust)
+    });
+    if blocked_by_shield_dust { return branches; }
+
     let chance = 1.0 - 0.9_f64.powi(hits_landed as i32);
     let flinch_effect = HitEffect {
         volatile_status: Some(VolatileStatus::Flinch),
         ..Default::default()
     };
     // side_condition_player is unused by the flinch path in apply_effect_to_target.
+    let side_condition_player = target_slot.player;
+    branch_on_secondary_effects(branches, chance, std::slice::from_ref(&flinch_effect), |bs, eff| {
+        apply_effect_to_target(bs, attacker_slot, target_slot, eff, side_condition_player);
+    })
+}
+
+/// Stench: add a 10% flinch chance to any damaging move that doesn't already flinch.
+/// Each hit of a multi-hit move rolls independently (same structure as `apply_kings_rock_flinch`).
+/// Does not stack with King's Rock / Razor Fang.
+pub fn apply_stench_flinch(
+    branches: Vec<(BattleState, f64)>,
+    attacker_slot: FieldSlot,
+    target_slot: FieldSlot,
+    move_data: &MoveData,
+    hits_landed: u32,
+) -> Vec<(BattleState, f64)> {
+    if hits_landed == 0 { return branches; }
+    if matches!(move_data.category, MoveCategory::Status) { return branches; }
+
+    // Skip if the move already has a flinch secondary (don't double-dip).
+    let move_already_flinches = move_data.secondaries.iter().any(|sec| {
+        sec.effect.volatile_status == Some(VolatileStatus::Flinch)
+            || sec.random_choices.iter().any(|c| c.volatile_status == Some(VolatileStatus::Flinch))
+    });
+    if move_already_flinches { return branches; }
+
+    // Check that the attacker has Stench and ability is active (not suppressed).
+    let eligible = branches.first().map_or(false, |(bs, _)| {
+        get_pokemon_at_slot(bs, attacker_slot)
+            .map_or(false, |m| !pokemon_ability_is_suppressed(bs, m) && m.ability == Ability::Stench)
+    });
+    if !eligible { return branches; }
+
+    // Shield Dust on the target blocks Stench flinch (same as King's Rock).
+    let blocked_by_shield_dust = branches.first().map_or(false, |(bs, _)| {
+        let attacker_breaks = get_pokemon_at_slot(bs, attacker_slot).map_or(false, |a| attacker_breaks_mold(bs, a));
+        !attacker_breaks && get_pokemon_at_slot(bs, target_slot).map_or(false, |m|
+            !pokemon_ability_is_suppressed(bs, m) && m.ability == Ability::ShieldDust)
+    });
+    if blocked_by_shield_dust { return branches; }
+
+    // 10% per-hit chance, independent rolls (1 - 0.9^n combined probability).
+    let chance = 1.0 - 0.9_f64.powi(hits_landed as i32);
+    let flinch_effect = HitEffect {
+        volatile_status: Some(VolatileStatus::Flinch),
+        ..Default::default()
+    };
     let side_condition_player = target_slot.player;
     branch_on_secondary_effects(branches, chance, std::slice::from_ref(&flinch_effect), |bs, eff| {
         apply_effect_to_target(bs, attacker_slot, target_slot, eff, side_condition_player);
@@ -7188,6 +7468,8 @@ pub fn try_set_single_type(state: &mut BattleState, target_slot: FieldSlot, new_
     if blocked { return false; }
     let Some(tgt) = get_pokemon_at_slot_mut(state, target_slot) else { return false; };
     tgt.types = vec![new_type];
+    // Clear pre_mimicry_types so Mimicry doesn't restore over the new type (Soak overrides Mimicry).
+    tgt.pre_mimicry_types = None;
     remove_status_volatile(tgt, &VolatileStatus::ForestsCurse);
     remove_status_volatile(tgt, &VolatileStatus::TrickorTreat);
     true
@@ -7320,6 +7602,32 @@ pub(crate) fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: F
     let mut fainted = false;
     if let Some(atk) = get_pokemon_at_slot_mut(bs, attacker_slot) {
         take_damage(atk, damage, env);
+        if atk.fainted {
+            clear_pokemon_on_faint(atk);
+            fainted = true;
+        }
+    }
+    if fainted {
+        handle_pokemon_faint(bs, attacker_slot.player, attacker_slot.slot_index);
+    }
+}
+
+/// Deal an exact amount of HP damage to the attacker. Used by Innards Out (and similar
+/// abilities that deal back a specific, pre-computed amount rather than a fraction of max HP).
+/// Blocked by Magic Guard.
+fn apply_flat_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSlot, amount: u16) {
+    if amount == 0 { return; }
+    let abilities_suppressed = abilities_are_suppressed(bs);
+    let magic_guard = {
+        let Some(m) = get_pokemon_at_slot(bs, attacker_slot) else { return };
+        if m.fainted { return; }
+        !abilities_suppressed && m.ability == Ability::MagicGuard
+    };
+    if magic_guard { return; }
+    let env = berry_env(bs, attacker_slot);
+    let mut fainted = false;
+    if let Some(atk) = get_pokemon_at_slot_mut(bs, attacker_slot) {
+        take_damage(atk, amount, env);
         if atk.fainted {
             clear_pokemon_on_faint(atk);
             fainted = true;
@@ -7590,6 +7898,32 @@ pub fn apply_contact_hit_reactions(
                 (bs, prob)
             }).collect()
         }
+        // Innards Out: when KO'd by a damaging move, deal the holder's pre-hit HP back to
+        // the attacker. `damage_dealt` is clamped to the holder's remaining HP at the time
+        // of the hit, so it equals the "HP before last hit" when the holder faints.
+        // No contact requirement; not blocked by Damp.
+        Ability::InnardsOut => {
+            branches.into_iter().map(|(mut bs, prob)| {
+                let holder_fainted = get_pokemon_at_slot(&bs, holder_slot)
+                    .map(|m| m.fainted)
+                    .unwrap_or(false);
+                if !holder_fainted { return (bs, prob); }
+                apply_flat_hp_damage_to_attacker(&mut bs, attacker_slot, damage_dealt);
+                (bs, prob)
+            }).collect()
+        }
+
+        // Toxic Debris: when hit by a physical move, scatter Toxic Spikes on the attacker's side.
+        // Triggers per hit on multi-hit moves; capped at 2 layers by add_side_condition.
+        // No contact requirement (any physical category move).
+        Ability::ToxicDebris => {
+            if !is_physical { return branches; }
+            branches.into_iter().map(|(mut bs, prob)| {
+                add_side_condition(&mut bs, attacker_slot.player, SideCondition::ToxicSpikes(1), 0);
+                (bs, prob)
+            }).collect()
+        }
+
         _ => branches,
     };
 
@@ -8174,6 +8508,16 @@ pub fn check_and_apply_redirection(
 ) -> Vec<FieldSlot> {
     // Only apply redirection if there's exactly one target
     if target_slots.len() != 1 {
+        return target_slots;
+    }
+
+    // Stalwart and Propeller Tail: ignore all target-redirecting effects (moves and abilities).
+    let attacker_ignores_redirection = get_pokemon_at_slot(state, user_slot)
+        .map_or(false, |a| {
+            !pokemon_ability_is_suppressed(state, a)
+                && matches!(a.ability, Ability::Stalwart | Ability::PropellerTail)
+        });
+    if attacker_ignores_redirection {
         return target_slots;
     }
 

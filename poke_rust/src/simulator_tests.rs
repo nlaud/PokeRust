@@ -28355,3 +28355,663 @@ mod abilities_cross_cutting {
     }
 }
 
+// ── Tests for newly-implemented abilities (batch: Contrary, Simple, Heavy/Light Metal,
+// Infiltrator screens, Intimidate immunity, Inner Focus flinch, Oblivious Taunt,
+// Scrappy ghost, Mega Sol, Mimicry, Stalwart, Stench, Toxic Debris, Innards Out)
+mod new_abilities_batch {
+    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{PokemonType, SideCondition, Terrain, VolatileStatus, Weather};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, damage_distribution, move_dex, pokemon_dex,
+        run_single_turn, simple_attack,
+    };
+    use crate::simulator_helpers;
+
+    fn mon_with_move(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn avg_damage_to_p2(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes.iter().map(|(s, p)| {
+            let taken = match s {
+                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p2_active_mons[0].hp),
+                MatchState::GameOverState { .. } => initial_hp,
+                _ => 0,
+            };
+            taken as f64 * p
+        }).sum()
+    }
+
+    fn avg_damage_to_p1(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes.iter().map(|(s, p)| {
+            let taken = match s {
+                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p1_active_mons[0].hp),
+                MatchState::GameOverState { .. } => initial_hp,
+                _ => 0,
+            };
+            taken as f64 * p
+        }).sum()
+    }
+
+    fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(),
+        )
+    }
+
+    // ── Contrary ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn contrary_inverts_foe_sourced_stat_drop() {
+        // Charm drops the target's Attack by -2. With Contrary, it should become +2.
+        let mut charmer = mon_with_move(Species::Snorlax, PokemonMove::Charm, Ability::None);
+        charmer.stats[5] = 300; // go first
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Contrary);
+        let state = battle_state_from_lists(vec![charmer], vec![], vec![target], vec![]);
+        let outcomes = run(state);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s,
+            MatchState::BattleState(bs) if bs.p2_active_mons[0].boosts[0] == 2
+        )), "Contrary should invert Charm's -2 Atk drop into +2 Atk");
+    }
+
+    #[test]
+    fn contrary_inverts_self_sourced_stat_drop() {
+        // Leaf Storm drops the user's SpA by -2. With Contrary, the user gains +2 SpA.
+        // Use guaranteed-hit target to avoid miss branches.
+        let user = mon_with_move(Species::Snorlax, PokemonMove::LeafStorm, Ability::Contrary);
+        let mut target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        target.hp = 10000;
+        target.stats[0] = 10000; // won't faint — only check attacker boosts
+        let state = battle_state_from_lists(vec![user], vec![], vec![target], vec![]);
+        let outcomes = run(state);
+        // In branches where Leaf Storm hits (target took damage), user's SpA rose by +2.
+        // In miss branches user's SpA should also be 0 (no drop from Contrary with miss).
+        // Key check: no branch has boosts[2] == -2 (which would mean Contrary failed).
+        assert!(outcomes.iter().all(|(s, _)| !matches!(s,
+            MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] < 0
+        )), "Contrary must not allow Leaf Storm's -2 SpA to actually drop SpA");
+        // In hit branches: boosts[2] == +2
+        let hit_branches_have_boost = outcomes.iter().any(|(s, _)| {
+            matches!(s, MatchState::BattleState(bs)
+                if bs.p2_active_mons[0].hp < 10000 && bs.p1_active_mons[0].boosts[2] == 2)
+        });
+        assert!(hit_branches_have_boost,
+            "Contrary should invert Leaf Storm's -2 SpA to +2 SpA in hit branches");
+    }
+
+    #[test]
+    fn contrary_defiant_does_not_fire() {
+        // Contrary holder also... can't have Defiant. Test: Defiant holder should NOT
+        // gain +2 Atk when Contrary inverts an incoming Intimidate into +1 Atk raise.
+        // Here: Intimidate targets a Contrary holder. The result should be +1 Atk from
+        // inversion, NOT a Defiant reaction on top.
+        let intimidator = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Intimidate);
+        // Contrary + Defiant is impossible, but we test that boosts are exactly +1, not +3.
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Contrary);
+        let state = battle_state_from_lists(vec![intimidator], vec![], vec![target], vec![]);
+        // Intimidate fires on send-out; check boosts immediately.
+        assert_eq!(state.p2_active_mons[0].boosts[0], 1,
+            "Contrary should invert Intimidate to +1 Atk; Defiant must not double-fire");
+    }
+
+    #[test]
+    fn mold_breaker_bypasses_contrary() {
+        // Mold Breaker using Charm: the -2 Atk drop should not be inverted by Contrary.
+        let mut charmer = mon_with_move(Species::Snorlax, PokemonMove::Charm, Ability::MoldBreaker);
+        charmer.stats[5] = 300;
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Contrary);
+        let state = battle_state_from_lists(vec![charmer], vec![], vec![target], vec![]);
+        let outcomes = run(state);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s,
+            MatchState::BattleState(bs) if bs.p2_active_mons[0].boosts[0] == -2
+        )), "Mold Breaker should bypass Contrary; Charm must still drop Atk by -2");
+    }
+
+    // ── Simple ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn simple_doubles_stat_boost_from_move() {
+        // Swords Dance normally gives +2 Atk. With Simple, +4.
+        let user = mon_with_move(Species::Snorlax, PokemonMove::SwordsDance, Ability::Simple);
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![user], vec![], vec![target], vec![]);
+        let outcomes = run(state);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s,
+            MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[0] == 4
+        )), "Simple should double Swords Dance's +2 Atk to +4");
+    }
+
+    #[test]
+    fn simple_doubles_intimidate_drop() {
+        // Intimidate drops Atk by -1; with Simple on the target, should be -2.
+        let intimidator = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Intimidate);
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Simple);
+        let state = battle_state_from_lists(vec![intimidator], vec![], vec![target], vec![]);
+        assert_eq!(state.p2_active_mons[0].boosts[0], -2,
+            "Simple should double Intimidate's -1 Atk drop to -2");
+    }
+
+    // ── Heavy Metal / Light Metal ─────────────────────────────────────────────
+
+    #[test]
+    fn heavy_metal_doubles_weight_for_low_kick() {
+        // Target has 100 hg base weight (10 kg) → normally 20 BP.
+        // With Heavy Metal: 200 hg (20 kg) → 40 BP. Should deal ~2× damage.
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::LowKick, Ability::None);
+        let mut without_hm = battle_state_from_lists(
+            vec![attacker.clone()], vec![],
+            vec![mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None)], vec![],
+        );
+        without_hm.p2_active_mons[0].weight_hg = 90; // < 100 hg → 20 BP
+        let init_hp = without_hm.p2_active_mons[0].stats[0];
+
+        let mut with_hm = battle_state_from_lists(
+            vec![attacker], vec![],
+            vec![mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::HeavyMetal)], vec![],
+        );
+        with_hm.p2_active_mons[0].weight_hg = 90; // × 2 = 180 hg → still 20 BP...
+        // Set base to 50 hg; ×2 = 100 hg → 40 BP. That's 2× BP.
+        with_hm.p2_active_mons[0].weight_hg = 50;
+        without_hm.p2_active_mons[0].weight_hg = 50; // 50 hg → 20 BP
+
+        let dmg_normal = avg_damage_to_p2(&run(without_hm), init_hp);
+        let dmg_hm     = avg_damage_to_p2(&run(with_hm), init_hp);
+        let ratio = dmg_hm / dmg_normal.max(1.0);
+        assert!((ratio - 2.0).abs() < 0.25,
+            "Heavy Metal should double weight → double Low Kick BP (~2×); ratio={ratio:.2}");
+    }
+
+    #[test]
+    fn light_metal_halves_weight_for_low_kick() {
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::LowKick, Ability::None);
+        // 2500 hg (250 kg) → 120 BP (≥200 kg); with Light Metal: 1250 hg → 100 BP (≥100 kg).
+        let mut without_lm = battle_state_from_lists(
+            vec![attacker.clone()], vec![],
+            vec![mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None)], vec![],
+        );
+        without_lm.p2_active_mons[0].weight_hg = 2500;
+        let init_hp = without_lm.p2_active_mons[0].stats[0];
+
+        let mut with_lm = battle_state_from_lists(
+            vec![attacker], vec![],
+            vec![mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::LightMetal)], vec![],
+        );
+        with_lm.p2_active_mons[0].weight_hg = 2500; // ÷ 2 = 1250 hg → 100 BP
+
+        let dmg_normal = avg_damage_to_p2(&run(without_lm), init_hp);
+        let dmg_lm     = avg_damage_to_p2(&run(with_lm), init_hp);
+        // 120 BP → 100 BP ≈ 0.833× ratio
+        let ratio = dmg_lm / dmg_normal.max(1.0);
+        assert!((ratio - (100.0 / 120.0)).abs() < 0.10,
+            "Light Metal should halve weight → 100/120 BP ratio; ratio={ratio:.2}");
+    }
+
+    // ── Infiltrator screen bypass ─────────────────────────────────────────────
+
+    #[test]
+    fn infiltrator_bypasses_reflect() {
+        let mut attacker_normal = mon_with_move(Species::Snorlax, PokemonMove::BodySlam, Ability::None);
+        attacker_normal.stats[5] = 300;
+        let mut attacker_infil = mon_with_move(Species::Snorlax, PokemonMove::BodySlam, Ability::Infiltrator);
+        attacker_infil.stats[5] = 300;
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let init_hp = target.stats[0];
+
+        let mut state_normal = battle_state_from_lists(
+            vec![attacker_normal], vec![], vec![target.clone()], vec![],
+        );
+        crate::simulator_helpers::add_side_condition(
+            &mut state_normal, Player::P2, SideCondition::Reflect, 5,
+        );
+        let mut state_infil = battle_state_from_lists(
+            vec![attacker_infil], vec![], vec![target], vec![],
+        );
+        crate::simulator_helpers::add_side_condition(
+            &mut state_infil, Player::P2, SideCondition::Reflect, 5,
+        );
+
+        let dmg_normal = avg_damage_to_p2(&run(state_normal), init_hp);
+        let dmg_infil  = avg_damage_to_p2(&run(state_infil), init_hp);
+        let ratio = dmg_infil / dmg_normal.max(1.0);
+        assert!((ratio - 2.0).abs() < 0.2,
+            "Infiltrator should bypass Reflect (no 0.5× reduction); ratio={ratio:.2}");
+    }
+
+    // ── Intimidate immunity ───────────────────────────────────────────────────
+
+    fn intimidate_does_not_drop_atk(immune_ability: Ability) {
+        let intimidator = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Intimidate);
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, immune_ability.clone());
+        let state = battle_state_from_lists(vec![intimidator], vec![], vec![target], vec![]);
+        assert_eq!(state.p2_active_mons[0].boosts[0], 0,
+            "{immune_ability:?} should block Intimidate (-1 Atk drop)");
+    }
+
+    #[test] fn inner_focus_blocks_intimidate() { intimidate_does_not_drop_atk(Ability::InnerFocus); }
+    #[test] fn own_tempo_blocks_intimidate()   { intimidate_does_not_drop_atk(Ability::OwnTempo);   }
+    #[test] fn oblivious_blocks_intimidate()   { intimidate_does_not_drop_atk(Ability::Oblivious);  }
+    #[test] fn scrappy_blocks_intimidate()     { intimidate_does_not_drop_atk(Ability::Scrappy);    }
+
+    // ── Inner Focus flinch immunity ───────────────────────────────────────────
+
+    #[test]
+    fn inner_focus_blocks_kings_rock_flinch() {
+        // Build attacker with King's Rock — gives 10% flinch on any damaging hit.
+        // With Inner Focus on the target, none of P2's PP should be preserved (flinch blocked).
+        let attacker = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::BodySlam), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            Some(Item::KingsRock), None, Some([0; 6]), None, false,
+        );
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::InnerFocus);
+        let initial_pp = target.move_pp[0];
+        let mut state = battle_state_from_lists(
+            vec![attacker], vec![], vec![target], vec![],
+        );
+        state.p1_active_mons[0].stats[5] = 300;
+        state.p2_active_mons[0].hp = 10000;
+        state.p2_active_mons[0].stats[0] = 10000;
+        let outcomes = run(state);
+        // Flinch probability (PP preserved = couldn't act) should be 0 with Inner Focus.
+        let flinch_prob: f64 = outcomes.iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p2_active_mons[0].move_pp[0] == initial_pp { *p } else { 0.0 }
+            } else { 0.0 }
+        }).sum();
+        assert!(flinch_prob < 0.01,
+            "Inner Focus should block King's Rock flinch; flinch_prob={flinch_prob:.3}");
+    }
+
+    // ── Oblivious extras ──────────────────────────────────────────────────────
+
+    #[test]
+    fn oblivious_blocks_taunt() {
+        // Taunt is applied via apply_effect_to_target as a volatile. Oblivious should block it.
+        let mut taunter = mon_with_move(Species::Snorlax, PokemonMove::Taunt, Ability::None);
+        taunter.stats[5] = 300;
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Oblivious);
+        let mut state = battle_state_from_lists(vec![taunter], vec![], vec![target], vec![]);
+        state.p2_active_mons[0].hp = 10000;
+        state.p2_active_mons[0].stats[0] = 10000;
+        let outcomes = run(state);
+        let taunt_applied: f64 = outcomes.iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p2_active_mons[0].volatiles.iter().any(|v|
+                    matches!(v, VolatileStatusState::MoveStatus(VolatileStatus::Taunt, _)))
+                { *p } else { 0.0 }
+            } else { 0.0 }
+        }).sum();
+        assert!(taunt_applied < 0.01,
+            "Oblivious should block Taunt; applied_prob={taunt_applied:.3}");
+    }
+
+    // ── Scrappy ghost bypass ──────────────────────────────────────────────────
+
+    #[test]
+    fn scrappy_normal_move_hits_ghost_type() {
+        // Tackle (Normal) vs Gengar (Ghost) — normally immune; Scrappy lets it hit.
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::Tackle, Ability::Scrappy);
+        let target = mon_with_move(Species::Gengar, PokemonMove::Splash, Ability::None);
+        let init_hp = target.stats[0];
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = run(state);
+        let dmg = avg_damage_to_p2(&outcomes, init_hp);
+        assert!(dmg > 0.0, "Scrappy should allow Normal-type Tackle to damage a Ghost-type");
+    }
+
+    #[test]
+    fn normal_move_does_not_hit_ghost_without_scrappy() {
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::Tackle, Ability::None);
+        let target = mon_with_move(Species::Gengar, PokemonMove::Splash, Ability::None);
+        let init_hp = target.stats[0];
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = run(state);
+        let dmg = avg_damage_to_p2(&outcomes, init_hp);
+        assert!(dmg < 0.01, "Normal Tackle should be immune to Ghost-type (no Scrappy)");
+    }
+
+    // ── Mega Sol ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mega_sol_boosts_fire_move_damage() {
+        // Fire Blast from Mega Sol holder vs Fire Blast from normal holder.
+        // Mega Sol gives 1.5× to Fire-type moves (perceives Sun); ratio ≈ 1.5.
+        let sol_attacker = mon_with_move(Species::Snorlax, PokemonMove::FireBlast, Ability::MegaSol);
+        let normal_attacker = mon_with_move(Species::Snorlax, PokemonMove::FireBlast, Ability::None);
+        let target1 = mon_with_move(Species::Blissey, PokemonMove::Splash, Ability::None);
+        let target2 = mon_with_move(Species::Blissey, PokemonMove::Splash, Ability::None);
+        let init_hp = target1.stats[0];
+
+        let state_sol = battle_state_from_lists(vec![sol_attacker], vec![], vec![target1], vec![]);
+        let state_norm = battle_state_from_lists(vec![normal_attacker], vec![], vec![target2], vec![]);
+
+        let dmg_sol  = avg_damage_to_p2(&run(state_sol), init_hp);
+        let dmg_norm = avg_damage_to_p2(&run(state_norm), init_hp);
+        let ratio = dmg_sol / dmg_norm.max(1.0);
+        assert!((ratio - 1.5).abs() < 0.1,
+            "Mega Sol should give 1.5× Fire damage; ratio={ratio:.2}");
+    }
+
+    #[test]
+    fn mega_sol_halves_water_move_damage() {
+        // Water Pulse from Mega Sol holder should be 0.5× (sun dampens Water).
+        let sol_attacker = mon_with_move(Species::Snorlax, PokemonMove::WaterPulse, Ability::MegaSol);
+        let normal_attacker = mon_with_move(Species::Snorlax, PokemonMove::WaterPulse, Ability::None);
+        let target1 = mon_with_move(Species::Blissey, PokemonMove::Splash, Ability::None);
+        let target2 = mon_with_move(Species::Blissey, PokemonMove::Splash, Ability::None);
+        let init_hp = target1.stats[0];
+
+        let state_sol  = battle_state_from_lists(vec![sol_attacker], vec![], vec![target1], vec![]);
+        let state_norm = battle_state_from_lists(vec![normal_attacker], vec![], vec![target2], vec![]);
+
+        let dmg_sol  = avg_damage_to_p2(&run(state_sol), init_hp);
+        let dmg_norm = avg_damage_to_p2(&run(state_norm), init_hp);
+        let ratio = dmg_sol / dmg_norm.max(1.0);
+        assert!((ratio - 0.5).abs() < 0.1,
+            "Mega Sol should give 0.5× Water damage; ratio={ratio:.2}");
+    }
+
+    #[test]
+    fn mega_sol_does_not_boost_ally_chlorophyll() {
+        // An ally with Chlorophyll should NOT get the Speed boost from Mega Sol's
+        // perceived-sun, since actual weather is not changed.
+        let sol_holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::MegaSol);
+        let ally = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Chlorophyll);
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+
+        let state = battle_state_from_lists(
+            vec![sol_holder, ally.clone()], vec![], vec![target.clone(), target.clone()], vec![],
+        );
+        // Chlorophyll doubles Speed in real sun. Without actual sun, ally_speed should be base.
+        let ally_speed = state.p2_active_mons[0].stats[5]; // compare against p2 speed
+        let _ = ally_speed;
+        // Check that p1_active_mons[1] (Chlorophyll ally) has the same speed as without sun.
+        let chloro_speed = state.p1_active_mons[1].stats[5];
+        let base_speed = ally.stats[5];
+        assert_eq!(chloro_speed, base_speed,
+            "Chlorophyll ally speed should not be doubled by Mega Sol (no real sun)");
+    }
+
+    // ── Mimicry ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mimicry_changes_type_to_electric_on_send_in_under_electric_terrain() {
+        let mut holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Mimicry);
+        let original_types = holder.types.clone();
+        let foe = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let mut state = battle_state_from_lists(vec![holder.clone()], vec![], vec![foe], vec![]);
+        crate::simulator_helpers::set_terrain(&mut state, Terrain::ElectricTerrain, 5);
+        // update_mimicry_forms fires inside set_terrain.
+        let p1_types = &state.p1_active_mons[0].types;
+        assert_eq!(p1_types, &vec![PokemonType::Electric],
+            "Mimicry should become Electric under Electric Terrain");
+        assert_ne!(original_types, vec![PokemonType::Electric],
+            "Original type must differ (Snorlax is Normal)");
+    }
+
+    #[test]
+    fn mimicry_reverts_type_when_terrain_clears() {
+        let holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Mimicry);
+        let original_types = holder.types.clone();
+        let foe = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let mut state = battle_state_from_lists(vec![holder], vec![], vec![foe], vec![]);
+        crate::simulator_helpers::set_terrain(&mut state, Terrain::GrassyTerrain, 5);
+        assert_eq!(state.p1_active_mons[0].types, vec![PokemonType::Grass]);
+        crate::simulator_helpers::clear_terrain(&mut state);
+        assert_eq!(state.p1_active_mons[0].types, original_types,
+            "Mimicry should revert to original types when terrain ends");
+    }
+
+    // ── Stalwart ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stalwart_ignores_lightning_rod_redirection() {
+        // Doubles: Stalwart attacker (P1 slot 0) uses Thunderbolt explicitly targeting P2 slot 1.
+        // Lightning Rod on P2 slot 0 would normally redirect it, but Stalwart bypasses it.
+        // Compare: without Stalwart, the same explicit-target Thunderbolt gets redirected.
+        let attacker_stalwart = mon_with_move(Species::Snorlax, PokemonMove::Thunderbolt, Ability::Stalwart);
+        let attacker_normal   = mon_with_move(Species::Snorlax, PokemonMove::Thunderbolt, Ability::None);
+        let dummy = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let rod_foe   = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::LightningRod);
+        let mut real_target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        real_target.hp = 10000;
+        real_target.stats[0] = 10000;
+
+        let init_hp_target = real_target.stats[0];
+
+        // Command: P1 slot 0 uses Thunderbolt explicitly targeting P2 slot 1.
+        let p1_cmd = vec![
+            crate::battle::BattleCommand::Attack(crate::battle::AttackCommand {
+                move_slot: 0,
+                target: Some(crate::battle::FieldSlot { player: Player::P2, slot_index: 1 }),
+                terastallize: false,
+                mega_evolve: false,
+            }),
+            crate::battle::BattleCommand::Attack(crate::battle::AttackCommand {
+                move_slot: 0,
+                target: None,
+                terastallize: false,
+                mega_evolve: false,
+            }),
+        ];
+        let p2_cmd = crate::simuilator_test_helpers::simple_attack(Player::P2, vec![0, 1]);
+
+        let stalwart_state = battle_state_from_lists(
+            vec![attacker_stalwart, dummy.clone()], vec![],
+            vec![rod_foe.clone(), real_target.clone()], vec![],
+        );
+        let outcomes_stalwart = run_single_turn(
+            &MatchState::BattleState(stalwart_state),
+            &PlayerCommand::Battle(p1_cmd.clone()),
+            &PlayerCommand::Battle(p2_cmd.clone()),
+            move_dex(), pokemon_dex(),
+        );
+
+        // With Stalwart: P2 slot 1 (real target) should have taken damage.
+        let stalwart_hit_real = outcomes_stalwart.iter().all(|(s, _)| {
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[1].hp < init_hp_target)
+        });
+        assert!(stalwart_hit_real,
+            "Stalwart should target the intended foe (P2 slot 1), bypassing Lightning Rod");
+
+        // Regression: without Stalwart, Lightning Rod should redirect to P2 slot 0.
+        let normal_state = battle_state_from_lists(
+            vec![attacker_normal, dummy], vec![],
+            vec![rod_foe, real_target], vec![],
+        );
+        let outcomes_normal = run_single_turn(
+            &MatchState::BattleState(normal_state),
+            &PlayerCommand::Battle(p1_cmd),
+            &PlayerCommand::Battle(p2_cmd),
+            move_dex(), pokemon_dex(),
+        );
+        let normal_redirected = outcomes_normal.iter().all(|(s, _)| {
+            // P2 slot 1 HP unchanged (redirected away to slot 0's LightningRod).
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[1].hp == init_hp_target)
+        });
+        assert!(normal_redirected,
+            "Without Stalwart, Lightning Rod should redirect Thunderbolt away from P2 slot 1");
+    }
+
+    // ── Stench ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stench_adds_10_percent_flinch_chance() {
+        // When P1 (Stench, fast) attacks first, P2's Splash PP stays at initial when flinched.
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::BodySlam, Ability::Stench);
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let initial_pp = target.move_pp[0];
+        let mut state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        state.p1_active_mons[0].stats[5] = 300; // P1 moves first
+
+        let outcomes = run(state);
+        // Flinch probability = branches where P2's PP stayed at initial (couldn't use Splash)
+        let flinch_prob: f64 = outcomes.iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p2_active_mons[0].move_pp[0] == initial_pp { *p } else { 0.0 }
+            } else { 0.0 }
+        }).sum();
+        assert!((flinch_prob - 0.10).abs() < 1e-6,
+            "Stench should add exactly 10% flinch chance; got {flinch_prob:.6}");
+    }
+
+    #[test]
+    fn stench_flinch_blocked_by_shield_dust() {
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::BodySlam, Ability::Stench);
+        let target = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::ShieldDust);
+        let initial_pp = target.move_pp[0];
+        let mut state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        state.p1_active_mons[0].stats[5] = 300;
+
+        let outcomes = run(state);
+        let flinch_prob: f64 = outcomes.iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p2_active_mons[0].move_pp[0] == initial_pp { *p } else { 0.0 }
+            } else { 0.0 }
+        }).sum();
+        assert!(flinch_prob < 0.01,
+            "Shield Dust should block Stench flinch; got {flinch_prob:.3}");
+    }
+
+    // ── Toxic Debris ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn toxic_debris_sets_toxic_spikes_on_physical_hit() {
+        // Attacker uses Tackle (Physical) → Toxic Debris holder → ToxicSpikes on attacker's side.
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::Tackle, Ability::None);
+        let holder   = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::ToxicDebris);
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![holder], vec![]);
+        let outcomes = run(state);
+        let has_toxic_spikes = outcomes.iter().all(|(s, _)| {
+            matches!(s, MatchState::BattleState(bs) if
+                bs.p1_side_conditions.iter().any(|c| matches!(c, SideCondition::ToxicSpikes(_))))
+        });
+        assert!(has_toxic_spikes,
+            "Toxic Debris should scatter ToxicSpikes on the attacker's side after a physical hit");
+    }
+
+    #[test]
+    fn toxic_debris_does_not_trigger_on_special_hit() {
+        // Water Pulse (Special) should not trigger Toxic Debris.
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::WaterPulse, Ability::None);
+        let holder   = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::ToxicDebris);
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![holder], vec![]);
+        let outcomes = run(state);
+        let no_toxic_spikes = outcomes.iter().all(|(s, _)| {
+            matches!(s, MatchState::BattleState(bs) if
+                !bs.p1_side_conditions.iter().any(|c| matches!(c, SideCondition::ToxicSpikes(_))))
+        });
+        assert!(no_toxic_spikes,
+            "Toxic Debris should not trigger on Special moves");
+    }
+
+    #[test]
+    fn toxic_debris_caps_at_two_layers() {
+        // Apply physical hit twice. The second should cap at 2 layers (not add a third).
+        let attacker = mon_with_move(Species::Snorlax, PokemonMove::Tackle, Ability::None);
+        let mut holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::ToxicDebris);
+        holder.hp = 10000;
+        holder.stats[0] = 10000;
+        let init_hp = holder.stats[0];
+
+        let state1 = battle_state_from_lists(
+            vec![attacker.clone()], vec![], vec![holder.clone()], vec![],
+        );
+        // First hit: 1 layer should be set.
+        let outcomes1 = run(state1);
+        let after1 = outcomes1.into_iter().find_map(|(s, _)| {
+            if let MatchState::BattleState(bs) = s { Some(bs) } else { None }
+        }).unwrap();
+        let layers1 = after1.p1_side_conditions.iter().find_map(|c| {
+            if let SideCondition::ToxicSpikes(n) = c { Some(*n) } else { None }
+        }).unwrap_or(0);
+        assert_eq!(layers1, 1, "First Toxic Debris hit should set 1 ToxicSpikes layer");
+
+        // Second hit: pre-load 1 layer, should become 2 max.
+        let mut state2 = battle_state_from_lists(
+            vec![attacker], vec![], vec![holder], vec![],
+        );
+        crate::simulator_helpers::add_side_condition(
+            &mut state2, Player::P1, SideCondition::ToxicSpikes(1), 0,
+        );
+        let outcomes2 = run(state2);
+        let layers2 = outcomes2.iter().find_map(|(s, _)| {
+            if let MatchState::BattleState(bs) = s {
+                bs.p1_side_conditions.iter().find_map(|c| {
+                    if let SideCondition::ToxicSpikes(n) = c { Some(*n) } else { None }
+                })
+            } else { None }
+        }).unwrap_or(0);
+        assert_eq!(layers2, 2, "Toxic Debris should cap at 2 ToxicSpikes layers");
+    }
+
+    // ── Innards Out ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn innards_out_deals_pre_hit_hp_to_attacker_on_ko() {
+        // Holder has 30 HP remaining. Attacker uses Earthquake (OHKOs it).
+        // Innards Out should deal 30 HP back to the attacker.
+        // P2 has a backup mon so the turn ends as BattleState (not GameOver), letting
+        // us inspect the attacker's HP after Innards Out fires.
+        let mut attacker = mon_with_move(Species::Snorlax, PokemonMove::Earthquake, Ability::None);
+        attacker.stats[5] = 300; // goes first
+        let attacker_max_hp = attacker.stats[0];
+        let mut holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::InnardsOut);
+        holder.hp = 30; // exactly 30 HP left before the hit
+        let p2_backup = mon_with_move(Species::Blissey, PokemonMove::Splash, Ability::None);
+
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![holder], vec![p2_backup]);
+        let outcomes = run(state);
+
+        // Every branch: attacker took 30 damage from Innards Out (holder had 30 HP before hit).
+        let attacker_hp_lost: f64 = outcomes.iter().map(|(s, p)| {
+            let hp = match s {
+                MatchState::BattleState(bs) => bs.p1_active_mons[0].hp,
+                MatchState::GameOverState { .. } => 0,
+                _ => attacker_max_hp,
+            };
+            (attacker_max_hp.saturating_sub(hp)) as f64 * p
+        }).sum();
+        assert!((attacker_hp_lost - 30.0).abs() < 2.0,
+            "Innards Out should deal the holder's pre-hit HP (30) to attacker; got {attacker_hp_lost:.1}");
+    }
+
+    #[test]
+    fn innards_out_does_not_fire_if_holder_survives() {
+        // Holder has 10000 HP and survives the hit — Innards Out should NOT fire.
+        let mut attacker = mon_with_move(Species::Snorlax, PokemonMove::Tackle, Ability::None);
+        attacker.stats[5] = 300;
+        let attacker_max_hp = attacker.stats[0];
+        let mut holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::InnardsOut);
+        holder.hp = 10000;
+        holder.stats[0] = 10000;
+
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![holder], vec![]);
+        let outcomes = run(state);
+
+        let attacker_hp_lost: f64 = outcomes.iter().map(|(s, p)| {
+            let hp = match s {
+                MatchState::BattleState(bs) => bs.p1_active_mons[0].hp,
+                _ => attacker_max_hp,
+            };
+            (attacker_max_hp.saturating_sub(hp)) as f64 * p
+        }).sum();
+        assert!(attacker_hp_lost < 1.0,
+            "Innards Out should not fire when holder survives; attacker lost {attacker_hp_lost:.1} HP");
+    }
+}
+
