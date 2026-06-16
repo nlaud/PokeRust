@@ -561,8 +561,14 @@ fn apply_single_hit_branch(
     // - Focus Sash KO: one entry  (hp-1,   true,  1.0)
     // - Focus Band KO: two entries (damage, false, 0.9) and (hp-1, false, 0.1)
     // Multi-hit calls us once per hit, so Band's 10% / Sturdy/Sash full-HP check is re-evaluated.
-    let target_ability_suppressed = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
-        .map_or(false, |t| simulator_helpers::pokemon_ability_is_suppressed(&branch_state, t));
+    let target_ability_suppressed = {
+        let attacker_breaks = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot)
+            .map_or(false, |a| simulator_helpers::attacker_breaks_mold(&branch_state, a));
+        simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
+            .map_or(false, |t|
+                simulator_helpers::pokemon_ability_is_suppressed(&branch_state, t)
+                    || (attacker_breaks && simulator_helpers::ability_is_ignorable(&t.ability)))
+    };
     let endure_outcomes = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
         .map_or_else(
             || vec![(damage, false, 1.0)],
@@ -1132,6 +1138,33 @@ fn possible_damage_outcomes_for_move(
     if move_name == PokemonMove::Splash {
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
         return vec![(MatchState::BattleState(next_state), 1.0)];
+    }
+
+    // Protean / Libero: change the attacker's type to the move's effective type before use.
+    // Fires once per switch-in (tracked by ProteanActivated volatile), not when Terastallized,
+    // not for Struggle, and not if already the same single type as the move.
+    if move_name != PokemonMove::Struggle {
+        let protean_result = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .and_then(|mon| {
+                if mon.is_tera { return None; }
+                if simulator_helpers::pokemon_ability_is_suppressed(&next_state, mon) { return None; }
+                if !matches!(mon.ability, Ability::Protean | Ability::Libero) { return None; }
+                if simulator_helpers::has_status_volatile(mon, &VolatileStatus::ProteanActivated) { return None; }
+                let move_type = simulator_helpers::effective_move_type(&next_state, mon, move_data);
+                // Skip if already a single type matching the move type
+                if mon.types.len() == 1 && mon.types[0] == move_type { return None; }
+                Some(move_type)
+            });
+        if let Some(new_type) = protean_result {
+            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+                mon.types = vec![new_type];
+                mon.volatiles.retain(|v| !matches!(v,
+                    crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ForestsCurse, _)
+                    | crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::TrickorTreat, _)
+                ));
+                mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ProteanActivated, 0));
+            }
+        }
     }
 
     if attacker.volatiles.iter().any(|volatile| matches!(volatile, crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _))) {
@@ -1724,8 +1757,23 @@ fn possible_damage_outcomes_for_move(
     }
 
     // Attract move: apply infatuation to the target.
+    // Magic Bounce: Attract targeting an opponent can be bounced back.
     if move_name == PokemonMove::Attract {
         let target_slot = target_slots[0];
+        if target_slot.player != action.user_slot.player
+            && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
+        {
+            let mb = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map_or(false, |t| !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t) && t.ability == Ability::MagicBounce);
+            if mb {
+                let applied = simulator_helpers::try_apply_attract(&mut next_state, target_slot, action.user_slot);
+                if applied {
+                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                    return vec![(MatchState::BattleState(next_state), 1.0)];
+                }
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+        }
         let applied = simulator_helpers::try_apply_attract(&mut next_state, action.user_slot, target_slot);
         if applied {
             decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
@@ -1743,6 +1791,21 @@ fn possible_damage_outcomes_for_move(
     // Disable move: disable the target's last-used move for 4 turns.
     if move_name == PokemonMove::Disable {
         let target_slot = target_slots[0];
+        // Magic Bounce: Disable targeting an opponent is reflected.
+        if target_slot.player != action.user_slot.player
+            && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
+        {
+            let mb = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map_or(false, |t| !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t) && t.ability == Ability::MagicBounce);
+            if mb {
+                let applied = simulator_helpers::try_apply_disable(&mut next_state, target_slot, action.user_slot);
+                if applied {
+                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                    return vec![(MatchState::BattleState(next_state), 1.0)];
+                }
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+        }
         let applied = simulator_helpers::try_apply_disable(&mut next_state, action.user_slot, target_slot);
         if applied {
             decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
@@ -2343,6 +2406,22 @@ fn possible_damage_outcomes_for_move(
     // the encored move so it is forced THIS turn.
     if move_name == PokemonMove::Encore {
         let target_slot = target_slots[0];
+        // Magic Bounce: Encore targeting an opponent is reflected back.
+        if target_slot.player != action.user_slot.player
+            && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
+        {
+            let mb = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map_or(false, |t| !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t) && t.ability == Ability::MagicBounce);
+            if mb {
+                match simulator_helpers::try_apply_encore(&mut next_state, target_slot, action.user_slot) {
+                    Some(_) => {
+                        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                        return vec![(MatchState::BattleState(next_state), 1.0)];
+                    }
+                    None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
+                }
+            }
+        }
         match simulator_helpers::try_apply_encore(&mut next_state, action.user_slot, target_slot) {
             Some(encored_move) => {
                 // Mid-turn replacement: rewrite the target's still-queued MoveAction.
@@ -3579,6 +3658,26 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
+    // Parental Bond: attacker hits twice; second hit at 25% BP. Excluded from: spread moves,
+    // moves that already hit multiple times (handled above by is_multihit_move), fixed-damage
+    // moves, self-destruct / explosion, charge moves, Fling, Uproar/Rollout/Ice Ball.
+    let parental_bond_eligible = {
+        let attacker_has_pb = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
+            && attacker.ability == Ability::ParentalBond;
+        attacker_has_pb
+            && target_slots.len() == 1  // spread moves excluded
+            && matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special)
+            && matches!(move_data.damage_override, crate::dex_data::DamageOverride::None)  // exclude fixed-damage moves
+            && !move_data.ohko
+            && !matches!(move_name,
+                PokemonMove::SelfDestruct | PokemonMove::Explosion | PokemonMove::MindBlown
+                | PokemonMove::MistyExplosion | PokemonMove::FinalGambit | PokemonMove::Endeavor
+                | PokemonMove::Fling | PokemonMove::Uproar | PokemonMove::Rollout
+                | PokemonMove::IceBall | PokemonMove::BeatUp
+            )
+            && !simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Charge)
+    };
+
     // Calculate hit/miss and damage outcomes for each target independently.
     // For spread moves this creates independent miss branches per target.
     let mut per_target_outcomes: Vec<(FieldSlot, Vec<(u16, bool, bool, f64)>)> = Vec::new();
@@ -3645,9 +3744,15 @@ fn possible_damage_outcomes_for_move(
             && !target_is_semi_invulnerable
             && !matches!(move_name, PokemonMove::ThousandArrows | PokemonMove::ThousandWaves)
         {
-            outcomes_for_target.push((0, false, false, 1.0));
-            per_target_outcomes.push((*target_slot, outcomes_for_target));
-            continue;
+            // Mold Breaker bypasses Levitate specifically (but not Flying-type, Air Balloon, etc.)
+            let mold_breaks_levitate = simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
+                && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+                && target.ability == Ability::Levitate;
+            if !mold_breaks_levitate {
+                outcomes_for_target.push((0, false, false, 1.0));
+                per_target_outcomes.push((*target_slot, outcomes_for_target));
+                continue;
+            }
         }
 
         // Bulletproof: immune to all ball and bomb moves (MoveFlag::Bullet).
@@ -3724,6 +3829,37 @@ fn possible_damage_outcomes_for_move(
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
+        }
+
+        // Magic Bounce: reflect opponent-targeted status moves back at the attacker.
+        // Fires before accuracy / invulnerability checks. Mold Breaker bypasses it.
+        if matches!(move_data.category, MoveCategory::Status)
+            && target_slot.player != action.user_slot.player
+            && !simulator_helpers::is_magic_bounce_exempt(&move_name)
+            && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
+        {
+            let target_has_mb = simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot)
+                .map_or(false, |t| {
+                    !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t)
+                    && t.ability == Ability::MagicBounce
+                });
+            if target_has_mb {
+                // Bounce: apply the move's effects to the ATTACKER (user_slot) as if the
+                // target (defender) used them. Swap attacker ↔ target slots so that
+                // side-condition hazards land on the original attacker's side.
+                let bounce_branches = simulator_helpers::apply_secondary_effects(
+                    &next_state, *target_slot, action.user_slot, move_data,
+                );
+                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                let mut final_outcomes: Vec<(MatchState, f64)> = bounce_branches
+                    .into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect();
+                let has_confusion = confusion_self_hit_outcomes.is_some();
+                if let Some(confusion_outcomes) = confusion_self_hit_outcomes {
+                    for (s, p) in confusion_outcomes { final_outcomes.push((s, p * 0.5)); }
+                    for (_, p) in &mut final_outcomes { *p *= if has_confusion { 0.5 } else { 1.0 }; }
+                }
+                return simulator_helpers::coalesce_branches(final_outcomes);
+            }
         }
 
         if !should_continue {
@@ -3898,6 +4034,45 @@ fn possible_damage_outcomes_for_move(
                             simulator_helpers::apply_hp_damage_to_attacker(&mut bs, action.user_slot, 1, 2);
                             (bs, p)
                         }).collect()
+                    } else {
+                        hit_branches
+                    };
+                    // Parental Bond: second hit at 25% BP. Rolls independently for damage, crit,
+                    // and secondary effects. Short-circuits if the target fainted on the first hit.
+                    let hit_branches: Vec<(BattleState, f64)> = if parental_bond_eligible {
+                        let second_bp = Some((move_data.base_power / 4).max(1));
+                        let mut pb_branches = Vec::new();
+                        for (first_bs, first_prob) in hit_branches {
+                            let tgt_fainted = simulator_helpers::get_pokemon_at_slot(&first_bs, *target_slot)
+                                .map_or(true, |t| t.fainted);
+                            if tgt_fainted {
+                                pb_branches.push((first_bs, first_prob));
+                                continue;
+                            }
+                            let atk2 = simulator_helpers::get_pokemon_at_slot(&first_bs, action.user_slot).cloned();
+                            let tgt2 = simulator_helpers::get_pokemon_at_slot(&first_bs, *target_slot).cloned();
+                            if let (Some(atk2), Some(tgt2)) = (atk2, tgt2) {
+                                let (inv2, _) = check_invulnerability_status(&atk2, &tgt2, &move_name);
+                            let second_outcomes = simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+                                    &first_bs, &atk2, &tgt2, action.user_slot, *target_slot,
+                                    move_data, config, targets_mult, inv2,
+                                    second_bp, None,
+                                );
+                                for (s_dmg, s_crit, s_prob) in second_outcomes {
+                                    let second_branches = apply_single_hit_branch(
+                                        first_bs.clone(), *target_slot, &move_name, move_data,
+                                        s_dmg, action.user_slot, first_prob * s_prob, s_crit,
+                                    );
+                                    let second_branches = if s_dmg > 0 {
+                                        simulator_helpers::apply_kings_rock_flinch(second_branches, action.user_slot, *target_slot, move_data, 1)
+                                    } else { second_branches };
+                                    pb_branches.extend(second_branches);
+                                }
+                            } else {
+                                pb_branches.push((first_bs, first_prob));
+                            }
+                        }
+                        pb_branches
                     } else {
                         hit_branches
                     };

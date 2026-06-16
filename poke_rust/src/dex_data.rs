@@ -250,6 +250,9 @@ pub enum VolatileStatus {
     /// Marks that the Ghost type currently on this Pokémon was *added* by Trick-or-Treat.
     /// Mirror of `ForestsCurse`. Cleared on switch-out.
     TrickorTreat,
+    /// Set after Protean / Libero fires once per switch-in. Stored as TurnStatus(_, 0) so it
+    /// persists indefinitely on the field and is wiped automatically on switch-out.
+    ProteanActivated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
