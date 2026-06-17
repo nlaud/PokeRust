@@ -9,13 +9,9 @@ hook and should be researchable, plannable, and implementable in a single focuse
 - Anticipation — signal if opponents have SE or OHKO moves (message-only; no battle-state change in a full-information sim)
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
-
-## Abilities
-
-(All previously listed complex abilities have been implemented.)
-
 ## Refactors
-- use thaws_target move bool and defrost move flag instead of fixed lists.
-- Use move flags such as IgnoreImmunity, IgnoreEvasion, Ignore... Flags (Refactor these to be move flags). Use all other move flags as well.
-- Recheck all test, suggest new tests, etc.
+- Finish off all the TODO entries within the code
+- Use thaws_target move bool and defrost move flag instead of fixed lists.
+- Use move flags such as IgnoreImmunity, IgnoreEvasion, Ignore... Flags (Refactor these to be move flags) instead of dedicated helper functions. Use all other move flags as well.
 - Refactor Outrage-type moves to act more like sleep, having a 50% chance to end after 2nd attack, then 100% on the last one.
+- Recheck all tests, suggest new tests, verify mechanics.

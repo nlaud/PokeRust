@@ -472,11 +472,12 @@ fn apply_single_hit_branch(
         if disguise_blocks {
             damage = 0;
             let env = simulator_helpers::berry_env(&branch_state, target_slot);
+            let as_ = simulator_helpers::abilities_are_suppressed(&branch_state);
             let mut busted_fainted = false;
             if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, target_slot) {
                 mon.species = Species::MimikyuBusted;
                 let chip = (mon.stats[0] / 8).max(1);
-                simulator_helpers::take_damage(mon, chip, env);
+                simulator_helpers::take_damage(mon, chip, env, as_);
                 if mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(mon);
                     busted_fainted = true;
@@ -596,12 +597,13 @@ fn apply_single_hit_branch(
         let mut seed_sower_triggered = false;
         let mut target_fainted = false;
         let target_env = simulator_helpers::berry_env(&bs, target_slot);
+        let as_ = simulator_helpers::abilities_are_suppressed(&bs);
 
         if let Some(target_mon) = match target_slot.player {
             Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
             Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
         } {
-            simulator_helpers::take_damage(target_mon, eff_damage, target_env);
+            simulator_helpers::take_damage(target_mon, eff_damage, target_env, as_);
 
             // Per-turn damage tracking: Assurance reads `damaged_this_turn`; Avalanche
             // checks whether this specific attacker slot damaged the holder this turn.
@@ -1622,8 +1624,9 @@ fn possible_damage_outcomes_for_move(
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
             let attacker_env = simulator_helpers::berry_env(&next_state, attacker_slot);
+            let as_ = simulator_helpers::abilities_are_suppressed(&next_state);
             if let Some(m) = mon_at_slot_mut(&mut next_state, attacker_slot) {
-                simulator_helpers::take_damage(m, cost, attacker_env);
+                simulator_helpers::take_damage(m, cost, attacker_env, as_);
                 m.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(
                     VolatileStatus::Substitute(cost), 0,
                 ));
@@ -1861,9 +1864,10 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         // Magic Powder is a powder move: Grass-types, Overcoat, and Safety Goggles are immune.
+        // Mold Breaker bypasses Overcoat only.
         if move_name == PokemonMove::MagicPowder
             && simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Powder)
-            && simulator_helpers::is_immune_to_powder(&next_state, &target)
+            && simulator_helpers::is_immune_to_powder(&next_state, &target, Some(&attacker))
         {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
@@ -2703,7 +2707,7 @@ fn possible_damage_outcomes_for_move(
         if let Some(user) = mon_at_slot_mut(&mut next_state, action.user_slot) {
             let amount = simulator_helpers::apply_big_root(user, target_atk, items_suppressed);
             if liquid_ooze {
-                simulator_helpers::take_damage(user, amount, user_env);
+                simulator_helpers::take_damage(user, amount, user_env, abilities_suppressed);
             } else if !simulator_helpers::heal_is_blocked(user) {
                 simulator_helpers::gain_hp(user, amount, user_env);
             }
@@ -2825,8 +2829,9 @@ fn possible_damage_outcomes_for_move(
         }
         let cost = max_hp / 2;
         let env = simulator_helpers::berry_env(&next_state, action.user_slot);
+        let as_ = simulator_helpers::abilities_are_suppressed(&next_state);
         if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            simulator_helpers::take_damage(mon, cost, env);
+            simulator_helpers::take_damage(mon, cost, env, as_);
             if mon.boosts[0] < 6 { mon.stats_raised_this_turn = true; }
             mon.boosts[0] = 6;
         }
@@ -2846,8 +2851,9 @@ fn possible_damage_outcomes_for_move(
         let cost = max_hp / 3;
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
         let env = simulator_helpers::berry_env(&next_state, action.user_slot);
+        let as_ = simulator_helpers::abilities_are_suppressed(&next_state);
         if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            simulator_helpers::take_damage(mon, cost, env);
+            simulator_helpers::take_damage(mon, cost, env, as_);
             simulator_helpers::apply_stat_boost_external(mon, &[1, 1, 1, 1, 1, 0, 0], items_suppressed);
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
@@ -3651,7 +3657,7 @@ fn possible_damage_outcomes_for_move(
     // Damp: any active Pokémon on either side with unsuppressed Damp causes explosive
     // moves to fail entirely. The user does NOT faint or take damage.
     // Blast Burn / Powder / Pollen Puff / Shell Trap are NOT explosive and are unaffected.
-    // Mold Breaker: TODO
+    // Mold Breaker bypasses Damp (Damp is an ignorable ability).
     let is_explosive_move = matches!(
         move_name,
         PokemonMove::SelfDestruct
@@ -3660,13 +3666,19 @@ fn possible_damage_outcomes_for_move(
             | PokemonMove::MistyExplosion
     );
     if is_explosive_move {
+        // Mold Breaker bypasses Damp only for opponent mons (Damp is ignorable).
+        // Ally Damp (same side as attacker) still blocks explosion even with Mold Breaker.
+        let attacker_breaks = simulator_helpers::attacker_breaks_mold(&next_state, &attacker);
+        let attacker_player = action.user_slot.player;
         let damp_on_field = next_state
-            .p1_active_mons
-            .iter()
-            .chain(next_state.p2_active_mons.iter())
-            .filter(|mon| !mon.fainted)
-            .any(|mon| {
-                !simulator_helpers::pokemon_ability_is_suppressed(&next_state, mon)
+            .p1_active_mons.iter().map(|m| (m, Player::P1))
+            .chain(next_state.p2_active_mons.iter().map(|m| (m, Player::P2)))
+            .filter(|(m, _)| !m.fainted)
+            .any(|(mon, side)| {
+                // Mold Breaker skips opponent Damp (same player ↔ ally, always checked).
+                let skip = attacker_breaks && side != attacker_player;
+                !skip
+                    && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, mon)
                     && mon.ability == Ability::Damp
             });
         if damp_on_field {
@@ -3718,11 +3730,12 @@ fn possible_damage_outcomes_for_move(
 
         // Queenly Majesty / Armor Tail / Dazzling: block any move with increased effective
         // priority (after Prankster / Gale Wings boosts) from an opposing mon.
-        // Bypassed by Mold Breaker (TODO: implement when Mold Breaker is added).
-        // Exception: spread/field-targeting moves are not blocked (TODO for doubles).
+        // Bypassed by Mold Breaker / Turboblaze / Teravolt (all three abilities are ignorable).
+        // Exception: spread/field-targeting moves are not blocked (doubles edge case).
         let effective_priority = simulator_helpers::effective_move_priority(&next_state, &attacker, move_data);
         let target_has_priority_block_ability =
-            !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+            !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
+            && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && matches!(target.ability, Ability::QueenlyMajesty | Ability::ArmorTail | Ability::Dazzling);
         if effective_priority > 0
             && action.user_slot.player != target_slot.player
@@ -3773,8 +3786,9 @@ fn possible_damage_outcomes_for_move(
 
         // Bulletproof: immune to all ball and bomb moves (MoveFlag::Bullet).
         // Blocks even an ally's Pollen Puff — no ally exemption.
-        // Mold Breaker: TODO
+        // Mold Breaker / Turboblaze / Teravolt bypass Bulletproof (it is ignorable).
         if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Bullet)
+            && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Bulletproof
         {
@@ -3785,9 +3799,10 @@ fn possible_damage_outcomes_for_move(
 
         // Soundproof: immune to sound-based moves (MoveFlag::Sound).
         // The holder is NOT immune to its own sound moves (Gen VIII+ / Champions behaviour).
-        // Mold Breaker: TODO
+        // Mold Breaker / Turboblaze / Teravolt bypass Soundproof (it is ignorable).
         if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Sound)
             && action.user_slot != *target_slot
+            && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Soundproof
         {
@@ -3797,12 +3812,11 @@ fn possible_damage_outcomes_for_move(
         }
 
         // Overcoat: immune to powder/spore moves (MoveFlag::Powder).
-        // is_immune_to_powder also covers Grass-type and Safety Goggles, which is correct
-        // for a general powder-immunity gate (mirrors the Rage Powder redirect logic).
+        // is_immune_to_powder also covers Grass-type and Safety Goggles; Mold Breaker
+        // only bypasses Overcoat — not the type-based or item-based immunities.
         // Weather-damage immunity is handled separately in apply_weather_residual.
-        // Mold Breaker: TODO
         if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Powder)
-            && simulator_helpers::is_immune_to_powder(&next_state, &target)
+            && simulator_helpers::is_immune_to_powder(&next_state, &target, Some(&attacker))
         {
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
@@ -3836,8 +3850,8 @@ fn possible_damage_outcomes_for_move(
         ) {
             // Punish a blocked CONTACT move (Spiky Shield chip / Baneful Bunker poison / King's
             // Shield −1 Atk). Deterministic, so applied once to the shared next_state per blocked
-            // target. TODO: Long Reach / Protective Pads should make these moves non-contact.
-            if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Contact) {
+            // target. Long Reach removes contact; Protective Pads blocks the punishment.
+            if simulator_helpers::contact_effects_apply(&next_state, &attacker, move_data) {
                 simulator_helpers::apply_protect_contact_punishment(
                     &mut next_state, action.user_slot, *target_slot, kind,
                 );
@@ -4037,7 +4051,7 @@ fn possible_damage_outcomes_for_move(
                     let hit_branches = if move_data.force_switch
                         && (*damage > 0 || matches!(move_data.category, MoveCategory::Status))
                     {
-                        apply_forced_switch(hit_branches, *target_slot, move_data, pokemon_dex)
+                        apply_forced_switch(hit_branches, action.user_slot, *target_slot, move_data, pokemon_dex)
                     } else {
                         hit_branches
                     };
@@ -4831,10 +4845,13 @@ fn action_user_slot(action: &Action) -> FieldSlot {
 }
 
 /// Whether the Pokémon in `slot` can be forced out by a phazing move. Suction Cups / Guard Dog
-/// (unsuppressed) and Ingrain prevent it. TODO: Mold Breaker bypasses Suction Cups / Guard Dog.
-fn can_be_forced_out(bs: &BattleState, slot: FieldSlot) -> bool {
+/// (unsuppressed) and Ingrain prevent it.
+/// `attacker_breaks` should be `attacker_breaks_mold(bs, attacker)` — Mold Breaker bypasses
+/// Suction Cups and Guard Dog (both are ignorable abilities) but NOT Ingrain.
+fn can_be_forced_out(bs: &BattleState, slot: FieldSlot, attacker_breaks: bool) -> bool {
     let Some(mon) = simulator_helpers::get_pokemon_at_slot(bs, slot) else { return false; };
-    if !simulator_helpers::pokemon_ability_is_suppressed(bs, mon)
+    if !attacker_breaks
+        && !simulator_helpers::pokemon_ability_is_suppressed(bs, mon)
         && matches!(mon.ability, Ability::SuctionCups | Ability::GuardDog)
     {
         return false;
@@ -4907,6 +4924,7 @@ fn status_move_changed_state(before: &BattleState, after: &BattleState) -> bool 
 /// pass through unchanged. Deterministic at this point: the move already connected.
 fn apply_forced_switch(
     branches: Vec<(BattleState, f64)>,
+    attacker_slot: FieldSlot,
     target_slot: FieldSlot,
     move_data: &MoveData,
     pokemon_dex: &HashMap<Species, PokemonData>,
@@ -4914,10 +4932,13 @@ fn apply_forced_switch(
     let bypasses_sub = simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::BypassSub);
     let mut out = Vec::new();
     for (bs, prob) in branches {
+        // Check Mold Breaker at resolution time (ability could have changed via Mummy etc.)
+        let attacker_breaks = simulator_helpers::get_pokemon_at_slot(&bs, attacker_slot)
+            .map_or(false, |a| simulator_helpers::attacker_breaks_mold(&bs, a));
         let target_fainted = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
             .map_or(true, |m| m.fainted);
         let switches = !target_fainted
-            && can_be_forced_out(&bs, target_slot)
+            && can_be_forced_out(&bs, target_slot, attacker_breaks)
             && (bypasses_sub || !slot_has_substitute(&bs, target_slot))
             && has_healthy_bench(&bs, target_slot.player);
         if !switches {
@@ -4961,6 +4982,7 @@ fn apply_post_damage_move_effects(
         .unwrap_or(false);
     let attacker_env = simulator_helpers::berry_env(&bs, attacker_slot);
     let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
+    let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&bs);
     let mut forced_winner: Option<Player> = None;
     let mut attacker_fainted = false;
 
@@ -5016,7 +5038,7 @@ fn apply_post_damage_move_effects(
         if move_data.mind_blown_recoil && !ability_blocks_recoil && !attacker_fainted {
             let recoil = ((max_hp as u32 + 1) / 2) as u16; // ceil(max_hp / 2)
             if recoil > 0 {
-                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env);
+                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
@@ -5033,7 +5055,7 @@ fn apply_post_damage_move_effects(
             } else { 0 };
 
             if recoil > 0 {
-                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env);
+                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
