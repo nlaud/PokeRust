@@ -3244,21 +3244,12 @@ pub(crate) fn ability_is_ignorable(ability: &Ability) -> bool {
     )
 }
 
-/// True when the move is in the "non-bounceable" exception list for Magic Bounce / Magic Coat.
-/// Moves that are Status-category, opponent-targeted, BUT not bounced.
-pub fn is_magic_bounce_exempt(move_name: &PokemonMove) -> bool {
-    matches!(move_name,
-        // Moves that affect the user or have non-opponent semantics
-        PokemonMove::Memento | PokemonMove::Curse | PokemonMove::Bestow
-        | PokemonMove::Transform | PokemonMove::Conversion2 | PokemonMove::FollowMe
-        | PokemonMove::RagePowder | PokemonMove::HealPulse | PokemonMove::HelpingHand
-        | PokemonMove::AromaticMist | PokemonMove::HoldHands | PokemonMove::FloralHealing
-        | PokemonMove::PowerTrick | PokemonMove::Imprison | PokemonMove::Telekinesis
-        | PokemonMove::Gravity | PokemonMove::IonDeluge | PokemonMove::MagneticFlux
-        | PokemonMove::PlasmaFists | PokemonMove::CraftyShield
-        // Phazing moves do bounce in Gen 9 (Roar/Whirlwind) but Mean Look/Block do not
-        | PokemonMove::Block | PokemonMove::MeanLook | PokemonMove::SpiderWeb
-    )
+/// True when a move can be reflected by Magic Bounce / Magic Coat.
+/// Reads the `Reflectable` flag from move data — the authoritative source from Showdown.
+/// This correctly bounces trapping moves (Block, Mean Look, Spider Web) and heal-redirect
+/// moves (Heal Pulse, Floral Healing) that the old hardcoded list incorrectly exempted.
+pub fn move_is_reflectable(move_data: &MoveData) -> bool {
+    move_has_flag(move_data, &MoveFlag::Reflectable)
 }
 
 /// True when an ally of `user_slot` on the same side has Plus or Minus (and is alive, unsuppressed).
@@ -6345,7 +6336,8 @@ where
 }
 
 /// If a mon is frozen and takes damage from a fire move or certain moves, unfreeze it.
-pub fn handle_unfreeze_on_damage(mon: &mut PokemonState, move_name: &PokemonMove, move_type: &PokemonType, damage: u16) {
+/// `thaws_target` comes from `MoveData::thaws_target` (the parsed `thawsTarget` field).
+pub fn handle_unfreeze_on_damage(mon: &mut PokemonState, thaws_target: bool, move_type: &PokemonType, damage: u16) {
     if damage == 0 { return; }
     if let Some(Status::Frozen(_)) = mon.status {
         // Fire-type moves thaw
@@ -6354,38 +6346,16 @@ pub fn handle_unfreeze_on_damage(mon: &mut PokemonState, move_name: &PokemonMove
             return;
         }
 
-        // Specific moves thaw on hit
-        if matches!(move_name, PokemonMove::Scald | PokemonMove::SteamEruption | PokemonMove::ScorchingSands | PokemonMove::MatchaGotcha) {
+        // Moves with thawsTarget: true (Scald, Steam Eruption, Scorching Sands, Matcha Gotcha)
+        if thaws_target {
             mon.status = None;
-            return;
         }
     }
 }
 
-/// Returns true if this move thaws the user when used.
-pub fn move_thaws_user_on_use(move_name: &PokemonMove) -> bool {
-    matches!(move_name,
-        PokemonMove::FlameWheel
-        | PokemonMove::SacredFire
-        | PokemonMove::FlareBlitz
-        | PokemonMove::FusionFlare
-        | PokemonMove::Scald
-        | PokemonMove::SteamEruption
-        | PokemonMove::BurnUp
-        | PokemonMove::PyroBall
-        | PokemonMove::ScorchingSands
-        | PokemonMove::MatchaGotcha
-    )
-}
-
-/// Returns true if this move unfreezes the target on damage (specific moves only, not fire-type).
-pub fn move_unfreezes_target(move_name: &PokemonMove) -> bool {
-    matches!(move_name, 
-        PokemonMove::Scald 
-        | PokemonMove::SteamEruption 
-        | PokemonMove::ScorchingSands 
-        | PokemonMove::MatchaGotcha
-    )
+/// Returns true if this move thaws the user when used (has the Defrost flag).
+pub fn move_thaws_user_on_use(move_data: &MoveData) -> bool {
+    move_has_flag(move_data, &MoveFlag::Defrost)
 }
 
 /// Apply a volatile status to a pokemon (prevents duplicate volatiles of the same type).

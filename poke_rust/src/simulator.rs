@@ -651,7 +651,7 @@ fn apply_single_hit_branch(
                 seed_sower_triggered = true;
             }
 
-            simulator_helpers::handle_unfreeze_on_damage(target_mon, move_name, &move_data.pokemon_type, eff_damage);
+            simulator_helpers::handle_unfreeze_on_damage(target_mon, move_data.thaws_target, &move_data.pokemon_type, eff_damage);
 
             if *move_name == PokemonMove::Uproar {
                 if let Some(crate::dex_data::Status::Sleep(_)) = target_mon.status {
@@ -1220,8 +1220,7 @@ fn possible_damage_outcomes_for_move(
     // Handle moves that thaw the user on use: thaw before attempt
     if let Some(Status::Frozen(_)) = attacker.status {
         if simulator_helpers::weather_is_sunlight(&next_state)
-            || simulator_helpers::move_thaws_user_on_use(&action.move_name)
-            || simulator_helpers::move_unfreezes_target(&action.move_name)
+            || simulator_helpers::move_thaws_user_on_use(&move_data)
             || attacker.ability == Ability::MagmaArmor
         {
             // thaw user
@@ -3863,9 +3862,10 @@ fn possible_damage_outcomes_for_move(
 
         // Magic Bounce: reflect opponent-targeted status moves back at the attacker.
         // Fires before accuracy / invulnerability checks. Mold Breaker bypasses it.
+        // Only moves with the Reflectable flag are bounced (sourced from move data).
         if matches!(move_data.category, MoveCategory::Status)
             && target_slot.player != action.user_slot.player
-            && !simulator_helpers::is_magic_bounce_exempt(&move_name)
+            && simulator_helpers::move_is_reflectable(&move_data)
             && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
         {
             let target_has_mb = simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot)
@@ -3926,7 +3926,7 @@ fn possible_damage_outcomes_for_move(
                 || (simulator_helpers::weather_is_harsh_sunlight(&next_state) && matches!(move_data.pokemon_type, PokemonType::Water)));
 
         if weather_blocks_move {
-            if matches!(move_data.name, PokemonMove::Scald | PokemonMove::SteamEruption) {
+            if move_data.thaws_target {
                 if let Some(target_mon) = match target_slot.player {
                     Player::P1 => next_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
                     Player::P2 => next_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
@@ -4112,10 +4112,10 @@ fn possible_damage_outcomes_for_move(
                         new_all_outcomes.push((MatchState::BattleState(bs), prob));
                     }
                 } else {
-                    // Miss: only thaw a frozen target if Scald/SteamEruption is used in harsh sun
+                    // Miss: only thaw a frozen target if a thaws_target move is used in harsh sun
                     let mut branch_state = branch_state;
                     if simulator_helpers::weather_is_harsh_sunlight(&branch_state)
-                        && matches!(move_data.name, PokemonMove::Scald | PokemonMove::SteamEruption)
+                        && move_data.thaws_target
                     {
                         if let Some(target_mon) = mon_at_slot_mut(&mut branch_state, *target_slot) {
                             if matches!(target_mon.status, Some(Status::Frozen(_))) {
