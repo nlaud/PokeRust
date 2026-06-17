@@ -9,7 +9,7 @@ use crate::battle::{
 use crate::pokemon::{
     PokemonState, parse_team_sheet
 };
-use crate::dex_data::{MoveData, MoveTarget, PokemonData};
+use crate::dex_data::{MoveData, MoveFlag, MoveTarget, PokemonData};
 use crate::dex_data::{MoveCategory, SelfDestructType, SelfSwitchType, SideCondition, Status, VolatileStatus};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
@@ -76,7 +76,7 @@ fn check_invulnerability_status(
     }
 }
 
-fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_name: &PokemonMove) {
+fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_name: &PokemonMove, move_data_opt: Option<&MoveData>) {
     let move_index = match user_slot.player {
         Player::P1 => next_state
             .p1_active_mons
@@ -93,17 +93,42 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             .map(|m| !simulator_helpers::item_is_active(next_state, m))
             .unwrap_or(true);
         let leppa_env = simulator_helpers::berry_env(next_state, user_slot);
-        // Pressure: drain 1 extra PP when any unsuppressed active opponent holds Pressure.
+        // Pressure: drain 1 extra PP when an unsuppressed active opponent holds Pressure,
+        // but only when the move targets opponents OR has the MustPressure flag (Imprison,
+        // Snatch, Spikes, Stealth Rock, Toxic Spikes, Tera Blast). Self-targeting and
+        // ally-targeting moves do not consume extra PP.
         let pressure_extra = {
-            let opp_mons = match user_slot.player {
-                Player::P1 => &next_state.p2_active_mons,
-                Player::P2 => &next_state.p1_active_mons,
+            let any_pressure_opp = {
+                let opp_mons = match user_slot.player {
+                    Player::P1 => &next_state.p2_active_mons,
+                    Player::P2 => &next_state.p1_active_mons,
+                };
+                opp_mons.iter().any(|m| {
+                    !m.fainted
+                        && m.ability == Ability::Pressure
+                        && !simulator_helpers::pokemon_ability_is_suppressed(next_state, m)
+                })
             };
-            opp_mons.iter().any(|m| {
-                !m.fainted
-                    && m.ability == Ability::Pressure
-                    && !simulator_helpers::pokemon_ability_is_suppressed(next_state, m)
-            })
+            if !any_pressure_opp {
+                false
+            } else if let Some(md) = move_data_opt {
+                // Correct: only trigger if the move targets foes or has MustPressure.
+                let self_or_ally_only = matches!(
+                    md.target,
+                    MoveTarget::SelfTarget
+                    | MoveTarget::AdjacentAlly
+                    | MoveTarget::AdjacentAllyOrSelf
+                    | MoveTarget::Allies
+                    | MoveTarget::AllySide
+                    | MoveTarget::AllyTeam
+                );
+                !self_or_ally_only
+                    || simulator_helpers::move_has_flag(md, &MoveFlag::MustPressure)
+            } else {
+                // move_data unavailable (e.g. confusion self-hit, no-effect early exit):
+                // fall back to always-trigger to preserve prior behavior.
+                true
+            }
         };
         if let Some(mon) = match user_slot.player {
             Player::P1 => next_state.p1_active_mons.get_mut(user_slot.slot_index as usize),
@@ -141,22 +166,6 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             if *move_name != PokemonMove::DestinyBond {
                 simulator_helpers::remove_status_volatile(mon, &VolatileStatus::DestinyBond);
             }
-
-            // Gigaton Hammer / Blood Moon etc.: apply the "can't use repeatedly" volatile.
-            // Applied on any use attempt (hit, miss, or blocked) per Bulbapedia.
-            if matches!(move_name, PokemonMove::GigatonHammer | PokemonMove::BloodMoon) {
-                let already_blocked = mon.volatiles.iter().any(|v| matches!(
-                    v,
-                    crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::CantUseRepeatedly(m), _) if m == move_name
-                ));
-                if !already_blocked {
-                    // Duration 1: blocks exactly the next turn's selection, then drops during
-                    // that turn's decrement_move_statuses. (decrement runs after selection.)
-                    mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
-                        VolatileStatus::CantUseRepeatedly(move_name.clone()), 1,
-                    ));
-                }
-            }
         }
         // Update the field-level last-move tracker for Copycat; Struggle excluded.
         if *move_name != PokemonMove::Struggle {
@@ -180,7 +189,7 @@ fn resolve_confusion_self_hit_outcomes(
 
     for (damage, probability) in damage_outcomes {
         let mut branch_state = state.clone();
-        decrement_move_pp(&mut branch_state, user_slot, move_name);
+        decrement_move_pp(&mut branch_state, user_slot, move_name, None);
         // Hurting itself in confusion means the chosen move never executed — that counts as a failed
         // move for Stomping Tantrum / Micle Berry (consistent with flinch/paralysis/sleep handling).
         if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, user_slot) {
@@ -981,7 +990,7 @@ fn no_effect_outcome(
     confusion_outcomes: &Option<Vec<(MatchState, f64)>>,
 ) -> Vec<(MatchState, f64)> {
     let mut no_effect_state = state.clone();
-    decrement_move_pp(&mut no_effect_state, action.user_slot, &action.move_name);
+    decrement_move_pp(&mut no_effect_state, action.user_slot, &action.move_name, None);
 
     if let Some(confusion) = confusion_outcomes {
         let mut combined: Vec<(MatchState, f64)> = confusion.iter()
@@ -1039,6 +1048,25 @@ fn possible_damage_outcomes_for_move(
     if !move_data.stalling_move {
         if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
             mon.stall_counter = 0;
+        }
+    }
+
+    // Moves with the CantUseTwice flag (Gigaton Hammer, Blood Moon) cannot be selected on
+    // consecutive turns. Apply the blocking volatile on every use attempt (hit, miss, or
+    // blocked) per Bulbapedia. Driven by MoveFlag::CantUseTwice rather than a move name list.
+    if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::CantUseTwice) {
+        if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+            let already_blocked = mon.volatiles.iter().any(|v| matches!(
+                v,
+                crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::CantUseRepeatedly(m), _) if m == &action.move_name
+            ));
+            if !already_blocked {
+                // Duration 1: blocks exactly the next turn's selection, then drops during
+                // that turn's decrement_move_statuses. (decrement runs after selection.)
+                mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+                    VolatileStatus::CantUseRepeatedly(action.move_name.clone()), 1,
+                ));
+            }
         }
     }
     // Ally Switch counter resets when any move OTHER than Ally Switch is used.
@@ -1154,7 +1182,7 @@ fn possible_damage_outcomes_for_move(
     }
 
     if move_name == PokemonMove::Splash {
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -1359,8 +1387,8 @@ fn possible_damage_outcomes_for_move(
                 if *mv == PokemonMove::SleepTalk { continue; }
                 // Skip charge moves or moves flagged NoSleepTalk if we can inspect them
                 if let Some(md) = move_dex.get(mv) {
-                    let is_charge = md.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(&crate::dex_data::MoveFlag::Charge));
-                    let no_sleep_talk = md.flags.iter().any(|f| std::mem::discriminant(f) == std::mem::discriminant(&crate::dex_data::MoveFlag::NoSleepTalk));
+                    let is_charge = simulator_helpers::move_has_flag(md, &crate::dex_data::MoveFlag::Charge);
+                    let no_sleep_talk = simulator_helpers::move_has_flag(md, &crate::dex_data::MoveFlag::NoSleepTalk);
                     if is_charge || no_sleep_talk { continue; }
                 }
                 candidates.push(mv.clone());
@@ -1447,7 +1475,7 @@ fn possible_damage_outcomes_for_move(
 
             // Success: set the protect volatile and grow the streak.
             let mut succ = next_state.clone();
-            decrement_move_pp(&mut succ, action.user_slot, &action.move_name);
+            decrement_move_pp(&mut succ, action.user_slot, &action.move_name, Some(move_data));
             if let Some(mon) = mon_at_slot_mut(&mut succ, action.user_slot) {
                 mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(vol.clone(), 1));
                 mon.stall_counter = mon.stall_counter.saturating_add(1);
@@ -1459,7 +1487,7 @@ fn possible_damage_outcomes_for_move(
             // streak resets.
             if p_success < 1.0 {
                 let mut fail = next_state.clone();
-                decrement_move_pp(&mut fail, action.user_slot, &action.move_name);
+                decrement_move_pp(&mut fail, action.user_slot, &action.move_name, Some(move_data));
                 if let Some(mon) = mon_at_slot_mut(&mut fail, action.user_slot) {
                     mon.stall_counter = 0;
                     mon.last_move_failed = true;
@@ -1510,7 +1538,7 @@ fn possible_damage_outcomes_for_move(
 
         // Success branch: swap the two active PokémonState entries
         let mut succ = next_state.clone();
-        decrement_move_pp(&mut succ, user_slot, &action.move_name);
+        decrement_move_pp(&mut succ, user_slot, &action.move_name, Some(move_data));
         {
             let actives = match user_slot.player {
                 Player::P1 => &mut succ.p1_active_mons,
@@ -1545,7 +1573,7 @@ fn possible_damage_outcomes_for_move(
         // Failure branch
         if p_success < 1.0 {
             let mut fail = next_state.clone();
-            decrement_move_pp(&mut fail, user_slot, &action.move_name);
+            decrement_move_pp(&mut fail, user_slot, &action.move_name, Some(move_data));
             if let Some(m) = mon_at_slot_mut(&mut fail, user_slot) {
                 m.ally_switch_counter = 0;
                 m.last_move_failed = true;
@@ -1631,7 +1659,7 @@ fn possible_damage_outcomes_for_move(
                 ));
             }
         }
-        decrement_move_pp(&mut next_state, attacker_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, attacker_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -1657,7 +1685,7 @@ fn possible_damage_outcomes_for_move(
             let heal = (mon.stats[0].max(1) as u32 / 4) as u16;
             simulator_helpers::gain_hp(mon, heal, envs[i]);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -1739,7 +1767,7 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::clear_pokemon_on_faint(user_mon);
         }
         simulator_helpers::handle_pokemon_faint(&mut next_state, user_player, user_slot_index);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -1770,7 +1798,7 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::clear_pokemon_on_faint(user_mon);
         }
         simulator_helpers::handle_pokemon_faint(&mut next_state, user_player, user_slot_index);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -1786,7 +1814,7 @@ fn possible_damage_outcomes_for_move(
             if mb {
                 let applied = simulator_helpers::try_apply_attract(&mut next_state, target_slot, action.user_slot);
                 if applied {
-                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
                     return vec![(MatchState::BattleState(next_state), 1.0)];
                 }
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -1794,7 +1822,7 @@ fn possible_damage_outcomes_for_move(
         }
         let applied = simulator_helpers::try_apply_attract(&mut next_state, action.user_slot, target_slot);
         if applied {
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
             let has_confusion = confusion_self_hit_outcomes.is_some();
             let mut result = Vec::new();
             if let Some(ref c) = confusion_self_hit_outcomes {
@@ -1818,7 +1846,7 @@ fn possible_damage_outcomes_for_move(
             if mb {
                 let applied = simulator_helpers::try_apply_disable(&mut next_state, target_slot, action.user_slot);
                 if applied {
-                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
                     return vec![(MatchState::BattleState(next_state), 1.0)];
                 }
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -1826,7 +1854,7 @@ fn possible_damage_outcomes_for_move(
         }
         let applied = simulator_helpers::try_apply_disable(&mut next_state, action.user_slot, target_slot);
         if applied {
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
             let has_confusion = confusion_self_hit_outcomes.is_some();
             let mut result = Vec::new();
             if let Some(ref c) = confusion_self_hit_outcomes {
@@ -1897,7 +1925,7 @@ fn possible_damage_outcomes_for_move(
         if !applied {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         let has_confusion = confusion_self_hit_outcomes.is_some();
         let mut result = Vec::new();
         if let Some(ref c) = confusion_self_hit_outcomes {
@@ -1924,7 +1952,7 @@ fn possible_damage_outcomes_for_move(
         if !simulator_helpers::try_swap_items(&mut next_state, action.user_slot, target_slot) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -1934,7 +1962,7 @@ fn possible_damage_outcomes_for_move(
         if !simulator_helpers::recover_consumed_item(&mut next_state, action.user_slot) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -1955,7 +1983,7 @@ fn possible_damage_outcomes_for_move(
         if !any_ate {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -1984,7 +2012,7 @@ fn possible_damage_outcomes_for_move(
             }
             simulator_helpers::try_remove_item(&mut next_state, slot);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2016,7 +2044,7 @@ fn possible_damage_outcomes_for_move(
         if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
             user.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedOn(target_mon_id), 2));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2182,7 +2210,7 @@ fn possible_damage_outcomes_for_move(
         } {
             target_mon.move_pp[slot_idx] = current_pp.saturating_sub(4);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2213,7 +2241,7 @@ fn possible_damage_outcomes_for_move(
         }
         // consume PP on the original state's branches collapsed
         for (bs, _) in &mut new_branches {
-            decrement_move_pp(bs, user_slot, &action.move_name);
+            decrement_move_pp(bs, user_slot, &action.move_name, Some(move_data));
         }
         return new_branches.into_iter()
             .map(|(bs, p)| (MatchState::BattleState(bs), p))
@@ -2240,7 +2268,7 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::on_berry_eaten(mon, &berry, &env);
             simulator_helpers::apply_stat_boost_external(mon, &[0, 2, 0, 0, 0, 0, 0], items_suppressed);
         }
-        decrement_move_pp(&mut next_state, user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2248,17 +2276,19 @@ fn possible_damage_outcomes_for_move(
     // Fails if no move has been used yet, or if the last move is uncopyable.
     if move_name == PokemonMove::Copycat {
         use crate::data::pokemon_move::PokemonMove as M;
-        const UNCOPYABLE: &[M] = &[
-            M::Assist, M::Sketch, M::Metronome, M::MirrorMove, M::Mimic,
-            M::Protect, M::Detect, M::Endure, M::KingsShield, M::SpikyShield,
-            M::BanefulBunker, M::Obstruct, M::SilkTrap, M::BurningBulwark,
-            M::DestinyBond, M::Transform, M::Counter, M::MirrorCoat,
-            M::Copycat, M::NaturePower, M::SleepTalk,
-        ];
+        // Moves that the FailCopyCat flag in move data does not yet cover (Showdown data gap —
+        // Gen IX column on the Copycat page is marked "needs research"). Remove these when the
+        // data is updated. MirrorCoat/Obstruct/SilkTrap are intentional omissions from the flag.
+        const UNCOPYABLE_EXTRA: &[M] = &[M::MirrorCoat, M::Obstruct, M::SilkTrap];
         let last_mv = next_state.last_move_on_field.clone();
         let copied = match last_mv {
             None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
-            Some(ref mv) if UNCOPYABLE.contains(mv) => {
+            Some(ref mv) if UNCOPYABLE_EXTRA.contains(mv) => {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+            Some(ref mv) if move_dex.get(mv).map_or(true, |d| {
+                simulator_helpers::move_has_flag(d, &crate::dex_data::MoveFlag::FailCopyCat)
+            }) => {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
             Some(mv) => mv,
@@ -2286,7 +2316,7 @@ fn possible_damage_outcomes_for_move(
             };
 
         // Decrement Copycat's own PP before branching.
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
 
         let n = valid_targets.len();
         let per_prob = 1.0 / n as f64;
@@ -2321,22 +2351,6 @@ fn possible_damage_outcomes_for_move(
     // PP is deducted from the TARGET's move slot. The instructed move's semantics
     // (including whether it hits, crits, etc.) are fully independent of Instruct.
     if move_name == PokemonMove::Instruct {
-        use crate::data::pokemon_move::PokemonMove as M;
-        const INSTRUCT_UNCALLABLE: &[M] = &[
-            M::Instruct, M::Bide, M::FocusPunch, M::BeakBlast, M::ShellTrap,
-            M::Sketch, M::Transform, M::Mimic, M::KingsShield, M::Struggle,
-            // Recharge moves
-            M::HyperBeam, M::GigaImpact, M::FrenzyPlant, M::BlastBurn,
-            M::HydroCannon, M::RockWrecker, M::RoarofTime, M::PrismaticLaser,
-            M::Eternabeam, M::MeteorAssault,
-            // Two-turn charge moves
-            M::SolarBeam, M::SolarBlade, M::SkyAttack, M::Dig, M::Fly,
-            M::Bounce, M::Dive, M::PhantomForce, M::ShadowForce, M::SkullBash,
-            M::SkyDrop, M::RazorWind, M::Geomancy, M::ElectroShot, M::MeteorBeam,
-            // Move-callers
-            M::Metronome, M::Assist, M::SleepTalk, M::MirrorMove,
-            M::Copycat, M::NaturePower, M::MeFirst,
-        ];
         let target_slot = target_slots.first().copied().unwrap_or(action.user_slot);
         // Gather what we need from the target before any mutable borrows
         let (instructed_move, pp_slot_idx) = {
@@ -2346,17 +2360,19 @@ fn possible_damage_outcomes_for_move(
             let Some(ref mv) = tgt.last_used_move.clone() else {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             };
-            if INSTRUCT_UNCALLABLE.contains(mv) {
+            // Fail if the last move cannot be repeated via Instruct. The FailInstruct flag is
+            // the authoritative set (covers charge moves, callers, Bide, Focus Punch, etc.).
+            // Recharge moves (Hyper Beam etc.) lack FailInstruct but carry the Recharge flag,
+            // so both are checked. Struggle has no move data — treat it as uncallable.
+            if *mv == PokemonMove::Struggle {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
-            // Check charge/recharge flags
             let md = move_dex.get(mv);
-            if let Some(md) = md {
-                if simulator_helpers::move_has_flag(md, &crate::dex_data::MoveFlag::Charge)
-                    || simulator_helpers::move_has_flag(md, &crate::dex_data::MoveFlag::Recharge)
-                {
-                    return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
-                }
+            if md.map_or(true, |d| {
+                simulator_helpers::move_has_flag(d, &crate::dex_data::MoveFlag::FailInstruct)
+                    || simulator_helpers::move_has_flag(d, &crate::dex_data::MoveFlag::Recharge)
+            }) {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
             let slot_idx = tgt.moves.iter().position(|m| m.as_ref() == Some(mv));
             let pp = slot_idx.and_then(|i| tgt.move_pp.get(i).copied()).unwrap_or(0);
@@ -2371,7 +2387,7 @@ fn possible_damage_outcomes_for_move(
         };
 
         // Debit Instruct's own PP
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
 
         // Debit one PP from the target's instructed move slot
         if let Some(idx) = pp_slot_idx {
@@ -2432,16 +2448,16 @@ fn possible_damage_outcomes_for_move(
             let mb = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
                 .map_or(false, |t| !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t) && t.ability == Ability::MagicBounce);
             if mb {
-                match simulator_helpers::try_apply_encore(&mut next_state, target_slot, action.user_slot) {
+                match simulator_helpers::try_apply_encore(&mut next_state, target_slot, action.user_slot, move_dex) {
                     Some(_) => {
-                        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
                         return vec![(MatchState::BattleState(next_state), 1.0)];
                     }
                     None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
                 }
             }
         }
-        match simulator_helpers::try_apply_encore(&mut next_state, action.user_slot, target_slot) {
+        match simulator_helpers::try_apply_encore(&mut next_state, action.user_slot, target_slot, move_dex) {
             Some(encored_move) => {
                 // Mid-turn replacement: rewrite the target's still-queued MoveAction.
                 let new_priority = move_dex.get(&encored_move).map(|d| d.priority).unwrap_or(0);
@@ -2453,7 +2469,7 @@ fn possible_damage_outcomes_for_move(
                         }
                     }
                 }
-                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
                 return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
             }
             None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
@@ -2483,7 +2499,7 @@ fn possible_damage_outcomes_for_move(
                 }
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2506,7 +2522,7 @@ fn possible_damage_outcomes_for_move(
                 }
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2514,7 +2530,8 @@ fn possible_damage_outcomes_for_move(
     // at the end of the second turn after this one. Damage is computed from the full attacker
     // snapshot at queue time so it remains correct if the user switches out before impact.
     // Fails if that slot already has a pending FutureMove condition.
-    if move_name == PokemonMove::FutureSight || move_name == PokemonMove::DoomDesire {
+    // Driven by MoveFlag::FutureMove rather than a hardcoded move name list.
+    if simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::FutureMove) {
         let target_slot = target_slots[0];
         let target_player = target_slot.player;
         let target_idx = target_slot.slot_index as usize;
@@ -2560,7 +2577,7 @@ fn possible_damage_outcomes_for_move(
                 turns_remaining: 3, // fires after 2 end-of-turns (ticks: 3→2, 2→1, 1→0=fire)
             });
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2585,7 +2602,7 @@ fn possible_damage_outcomes_for_move(
         for mon in backs.iter_mut() {
             if !mon.fainted { mon.status = None; }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2618,7 +2635,7 @@ fn possible_damage_outcomes_for_move(
                     }
                 }
             }
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
             return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
         }
         // Foe-targeting falls through to the normal damage pipeline.
@@ -2651,7 +2668,7 @@ fn possible_damage_outcomes_for_move(
                 if let Some(t) = mon_at_slot_mut(&mut next_state, target_slot) {
                     simulator_helpers::gain_hp(t, amount, target_env);
                 }
-                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
                 return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
             }
             None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
@@ -2680,7 +2697,7 @@ fn possible_damage_outcomes_for_move(
         if let Some(t) = mon_at_slot_mut(&mut next_state, target_slot) {
             t.hp = avg.min(t.stats[0]);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2714,7 +2731,7 @@ fn possible_damage_outcomes_for_move(
         simulator_helpers::apply_opponent_stat_drop(
             &mut next_state, target_slot, action.user_slot, [-1, 0, 0, 0, 0, 0, 0], items_suppressed, false,
         );
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2743,7 +2760,7 @@ fn possible_damage_outcomes_for_move(
                 turns_remaining: 2,
             });
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         let has_confusion = confusion_self_hit_outcomes.is_some();
         let mut result = Vec::new();
         if let Some(ref c) = confusion_self_hit_outcomes {
@@ -2780,7 +2797,7 @@ fn possible_damage_outcomes_for_move(
             if simulator_helpers::has_status_volatile(mon, &VolatileStatus::PerishSong) { continue; }
             simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, mon, &VolatileStatus::PerishSong);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2800,7 +2817,7 @@ fn possible_damage_outcomes_for_move(
         } {
             simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, user, &VolatileStatus::DestinyBond);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2812,7 +2829,7 @@ fn possible_damage_outcomes_for_move(
         {
             mon.boosts = [0; 7];
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2834,7 +2851,7 @@ fn possible_damage_outcomes_for_move(
             if mon.boosts[0] < 6 { mon.stats_raised_this_turn = true; }
             mon.boosts[0] = 6;
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2855,7 +2872,7 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::take_damage(mon, cost, env, as_);
             simulator_helpers::apply_stat_boost_external(mon, &[1, 1, 1, 1, 1, 0, 0], items_suppressed);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2868,7 +2885,7 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Charge);
             mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Charge, 0));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2885,7 +2902,7 @@ fn possible_damage_outcomes_for_move(
         if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
             mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, 0));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2923,7 +2940,7 @@ fn possible_damage_outcomes_for_move(
         if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, ally_slot) {
             mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::DragonCheer(amount), 0));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2954,7 +2971,7 @@ fn possible_damage_outcomes_for_move(
         if !any {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2968,7 +2985,7 @@ fn possible_damage_outcomes_for_move(
                 mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Minimize, 0));
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2986,7 +3003,7 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Stockpile(0));
             mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Stockpile(level + 1), 0));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3010,7 +3027,7 @@ fn possible_damage_outcomes_for_move(
             let drop = -(level as i8);
             simulator_helpers::apply_stat_boost_external(mon, &[0, drop, 0, drop, 0, 0, 0], items_suppressed);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3049,7 +3066,7 @@ fn possible_damage_outcomes_for_move(
                 simulator_helpers::remove_status_volatile(user, &VolatileStatus::FocusEnergy);
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3078,7 +3095,7 @@ fn possible_damage_outcomes_for_move(
                 target.stats[4] = new_spd;
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3104,7 +3121,7 @@ fn possible_damage_outcomes_for_move(
             target.boosts[1] = user_def_b;
             target.boosts[3] = user_spd_b;
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3133,7 +3150,7 @@ fn possible_damage_outcomes_for_move(
                 target.stats[3] = new_spa;
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3159,7 +3176,7 @@ fn possible_damage_outcomes_for_move(
             target.boosts[0] = user_atk_b;
             target.boosts[2] = user_spa_b;
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3181,7 +3198,7 @@ fn possible_damage_outcomes_for_move(
             target.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpeedSwap(target_spe), 0));
             target.stats[5] = user_spe;
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3220,7 +3237,7 @@ fn possible_damage_outcomes_for_move(
         }
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, action.user_slot);
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, target_slot);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3250,7 +3267,7 @@ fn possible_damage_outcomes_for_move(
             user.ability = target_ability;
         }
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, action.user_slot);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3289,7 +3306,7 @@ fn possible_damage_outcomes_for_move(
             tgt.ability = user_ability;
         }
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, target_slot);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3321,7 +3338,7 @@ fn possible_damage_outcomes_for_move(
             // apply_volatile_to_pokemon_pub skips if already present, so no duplicate guard needed.
             simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, tgt, &VolatileStatus::GastroAcid);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3357,7 +3374,7 @@ fn possible_damage_outcomes_for_move(
                 tgt.status = None;
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3390,7 +3407,7 @@ fn possible_damage_outcomes_for_move(
             if tgt.original_ability.is_none() { tgt.original_ability = Some(tgt.ability.clone()); }
             tgt.ability = Ability::Simple;
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3411,7 +3428,7 @@ fn possible_damage_outcomes_for_move(
                 user.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(volatile, 0));
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3466,7 +3483,7 @@ fn possible_damage_outcomes_for_move(
                 (false, true) => [foe_slots[1], foe_slots[1]], // both to slot1
                 (false, false) => {
                     // Both immune — move fails
-                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
                     return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
                 }
             };
@@ -3522,7 +3539,7 @@ fn possible_damage_outcomes_for_move(
             }
             for (state, _) in &mut all_outcomes {
                 if let MatchState::BattleState(bs) = state {
-                    decrement_move_pp(bs, action.user_slot, &action.move_name);
+                    decrement_move_pp(bs, action.user_slot, &action.move_name, Some(move_data));
                 }
             }
 
@@ -3563,7 +3580,7 @@ fn possible_damage_outcomes_for_move(
 
         let (invulnerability_multiplier, should_continue) = check_invulnerability_status(&attacker, &target, &move_name);
         if !should_continue {
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
 
@@ -3615,7 +3632,7 @@ fn possible_damage_outcomes_for_move(
 
         for (state, _) in &mut all_outcomes {
             if let MatchState::BattleState(bs) = state {
-                decrement_move_pp(bs, action.user_slot, &action.move_name);
+                decrement_move_pp(bs, action.user_slot, &action.move_name, Some(move_data));
             }
         }
 
@@ -3696,12 +3713,9 @@ fn possible_damage_outcomes_for_move(
             && matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special)
             && matches!(move_data.damage_override, crate::dex_data::DamageOverride::None)  // exclude fixed-damage moves
             && !move_data.ohko
-            && !matches!(move_name,
-                PokemonMove::SelfDestruct | PokemonMove::Explosion | PokemonMove::MindBlown
-                | PokemonMove::MistyExplosion | PokemonMove::FinalGambit | PokemonMove::Endeavor
-                | PokemonMove::Fling | PokemonMove::Uproar | PokemonMove::Rollout
-                | PokemonMove::IceBall | PokemonMove::BeatUp
-            )
+            && !simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::NoParentalBond)
+            // Uproar and Beat Up lack the NoParentalBond flag in data; excluded manually.
+            && !matches!(move_name, PokemonMove::Uproar | PokemonMove::BeatUp)
             && !simulator_helpers::move_has_flag(move_data, &crate::dex_data::MoveFlag::Charge)
     };
 
@@ -3880,7 +3894,7 @@ fn possible_damage_outcomes_for_move(
                 let bounce_branches = simulator_helpers::apply_secondary_effects(
                     &next_state, *target_slot, action.user_slot, move_data,
                 );
-                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
                 let mut final_outcomes: Vec<(MatchState, f64)> = bounce_branches
                     .into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect();
                 let has_confusion = confusion_self_hit_outcomes.is_some();
@@ -3894,7 +3908,7 @@ fn possible_damage_outcomes_for_move(
 
         if !should_continue {
             // Move is blocked by invulnerability
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name);
+            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -4189,7 +4203,7 @@ fn possible_damage_outcomes_for_move(
     // Decrement PP once at the end
     for (state, _) in &mut all_outcomes {
         if let MatchState::BattleState(bs) = state {
-            decrement_move_pp(bs, action.user_slot, &action.move_name);
+            decrement_move_pp(bs, action.user_slot, &action.move_name, Some(move_data));
         }
     }
 
@@ -4632,6 +4646,13 @@ fn generate_commands_for_active(
             continue;
         }
 
+        // Heal Block: moves with the Heal flag cannot be selected.
+        if simulator_helpers::heal_is_blocked(mon)
+            && move_dex.get(move_name).map_or(false, |d| simulator_helpers::move_has_flag(d, &crate::dex_data::MoveFlag::Heal))
+        {
+            continue;
+        }
+
         // Torment: the same move cannot be used twice in a row.
         if tormented && mon.last_used_move.as_ref() == Some(move_name) { continue; }
 
@@ -4646,8 +4667,10 @@ fn generate_commands_for_active(
         ));
         if cant_repeat { continue; }
 
-        // Gravity: airborne and jump moves cannot be selected while Gravity is active.
-        if simulator_helpers::is_gravity_active(state) && move_is_disabled_by_gravity(move_name) {
+        // Gravity: moves with the Gravity flag cannot be selected while Gravity is active.
+        if simulator_helpers::is_gravity_active(state)
+            && move_dex.get(move_name).map_or(false, |d| simulator_helpers::move_has_flag(d, &crate::dex_data::MoveFlag::Gravity))
+        {
             continue;
         }
 
@@ -4861,20 +4884,6 @@ fn can_be_forced_out(bs: &BattleState, slot: FieldSlot, attacker_breaks: bool) -
             | crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Ingrain, _)))
 }
 
-/// Moves that cannot be selected while Gravity is active.
-fn move_is_disabled_by_gravity(move_name: &PokemonMove) -> bool {
-    matches!(move_name,
-        PokemonMove::Bounce
-        | PokemonMove::Fly
-        | PokemonMove::FlyingPress
-        | PokemonMove::HighJumpKick
-        | PokemonMove::JumpKick
-        | PokemonMove::MagnetRise
-        | PokemonMove::SkyDrop
-        | PokemonMove::Splash
-        | PokemonMove::Telekinesis
-    )
-}
 
 /// Status moves that legitimately succeed without changing any battle state (so the success-by-diff
 /// heuristic below must not mis-flag them as failures).

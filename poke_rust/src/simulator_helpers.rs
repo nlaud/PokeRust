@@ -7537,22 +7537,15 @@ pub fn apply_electrify(state: &mut BattleState, source_slot: FieldSlot, target_s
 
 /// Moves Encore cannot lock the target into. Mirrors Showdown's `failencore` flag: copying /
 /// move-calling moves, Encore/Mimic/Sketch/Mirror Move, Struggle, and Transform.
-pub(crate) fn encore_immune_move(mv: &PokemonMove) -> bool {
-    matches!(
-        mv,
-        PokemonMove::Struggle
-            | PokemonMove::Encore
-            | PokemonMove::Mimic
-            | PokemonMove::Sketch
-            | PokemonMove::MirrorMove
-            | PokemonMove::Transform
-            | PokemonMove::Metronome
-            | PokemonMove::Assist
-            | PokemonMove::MeFirst
-            | PokemonMove::Copycat
-            | PokemonMove::NaturePower
-            | PokemonMove::SleepTalk
-    )
+/// Returns true if Encore should fail / cannot lock the target into this move.
+/// Uses the FailEncore flag as the authoritative source. Mimic is a manual addition:
+/// it carries FailEncore semantics per Bulbapedia but the Showdown data omits the flag.
+/// Struggle has no move data entry, so it is also excluded manually.
+pub(crate) fn encore_immune_move(mv: &PokemonMove, move_dex: &std::collections::HashMap<crate::data::pokemon_move::PokemonMove, crate::dex_data::MoveData>) -> bool {
+    if matches!(mv, PokemonMove::Struggle | PokemonMove::Mimic) {
+        return true;
+    }
+    move_dex.get(mv).map_or(false, |d| move_has_flag(d, &crate::dex_data::MoveFlag::FailEncore))
 }
 
 /// Apply Encore to `target_slot`, locking it into its `last_used_move` for 3 turns. Returns the
@@ -7562,11 +7555,12 @@ pub fn try_apply_encore(
     state: &mut BattleState,
     source_slot: FieldSlot,
     target_slot: FieldSlot,
+    move_dex: &std::collections::HashMap<crate::data::pokemon_move::PokemonMove, crate::dex_data::MoveData>,
 ) -> Option<PokemonMove> {
     let last_move = {
         let tgt = get_pokemon_at_slot(state, target_slot)?;
         let m = match &tgt.last_used_move {
-            Some(mv) if !encore_immune_move(mv) => mv.clone(),
+            Some(mv) if !encore_immune_move(mv, move_dex) => mv.clone(),
             _ => return None,
         };
         // Fail if the target no longer carries that move with PP (e.g. it was forgotten/0 PP).
