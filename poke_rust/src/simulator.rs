@@ -1037,6 +1037,42 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(next_state), 1.0)];
     };
 
+    // RandomNormal targeting: select a random live opponent each use (e.g. Outrage/Thrash in
+    // doubles). If no concrete target was provided and there are multiple live foes, fork into one
+    // equally-weighted branch per foe so the simulator properly represents the random pick.
+    // The recursive calls carry a concrete `target_slot`, so this block runs only once per action.
+    if move_data.target == crate::dex_data::MoveTarget::RandomNormal && action.target_slot.is_none() {
+        let foe_player = match action.user_slot.player {
+            Player::P1 => Player::P2,
+            Player::P2 => Player::P1,
+        };
+        let live_foes: Vec<FieldSlot> = match foe_player {
+            Player::P1 => next_state.p1_active_mons.iter().enumerate()
+                .filter(|(_, m)| !m.fainted)
+                .map(|(i, _)| FieldSlot { player: foe_player, slot_index: i as u8 })
+                .collect(),
+            Player::P2 => next_state.p2_active_mons.iter().enumerate()
+                .filter(|(_, m)| !m.fainted)
+                .map(|(i, _)| FieldSlot { player: foe_player, slot_index: i as u8 })
+                .collect(),
+        };
+        if live_foes.len() > 1 {
+            let weight = 1.0 / live_foes.len() as f64;
+            let mut out: Vec<(MatchState, f64)> = Vec::new();
+            for foe in live_foes {
+                let mut pinned_action = action.clone();
+                pinned_action.target_slot = Some(foe);
+                for (st, p) in possible_damage_outcomes_for_move(
+                    state, &pinned_action, move_data, config, move_dex, pokemon_dex, is_called_move,
+                ) {
+                    out.push((st, p * weight));
+                }
+            }
+            return simulator_helpers::coalesce_branches(out);
+        }
+        // 0 or 1 live foe — fall through to existing single-target handling.
+    }
+
     // Save pre-move state for potential failure branches (paralysis, sleep, freeze)
     let pre_move_state = next_state.clone();
 
@@ -1089,7 +1125,7 @@ fn possible_damage_outcomes_for_move(
             mon.last_move_failed = true;
             mon.stall_counter = 0;
         }
-        // Flinch disrupts a rampage lock. Use post-decrement turns from `attacker`.
+        // Flinch disrupts a rampage lock. Pass attacks_completed (count-up counter) from `attacker`.
         let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
             if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
         });
@@ -1615,7 +1651,25 @@ fn possible_damage_outcomes_for_move(
     } else {
         // Single-target move: use action.target_slot if available
         match action.target_slot {
-            Some(slot) => vec![slot],
+            Some(slot) => {
+                // Faint redirection (doubles): if the chosen target has fainted before this
+                // move executes, single-target moves automatically retarget to a remaining
+                // valid target. The move only fails when NO valid target remains.
+                // (Bulbapedia, Double Battle: a move fails for lack of target only when all
+                // eligible targets are knocked out before it attacks.)
+                let target_fainted = simulator_helpers::get_pokemon_at_slot(&next_state, slot)
+                    .map_or(true, |m| m.fainted);
+                if target_fainted {
+                    let redirected = simulator_helpers::resolve_move_targets(
+                        &next_state, action.user_slot, &move_data.target);
+                    if redirected.is_empty() {
+                        return vec![(MatchState::BattleState(next_state), 1.0)];
+                    }
+                    redirected
+                } else {
+                    vec![slot]
+                }
+            }
             None => {
                 // Fallback: use resolve_move_targets
                 let targets = simulator_helpers::resolve_move_targets(&next_state, action.user_slot, &move_data.target);
@@ -3516,10 +3570,12 @@ fn possible_damage_outcomes_for_move(
             }
 
             let all_outcomes: Vec<(MatchState, f64)> = outcomes.into_iter()
-                .map(|(bs, p)| (
-                    apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player),
-                    p,
-                ))
+                .flat_map(|(bs, p)| {
+                    apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player)
+                        .into_iter()
+                        .map(move |(st, w)| (st, p * w))
+                        .collect::<Vec<_>>()
+                })
                 .collect();
 
             let all_outcomes: Vec<(MatchState, f64)> = all_outcomes.into_iter()
@@ -3607,12 +3663,14 @@ fn possible_damage_outcomes_for_move(
 
         let mut all_outcomes: Vec<(MatchState, f64)> = all_outcomes
             .into_iter()
-            .map(|(state, prob)| match state {
-                MatchState::BattleState(bs) => (
-                    apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player),
-                    prob,
-                ),
-                other => (other, prob),
+            .flat_map(|(state, prob)| match state {
+                MatchState::BattleState(bs) => {
+                    apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player)
+                        .into_iter()
+                        .map(move |(st, w)| (st, prob * w))
+                        .collect::<Vec<_>>()
+                }
+                other => vec![(other, prob)],
             })
             .collect();
 
@@ -4156,17 +4214,18 @@ fn possible_damage_outcomes_for_move(
 
     // Apply post-damage move effects that depend on total HP damage dealt.
     let opposing_player = opposing_player(action.user_slot.player);
-    let all_outcomes: Vec<(MatchState, f64)> = all_outcomes
+    let mut all_outcomes: Vec<(MatchState, f64)> = all_outcomes
         .into_iter()
-        .map(|(state, prob)| match state {
-            MatchState::BattleState(bs) => (
-                apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player),
-                prob,
-            ),
-            other => (other, prob),
+        .flat_map(|(state, prob)| match state {
+            MatchState::BattleState(bs) => {
+                apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player)
+                    .into_iter()
+                    .map(move |(st, w)| (st, prob * w))
+                    .collect::<Vec<_>>()
+            }
+            other => vec![(other, prob)],
         })
         .collect();
-    let mut all_outcomes: Vec<(MatchState, f64)> = all_outcomes;
 
     // Status moves: set `last_move_failed` (Stomping Tantrum / Micle Berry) via a state diff against
     // the pre-move baseline — a status move "failed" if it changed nothing battle-meaningful. This
@@ -4444,21 +4503,23 @@ fn locked_semi_invulnerable_commands(mon: &PokemonState, player: Player) -> Vec<
 }
 
 /// Disrupt an in-progress rampage lock, clearing the volatile and applying confusion if this is
-/// the final locked turn (per game quirk: disruption on the final turn still confuses).
+/// the guaranteed-final locked turn (per game quirk: disruption on the final turn still confuses).
 ///
-/// `post_decrement_turns`: the turns value on the `LockedMove` volatile AFTER
-/// `decrement_move_statuses` has already run (i.e. the value visible in `attacker` or `next_state`
-/// at the point of disruption). `turns == 1` means the next natural decrement would drop the
-/// volatile, making this the last locked turn.
+/// `attacks_completed`: the count-up value on the `LockedMove` volatile — number of rampage
+/// attacks already landed (the current disrupted attack is NOT counted). `attacks_completed >= 2`
+/// means the disrupted attack would have been the guaranteed 3rd-and-final turn, so confusion
+/// fires. `attacks_completed == 1` (disrupted on the 2nd turn) does NOT confuse; in-cartridge
+/// this would be 50%-confuse but branching all five fail sites is out of scope.
 fn disrupt_rampage_lock(
     mon: &mut PokemonState,
-    post_decrement_turns: u16,
+    attacks_completed: u16,
     is_misty_terrain: bool,
 ) {
     simulator_helpers::remove_status_volatile(mon, &VolatileStatus::LockedMove(
         crate::data::pokemon_move::PokemonMove::Tackle // payload ignored by discriminant match
     ));
-    let is_final_turn = post_decrement_turns == 1;
+    // Only confuse when the disrupted attack would have been the guaranteed-final 3rd turn.
+    let is_final_turn = attacks_completed >= 2;
     if is_final_turn && !simulator_helpers::is_confused(mon) && !is_misty_terrain {
         let duration = rand::thread_rng().gen_range(2u16..=5u16);
         mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
@@ -4469,20 +4530,17 @@ fn disrupt_rampage_lock(
 }
 
 /// Return commands for a Pokémon locked into a rampaging move (Thrash/Outrage/Petal Dance/Raging Fury).
-/// The user must re-select that move and cannot switch. Target is re-resolved normally each turn
-/// (i.e. the only opposing slot — singles; doubles will pick a foe slot below).
+/// The user must re-select that move and cannot switch. Target is left as `None` so that the
+/// RandomNormal fan-out in `possible_damage_outcomes_for_move` re-randomizes the foe each turn
+/// (relevant in doubles; in singles the sole live foe is selected by the fallback path).
 fn locked_rampage_commands(mon: &PokemonState, locked_move: &PokemonMove, player: Player, state: &BattleState, slot_idx: usize) -> Vec<BattleCommand> {
-    let opposing_player = match player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
-    // Pick any live opposing slot as the default target (slot 0 in singles).
-    let target = match opposing_player {
-        Player::P1 => state.p1_active_mons.iter().enumerate().find(|(_, m)| !m.fainted).map(|(i, _)| FieldSlot { player: opposing_player, slot_index: i as u8 }),
-        Player::P2 => state.p2_active_mons.iter().enumerate().find(|(_, m)| !m.fainted).map(|(i, _)| FieldSlot { player: opposing_player, slot_index: i as u8 }),
-    };
+    let _ = (player, state, slot_idx); // these were only used for target resolution; now None
     // Validate: rampaging move must still be in the moveset.
     for (i, move_opt) in mon.moves.iter().enumerate() {
         if move_opt.as_ref() == Some(locked_move) {
             // No tera/mega variants while locked — the lock was established without them.
-            return vec![BattleCommand::Attack(AttackCommand { move_slot: i, target, terastallize: false, mega_evolve: false })];
+            // target: None → resolved by the RandomNormal fan-out (re-randomized each turn).
+            return vec![BattleCommand::Attack(AttackCommand { move_slot: i, target: None, terastallize: false, mega_evolve: false })];
         }
     }
     // Shouldn't happen, but if the move somehow isn't in the moveset, pass.
@@ -4978,7 +5036,7 @@ fn apply_post_damage_move_effects(
     move_data: &MoveData,
     baseline: &BattleState,
     opposing_player: Player,
-) -> MatchState {
+) -> Vec<(MatchState, f64)> {
     let total_dmg = total_damage_to_opponent(baseline, &bs, opposing_player);
     // sub_damage_dealt tracks the full damage roll sent into a Substitute this action.
     // Recoil is based on all damage dealt (to HP or sub); drain and Shell Bell are not.
@@ -4994,6 +5052,8 @@ fn apply_post_damage_move_effects(
     let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&bs);
     let mut forced_winner: Option<Player> = None;
     let mut attacker_fainted = false;
+    // (cur, end_prob, disrupt_now, can_confuse) — set inside the attacker_mon block below.
+    let mut rampage_decision: Option<(u16, f64, bool, bool)> = None;
 
     if let Some(attacker_mon) = mon_at_slot_mut(&mut bs, attacker_slot) {
         // Stomping Tantrum / Temper Flare / Micle Berry bookkeeping: a damaging move
@@ -5086,57 +5146,68 @@ fn apply_post_damage_move_effects(
 
         // Rampaging moves (Thrash / Outrage / Petal Dance / Raging Fury):
         //
-        //  Turn 1 (no lock yet): if the move connected push MoveStatus(LockedMove, N) where N ∈
-        //  {2, 3} (rand). N is the total turn count, including this one — so N=2 means "1 more
-        //  locked turn after this". decrement_move_statuses fires at the START of each subsequent
-        //  turn: 3→2→1, then 1 is dropped. When the remaining count == 1 at post-damage time we
-        //  know this is the final locked turn: remove the lock and confuse the user.
+        //  The LockedMove volatile carries a COUNT-UP counter `n` = attacks completed
+        //  so far (0 = no lock yet, not present):
         //
-        //  Disruption (total_dmg == 0: miss, immune, Protect, flinch etc.): remove the lock
-        //  immediately without confusion — UNLESS this was going to be the final turn anyway
-        //  (turns == 1), in which case still confuse per game quirk.
+        //   cur = n_before + 1  (attacks including the current one)
+        //   cur == 1 (first):   lock starts; no end branching
+        //   cur == 2 (second):  50% end (remove lock + confuse), 50% continue
+        //   cur >= 3 (third+):  always end (remove lock + confuse)
+        //
+        //  This produces a real 50/50 probability branch instead of a sampled
+        //  gen_range(2..=3), matching how sleep forks the outcome tree.
+        //
+        //  Decision parameters are collected here so the fork can happen AFTER all
+        //  other post-damage effects (self-destruct, Magician, etc.) have mutated `bs`.
+        //  The actual forking happens at the bottom of this function.
+        //
+        //  Disruption (total_dmg == 0: miss, immune, Protect, flinch, etc.) ends the
+        //  rampage immediately without confusion — UNLESS this was the guaranteed-final
+        //  3rd turn (cur >= 3), in which case still confuse per game quirk.
+        //  A disruption on the 2nd turn does NOT confuse (conservative approximation;
+        //  the in-cartridge behaviour would be 50%-confuse but forking all five
+        //  fail-branch sites is out of scope).
         let is_rampaging_move = matches!(move_data.name,
             PokemonMove::Thrash | PokemonMove::Outrage | PokemonMove::PetalDance | PokemonMove::RagingFury
         );
-        if is_rampaging_move && !attacker_fainted {
-            let existing_lock: Option<u16> = attacker_mon.volatiles.iter().find_map(|v| {
+
+        // rampage_decision: Some((cur, end_prob, disrupt_now, can_confuse))
+        //   cur          — attacks completed including this one
+        //   end_prob     — probability this is the final rampage attack
+        //   disrupt_now  — move failed (total_dmg==0); end without confusion unless
+        //                  end_prob==1.0 (final turn quirk)
+        //   can_confuse  — !is_confused && !misty_terrain at decision time
+        rampage_decision = if is_rampaging_move && !attacker_fainted {
+            let n_before: Option<u16> = attacker_mon.volatiles.iter().find_map(|v| {
                 if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v {
                     Some(*t)
                 } else {
                     None
                 }
             });
-            match existing_lock {
-                None => {
-                    // First use. Only start the lock if the move actually connected.
-                    if total_dmg > 0 {
-                        let extra_turns = rand::thread_rng().gen_range(2u16..=3u16);
-                        attacker_mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
-                            VolatileStatus::LockedMove(move_data.name.clone()),
-                            extra_turns,
-                        ));
-                    }
+            let cur = n_before.unwrap_or(0) + 1;
+            let disrupt_now = total_dmg == 0;
+            let can_confuse = !simulator_helpers::is_confused(attacker_mon) && !attacker_env.misty_terrain;
+
+            if cur == 1 {
+                // First use: set lock to n=1 only if move connected.
+                if total_dmg > 0 {
+                    attacker_mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+                        VolatileStatus::LockedMove(move_data.name.clone()),
+                        1,
+                    ));
                 }
-                Some(turns) => {
-                    let is_final_turn = turns == 1;
-                    let disrupted = total_dmg == 0;
-                    // Remove the lock volatile (covers both expiry and disruption).
-                    simulator_helpers::remove_status_volatile(attacker_mon, &VolatileStatus::LockedMove(move_data.name.clone()));
-                    // Confuse the user when the rampage ends naturally (final turn),
-                    // or when disrupted on the final turn (game quirk — still confuses).
-                    // Disrupted mid-rampage (not final turn) → no confusion.
-                    if !disrupted || is_final_turn {
-                        if !simulator_helpers::is_confused(attacker_mon) && !attacker_env.misty_terrain {
-                            let duration = rand::thread_rng().gen_range(2u16..=5u16);
-                            attacker_mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
-                                VolatileStatus::Confusion,
-                                duration,
-                            ));
-                        }
-                    }
-                }
+                None // no end-timing branch on the first attack
+            } else {
+                // Already locked: remove the existing lock entry now; the fork below
+                // will re-add it on the continue branch.
+                simulator_helpers::remove_status_volatile(attacker_mon, &VolatileStatus::LockedMove(move_data.name.clone()));
+                let end_prob = if cur >= 3 { 1.0 } else { 0.5 };
+                Some((cur, end_prob, disrupt_now, can_confuse))
             }
-        }
+        } else {
+            None
+        };
 
         // Self-destruct moves: faint the user after damage is dealt.
         //
@@ -5289,7 +5360,7 @@ fn apply_post_damage_move_effects(
         }
     }
 
-    if let Some(winner) = forced_winner {
+    let terminal = if let Some(winner) = forced_winner {
         MatchState::GameOverState { winner }
     } else if let Some(game_over) = game_over_state_if_battle_finished(&bs) {
         game_over
@@ -5323,6 +5394,59 @@ fn apply_post_damage_move_effects(
             bs.round_used_this_turn = true;
         }
         MatchState::BattleState(bs)
+    };
+
+    // Rampage end-timing fork: split into continue vs end branches.
+    // The lock volatile was already removed from `attacker_mon` above (for locked turns);
+    // we write it back on the continue branch or leave it absent on the end branch.
+    match rampage_decision {
+        None => vec![(terminal, 1.0)],
+        Some((cur, end_prob, disrupt_now, can_confuse)) => {
+            let mut branches: Vec<(MatchState, f64)> = Vec::new();
+
+            // End branch: remove lock (already done above), optionally confuse.
+            // A disruption mid-rampage (not final turn: end_prob < 1.0) skips confusion.
+            // A disruption on the final turn (end_prob == 1.0) still confuses (game quirk).
+            let should_confuse = can_confuse && (!disrupt_now || end_prob >= 1.0);
+            if end_prob > 0.0 {
+                let mut end_state = terminal.clone();
+                if should_confuse {
+                    if let MatchState::BattleState(ref mut end_bs) = end_state {
+                        if let Some(mon) = mon_at_slot_mut(end_bs, attacker_slot) {
+                            let duration = rand::thread_rng().gen_range(2u16..=5u16);
+                            mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+                                VolatileStatus::Confusion,
+                                duration,
+                            ));
+                        }
+                    }
+                }
+                branches.push((end_state, end_prob));
+            }
+
+            // Continue branch: re-add the lock volatile at `cur` (count-up).
+            // Only emitted when end_prob < 1.0 and the rampage wasn't disrupted.
+            let continue_prob = 1.0 - end_prob;
+            if continue_prob > 0.0 && !disrupt_now {
+                let mut cont_state = terminal.clone();
+                if let MatchState::BattleState(ref mut cont_bs) = cont_state {
+                    if let Some(mon) = mon_at_slot_mut(cont_bs, attacker_slot) {
+                        mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
+                            VolatileStatus::LockedMove(move_data.name.clone()),
+                            cur,
+                        ));
+                    }
+                }
+                branches.push((cont_state, continue_prob));
+            }
+
+            if branches.is_empty() {
+                // Disrupted mid-rampage (end_prob < 1.0, disrupt_now) — lock cleared, no confuse.
+                vec![(terminal, 1.0)]
+            } else {
+                branches
+            }
+        }
     }
 }
 
