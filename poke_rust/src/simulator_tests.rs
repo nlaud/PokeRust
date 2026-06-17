@@ -11296,7 +11296,6 @@ mod tests {
                 foul_play: false,
                 breaks_protect: false,
                 mind_blown_recoil: false,
-                steals_boosts: false,
                 override_offensive_stat: None,
                 override_defensive_stat: None,
                 ignore_ability: false,
@@ -11304,8 +11303,6 @@ mod tests {
                 ignore_evasion: false,
                 ignore_immunity: vec![],
                 sleep_usable: false,
-                smart_target: false,
-                tracks_target: false,
                 has_crash_damage: false,
                 stalling_move: false,
             };
@@ -29015,3 +29012,501 @@ mod new_abilities_batch {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TODO-refactor mechanic tests — verifying every in-code TODO that was wired up.
+// Groups: Mold Breaker expansion, Magic Guard/Heal Block gaps, Long Reach /
+// Protective Pads contact-punishment bypass, Neutralizing Gas + Berserk.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod todo_refactor_mechanic_tests {
+    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{Status, VolatileStatus};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+    };
+
+    /// Build a bare mon: fixed EVs (all 0), level 50, Hardy, no item.
+    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    /// Like `mon` but with a held item.
+    fn mon_item(species: Species, mv: PokemonMove, ability: Ability, item: Item) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            Some(item), None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn run(state: BattleState) -> Vec<(MatchState, f64)> {
+        run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(),
+        )
+    }
+
+    /// Average HP lost by P2 across all outcome branches.
+    fn avg_dmg_p2(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes.iter().map(|(s, p)| {
+            let lost = match s {
+                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p2_active_mons[0].hp),
+                MatchState::GameOverState { .. } => initial_hp,
+                _ => 0,
+            };
+            lost as f64 * p
+        }).sum()
+    }
+
+    /// Average HP lost by P1 across all outcome branches.
+    fn avg_dmg_p1(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes.iter().map(|(s, p)| {
+            let lost = match s {
+                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p1_active_mons[0].hp),
+                MatchState::GameOverState { .. } => initial_hp,
+                _ => 0,
+            };
+            lost as f64 * p
+        }).sum()
+    }
+
+    // ── Mold Breaker: Bulletproof ─────────────────────────────────────────────
+
+    #[test]
+    fn mold_breaker_bypasses_bulletproof() {
+        // Aura Sphere (ball move, no-miss) vs Bulletproof — should hit with Mold Breaker.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::AuraSphere, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::AuraSphere, Ability::None);
+        p1_mb.stats[5] = 200; p1_no.stats[5] = 200;   // move first
+        p1_mb.stats[3] = 300; p1_no.stats[3] = 300;   // high SpAtk
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Bulletproof);
+        p2.stats[0] = 500; p2.hp = 500;
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let dmg_mb = avg_dmg_p2(&run(state_mb), 500);
+        let dmg_no = avg_dmg_p2(&run(state_no), 500);
+        assert!(dmg_mb > 0.0, "Mold Breaker should let Aura Sphere hit Bulletproof; dmg={dmg_mb}");
+        assert_eq!(dmg_no, 0.0, "Without Mold Breaker Aura Sphere is blocked by Bulletproof");
+    }
+
+    // ── Mold Breaker: Soundproof ──────────────────────────────────────────────
+
+    #[test]
+    fn mold_breaker_bypasses_soundproof() {
+        // Boomburst (sound move) vs Soundproof — blocked normally, penetrates with Mold Breaker.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::Boomburst, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::Boomburst, Ability::None);
+        p1_mb.stats[5] = 200; p1_no.stats[5] = 200;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Soundproof);
+        p2.stats[0] = 800; p2.hp = 800;
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let dmg_mb = avg_dmg_p2(&run(state_mb), 800);
+        let dmg_no = avg_dmg_p2(&run(state_no), 800);
+        assert!(dmg_mb > 0.0, "Mold Breaker should let Boomburst hit Soundproof; dmg={dmg_mb}");
+        assert_eq!(dmg_no, 0.0, "Without Mold Breaker Boomburst is blocked by Soundproof");
+    }
+
+    // ── Mold Breaker: Overcoat (powder moves) ────────────────────────────────
+
+    #[test]
+    fn mold_breaker_bypasses_overcoat_powder() {
+        // Spore (powder, 100% sleep) vs Overcoat — blocked normally, lands with Mold Breaker.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::Spore, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::Spore, Ability::None);
+        p1_mb.stats[5] = 200; p1_no.stats[5] = 200;
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Overcoat);
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let asleep_mb = run(state_mb).iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Sleep(_)))));
+        let asleep_no = run(state_no).iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Sleep(_)))));
+
+        assert!(asleep_mb, "Mold Breaker should let Spore sleep an Overcoat target");
+        assert!(!asleep_no, "Without Mold Breaker Spore is blocked by Overcoat");
+    }
+
+    // ── Mold Breaker: Queenly Majesty / Dazzling ──────────────────────────────
+
+    #[test]
+    fn mold_breaker_bypasses_dazzling_priority_block() {
+        // Quick Attack (+1 priority) vs Dazzling — should be blocked normally but land with MB.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::QuickAttack, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::QuickAttack, Ability::None);
+        // Both have high Speed to guarantee Quick Attack goes first regardless.
+        p1_mb.stats[5] = 500; p1_no.stats[5] = 500;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Dazzling);
+        p2.stats[0] = 500; p2.hp = 500;
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let dmg_mb = avg_dmg_p2(&run(state_mb), 500);
+        let dmg_no = avg_dmg_p2(&run(state_no), 500);
+        assert!(dmg_mb > 0.0, "Mold Breaker should let Quick Attack through Dazzling; dmg={dmg_mb}");
+        assert_eq!(dmg_no, 0.0, "Without Mold Breaker Quick Attack is blocked by Dazzling");
+    }
+
+    // ── Mold Breaker: Damp ────────────────────────────────────────────────────
+
+    #[test]
+    fn mold_breaker_bypasses_damp_self_destruct() {
+        // Self-Destruct normally blocked by Damp; Mold Breaker lets it fire.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::SelfDestruct, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::SelfDestruct, Ability::None);
+        p1_mb.stats[5] = 200; p1_no.stats[5] = 200;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Damp);
+        p2.stats[0] = 1000; p2.hp = 1000;  // high HP so P2 survives and we can measure damage
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let dmg_mb = avg_dmg_p2(&run(state_mb), 1000);
+        let dmg_no = avg_dmg_p2(&run(state_no), 1000);
+        assert!(dmg_mb > 0.0, "Mold Breaker should let Self-Destruct fire through Damp; dmg={dmg_mb}");
+        assert_eq!(dmg_no, 0.0, "Without Mold Breaker Self-Destruct is blocked by Damp");
+    }
+
+    // ── Mold Breaker: Suction Cups / Guard Dog (forced switch) ────────────────
+
+    #[test]
+    fn mold_breaker_dragon_tail_phazes_suction_cups() {
+        // Dragon Tail normally fails vs Suction Cups; Mold Breaker forces the switch.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::DragonTail, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::DragonTail, Ability::None);
+        p1_mb.stats[5] = 200; p1_no.stats[5] = 200;
+
+        let foe = mon(Species::Snorlax, PokemonMove::Splash, Ability::SuctionCups);
+        let bench = mon(Species::Gyarados, PokemonMove::Splash, Ability::None);
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![foe.clone()], vec![bench.clone()]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![foe], vec![bench]);
+
+        // Dragon Tail hits on ~90% of branches (90% accuracy); check if any branch switched P2 to Gyarados.
+        let switched_mb = run(state_mb).iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].species == Species::Gyarados));
+        let switched_no = run(state_no).iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].species == Species::Gyarados));
+
+        assert!(switched_mb, "Mold Breaker Dragon Tail should bypass Suction Cups and force the switch");
+        assert!(!switched_no, "Without Mold Breaker Dragon Tail cannot phaze a Suction Cups holder");
+    }
+
+    #[test]
+    fn mold_breaker_dragon_tail_phazes_guard_dog() {
+        // Guard Dog also blocks phazing — Mold Breaker should override it.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::DragonTail, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::DragonTail, Ability::None);
+        p1_mb.stats[5] = 200; p1_no.stats[5] = 200;
+
+        let foe = mon(Species::Snorlax, PokemonMove::Splash, Ability::GuardDog);
+        let bench = mon(Species::Gyarados, PokemonMove::Splash, Ability::None);
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![foe.clone()], vec![bench.clone()]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![foe], vec![bench]);
+
+        let switched_mb = run(state_mb).iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].species == Species::Gyarados));
+        let switched_no = run(state_no).iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].species == Species::Gyarados));
+
+        assert!(switched_mb, "Mold Breaker Dragon Tail should bypass Guard Dog and force the switch");
+        assert!(!switched_no, "Without Mold Breaker Dragon Tail cannot phaze a Guard Dog holder");
+    }
+
+    // ── Mold Breaker: Unaware (defender ignores attacker's boosts) ────────────
+
+    #[test]
+    fn mold_breaker_ignores_defender_unaware() {
+        // P2 has Unaware (+ignores P1's Attack boosts). P1 has +6 Attack.
+        // With Mold Breaker: P2's Unaware is suppressed → P1's boosts apply → more damage.
+        // Without Mold Breaker: P2's Unaware blocks P1's boosts → less damage.
+        let mut p1_mb = mon(Species::Haxorus, PokemonMove::Tackle, Ability::MoldBreaker);
+        let mut p1_no = mon(Species::Haxorus, PokemonMove::Tackle, Ability::None);
+        // Both P1s move first.
+        p1_mb.stats[5] = 500; p1_no.stats[5] = 500;
+        // Set +6 Attack on both P1s.
+        p1_mb.boosts[0] = 6; p1_no.boosts[0] = 6;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Unaware);
+        p2.stats[0] = 600; p2.hp = 600;
+
+        let state_mb = battle_state_from_lists(vec![p1_mb], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let dmg_mb = avg_dmg_p2(&run(state_mb), 600);
+        let dmg_no = avg_dmg_p2(&run(state_no), 600);
+        // With MB the boosts count (higher damage), without MB Unaware negates them (lower damage).
+        assert!(dmg_mb > dmg_no,
+            "Mold Breaker should suppress Unaware, making boosted Tackle deal more damage; \
+             mb={dmg_mb:.1} vs no_mb={dmg_no:.1}");
+    }
+
+    // ── Heal Block blocks Leftovers ───────────────────────────────────────────
+
+    #[test]
+    fn heal_block_suppresses_leftovers_recovery() {
+        // P1 holds Leftovers and is under Heal Block — Leftovers should NOT heal at end of turn.
+        let mut p1 = mon_item(Species::Snorlax, PokemonMove::Splash, Ability::None, Item::Leftovers);
+        let max_hp = p1.stats[0];
+        p1.hp = max_hp / 2;
+        // Apply Heal Block volatile (n=5 turns).
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::HealBlock, 5));
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        // All branches should show P1 still at max_hp / 2 — no Leftovers heal.
+        assert!(outcomes.iter().all(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == max_hp / 2)),
+            "Heal Block should prevent Leftovers from healing P1");
+    }
+
+    #[test]
+    fn leftovers_heals_normally_without_heal_block() {
+        // Baseline: same setup without Heal Block — Leftovers should heal 1/16.
+        let mut p1 = mon_item(Species::Snorlax, PokemonMove::Splash, Ability::None, Item::Leftovers);
+        let max_hp = p1.stats[0];
+        p1.hp = max_hp / 2;
+
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        let expected_hp = (max_hp / 2 + (max_hp / 16).max(1)).min(max_hp);
+        assert!(outcomes.iter().all(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == expected_hp)),
+            "Without Heal Block, Leftovers should heal 1/16 per turn");
+    }
+
+    // ── Leech Seed does no damage to Magic Guard ──────────────────────────────
+
+    #[test]
+    fn leech_seed_does_not_drain_magic_guard_holder() {
+        // P1 uses Leech Seed on P2 who has Magic Guard.
+        // End-of-turn: P2 should take zero HP drain, P1 should gain no HP.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::LeechSeed, Ability::None);
+        p1.stats[5] = 200;   // move first so Leech Seed lands this turn
+        // Start P1 below max to notice any healing.
+        let p1_max = p1.stats[0];
+        p1.hp = p1_max / 2;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::MagicGuard);
+        let p2_max = p2.stats[0];
+        p2.hp = p2_max;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        // P2 should retain full HP (no drain damage).
+        let p2_hp_unchanged = outcomes.iter().all(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == p2_max));
+        // P1 should not have gained HP from the drain (stays at p1_max / 2).
+        let p1_no_heal = outcomes.iter().all(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == p1_max / 2));
+
+        assert!(p2_hp_unchanged, "Magic Guard should block Leech Seed HP drain from P2");
+        assert!(p1_no_heal, "Seeder (P1) should receive no HP when Magic Guard blocks the drain");
+    }
+
+    #[test]
+    fn leech_seed_drains_without_magic_guard() {
+        // Baseline: Leech Seed drains a non-Magic-Guard target normally.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::LeechSeed, Ability::None);
+        p1.stats[5] = 200;
+        let p1_max = p1.stats[0];
+        p1.hp = p1_max / 2;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let p2_max = p2.stats[0];
+        p2.hp = p2_max;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        // P2 should have lost some HP from the drain on hit branches (Leech Seed has 90% accuracy).
+        let p2_drained = outcomes.iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < p2_max));
+        assert!(p2_drained, "Leech Seed should drain HP from a non-Magic-Guard target");
+    }
+
+    // ── Long Reach: blocks contact punishment ─────────────────────────────────
+
+    #[test]
+    fn long_reach_blocks_rough_skin_recoil() {
+        // Long Reach user uses Tackle — no Rough Skin recoil (contact removed).
+        let mut p1_lr = mon(Species::Decidueye, PokemonMove::Tackle, Ability::LongReach);
+        let mut p1_no = mon(Species::Decidueye, PokemonMove::Tackle, Ability::None);
+        p1_lr.stats[5] = 200; p1_no.stats[5] = 200;
+        let p1_max = p1_lr.stats[0];
+
+        let p2 = mon(Species::Garchomp, PokemonMove::Splash, Ability::RoughSkin);
+
+        let state_lr = battle_state_from_lists(vec![p1_lr], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let recoil_lr = avg_dmg_p1(&run(state_lr), p1_max);
+        let recoil_no = avg_dmg_p1(&run(state_no), p1_max);
+
+        assert_eq!(recoil_lr, 0.0,
+            "Long Reach removes contact — Rough Skin should not fire; recoil={recoil_lr}");
+        assert!(recoil_no > 0.0,
+            "Without Long Reach, Tackle triggers Rough Skin recoil; recoil={recoil_no}");
+    }
+
+    #[test]
+    fn long_reach_blocks_spiky_shield_chip() {
+        // Long Reach user uses Tackle into Spiky Shield — no chip damage (contact removed).
+        // P1 uses Spiky Shield, P2 (Long Reach) attacks into it.
+        let p1 = build_pokemon_state(
+            Species::Clefable, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::SpikyShield), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        let mut p2_lr = mon(Species::Decidueye, PokemonMove::Tackle, Ability::LongReach);
+        let mut p2_no = mon(Species::Decidueye, PokemonMove::Tackle, Ability::None);
+        // P2 moves first (higher speed) so the attack hits the shield this turn.
+        p2_lr.stats[5] = 500; p2_no.stats[5] = 500;
+        let p2_max = p2_lr.stats[0];
+
+        let state_lr = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_lr], vec![]);
+        let state_no = battle_state_from_lists(vec![p1], vec![], vec![p2_no], vec![]);
+
+        // In state_lr / state_no: P2 attacks first, hits Spiky Shield.
+        let outcomes_lr = run_single_turn(
+            &MatchState::BattleState(state_lr),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(),
+        );
+        let outcomes_no = run_single_turn(
+            &MatchState::BattleState(state_no),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(),
+        );
+
+        let chip_lr = avg_dmg_p2(&outcomes_lr, p2_max);
+        let chip_no = avg_dmg_p2(&outcomes_no, p2_max);
+
+        assert_eq!(chip_lr, 0.0,
+            "Long Reach removes contact — Spiky Shield should deal no chip; chip={chip_lr}");
+        assert!(chip_no > 0.0,
+            "Without Long Reach Tackle triggers Spiky Shield chip; chip={chip_no}");
+    }
+
+    // ── Protective Pads: blocks contact punishment, retains contact bonuses ───
+
+    #[test]
+    fn protective_pads_blocks_rough_skin_recoil() {
+        // Protective Pads user uses Tackle — no Rough Skin recoil.
+        let mut p1_pp = mon_item(Species::Snorlax, PokemonMove::Tackle, Ability::None, Item::ProtectivePads);
+        let mut p1_no = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None);
+        p1_pp.stats[5] = 200; p1_no.stats[5] = 200;
+        let p1_max = p1_pp.stats[0];
+
+        let p2 = mon(Species::Garchomp, PokemonMove::Splash, Ability::RoughSkin);
+
+        let state_pp = battle_state_from_lists(vec![p1_pp], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_no], vec![], vec![p2], vec![]);
+
+        let recoil_pp = avg_dmg_p1(&run(state_pp), p1_max);
+        let recoil_no = avg_dmg_p1(&run(state_no), p1_max);
+
+        assert_eq!(recoil_pp, 0.0,
+            "Protective Pads should block Rough Skin recoil; recoil={recoil_pp}");
+        assert!(recoil_no > 0.0,
+            "Without Protective Pads Tackle triggers Rough Skin; recoil={recoil_no}");
+    }
+
+    #[test]
+    fn protective_pads_retains_tough_claws_damage_boost() {
+        // Tough Claws + Protective Pads: the move still "makes contact" for ToughClaws (1.3×),
+        // even though Protective Pads blocks the incoming punishment.
+        // Compare damage: ToughClaws + PP vs ToughClaws alone (no item).
+        let mut p1_tc_pp = mon_item(Species::Snorlax, PokemonMove::Tackle, Ability::ToughClaws, Item::ProtectivePads);
+        let mut p1_tc    = mon(Species::Snorlax, PokemonMove::Tackle, Ability::ToughClaws);
+        p1_tc_pp.stats[5] = 200; p1_tc.stats[5] = 200;
+
+        // Make them identical in all damage-relevant stats.
+        p1_tc_pp.stats[1] = 150; p1_tc.stats[1] = 150;
+
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 500; p2.hp = 500;
+
+        let state_pp = battle_state_from_lists(vec![p1_tc_pp], vec![], vec![p2.clone()], vec![]);
+        let state_no = battle_state_from_lists(vec![p1_tc],    vec![], vec![p2], vec![]);
+
+        let dmg_pp = avg_dmg_p2(&run(state_pp), 500);
+        let dmg_no = avg_dmg_p2(&run(state_no), 500);
+
+        // Both should deal similar damage (PP does not affect ToughClaws boost).
+        // Allow a small rounding margin.
+        let ratio = if dmg_no > 0.0 { dmg_pp / dmg_no } else { 1.0 };
+        assert!((ratio - 1.0).abs() < 0.05,
+            "Protective Pads should not reduce Tough Claws boost; dmg_pp={dmg_pp:.1} vs dmg_no={dmg_no:.1}");
+    }
+
+    // ── Berserk disabled by Neutralizing Gas ──────────────────────────────────
+
+    #[test]
+    fn berserk_does_not_trigger_under_neutralizing_gas() {
+        // P1 has Berserk, HP just above 50% → a strong hit crosses the threshold.
+        // P2 has Neutralizing Gas (suppresses all abilities on the field).
+        // Expected: Berserk does NOT fire → P1's SpA stays at 0.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Berserk);
+        let max_hp = p1.stats[0];
+        p1.hp = max_hp / 2 + 1;
+
+        let mut p2_gas = mon(Species::WeezingGalar, PokemonMove::Tackle, Ability::NeutralizingGas);
+        let mut p2_no  = mon(Species::WeezingGalar, PokemonMove::Tackle, Ability::None);
+        // P2 attacks first with high SpDef-piercing physical damage.
+        p2_gas.stats[5] = 500; p2_gas.stats[1] = 300;
+        p2_no.stats[5]  = 500; p2_no.stats[1]  = 300;
+
+        let state_gas = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_gas], vec![]);
+        let state_no  = battle_state_from_lists(vec![p1],         vec![], vec![p2_no],  vec![]);
+
+        let outcomes_gas = run(state_gas);
+        let outcomes_no  = run(state_no);
+
+        // With Neutralizing Gas: no branch should have P1 SpA boost.
+        let berserk_under_gas = outcomes_gas.iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] >= 1));
+        // Without Neutralizing Gas: some branches where the hit crosses 50% should show +1 SpA.
+        let berserk_without_gas = outcomes_no.iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] >= 1));
+
+        assert!(!berserk_under_gas,
+            "Berserk should not trigger while Neutralizing Gas suppresses abilities");
+        assert!(berserk_without_gas,
+            "Without Neutralizing Gas, Berserk should fire when HP drops below 50%");
+    }
+}

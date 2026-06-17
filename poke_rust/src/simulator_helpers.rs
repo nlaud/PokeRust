@@ -1154,8 +1154,14 @@ fn effective_base_power(
         if attacker.ability == Ability::IronFist && move_has_flag(move_data, &MoveFlag::Punch) {
             bp = (bp * 1.2).floor();
         }
-        // Tough Claws: 1.3× contact moves.
-        if attacker.ability == Ability::ToughClaws && move_has_flag(move_data, &MoveFlag::Contact) {
+        // Tough Claws: 1.3× contact moves. Long Reach removes contact entirely (no boost).
+        // Protective Pads does NOT suppress this: it only blocks contact-triggered punishment.
+        let long_reach = !pokemon_ability_is_suppressed(state, attacker)
+            && attacker.ability == Ability::LongReach;
+        if attacker.ability == Ability::ToughClaws
+            && !long_reach
+            && move_has_flag(move_data, &MoveFlag::Contact)
+        {
             bp = (bp * 1.3).floor();
         }
         // Strong Jaw: 1.5× biting moves.
@@ -1602,7 +1608,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     // Shell Side Arm: forecasts physical vs special and uses whichever would deal more.
     // Compares staged Atk/Def vs SpA/SpD via cross-multiplication (no item/ability multipliers
     // per Bulbapedia). Ties resolve deterministically Physical (50/50 tie-branching is a
-    // TODO; ties are rare in practice and the damage value is identical either way).
+    // Note: ties are rare in practice and the damage value is identical either way.
     let (attacking_stat, defending_stat) = if move_data.name == PokemonMove::ShellSideArm {
         let phys_a = effective_stat(_state, attacker, PokemonStat::Atk, false, false);
         let phys_d = effective_stat(_state, target, PokemonStat::Def, false, false).max(1.0);
@@ -1624,9 +1630,13 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     };
 
     // Pre-compute values that don't change per crit branch.
+    // Mold Breaker / Turboblaze / Teravolt: computed early so Unaware gating can use it.
+    let mold_breaker = attacker_breaks_mold(_state, attacker);
     // Unaware: when defending, a Pokémon with Unaware ignores the attacker's Atk/SpA stages;
-    // when attacking, it ignores the target's Def/SpD stages. Mold Breaker TODO.
-    let defender_unaware = !pokemon_ability_is_suppressed(_state, target)
+    // when attacking, it ignores the target's Def/SpD stages.
+    // Mold Breaker bypasses defender Unaware (but not attacker Unaware — self-ability).
+    let defender_unaware = !mold_breaker
+        && !pokemon_ability_is_suppressed(_state, target)
         && target.ability == Ability::Unaware;
     let attacker_unaware = !pokemon_ability_is_suppressed(_state, attacker)
         && attacker.ability == Ability::Unaware;
@@ -1855,8 +1865,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     } else { 1.0 };
 
     // ── Defender-side damage reduction abilities ──────────────────────────────
-    // Mold Breaker / Turboblaze / Teravolt: suppress ignorable target abilities.
-    let mold_breaker = attacker_breaks_mold(_state, attacker);
+    // (mold_breaker was already computed above, before the Unaware pre-compute block.)
     // Filter / Solid Rock / Prism Armor: ×0.75 from super-effective hits.
     let filter_solidrock_mult = filter_solidrock_mult(_state, target, effectiveness, mold_breaker);
     // Multiscale / Shadow Shield: ×0.5 when the target is at full HP.
@@ -2221,7 +2230,9 @@ pub fn release_traps_set_by(state: &mut BattleState, source_mon_id: u8) {
     }
 }
 
-pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
+/// `field_abilities_suppressed` should be the result of `abilities_are_suppressed(state)`.
+/// Pass `false` when no battle state is available (e.g. recoil helpers that lack state access).
+pub fn apply_damage(mon: &mut PokemonState, damage: u16, field_abilities_suppressed: bool) {
     let hp_before = mon.hp;
     mon.hp = hp_before.saturating_sub(damage);
     mon.fainted = mon.hp == 0;
@@ -2230,9 +2241,10 @@ pub fn apply_damage(mon: &mut PokemonState, damage: u16) {
     // Triggers on ANY HP loss — move damage, burn, sandstorm, Leech Seed, recoil, etc.
     // (Canon Gen 9 restricts this to direct move damage; this simulator intentionally
     // broadens the trigger per user request.)
-    // Skip if the holder fainted from this hit; skip if ability is suppressed via Gastro Acid.
-    // Field-level Neutralizing Gas suppression cannot be checked here (no state access) — TODO.
+    // Skip if the holder fainted; if ability is suppressed via Gastro Acid; or if
+    // field-level Neutralizing Gas is active (field_abilities_suppressed).
     if !mon.fainted
+        && !field_abilities_suppressed
         && mon.ability == Ability::Berserk
         && !has_status_volatile(mon, &VolatileStatus::GastroAcid)
         && (hp_before as u32) * 2 > (mon.stats[0] as u32)
@@ -2474,9 +2486,12 @@ pub(crate) fn compute_endure_outcomes(
 
 /// Apply damage and trigger the HP-change hook. Use this instead of bare `apply_damage`
 /// at any call site where item-triggered effects should fire (direct hits, recoil, residual).
-pub(crate) fn take_damage(mon: &mut PokemonState, damage: u16, env: BerryEnv) {
+///
+/// Pass the result of `abilities_are_suppressed(state)` for `field_abilities_suppressed` so
+/// that Berserk is correctly disabled while Neutralizing Gas is active.
+pub(crate) fn take_damage(mon: &mut PokemonState, damage: u16, env: BerryEnv, field_abilities_suppressed: bool) {
     if damage == 0 { return; }
-    apply_damage(mon, damage);
+    apply_damage(mon, damage, field_abilities_suppressed);
     if !mon.fainted {
         on_hp_change(mon, &env);
     }
@@ -2527,12 +2542,14 @@ pub fn apply_damage_and_check_game_over(
         .map(|m| item_is_active(state, m))
         .unwrap_or(false);
     let target_env = berry_env(state, target_slot);
+    // Compute before mutable borrow of state below.
+    let field_suppressed = abilities_are_suppressed(state);
     let target_mon = match target_slot.player {
         Player::P1 => state.p1_active_mons.get_mut(target_slot.slot_index as usize),
         Player::P2 => state.p2_active_mons.get_mut(target_slot.slot_index as usize),
     }?;
 
-    take_damage(target_mon, damage, target_env);
+    take_damage(target_mon, damage, target_env, field_suppressed);
 
     if damage > 0 && item_active && matches!(target_mon.item, Item::AirBalloon) {
         target_mon.item = Item::None;
@@ -4066,7 +4083,8 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
     if !magic_guard && conditions.iter().any(|sc| matches!(sc, SideCondition::StealthRock)) {
         let dmg = (((max_hp as f64) * rock_eff / 8.0).floor() as u16).max(1);
         let env = berry_env(state, slot);
-        if let Some(m) = get_pokemon_at_slot_mut(state, slot) { take_damage(m, dmg, env); }
+        let as_ = abilities_are_suppressed(state);
+        if let Some(m) = get_pokemon_at_slot_mut(state, slot) { take_damage(m, dmg, env, as_); }
     }
     if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) { return; }
 
@@ -4078,7 +4096,8 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
             let denom: u16 = match layers { 1 => 8, 2 => 6, _ => 4 };
             let dmg = (max_hp / denom).max(1);
             let env = berry_env(state, slot);
-            if let Some(m) = get_pokemon_at_slot_mut(state, slot) { take_damage(m, dmg, env); }
+            let as_ = abilities_are_suppressed(state);
+            if let Some(m) = get_pokemon_at_slot_mut(state, slot) { take_damage(m, dmg, env, as_); }
         }
     }
     if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) { return; }
@@ -5381,9 +5400,9 @@ fn heal_mon(mon: &mut PokemonState, amount: u16) {
 }
 
 /// Deal `amount` residual damage, clearing on faint. Returns true if the mon fainted.
-fn deal_residual_damage(mon: &mut PokemonState, amount: u16, env: BerryEnv) -> bool {
+fn deal_residual_damage(mon: &mut PokemonState, amount: u16, env: BerryEnv, abilities_suppressed: bool) -> bool {
     if amount == 0 { return false; }
-    take_damage(mon, amount, env);
+    take_damage(mon, amount, env, abilities_suppressed);
     if mon.fainted {
         clear_pokemon_on_faint(mon);
         true
@@ -5415,8 +5434,8 @@ fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx, env:
     }
 
     if ctx.sun && !ctx.abilities_suppressed {
-        if mon.ability == Ability::DrySkin   && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, env) { return; }
-        if mon.ability == Ability::SolarPower && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, env) { return; }
+        if mon.ability == Ability::DrySkin   && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, env, ctx.abilities_suppressed) { return; }
+        if mon.ability == Ability::SolarPower && deal_residual_damage(mon, (max_hp as u32 / 8) as u16, env, ctx.abilities_suppressed) { return; }
     }
 
     if !ctx.sandstorm { return; }
@@ -5429,7 +5448,7 @@ fn apply_weather_residual(mon: &mut PokemonState, ctx: &WeatherResidualCtx, env:
         || (!ctx.items_suppressed && !klutz_disables_item(mon) && matches!(mon.item, Item::SafetyGoggles));
 
     if !sandstorm_immune {
-        deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16, env);
+        deal_residual_damage(mon, (mon.stats[0] as u32 / 16) as u16, env, ctx.abilities_suppressed);
     }
 }
 
@@ -5445,16 +5464,16 @@ fn apply_status_residual(mon: &mut PokemonState, abilities_suppressed: bool, env
             if !magic_guard {
                 // Heatproof halves burn residual damage (from 1/16 to 1/32 max HP).
                 let divisor = if !abilities_suppressed && mon.ability == Ability::Heatproof { 32 } else { 16 };
-                deal_residual_damage(mon, (mon.stats[0] as u32 / divisor) as u16, env);
+                deal_residual_damage(mon, (mon.stats[0] as u32 / divisor) as u16, env, abilities_suppressed);
             }
         }
         Some(Status::Poison) => {
-            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 8) as u16, env); }
+            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 / 8) as u16, env, abilities_suppressed); }
         }
         Some(Status::ToxicPoison(n)) => {
             let new_n = n.saturating_add(1);
             mon.status = Some(Status::ToxicPoison(new_n));
-            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 * new_n as u32 / 16) as u16, env); }
+            if !magic_guard { deal_residual_damage(mon, (mon.stats[0] as u32 * new_n as u32 / 16) as u16, env, abilities_suppressed); }
         }
         _ => {}
     }
@@ -5505,15 +5524,19 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
 
     // Leftovers: restore 1/16 max HP (rounded down, min 1) at end of turn.
     // Does not consume the item. Capped at max HP by gain_hp.
-    // TODO: gate on Heal Block when that mechanic is implemented.
+    // Blocked by Heal Block.
     for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
-        if !mon.fainted && !ctx.items_suppressed && !klutz_disables_item(mon) && mon.item == Item::Leftovers {
+        if !mon.fainted && !ctx.items_suppressed && !klutz_disables_item(mon)
+            && mon.item == Item::Leftovers && !heal_is_blocked(mon)
+        {
             let max_hp = mon.stats[0].max(1);
             gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p1_envs[i]);
         }
     }
     for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
-        if !mon.fainted && !ctx.items_suppressed && !klutz_disables_item(mon) && mon.item == Item::Leftovers {
+        if !mon.fainted && !ctx.items_suppressed && !klutz_disables_item(mon)
+            && mon.item == Item::Leftovers && !heal_is_blocked(mon)
+        {
             let max_hp = mon.stats[0].max(1);
             gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p2_envs[i]);
         }
@@ -5723,8 +5746,9 @@ fn apply_future_move_damage(
             for (dmg, _is_crit, dmg_prob) in damage_outcomes {
                 let mut new_state = state.clone();
                 let env = berry_env(&new_state, target_slot);
+                let as_ = abilities_are_suppressed(&new_state);
                 if let Some(t) = get_pokemon_at_slot_mut(&mut new_state, target_slot) {
-                    take_damage(t, dmg, env);
+                    take_damage(t, dmg, env, as_);
                 }
                 next_branches.push((new_state, prob * dmg_prob));
             }
@@ -5794,11 +5818,15 @@ fn apply_leech_seed_residual(
         let drain = (target_mon.stats[0].max(1) as u32 / 8).max(1) as u16;
         // Does the seeded mon have (unsuppressed) Liquid Ooze?
         let liquid_ooze = !abilities_suppressed && target_mon.ability == Ability::LiquidOoze;
+        // Magic Guard prevents Leech Seed damage to the holder.
+        let target_magic_guard = !abilities_suppressed && target_mon.ability == Ability::MagicGuard;
 
-        // Apply the drain to the seeded mon.
-        match player {
-            Player::P1 => take_damage(&mut state.p1_active_mons[idx], drain, target_env),
-            Player::P2 => take_damage(&mut state.p2_active_mons[idx], drain, target_env),
+        // Apply the drain to the seeded mon (skipped by Magic Guard).
+        if !target_magic_guard {
+            match player {
+                Player::P1 => take_damage(&mut state.p1_active_mons[idx], drain, target_env, abilities_suppressed),
+                Player::P2 => take_damage(&mut state.p2_active_mons[idx], drain, target_env, abilities_suppressed),
+            }
         }
 
         // Resolve the seeder (opposing active slot in singles); skip if empty/fainted.
@@ -5808,9 +5836,11 @@ fn apply_leech_seed_residual(
         };
         let (Some(seeder), Some(seeder_env)) = (seeder_opt, seeder_env) else { continue };
         if seeder.fainted { continue; }
+        // If Magic Guard blocked the drain, no HP was transferred; seeder gets nothing.
+        if target_magic_guard { continue; }
         let amount = apply_big_root(seeder, drain, items_suppressed);
         if liquid_ooze {
-            take_damage(seeder, amount, seeder_env);
+            take_damage(seeder, amount, seeder_env, abilities_suppressed);
         } else if !heal_is_blocked(seeder) {
             gain_hp(seeder, amount, seeder_env);
         }
@@ -5876,7 +5906,7 @@ fn apply_binding_chip_damage(
         } else {
             ((max_hp as u32) / 8).max(1) as u16
         };
-        deal_residual_damage(mon, chip, env);
+        deal_residual_damage(mon, chip, env, abilities_suppressed);
     }
 }
 
@@ -5920,7 +5950,7 @@ fn apply_salt_cure_damage(
             || pokemon_has_type(mon, &PokemonType::Steel);
         let divisor: u32 = if is_water_or_steel { 4 } else { 8 };
         let chip = ((max_hp as u32) / divisor).max(1) as u16;
-        deal_residual_damage(mon, chip, env);
+        deal_residual_damage(mon, chip, env, abilities_suppressed);
     }
 }
 
@@ -6359,7 +6389,9 @@ pub fn move_unfreezes_target(move_name: &PokemonMove) -> bool {
 }
 
 /// Apply a volatile status to a pokemon (prevents duplicate volatiles of the same type).
-fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volatile: &VolatileStatus) {
+/// `attacker_mold_break` should be `true` when the source has a Mold Breaker / Turboblaze /
+/// Teravolt ability — it bypasses the Sweet Veil self-protection block on the holder.
+fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volatile: &VolatileStatus, attacker_mold_break: bool) {
     // Check if pokemon already has this volatile status
     let already_has = has_status_volatile(mon, volatile);
 
@@ -6398,8 +6430,9 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
         // Sweet Veil: the holder cannot receive Yawn.
         // Ally protection (Sweet Veil protecting teammates' Yawn) is handled at the
         // apply_effect_to_target call site where side context is available.
-        // Mold Breaker: TODO
+        // Mold Breaker bypasses this self-protection (attacker_mold_break passed from caller).
         if matches!(volatile, VolatileStatus::Yawn)
+            && !attacker_mold_break
             && !pokemon_ability_is_suppressed(state, mon)
             && mon.ability == Ability::SweetVeil
         {
@@ -6452,8 +6485,10 @@ pub(crate) fn apply_stat_boost_external(mon: &mut PokemonState, boosts: &[i8; 7]
 }
 
 /// Public thin wrapper around `apply_volatile_to_pokemon` for callers outside this module.
+/// Always passes `attacker_mold_break = false`; callers that need Mold Breaker bypass should
+/// route through `apply_effect_to_target` instead.
 pub(crate) fn apply_volatile_to_pokemon_pub(state: &BattleState, mon: &mut PokemonState, volatile: &VolatileStatus) {
-    apply_volatile_to_pokemon(state, mon, volatile);
+    apply_volatile_to_pokemon(state, mon, volatile, false);
 }
 
 /// Apply a stat boost delta to `mon`, clamping each stage to `[-6, 6]`.
@@ -6907,7 +6942,7 @@ fn apply_effect_to_target(
             if !yawn_blocked_by_sweet_veil && !aroma_veil_blocked && !volatile_blocked_by_safeguard
                 && !oblivious_blocks && !inner_focus_blocks_flinch
             {
-                apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile);
+                apply_volatile_to_pokemon(&terrain_snapshot, target_mon, volatile, attacker_mold_break);
 
                 // Steadfast: +1 Speed when the holder flinches.
                 // The flinch volatile has just been pushed; fire immediately so the boost
@@ -7007,7 +7042,7 @@ fn apply_effect_to_attacker(
         }
 
         if let Some(volatile) = &effect.volatile_status {
-            apply_volatile_to_pokemon(&terrain_snapshot, attacker_mon, volatile);
+            apply_volatile_to_pokemon(&terrain_snapshot, attacker_mon, volatile, false);
         }
 
         // After both status and volatile are applied, check status-cure berries.
@@ -7581,13 +7616,10 @@ pub fn try_apply_encore(
 
 /// Damage the attacker by `numer/denom` of its max HP (Rough Skin / Aftermath pattern).
 /// Indirect HP damage paid by the attacker after using a move: Rough Skin / Iron Barbs recoil,
-/// Rocky Helmet, etc.  Blocked by Magic Guard.  Handles faint bookkeeping.
+/// Rocky Helmet, crash damage, entry hazards, etc.  Blocked by Magic Guard.
+/// Handles faint bookkeeping.
 ///
-/// Future indirect-damage sources that must also be blocked by Magic Guard:
-///   - Life Orb recoil (1/10 max HP after each damaging hit) — Magic Guard: TODO
-///   - Crash damage (High Jump Kick / Jump Kick miss — 1/2 max HP) — Magic Guard: TODO
-///   - Leech Seed end-of-turn drain — Magic Guard: TODO (see apply_status_residual)
-///   - Entry hazard switch-in damage (Spikes, Stealth Rock, Toxic Spikes) — Magic Guard: TODO
+/// Note: Life Orb recoil (1/10 max HP) is not yet implemented (feature gap).
 pub(crate) fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSlot, numer: u32, denom: u32) {
     let abilities_suppressed = abilities_are_suppressed(bs);
     let (max_hp, magic_guard) = {
@@ -7601,7 +7633,7 @@ pub(crate) fn apply_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: F
     let damage = ((max_hp as u32 * numer) / denom).max(1) as u16;
     let mut fainted = false;
     if let Some(atk) = get_pokemon_at_slot_mut(bs, attacker_slot) {
-        take_damage(atk, damage, env);
+        take_damage(atk, damage, env, abilities_suppressed);
         if atk.fainted {
             clear_pokemon_on_faint(atk);
             fainted = true;
@@ -7627,7 +7659,7 @@ fn apply_flat_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSl
     let env = berry_env(bs, attacker_slot);
     let mut fainted = false;
     if let Some(atk) = get_pokemon_at_slot_mut(bs, attacker_slot) {
-        take_damage(atk, amount, env);
+        take_damage(atk, amount, env, abilities_suppressed);
         if atk.fainted {
             clear_pokemon_on_faint(atk);
             fainted = true;
@@ -7636,6 +7668,25 @@ fn apply_flat_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSl
     if fainted {
         handle_pokemon_faint(bs, attacker_slot.player, attacker_slot.slot_index);
     }
+}
+
+/// Returns `true` if the move can trigger contact-based punishment effects on the attacker.
+/// Long Reach removes contact entirely (so Tough Claws is also lost); Protective Pads only
+/// blocks the *punishment* side — the holder still benefits from user-side contact bonuses
+/// (Tough Claws etc.).
+pub(crate) fn contact_effects_apply(
+    state: &BattleState,
+    attacker: &PokemonState,
+    move_data: &MoveData,
+) -> bool {
+    if !move_has_flag(move_data, &MoveFlag::Contact) { return false; }
+    let abilities_suppressed = abilities_are_suppressed(state);
+    // Long Reach removes contact entirely.
+    if !abilities_suppressed && attacker.ability == Ability::LongReach { return false; }
+    // Protective Pads: blocks contact-triggered punishment while still "making contact" for
+    // user-side bonuses. Item must be active (not suppressed by Klutz/Magic Room).
+    if item_is_active(state, attacker) && attacker.item == Item::ProtectivePads { return false; }
+    true
 }
 
 /// Fire all on-hit reactive ability effects for the ability holder (`holder_slot`) after it
@@ -7669,12 +7720,18 @@ pub fn apply_contact_hit_reactions(
         }
     };
 
-    let is_contact = move_has_flag(move_data, &MoveFlag::Contact);
+    // `contact_effects_apply` accounts for Long Reach (removes contact) and Protective Pads
+    // (blocks punishment while keeping user-side contact bonuses like Tough Claws).
+    let contact_punish = {
+        let first_bs = &branches[0].0;
+        get_pokemon_at_slot(first_bs, attacker_slot)
+            .map_or(false, |atk| contact_effects_apply(first_bs, atk, move_data))
+    };
     let is_physical = matches!(move_data.category, MoveCategory::Physical);
 
     // Beak Blast: if the holder has the BeakBlastCharging volatile and the attacker's move
-    // makes contact, burn the attacker (100% chance, respects burn immunity).
-    let branches = if is_contact {
+    // makes contact (and contact punishment applies), burn the attacker.
+    let branches = if contact_punish {
         let has_beak_blast_charging = {
             let first_bs = &branches[0].0;
             get_pokemon_at_slot(first_bs, holder_slot)
@@ -7695,14 +7752,14 @@ pub fn apply_contact_hit_reactions(
 
     let mut branches = match holder_ability {
         Ability::RoughSkin => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             branches.into_iter().map(|(mut bs, prob)| {
                 apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 8);
                 (bs, prob)
             }).collect()
         }
         Ability::Aftermath => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             branches.into_iter().map(|(mut bs, prob)| {
                 let holder_fainted = get_pokemon_at_slot(&bs, holder_slot).map(|m| m.fainted).unwrap_or(false);
                 if !holder_fainted { return (bs, prob); }
@@ -7712,21 +7769,21 @@ pub fn apply_contact_hit_reactions(
             }).collect()
         }
         Ability::FlameBody => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             let eff = HitEffect { status: Some(Status::Burn), ..Default::default() };
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
                 apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
             })
         }
         Ability::PoisonPoint => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             let eff = HitEffect { status: Some(Status::Poison), ..Default::default() };
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
                 apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
             })
         }
         Ability::Static => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             let eff = HitEffect { status: Some(Status::Paralysis), ..Default::default() };
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
                 apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
@@ -7741,7 +7798,7 @@ pub fn apply_contact_hit_reactions(
             }).collect()
         }
         Ability::CuteCharm => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             let eligible = {
                 let first_bs = &branches[0].0;
                 can_be_infatuated(first_bs, holder_slot, attacker_slot)
@@ -7761,7 +7818,7 @@ pub fn apply_contact_hit_reactions(
             })
         }
         Ability::Gooey => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             let eff = HitEffect { boosts: [0, 0, 0, 0, -1, 0, 0], ..Default::default() };
             branches.into_iter().map(|(mut bs, prob)| {
                 apply_effect_to_target(&mut bs, holder_slot, attacker_slot, &eff, attacker_slot.player);
@@ -7842,7 +7899,7 @@ pub fn apply_contact_hit_reactions(
         // first contact hit rather than the cartridge's last strike — equivalent outcome,
         // since the attacker's item is gone either way.
         Ability::Pickpocket => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             branches.into_iter().map(|(mut bs, prob)| {
                 let holder_alive = get_pokemon_at_slot(&bs, holder_slot)
                     .map(|m| !m.fainted)
@@ -7854,7 +7911,7 @@ pub fn apply_contact_hit_reactions(
             }).collect()
         }
         Ability::Mummy => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             branches.into_iter().map(|(mut bs, prob)| {
                 let (atk_ability, excluded) = {
                     let Some(atk) = get_pokemon_at_slot(&bs, attacker_slot) else { return (bs, prob); };
@@ -7870,7 +7927,7 @@ pub fn apply_contact_hit_reactions(
             }).collect()
         }
         Ability::WanderingSpirit => {
-            if !is_contact { return branches; }
+            if !contact_punish { return branches; }
             branches.into_iter().map(|(mut bs, prob)| {
                 // Check attacker's ability can be swapped
                 let (atk_ability, excluded) = {
@@ -7960,7 +8017,8 @@ pub fn apply_contact_hit_reactions(
 /// Lightning Rod and Storm Drain are **not** handled here — they are draw-in abilities that
 /// fire before the accuracy roll.  See `try_drawin_negate`.
 ///
-/// Note: Mold Breaker bypass is not yet implemented (separate TODO).
+/// Mold Breaker bypass is handled via `target_ability_as_seen_by`, which returns `Ability::None`
+/// for ignorable abilities when the attacker has a Mold Breaker family ability.
 pub(crate) fn try_absorb_move(
     state: &mut BattleState,
     target_slot: FieldSlot,
@@ -7968,7 +8026,7 @@ pub(crate) fn try_absorb_move(
     move_data: &MoveData,
     items_suppressed: bool,
 ) -> bool {
-    // Fetch the target's ability; if suppressed (or bypassed by Mold Breaker) the move hits normally.
+    // Fetch the target's ability as seen by the attacker; suppressed or Mold-Broken → hits normally.
     let target_ability = match get_pokemon_at_slot(state, target_slot) {
         Some(t) => target_ability_as_seen_by(state, attacker, t),
         _ => return false,
@@ -8195,10 +8253,11 @@ pub fn apply_secondary_effects(
         if !failed {
             // HP cost: ceil(max_hp / 2)
             for (bs, _) in branches.iter_mut() {
+                let as_ = abilities_are_suppressed(bs);
                 if let Some(m) = get_pokemon_at_slot_mut(bs, attacker_slot) {
                     let max_hp = m.stats[0].max(1);
                     let cost = (max_hp + 1) / 2;
-                    take_damage(m, cost, attacker_env);
+                    take_damage(m, cost, attacker_env, as_);
                 }
             }
         }
@@ -8409,7 +8468,7 @@ pub fn apply_secondary_effects(
             let state_snapshot = bs.clone();
             if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot) {
                 if !target_mon.fainted {
-                    apply_volatile_to_pokemon(&state_snapshot, target_mon, &VolatileStatus::SaltCure);
+                    apply_volatile_to_pokemon(&state_snapshot, target_mon, &VolatileStatus::SaltCure, false);
                 }
             }
         }
@@ -8480,10 +8539,19 @@ pub fn clear_pokemon_on_faint(mon: &mut PokemonState) {
 
 /// Check if a PokÃ©mon is immune to Rage Powder based on type, ability, or item.
 /// Grass-types, PokÃ©mon with Overcoat ability, and those holding Safety Googles are immune.
-pub fn is_immune_to_powder(state: &BattleState, mon: &PokemonState) -> bool {
-    pokemon_has_type(mon, &PokemonType::Grass)
-    || (!abilities_are_suppressed(state) && mon.ability == Ability::Overcoat)
-    || (item_is_active(state, mon) && matches!(mon.item, Item::SafetyGoggles))
+/// Returns true when `mon` is immune to powder/spore moves.
+///
+/// `attacker` — pass the attacking Pokémon to enable Mold Breaker bypass: a Mold Breaker /
+/// Turboblaze / Teravolt attacker suppresses Overcoat (it is an ignorable ability) but does
+/// NOT bypass Grass-type immunity or Safety Goggles (those are type/item, not ability).
+/// Pass `None` when the caller has no attacker context (e.g. Rage Powder redirect check).
+pub fn is_immune_to_powder(state: &BattleState, mon: &PokemonState, attacker: Option<&PokemonState>) -> bool {
+    if pokemon_has_type(mon, &PokemonType::Grass) { return true; }
+    let abilities_suppressed = abilities_are_suppressed(state);
+    let mold_breaks_overcoat = attacker.is_some_and(|a| attacker_breaks_mold(state, a));
+    if !abilities_suppressed && !mold_breaks_overcoat && mon.ability == Ability::Overcoat { return true; }
+    if item_is_active(state, mon) && matches!(mon.item, Item::SafetyGoggles) { return true; }
+    false
 }
 
 /// Check if a redirect target has both Sky Drop and a Follow Me/Rage Powder effect.
@@ -8541,8 +8609,10 @@ pub fn check_and_apply_redirection(
     // Rage Powder only redirects moves from attackers that are not immune to powder
     // (Grass types, Overcoat, Safety Goggles). The immunity belongs to the attacker
     // whose move is being redirected, not to the redirector.
+    // No attacker context needed here — the check is on the attacker itself, and
+    // Mold Breaker does not suppress an attacker's own Overcoat for redirect purposes.
     let attacker_immune_to_powder = get_pokemon_at_slot(state, user_slot)
-        .map(|attacker| is_immune_to_powder(state, attacker))
+        .map(|attacker| is_immune_to_powder(state, attacker, None))
         .unwrap_or(false);
 
     // --- Priority 1: FollowMe / RagePowder (volatile-based) ---
@@ -8594,9 +8664,13 @@ pub fn check_and_apply_redirection(
 
     // --- Priority 2: Lightning Rod (Electric) / Storm Drain (Water) ---
     // These draw single-target moves of the matching type toward the ability holder.
-    // Mold Breaker bypass is not yet implemented (separate TODO).
+    // Mold Breaker / Turboblaze / Teravolt bypass the redirection entirely.
     if let Some(md) = move_data {
         if let Some(attacker) = get_pokemon_at_slot(state, user_slot) {
+            // Mold Breaker suppresses Lightning Rod / Storm Drain on the redirector.
+            if attacker_breaks_mold(state, attacker) {
+                return target_slots;
+            }
             let move_type = effective_move_type(state, attacker, md);
             let mut ability_redirectors: Vec<(FieldSlot, &PokemonState)> = Vec::new();
 

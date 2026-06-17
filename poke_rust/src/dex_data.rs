@@ -407,7 +407,6 @@ pub struct MoveData {
     pub drain_fraction: [u8; 2],
     pub mind_blown_recoil: bool,
     pub struggle_recoil: bool,
-    pub steals_boosts: bool,
 
     // Hit Modifiers
     pub crit_ratio: u8,
@@ -423,9 +422,6 @@ pub struct MoveData {
     pub multihit_accuracy: bool,
 
     pub sleep_usable: bool,
-    pub smart_target: bool,
-    pub tracks_target: bool,
-
     pub has_crash_damage: bool,
     pub damage_override: DamageOverride,
 
@@ -1358,7 +1354,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
     let mut drain_fraction: [u8; 2] = [0, 0];
     let mut mind_blown_recoil = false;
     let mut struggle_recoil = false;
-    let mut steals_boosts = false;
 
     let mut secondaries: Vec<PokemonSecondaryEffect> = Vec::new();
     let mut self_secondaries: Vec<PokemonSecondaryEffect> = Vec::new();
@@ -1375,8 +1370,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
     let mut multihit_accuracy = false;
 
     let mut sleep_usable = false;
-    let mut smart_target = false;
-    let mut tracks_target = false;
     let mut has_crash_damage = false;
     let mut stalling_move = false;
     let mut override_offensive_stat: Option<PokemonStat> = None;
@@ -1532,8 +1525,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             mind_blown_recoil = extract_bool(trimmed, "mindBlownRecoil").unwrap_or(false);
         } else if trimmed.starts_with("struggleRecoil:") {
             struggle_recoil = extract_bool(trimmed, "struggleRecoil").unwrap_or(false);
-        } else if trimmed.starts_with("stealsBoosts:") {
-            steals_boosts = extract_bool(trimmed, "stealsBoosts").unwrap_or(false);
         } else if trimmed.starts_with("ignoreAbility:") {
             ignore_ability = extract_bool(trimmed, "ignoreAbility").unwrap_or(false);
         } else if trimmed.starts_with("ignoreDefensive:") {
@@ -1582,10 +1573,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             }
         } else if trimmed.starts_with("sleepUsable:") {
             sleep_usable = extract_bool(trimmed, "sleepUsable").unwrap_or(false);
-        } else if trimmed.starts_with("smartTarget:") {
-            smart_target = extract_bool(trimmed, "smartTarget").unwrap_or(false);
-        } else if trimmed.starts_with("tracksTarget:") {
-            tracks_target = extract_bool(trimmed, "tracksTarget").unwrap_or(false);
         } else if trimmed.starts_with("hasCrashDamage:") {
             has_crash_damage = extract_bool(trimmed, "hasCrashDamage").unwrap_or(false);
         } else if trimmed.starts_with("overrideOffensivePokemon:") {
@@ -1823,7 +1810,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             drain_fraction,
             mind_blown_recoil,
             struggle_recoil,
-            steals_boosts,
             secondaries,
             self_secondaries,
             crit_ratio,
@@ -1835,8 +1821,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             multihit_range,
             multihit_accuracy,
             sleep_usable,
-            smart_target,
-            tracks_target,
             has_crash_damage,
             damage_override,
             stalling_move,
