@@ -42,7 +42,7 @@ pub enum MoveCategory {
     Status,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum MoveTarget {
     AdjacentAlly,       //Targets Teammates
     AdjacentAllyOrSelf, //Targets teammates or self

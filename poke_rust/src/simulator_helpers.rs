@@ -5074,11 +5074,17 @@ pub fn decrement_move_statuses(mon: &mut PokemonState) {
     for volatile in mon.volatiles.drain(..) {
         match volatile {
             VolatileStatusState::MoveStatus(effect, turns) => {
-                if turns == 0 {
+                // LockedMove counter is count-up (attacks completed so far) and is
+                // managed exclusively by the rampage end-timing fork in
+                // apply_post_damage_move_effects. Do not decrement it here.
+                if matches!(effect, crate::dex_data::VolatileStatus::LockedMove(_)) {
+                    kept.push(VolatileStatusState::MoveStatus(effect, turns));
+                } else if turns == 0 {
                     kept.push(VolatileStatusState::MoveStatus(effect, 0));
                 } else if turns > 1 {
                     kept.push(VolatileStatusState::MoveStatus(effect, turns - 1));
                 }
+                // turns == 1: drop (volatile expires)
             }
             other_volatile => {kept.push(other_volatile)}
         }

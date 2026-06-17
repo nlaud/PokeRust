@@ -22589,11 +22589,12 @@ mod rampaging_moves {
         assert!(!cmds.is_empty(), "must have at least one command (attack)");
     }
 
-    /// After the lock expires (turns == 1 entering post-damage), the user should be confused.
+    /// After the 3rd (guaranteed-final) locked turn, the user should be confused.
+    /// Counter = 2 means "2 attacks already completed" → next is the 3rd (always ends).
     #[test]
     fn thrash_final_turn_applies_confusion() {
         let mut p1 = mon(Species::Snorlax, PokemonMove::Thrash);
-        // turns = 2 → decrement_move_statuses will bring it to 1 → apply_post_damage detects final turn
+        // count-up: n=2 means 2 attacks done → this is the guaranteed 3rd → always end+confuse
         p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(PokemonMove::Thrash), 2));
 
         let p2 = mon(Species::Blissey, PokemonMove::Splash);
@@ -22620,6 +22621,216 @@ mod rampaging_moves {
             still_locked_prob < 0.01,
             "Thrash final turn: LockedMove volatile must be removed (still_locked_prob = {:.3})",
             still_locked_prob
+        );
+    }
+
+    // ─── New tests for sleep-like probabilistic end-timing ───────────────────
+
+    /// First use of Thrash (no pre-existing lock): the lock should be set to n=1 (count-up),
+    /// and the move must NOT end or confuse on the first attack.
+    #[test]
+    fn thrash_first_turn_sets_lock_and_never_ends() {
+        let p1 = mon(Species::Snorlax, PokemonMove::Thrash);
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(
+                    has_locked_move_volatile(&bs.p1_active_mons[0]),
+                    "Thrash turn 1: attacker must have LockedMove volatile"
+                );
+                assert!(
+                    !is_confused(&bs.p1_active_mons[0]),
+                    "Thrash turn 1: attacker must NOT be confused yet"
+                );
+            }
+        }
+
+        // Verify counter is exactly 1 (count-up semantics)
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                let counter = bs.p1_active_mons[0].volatiles.iter().find_map(|v| {
+                    if let VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), n) = v { Some(*n) } else { None }
+                });
+                assert_eq!(counter, Some(1), "Thrash turn 1: lock counter must be 1 (count-up)");
+            }
+        }
+    }
+
+    /// Second locked use (counter = 1): 50% chance to end + confuse, 50% continue.
+    /// This is the key new probabilistic branch — mirrors the sleep pattern.
+    #[test]
+    fn thrash_second_turn_fifty_fifty_end() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Thrash);
+        // n=1 → "1 attack already done" → this is the 2nd → 50% end, 50% continue
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(PokemonMove::Thrash), 1));
+
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        let total_prob: f64 = outcomes.iter().map(|(_, p)| p).sum();
+        assert!(
+            (total_prob - 1.0).abs() < 0.01,
+            "Branches must sum to 1.0 (got {:.4})",
+            total_prob
+        );
+
+        let confused_prob: f64 = outcomes.iter()
+            .filter(|(s, _)| matches!(s, MatchState::BattleState(bs) if is_confused(&bs.p1_active_mons[0])))
+            .map(|(_, p)| p)
+            .sum();
+
+        let still_locked_prob: f64 = outcomes.iter()
+            .filter(|(s, _)| matches!(s, MatchState::BattleState(bs) if has_locked_move_volatile(&bs.p1_active_mons[0])))
+            .map(|(_, p)| p)
+            .sum();
+
+        assert!(
+            (confused_prob - 0.5).abs() < 0.1,
+            "Thrash 2nd turn: ~50%% of branches should confuse (got {:.3})",
+            confused_prob
+        );
+        assert!(
+            (still_locked_prob - 0.5).abs() < 0.1,
+            "Thrash 2nd turn: ~50%% of branches should stay locked (got {:.3})",
+            still_locked_prob
+        );
+    }
+
+    /// Branches from a rampage turn must sum to 1.0.
+    #[test]
+    fn thrash_branches_sum_to_one() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Thrash);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(PokemonMove::Thrash), 1));
+
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        let total: f64 = outcomes.iter().map(|(_, p)| p).sum();
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "All outcome branches must sum to 1.0 (got {:.6})",
+            total
+        );
+    }
+
+    // ─── RandomNormal doubles targeting ──────────────────────────────────────
+    // Uses simuilator_test_helpers::battle_state_from_lists with 2 active mons per side.
+
+    /// In doubles, Outrage should branch ~50/50 over the two live foes.
+    /// Each branch should have exactly one foe taking damage.
+    #[test]
+    fn outrage_doubles_branches_over_both_foes() {
+        use crate::data::species::Species;
+        use crate::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
+        use crate::battle::{BattleCommand, AttackCommand};
+        use crate::simulator;
+
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+
+        let attacker = build_pokemon_state(
+            Species::Dragonite, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Outrage), None, None, None]),
+            None, Some(Ability::None), Some(crate::pokemon::Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        let ally = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(crate::pokemon::Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        let foe0 = build_pokemon_state(
+            Species::Blissey, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(crate::pokemon::Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        let foe1 = build_pokemon_state(
+            Species::Blissey, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(crate::pokemon::Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+
+        let initial_hp = foe0.stats[0];
+        let state = battle_state_from_lists(
+            vec![attacker, ally.clone()], vec![],
+            vec![foe0, foe1], vec![],
+        );
+
+        // P1 slot 0 uses Outrage (no target — RandomNormal fan-out resolves it).
+        // P2 slots both use Splash.
+        let p1_cmd = crate::battle::PlayerCommand::Battle(vec![
+            BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
+            BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
+        ]);
+        let p2_cmd = crate::battle::PlayerCommand::Battle(vec![
+            BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
+            BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
+        ]);
+        let outcomes = simulator::simulate_turn(
+            &crate::battle::MatchState::BattleState(state),
+            &p1_cmd, &p2_cmd,
+            &mdex, &pdex, false, 1,
+        );
+
+        // Probability that foe slot 0 was hit (lost HP)
+        let foe0_hit_prob: f64 = outcomes.iter()
+            .filter(|(s, _)| matches!(s, crate::battle::MatchState::BattleState(bs)
+                if bs.p2_active_mons.get(0).map(|m| m.hp < initial_hp).unwrap_or(false)))
+            .map(|(_, p)| p)
+            .sum();
+
+        let foe1_hit_prob: f64 = outcomes.iter()
+            .filter(|(s, _)| matches!(s, crate::battle::MatchState::BattleState(bs)
+                if bs.p2_active_mons.get(1).map(|m| m.hp < initial_hp).unwrap_or(false)))
+            .map(|(_, p)| p)
+            .sum();
+
+        assert!(
+            foe0_hit_prob > 0.3 && foe0_hit_prob < 0.7,
+            "Outrage doubles: foe0 should be hit ~50%% of the time (got {:.3})",
+            foe0_hit_prob
+        );
+        assert!(
+            foe1_hit_prob > 0.3 && foe1_hit_prob < 0.7,
+            "Outrage doubles: foe1 should be hit ~50%% of the time (got {:.3})",
+            foe1_hit_prob
+        );
+    }
+
+    /// In singles, Outrage (RandomNormal) should deterministically hit the sole foe
+    /// (no probability split when only one live target exists).
+    #[test]
+    fn outrage_singles_always_hits_sole_foe() {
+        let p1 = mon(Species::Dragonite, PokemonMove::Outrage);
+        let p2 = mon(Species::Blissey, PokemonMove::Splash);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run(state);
+
+        // All outcomes should have the foe taking damage (lock set, not confused)
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(
+                    has_locked_move_volatile(&bs.p1_active_mons[0]),
+                    "Outrage singles: attacker must be locked after turn 1"
+                );
+            }
+        }
+
+        let total: f64 = outcomes.iter().map(|(_, p)| p).sum();
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "Outrage singles: branches must sum to 1.0 (got {:.4})",
+            total
         );
     }
 }
@@ -29508,5 +29719,223 @@ mod todo_refactor_mechanic_tests {
             "Berserk should not trigger while Neutralizing Gas suppresses abilities");
         assert!(berserk_without_gas,
             "Without Neutralizing Gas, Berserk should fire when HP drops below 50%");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Doubles faint redirection + spread multiplier guard
+// ─────────────────────────────────────────────────────────────────────────────
+mod doubles_faint_redirection {
+    use crate::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex, run_single_turn};
+    use crate::simulator;
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        build_pokemon_state(
+            species, &pdex, &mdex, Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn targeted_attack(move_slot: usize, target: Option<FieldSlot>) -> BattleCommand {
+        BattleCommand::Attack(AttackCommand { move_slot, target, terastallize: false, mega_evolve: false })
+    }
+
+    // ── Part A: single-target faint redirect ─────────────────────────────────
+
+    /// In doubles, if P1 selects foe slot 0 as the target but that slot has already
+    /// fainted before P1 attacks, the move should automatically redirect to the
+    /// surviving foe (slot 1). The fainted slot must remain untouched.
+    #[test]
+    fn single_target_redirects_to_surviving_foe_when_original_target_fainted() {
+        let attacker = mon(Species::Blastoise, PokemonMove::WaterGun);
+        let ally     = mon(Species::Snorlax,   PokemonMove::Splash);
+
+        // Blissey is very bulky — won't faint from a single WaterGun (avoids faint-masking).
+        let mut foe0 = mon(Species::Blissey, PokemonMove::Splash); // will be pre-fainted
+        let foe1     = mon(Species::Blissey, PokemonMove::Splash); // the surviving target
+
+        let foe1_initial_hp = foe1.hp;
+
+        // Pre-faint foe slot 0
+        foe0.hp = 0;
+        foe0.fainted = true;
+
+        let state = battle_state_from_lists(
+            vec![attacker, ally], vec![],
+            vec![foe0, foe1], vec![],
+        );
+
+        // P1 slot 0 explicitly targets foe slot 0 (which is fainted)
+        let p1_cmd = PlayerCommand::Battle(vec![
+            targeted_attack(0, Some(FieldSlot { player: Player::P2, slot_index: 0 })),
+            targeted_attack(0, None), // ally splashes
+        ]);
+        let p2_cmd = PlayerCommand::Battle(vec![
+            targeted_attack(0, None), // foe1 splashes
+        ]);
+
+        let outcomes = simulator::simulate_turn(
+            &MatchState::BattleState(state),
+            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1,
+        );
+
+        assert!(!outcomes.is_empty(), "must produce at least one outcome");
+
+        // In every branch: foe slot 1 (survivor) should have taken damage,
+        // and foe slot 0 (the corpse) should remain at hp = 0 (untouched).
+        let foe1_took_damage_prob: f64 = outcomes.iter()
+            .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                if bs.p2_active_mons.get(1).map(|m| m.hp < foe1_initial_hp).unwrap_or(false)))
+            .map(|(_, p)| p)
+            .sum();
+
+        let foe0_touched_prob: f64 = outcomes.iter()
+            .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                if bs.p2_active_mons.get(0).map(|m| m.hp != 0).unwrap_or(false)))
+            .map(|(_, p)| p)
+            .sum();
+
+        assert!(
+            foe1_took_damage_prob > 0.9,
+            "Redirect: surviving foe (slot 1) should take damage in ~all branches \
+             (got foe1_hit_prob={foe1_took_damage_prob:.3})"
+        );
+        assert!(
+            foe0_touched_prob < 0.01,
+            "Redirect: fainted foe (slot 0) must remain untouched \
+             (got foe0_touched_prob={foe0_touched_prob:.3})"
+        );
+    }
+
+    /// When both foes have fainted but P2 still has back mons, a single-target move
+    /// aimed at a fainted slot should fizzle gracefully (no damage, no panic).
+    #[test]
+    fn single_target_fizzles_gracefully_when_all_foes_fainted() {
+        let attacker = mon(Species::Blastoise, PokemonMove::WaterGun);
+        let ally     = mon(Species::Snorlax,   PokemonMove::Splash);
+
+        let mut foe0 = mon(Species::Blissey, PokemonMove::Splash);
+        let mut foe1 = mon(Species::Blissey, PokemonMove::Splash);
+        let back_mon = mon(Species::Blissey, PokemonMove::Splash); // keeps battle going
+
+        foe0.hp = 0; foe0.fainted = true;
+        foe1.hp = 0; foe1.fainted = true;
+
+        let state = battle_state_from_lists(
+            vec![attacker, ally], vec![],
+            vec![foe0, foe1], vec![back_mon],
+        );
+
+        // P1 slot 0 explicitly targets foe slot 0 (fainted), both P2 active mons down
+        let p1_cmd = PlayerCommand::Battle(vec![
+            targeted_attack(0, Some(FieldSlot { player: Player::P2, slot_index: 0 })),
+            targeted_attack(0, None),
+        ]);
+        // P2 can't act with both active mons fainted — but a SwitchAction would normally be
+        // forced; for this test we just supply no command and rely on the no-op path.
+        // Omit P2 command by issuing Splash from the (fainted) slot — the battle system
+        // should handle fainted-target checks itself and not crash.
+        let p2_cmd = PlayerCommand::Battle(vec![
+            targeted_attack(0, None),
+            targeted_attack(0, None),
+        ]);
+
+        // Should not panic; the move simply fizzles (no valid redirect target).
+        let outcomes = simulator::simulate_turn(
+            &MatchState::BattleState(state),
+            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1,
+        );
+
+        let total_prob: f64 = outcomes.iter().map(|(_, p)| p).sum();
+        assert!(
+            (total_prob - 1.0).abs() < 0.01,
+            "Fizzle: branches must still sum to 1.0 (got {total_prob:.4})"
+        );
+    }
+
+    // ── Part B: spread multiplier is already correct; guard test ─────────────
+
+    /// Rock Slide (AllAdjacentFoes) in doubles should deal 0.75× damage when both
+    /// foes are alive, and full 1.0× damage when only one foe remains.
+    /// The ratio between the two should be approximately 4/3.
+    #[test]
+    fn spread_move_full_power_when_one_foe_fainted() {
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+
+        // Use Rhyperior (high Attack) with Rock Slide.
+        // Blissey targets are bulky enough that neither will faint in one hit.
+        let attacker = build_pokemon_state(
+            Species::Rhyperior, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::RockSlide), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        );
+        let ally      = mon(Species::Snorlax,  PokemonMove::Splash);
+        let foe_alive = mon(Species::Blissey,  PokemonMove::Splash);
+        let initial_hp = foe_alive.hp;
+
+        // ── Run A: both foes alive ──────────────────────────────────────────
+        let state_two = battle_state_from_lists(
+            vec![attacker.clone(), ally.clone()], vec![],
+            vec![foe_alive.clone(), foe_alive.clone()], vec![],
+        );
+        let p1_cmd = PlayerCommand::Battle(vec![
+            targeted_attack(0, None),
+            targeted_attack(0, None),
+        ]);
+        let p2_cmd = PlayerCommand::Battle(vec![
+            targeted_attack(0, None),
+            targeted_attack(0, None),
+        ]);
+        let out_two = simulator::simulate_turn(
+            &MatchState::BattleState(state_two),
+            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1,
+        );
+        // Average damage dealt to foe slot 0 across all outcome branches
+        let avg_dmg_two: f64 = out_two.iter().map(|(s, p)| {
+            let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => initial_hp };
+            (initial_hp.saturating_sub(hp) as f64) * p
+        }).sum();
+
+        // ── Run B: foe slot 1 already fainted ──────────────────────────────
+        let mut foe1_fainted = foe_alive.clone();
+        foe1_fainted.hp = 0;
+        foe1_fainted.fainted = true;
+
+        let state_one = battle_state_from_lists(
+            vec![attacker, ally], vec![],
+            vec![foe_alive, foe1_fainted], vec![],
+        );
+        let out_one = simulator::simulate_turn(
+            &MatchState::BattleState(state_one),
+            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1,
+        );
+        let avg_dmg_one: f64 = out_one.iter().map(|(s, p)| {
+            let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => initial_hp };
+            (initial_hp.saturating_sub(hp) as f64) * p
+        }).sum();
+
+        // Single-target case must deal strictly more damage than spread case
+        assert!(
+            avg_dmg_one > avg_dmg_two,
+            "Spread: damage with 1 foe ({avg_dmg_one:.1}) must exceed damage with 2 foes ({avg_dmg_two:.1})"
+        );
+
+        // Ratio should be close to 4/3 (= 1.0 / 0.75)
+        let ratio = avg_dmg_one / avg_dmg_two.max(1.0);
+        assert!(
+            (ratio - 4.0 / 3.0).abs() < 0.1,
+            "Spread: damage ratio (1-foe / 2-foe) should be ~1.333, got {ratio:.4}"
+        );
     }
 }

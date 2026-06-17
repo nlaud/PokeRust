@@ -9,6 +9,9 @@ hook and should be researchable, plannable, and implementable in a single focuse
 - Anticipation — signal if opponents have SE or OHKO moves (message-only; no battle-state change in a full-information sim)
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
+## Season 2 New Stuff
+- 
+
 ## Refactors
 - Refactor Outrage-type moves to act more like sleep, having a 50% chance to end after 2nd attack, then 100% on the last one.
 - Recheck all tests, suggest new tests, verify mechanics.
