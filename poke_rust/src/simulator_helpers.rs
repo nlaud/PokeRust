@@ -439,6 +439,16 @@ pub fn move_type_effectiveness_with_attacker(state: &BattleState, move_type: &Po
         {
             type_effectiveness = 1.0;
         }
+        // Grounded Flying-types (Iron Ball / Gravity / Smack Down) lose their Ground immunity.
+        // The early-exit in simulator.rs already skips Ground moves on non-grounded targets;
+        // this overrides the type chart 0× so grounded Flying-types take actual damage.
+        if matches!(move_type, PokemonType::Ground)
+            && matches!(target_type, PokemonType::Flying)
+            && type_effectiveness == 0.0
+            && pokemon_is_grounded(state, target)
+        {
+            type_effectiveness = 1.0;
+        }
         effectiveness * type_effectiveness
     })
 }
@@ -1253,6 +1263,16 @@ fn effective_base_power(
             }
         }
 
+        // Fire Mane: ×1.5 to all Fire-type moves, always (no HP condition, unlike Blaze).
+        // Exclusive to Mega Pyroar. Treated as an attack-stat multiplier here (same final
+        // damage, keeps all multiplicative boosts in one coherent block).
+        if !pokemon_ability_is_suppressed(state, attacker) && attacker.ability == Ability::FireMane {
+            let eff_type = effective_move_type(state, attacker, move_data);
+            if matches!(eff_type, PokemonType::Fire) {
+                bp = (bp * 1.5).floor();
+            }
+        }
+
         // Charge / Electromorphosis / Wind Power: ×2 for the next Electric-type move.
         // The volatile is consumed (removed from the attacker's list) after the hit in
         // apply_contact_hit_reactions so that the doubling only applies to the first hit.
@@ -1444,6 +1464,52 @@ fn type_boost_item_multiplier(attacker: &PokemonState, attack_type: &PokemonType
         Some(t) if t == *attack_type => 1.2,
         _ => 1.0,
     }
+}
+
+/// Multiplicative damage bonus from "universal power items" held by the attacker:
+/// Life Orb (×1.3), Expert Belt (×1.2 on super-effective), Muscle Band (×1.1 physical),
+/// Wise Glasses (×1.1 special), Metronome item (×(1.0 + 0.2·min(streak,5)), cap ×2.0).
+/// Items must already be confirmed active (item_is_active gate applied by caller).
+/// Does NOT include type-boosting items (see `type_boost_item_multiplier`).
+fn user_power_item_multiplier(
+    attacker: &PokemonState,
+    category: &MoveCategory,
+    effectiveness: f64,
+) -> f64 {
+    let mut mult = 1.0f64;
+    match &attacker.item {
+        Item::LifeOrb => {
+            // Only boosts moves that go through the damage formula (not fixed-damage moves).
+            // Fixed-damage moves have their BP set to 0 before reaching here; they early-return
+            // before this function is called, so we always boost here.
+            mult *= 5324.0 / 4096.0;
+        }
+        Item::ExpertBelt => {
+            if effectiveness > 1.0 {
+                mult *= 4915.0 / 4096.0;
+            }
+        }
+        Item::MuscleBand => {
+            if matches!(category, MoveCategory::Physical) {
+                mult *= 4505.0 / 4096.0;
+            }
+        }
+        Item::WiseGlasses => {
+            if matches!(category, MoveCategory::Special) {
+                mult *= 4505.0 / 4096.0;
+            }
+        }
+        Item::Metronome => {
+            // streak 0 = first use (×1.0); streak n ≥ 1 = n-th consecutive (×1.2 × n, cap ×2.0).
+            let streak = attacker.consecutive_move_count.min(5) as u32;
+            if streak > 0 {
+                let numerator = 4096u32 + 819 * streak;
+                mult *= numerator as f64 / 4096.0;
+            }
+        }
+        _ => {}
+    }
+    mult
 }
 
 // ──── Type-resist berries (0.5× on super-effective hit, then consumed) ────────
@@ -1827,6 +1893,8 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let dry_skin_mult = dry_skin_fire_multiplier(target, &attack_type);
     let type_boost_mult = if !item_is_active(_state, attacker) { 1.0 }
         else { type_boost_item_multiplier(attacker, &attack_type) };
+    let user_power_mult = if !item_is_active(_state, attacker) { 1.0 }
+        else { user_power_item_multiplier(attacker, &move_data.category, effectiveness) };
     let resist_berry_mult = if !item_is_active(_state, target) { 1.0 }
         else {
             let base = resist_berry_multiplier(target, &attack_type, effectiveness);
@@ -1925,6 +1993,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
             dmg = (dmg * weather_mult).floor();
             dmg = (dmg * dry_skin_mult).floor();
             dmg = (dmg * type_boost_mult).floor();    // type-boosting item in the "other" multiplier bucket
+            dmg = (dmg * user_power_mult).floor();    // Life Orb / Expert Belt / Muscle Band / Wise Glasses / Metronome item
             dmg = (dmg * analytic_mult).floor();      // Analytic: ×1.3 when moving last
             dmg = (dmg * aura_mult).floor();          // Fairy Aura / Aura Break field effect
             // Defender-side damage reduction abilities:
@@ -3209,7 +3278,7 @@ pub(crate) fn attacker_breaks_mold(state: &BattleState, attacker: &PokemonState)
 pub(crate) fn ability_is_ignorable(ability: &Ability) -> bool {
     matches!(ability,
         // Type immunities / absorbtion
-        Ability::Levitate | Ability::WaterAbsorb | Ability::VoltAbsorb | Ability::FlashFire
+        Ability::Levitate | Ability::Eelevate | Ability::WaterAbsorb | Ability::VoltAbsorb | Ability::FlashFire
         | Ability::EarthEater | Ability::SapSipper | Ability::MotorDrive | Ability::LightningRod
         | Ability::StormDrain | Ability::DrySkin | Ability::WindRider
         // Hazard landing
@@ -3307,8 +3376,16 @@ pub fn pokemon_is_grounded(state: &BattleState, mon: &PokemonState) -> bool {
     let counts_as_flying = pokemon_has_type(mon, &PokemonType::Flying)
         && !has_status_volatile(mon, &VolatileStatus::Roost);
 
+    // Iron Ball overrides all other ungrounding effects (Flying type, Levitate, Eelevate,
+    // Air Balloon, Magnet Rise, Telekinesis) and forces the holder to be grounded.
+    // Klutz / Magic Room / Embargo already suppress item_is_active, so those negate Iron Ball.
+    if item_is_active(state, mon) && matches!(mon.item, Item::IronBall) {
+        return true;
+    }
+
     !counts_as_flying
         && mon.ability != Ability::Levitate
+        && mon.ability != Ability::Eelevate
         && (!matches!(mon.item, Item::AirBalloon) || !item_is_active(state, mon))
         && !has_status_volatile(mon, &VolatileStatus::MagnetRise)
         && !has_status_volatile(mon, &VolatileStatus::Telekinesis)
@@ -3828,6 +3905,11 @@ fn get_effective_speed(state: &BattleState, mon: &PokemonState) -> f32 {
         speed *= 1.5;
     }
 
+    // Iron Ball: ×0.5 Speed. Klutz / Magic Room (via item_is_active) negate this.
+    if item_is_active(state, mon) && matches!(mon.item, Item::IronBall) {
+        speed *= 0.5;
+    }
+
     speed
 }
 
@@ -3989,6 +4071,22 @@ pub fn get_pokemon_at_slot<'a>(state: &'a BattleState, slot: FieldSlot) -> Optio
         Player::P2 => &state.p2_active_mons,
     };
     mons.get(slot.slot_index as usize)
+}
+
+/// Returns the weather duration for `mon` setting `weather`:
+/// 8 turns if `mon` holds the matching weather rock (item active), 5 turns otherwise.
+/// Strong/permanent weather (duration 0) is unaffected — callers pass 0 directly.
+pub fn weather_rock_duration(mon: &PokemonState, weather: &Weather) -> u8 {
+    // Rock items are not suppressed by Klutz / Magic Room — use raw item check here.
+    // (This mirrors how Light Clay is read for screens: item is not gated by item_is_active.)
+    let has_rock = match weather {
+        Weather::Sun          => matches!(mon.item, Item::HeatRock),
+        Weather::Rain         => matches!(mon.item, Item::DampRock),
+        Weather::Sandstorm    => matches!(mon.item, Item::SmoothRock),
+        Weather::Snow         => matches!(mon.item, Item::IcyRock),
+        _ => false,
+    };
+    if has_rock { 8 } else { 5 }
 }
 
 /// Set weather, respecting strong weather precedence.
@@ -4202,7 +4300,7 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
         .unwrap_or(true);
 
     if !ability_suppressed {
-        apply_entry_ability_field_effects(state, &ability);
+        apply_entry_ability_field_effects(state, slot, &ability);
         apply_entry_ability_target_effects(state, slot, &ability);
         apply_send_out_only_ability_effects(state, slot, &ability);
     }
@@ -4431,7 +4529,7 @@ fn apply_send_out_only_ability_effects(state: &mut BattleState, slot: FieldSlot,
                     mon.ability = new_ability.clone();
                 }
                 // Fire the newly-traced ability's gain effects (Intimidate, weather, etc.).
-                apply_entry_ability_field_effects(state, &new_ability);
+                apply_entry_ability_field_effects(state, slot, &new_ability);
                 apply_entry_ability_target_effects(state, slot, &new_ability);
             }
         }
@@ -4449,7 +4547,7 @@ fn apply_send_out_only_ability_effects(state: &mut BattleState, slot: FieldSlot,
                     if success {
                         let new_ability = transformer.ability.clone();
                         // Fire the copied ability's gain effects (Intimidate, weather, etc.).
-                        apply_entry_ability_field_effects(state, &new_ability);
+                        apply_entry_ability_field_effects(state, slot, &new_ability);
                         apply_entry_ability_target_effects(state, slot, &new_ability);
                     }
                 }
@@ -4469,18 +4567,37 @@ fn apply_send_out_only_ability_effects(state: &mut BattleState, slot: FieldSlot,
 /// Apply the field-setting effects of an entry ability (weather/terrain setters).
 /// Shared by `process_pokemon_send_out` (a Pokémon switching in) and
 /// `process_pokemon_gain_ability` (a Pokémon gaining an ability mid-battle).
-fn apply_entry_ability_field_effects(state: &mut BattleState, ability: &Ability) {
+/// `setter_slot` is used to check for weather-extending rock items on the setter.
+fn apply_entry_ability_field_effects(state: &mut BattleState, setter_slot: FieldSlot, ability: &Ability) {
+    // Pre-snapshot whether each rock item is held (before mutably borrowing state).
+    let dur_for = |w: &Weather| -> u8 {
+        get_pokemon_at_slot(state, setter_slot)
+            .map(|m| weather_rock_duration(m, w))
+            .unwrap_or(5)
+    };
     match ability {
         Ability::ElectricSurge | Ability::HadronEngine => set_terrain(state, Terrain::ElectricTerrain, 5),
         Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
         Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
         Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
-        Ability::Drought | Ability::OrichalcumPulse => set_weather(state, Weather::Sun, 5),
+        Ability::Drought | Ability::OrichalcumPulse => {
+            let d = dur_for(&Weather::Sun);
+            set_weather(state, Weather::Sun, d);
+        }
         Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
-        Ability::Drizzle => set_weather(state, Weather::Rain, 5),
+        Ability::Drizzle => {
+            let d = dur_for(&Weather::Rain);
+            set_weather(state, Weather::Rain, d);
+        }
         Ability::PrimordialSea => set_weather(state, Weather::HeavyRain, 0),
-        Ability::SandStream => set_weather(state, Weather::Sandstorm, 5),
-        Ability::SnowWarning => set_weather(state, Weather::Snow, 5),
+        Ability::SandStream => {
+            let d = dur_for(&Weather::Sandstorm);
+            set_weather(state, Weather::Sandstorm, d);
+        }
+        Ability::SnowWarning => {
+            let d = dur_for(&Weather::Snow);
+            set_weather(state, Weather::Snow, d);
+        }
         Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
         _ => {}
     }
@@ -4507,7 +4624,7 @@ pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
         return;
     }
 
-    apply_entry_ability_field_effects(state, &ability);
+    apply_entry_ability_field_effects(state, slot, &ability);
     apply_entry_ability_target_effects(state, slot, &ability);
     trigger_terrain_seed_items(state);
     update_forecast_forms(state);
@@ -6456,6 +6573,20 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
 /// Public thin wrapper around `apply_stat_boosts_to_pokemon` for callers outside this module
 /// (primarily `simulator.rs`).  Passes `defer_white_herb: false` so White Herb fires
 /// immediately — appropriate for all self-boost paths (Moxie, post-KO boosts, etc.).
+/// Returns the boost-array index (0=Atk,1=Def,2=SpA,3=SpD,4=Spe) of the highest base stat
+/// (non-HP), with tie-breaking order Atk > Def > SpA > SpD > Spe.
+/// Used by Eelevate's KO bonus (raise highest stat +1) and can serve future Beast Boost.
+pub(crate) fn highest_boostable_stat_index(mon: &PokemonState) -> usize {
+    // stats layout: [hp, atk, def, spa, spd, spe] → boost indices [0=atk,1=def,2=spa,3=spd,4=spe]
+    let stat_to_boost = [(1usize, 0usize), (2, 1), (3, 2), (4, 3), (5, 4)];
+    let (_, best_boost) = stat_to_boost
+        .iter()
+        .max_by_key(|&&(stat_idx, _)| mon.stats[stat_idx])
+        .copied()
+        .unwrap_or((1, 0));
+    best_boost
+}
+
 pub(crate) fn apply_stat_boost_external(mon: &mut PokemonState, boosts: &[i8; 7], items_suppressed: bool) {
     apply_stat_boosts_to_pokemon(mon, boosts, items_suppressed, false);
 }
@@ -6713,9 +6844,14 @@ pub(crate) fn apply_opponent_stat_drop(
 }
 
 /// Apply weather or pseudo-weather effects.
-fn apply_weather_effects(state: &mut BattleState, effect: &HitEffect) {
+/// `attacker_slot` is the setter's field slot; used to check for weather-extending rock items.
+fn apply_weather_effects(state: &mut BattleState, effect: &HitEffect, attacker_slot: FieldSlot) {
     if let Some(weather) = &effect.weather {
-        set_weather(state, weather.clone(), 5);
+        // Compute duration before mutably borrowing state.
+        let dur = get_pokemon_at_slot(state, attacker_slot)
+            .map(|m| weather_rock_duration(m, weather))
+            .unwrap_or(5);
+        set_weather(state, weather.clone(), dur);
     }
 
     if let Some(pseudo_weather) = &effect.pseudo_weather {
@@ -6998,7 +7134,7 @@ fn apply_effect_to_target(
         }
     }
 
-    apply_weather_effects(state, effect);
+    apply_weather_effects(state, effect, attacker_slot);
     apply_terrain_effects(state, effect);
 }
 
@@ -7051,7 +7187,7 @@ fn apply_effect_to_attacker(
         }
     }
 
-    apply_weather_effects(state, effect);
+    apply_weather_effects(state, effect, attacker_slot);
     apply_terrain_effects(state, effect);
 }
 
@@ -8490,7 +8626,7 @@ pub fn apply_secondary_effects(
                         .map(|m| m.ability.clone());
                     if let Some(ab) = new_ability {
                         // Fire the copied ability's gain effects.
-                        apply_entry_ability_field_effects(bs, &ab);
+                        apply_entry_ability_field_effects(bs, attacker_slot, &ab);
                         apply_entry_ability_target_effects(bs, attacker_slot, &ab);
                     }
                 }

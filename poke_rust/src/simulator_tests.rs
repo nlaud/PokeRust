@@ -29939,3 +29939,671 @@ mod doubles_faint_redirection {
         );
     }
 }
+
+// ── Season-2 abilities and items ─────────────────────────────────────────────
+mod season2_items_and_abilities {
+    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::Weather;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+        extract_battle_state,
+    };
+    use crate::simulator;
+    use crate::simulator_helpers;
+
+    fn mon(species: Species, mv: PokemonMove, ability: Ability, item: Option<Item>) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), Some(PokemonMove::Splash), None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            item, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn avg_damage(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes.iter().map(|(s, p)| {
+            let taken = match s {
+                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p2_active_mons[0].hp),
+                MatchState::GameOverState { .. } => initial_hp,
+                _ => 0,
+            };
+            taken as f64 * p
+        }).sum()
+    }
+
+    fn avg_damage_p1(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes.iter().map(|(s, p)| {
+            let taken = match s {
+                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p1_active_mons[0].hp),
+                MatchState::GameOverState { .. } => initial_hp,
+                _ => 0,
+            };
+            taken as f64 * p
+        }).sum()
+    }
+
+    // ── Fire Mane ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fire_mane_boosts_fire_moves_by_1_5x() {
+        // Fire Mane: holder's Fire-type moves deal ~1.5× more damage (always, no HP condition).
+        // Use a Water-type target (Vaporeon) so Fire is resisted (×0.5); this prevents
+        // the boosted version from overkilling the target and masking the ratio.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let target = mon(Species::Vaporeon, PokemonMove::Splash, Ability::None, None);
+        let snorlax_hp = target.stats[0];
+
+        // Control: Flareon with no notable ability, uses Flamethrower.
+        let base = mon(Species::Flareon, PokemonMove::Flamethrower, Ability::None, None);
+        let outcomes_base = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
+
+        // Fire Mane: same Flareon with FireMane ability.
+        let boosted = mon(Species::Flareon, PokemonMove::Flamethrower, Ability::FireMane, None);
+        let outcomes_boosted = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![boosted], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_boosted = avg_damage(&outcomes_boosted, snorlax_hp);
+
+        let ratio = dmg_boosted / dmg_base;
+        assert!(
+            (ratio - 1.5).abs() < 0.05,
+            "Fire Mane: expected ~1.5× Fire-move damage, got {ratio:.4}",
+        );
+    }
+
+    #[test]
+    fn fire_mane_does_not_boost_non_fire_moves() {
+        // Fire Mane only boosts Fire-type moves; non-Fire moves should be unaffected.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let snorlax_hp = target.stats[0];
+
+        let base = mon(Species::Flareon, PokemonMove::Tackle, Ability::None, None);
+        let outcomes_base = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
+
+        let fire_mane = mon(Species::Flareon, PokemonMove::Tackle, Ability::FireMane, None);
+        let outcomes_fm = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![fire_mane], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_fm = avg_damage(&outcomes_fm, snorlax_hp);
+
+        let ratio = dmg_fm / dmg_base;
+        assert!(
+            (ratio - 1.0).abs() < 0.05,
+            "Fire Mane: non-Fire moves should deal ~1.0× (no boost), got {ratio:.4}",
+        );
+    }
+
+    // ── Eelevate ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn eelevate_is_immune_to_earthquake() {
+        // Eelevate grants Ground immunity like Levitate.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let target = mon(Species::Eelektross, PokemonMove::Splash, Ability::Eelevate, None);
+        let max_hp = target.stats[0];
+        let state = battle_state_from_lists(
+            vec![target], vec![],
+            vec![mon(Species::Garchomp, PokemonMove::Earthquake, Ability::None, None)], vec![],
+        );
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        assert!(
+            outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                if bs.p1_active_mons[0].hp == max_hp)),
+            "Eelevate: Earthquake should deal 0 damage (Ground immunity)",
+        );
+    }
+
+    #[test]
+    fn eelevate_grants_highest_stat_boost_on_ko() {
+        // Eelevate: when the holder KOs a foe with a damaging move, it gets +1 in its highest
+        // non-HP stat. We compute the expected boost index from natural stats (no speed tweak)
+        // so the test validates Eelektross's actual highest stat.
+        // Turn order doesn't matter: the 1-HP Snorlax uses Splash and is KO'd either way.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let attacker = mon(Species::Eelektross, PokemonMove::Thunderbolt, Ability::Eelevate, None);
+        let expected_boost_idx = simulator_helpers::highest_boostable_stat_index(&attacker);
+        let mut target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        target.hp = 1; // guarantee KO
+        let backup = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![backup]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        // All branches should KO the target and give +1 in the highest stat.
+        let all_boosted = outcomes.iter().all(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[expected_boost_idx] == 1)
+        );
+        assert!(all_boosted, "Eelevate: should grant +1 in highest stat (boost[{expected_boost_idx}]) on KO");
+    }
+
+    // ── Life Orb ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn life_orb_boosts_damage_and_deals_recoil() {
+        // Life Orb: +30% damage boost and 10% max HP recoil after the damaging move.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let snorlax_hp = target.stats[0];
+
+        // Control: Gengar with no item uses Psychic.
+        let base = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, None);
+        let max_hp_base = base.stats[0];
+        let outcomes_base = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
+
+        // Life Orb: Gengar with Life Orb uses Psychic.
+        let orb = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, Some(Item::LifeOrb));
+        let max_hp_orb = orb.stats[0];
+        let outcomes_orb = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![orb], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_orb = avg_damage(&outcomes_orb, snorlax_hp);
+
+        // Damage ratio should be ~1.3×.
+        let ratio = dmg_orb / dmg_base;
+        assert!(
+            (ratio - 1.3).abs() < 0.05,
+            "Life Orb: expected ~1.3× damage, got {ratio:.4}",
+        );
+
+        // Recoil: holder should lose 10% max HP (at least 1) in every outcome that doesn't faint.
+        let expected_recoil = ((max_hp_orb as u32 / 10).max(1)) as u16;
+        for (s, _) in &outcomes_orb {
+            if let MatchState::BattleState(bs) = s {
+                if !bs.p1_active_mons[0].fainted {
+                    assert_eq!(
+                        bs.p1_active_mons[0].hp,
+                        max_hp_orb - expected_recoil,
+                        "Life Orb: holder should lose {} HP as recoil", expected_recoil,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn life_orb_no_recoil_with_magic_guard() {
+        // Magic Guard blocks Life Orb recoil entirely.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let attacker = mon(Species::Clefable, PokemonMove::Psychic, Ability::MagicGuard, Some(Item::LifeOrb));
+        let max_hp = attacker.stats[0];
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        for (s, _) in &outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(
+                    bs.p1_active_mons[0].hp, max_hp,
+                    "Life Orb + Magic Guard: holder should take NO recoil",
+                );
+            }
+        }
+    }
+
+    // ── Expert Belt ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn expert_belt_boosts_super_effective_moves() {
+        // Expert Belt: +20% to super-effective moves only.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        // Water vs Fire is super-effective (×2). Charizard is Fire/Flying.
+        let target = mon(Species::Charizard, PokemonMove::Splash, Ability::None, None);
+        let charizard_hp = target.stats[0];
+
+        let base = mon(Species::Vaporeon, PokemonMove::WaterGun, Ability::None, None);
+        let outcomes_base = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_base = avg_damage(&outcomes_base, charizard_hp);
+
+        let belted = mon(Species::Vaporeon, PokemonMove::WaterGun, Ability::None, Some(Item::ExpertBelt));
+        let outcomes_belt = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![belted], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_belt = avg_damage(&outcomes_belt, charizard_hp);
+
+        let ratio = dmg_belt / dmg_base;
+        assert!(
+            (ratio - 1.2).abs() < 0.05,
+            "Expert Belt: super-effective Water vs Fire should deal ~1.2× more, got {ratio:.4}",
+        );
+    }
+
+    #[test]
+    fn expert_belt_no_boost_on_neutral_moves() {
+        // Expert Belt does NOT boost neutral-effectiveness moves.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let snorlax_hp = target.stats[0];
+
+        let base = mon(Species::Vaporeon, PokemonMove::WaterGun, Ability::None, None);
+        let outcomes_base = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
+
+        let belted = mon(Species::Vaporeon, PokemonMove::WaterGun, Ability::None, Some(Item::ExpertBelt));
+        let outcomes_belt = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![belted], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_belt = avg_damage(&outcomes_belt, snorlax_hp);
+
+        let ratio = dmg_belt / dmg_base;
+        assert!(
+            (ratio - 1.0).abs() < 0.05,
+            "Expert Belt: neutral move should deal ~1.0× (no boost), got {ratio:.4}",
+        );
+    }
+
+    // ── Muscle Band / Wise Glasses ────────────────────────────────────────────
+
+    #[test]
+    fn muscle_band_boosts_physical_moves_by_1_1x() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let snorlax_hp = target.stats[0];
+
+        let base = mon(Species::Machoke, PokemonMove::Tackle, Ability::None, None);
+        let outcomes_base = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
+
+        let banded = mon(Species::Machoke, PokemonMove::Tackle, Ability::None, Some(Item::MuscleBand));
+        let outcomes_band = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![banded], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_band = avg_damage(&outcomes_band, snorlax_hp);
+
+        let ratio = dmg_band / dmg_base;
+        assert!(
+            (ratio - 1.1).abs() < 0.05,
+            "Muscle Band: physical move should deal ~1.1×, got {ratio:.4}",
+        );
+    }
+
+    #[test]
+    fn wise_glasses_boosts_special_moves_by_1_1x() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let snorlax_hp = target.stats[0];
+
+        let base = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, None);
+        let outcomes_base = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
+
+        let glassed = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, Some(Item::WiseGlasses));
+        let outcomes_glass = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![glassed], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_glass = avg_damage(&outcomes_glass, snorlax_hp);
+
+        let ratio = dmg_glass / dmg_base;
+        assert!(
+            (ratio - 1.1).abs() < 0.05,
+            "Wise Glasses: special move should deal ~1.1×, got {ratio:.4}",
+        );
+    }
+
+    #[test]
+    fn muscle_band_does_not_boost_special_moves() {
+        // Muscle Band only boosts physical; should be neutral on special moves.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let snorlax_hp = target.stats[0];
+
+        let base = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, None);
+        let outcomes_base = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
+
+        let banded = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, Some(Item::MuscleBand));
+        let outcomes_band = run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![banded], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        let dmg_band = avg_damage(&outcomes_band, snorlax_hp);
+
+        let ratio = dmg_band / dmg_base;
+        assert!(
+            (ratio - 1.0).abs() < 0.05,
+            "Muscle Band: should not boost special moves (ratio={ratio:.4})",
+        );
+    }
+
+    // ── Metronome item ────────────────────────────────────────────────────────
+
+    #[test]
+    fn metronome_item_ramps_damage_on_consecutive_uses() {
+        // Metronome item: first use is baseline (×1.0), second is ×1.2, third ×1.4, etc.
+        // We compare turn-1 damage vs turn-2 damage using the same move.
+        // Use Tackle (no secondary, 100% accurate) + no_consider_crit=true so each turn
+        // produces exactly one branch, allowing extract_battle_state to carry state over.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let mut attacker = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            Some(Item::Metronome), None, Some([0; 6]), None, false,
+        );
+        attacker.stats[5] = 999; // ensure p1 goes first
+
+        // Bulky target to survive multiple hits.
+        let mut target = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([252, 0, 252, 0, 252, 0]), None, false,
+        );
+        target.stats[5] = 1; // target goes last
+
+        let target_hp = target.stats[0];
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // Turn 1: first Tackle (streak=0, so multiplier=×1.0).
+        // run_single_turn uses consider_crit=false + damage_rolls=1: one deterministic branch.
+        let state1 = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(state1), &p1_cmd, &p2_cmd, mdex, pdex,
+        );
+        let dmg1 = avg_damage(&outcomes1, target_hp);
+
+        // Simulate turn 2 from the actual state (carry over last_used_move + consecutive_move_count).
+        let (bs1, _) = extract_battle_state(outcomes1);
+        let t2_target_hp = bs1.p2_active_mons[0].hp;
+        let outcomes2 = run_single_turn(
+            &MatchState::BattleState(bs1), &p1_cmd, &p2_cmd, mdex, pdex,
+        );
+        let dmg2 = avg_damage(&outcomes2, t2_target_hp);
+
+        // Second use should be ~1.2× the first.
+        let ratio = dmg2 / dmg1;
+        assert!(
+            (ratio - 1.2).abs() < 0.07,
+            "Metronome item: second consecutive use should deal ~1.2× first use, got {ratio:.4}",
+        );
+    }
+
+    #[test]
+    fn metronome_item_resets_on_different_move() {
+        // Switching moves resets the streak: damage on turn 3 (after turn-1 Tackle,
+        // turn-2 Splash, turn-3 Tackle) should equal turn-1 damage (×1.0).
+        // Use no_consider_crit=true + damage_rolls=1 so each turn produces exactly one branch.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let mut attacker = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            Some(Item::Metronome), None, Some([0; 6]), None, false,
+        );
+        attacker.stats[5] = 999;
+
+        let mut target = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([252, 0, 252, 0, 252, 0]), None, false,
+        );
+        target.stats[5] = 1;
+        let target_hp = target.stats[0];
+
+        let p1_tackle = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p1_splash = PlayerCommand::Battle(simple_attack(Player::P1, vec![1]));
+        let p2_cmd   = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // Turn 1: Tackle (streak=0, ×1.0 baseline).
+        // run_single_turn: consider_crit=false + damage_rolls=1 → single deterministic branch.
+        let state1 = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
+        let outcomes1 = run_single_turn(
+            &MatchState::BattleState(state1), &p1_tackle, &p2_cmd, mdex, pdex,
+        );
+        let dmg1 = avg_damage(&outcomes1, target_hp);
+        let (bs1, _) = extract_battle_state(outcomes1);
+
+        // Turn 2: Splash (different move → resets streak).
+        let outcomes2 = run_single_turn(
+            &MatchState::BattleState(bs1), &p1_splash, &p2_cmd, mdex, pdex,
+        );
+        let (bs2, _) = extract_battle_state(outcomes2);
+
+        // Turn 3: Tackle again (streak reset → ×1.0, should equal turn-1 damage).
+        let t3_target_hp = bs2.p2_active_mons[0].hp;
+        let outcomes3 = run_single_turn(
+            &MatchState::BattleState(bs2), &p1_tackle, &p2_cmd, mdex, pdex,
+        );
+        let dmg3 = avg_damage(&outcomes3, t3_target_hp);
+
+        let ratio = dmg3 / dmg1;
+        assert!(
+            (ratio - 1.0).abs() < 0.07,
+            "Metronome item: streak should reset after different move (ratio={ratio:.4})",
+        );
+    }
+
+    // ── Iron Ball ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn iron_ball_halves_speed() {
+        // Iron Ball cuts the holder's speed by 50%.
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let base = mon(Species::Raticate, PokemonMove::Splash, Ability::None, None);
+        let iron = mon(Species::Raticate, PokemonMove::Splash, Ability::None, Some(Item::IronBall));
+        let state = battle_state_from_lists(vec![base.clone()], vec![], vec![base.clone()], vec![]);
+        let slot = crate::battle::FieldSlot { player: Player::P1, slot_index: 0 };
+        let speed_no_ball = simulator_helpers::effective_speed_for_slot(&state, slot, &base);
+        let speed_iron    = simulator_helpers::effective_speed_for_slot(&state, slot, &iron);
+        assert!(
+            (speed_iron - speed_no_ball * 0.5).abs() < 0.1,
+            "Iron Ball: speed should be halved (base={speed_no_ball}, iron={speed_iron})",
+        );
+    }
+
+    #[test]
+    fn iron_ball_grounds_flying_type_for_earthquake() {
+        // Iron Ball: Flying-type (normally immune to Ground) becomes susceptible.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut target = mon(Species::Pidgeot, PokemonMove::Splash, Ability::None, Some(Item::IronBall));
+        let initial_hp = target.stats[0];
+        target.hp = initial_hp;
+        let state = battle_state_from_lists(
+            vec![target], vec![],
+            vec![mon(Species::Garchomp, PokemonMove::Earthquake, Ability::None, None)], vec![],
+        );
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        );
+        // The Flying-type should take damage from Earthquake (not immune).
+        let any_damage = outcomes.iter().any(|(s, _)|
+            matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp < initial_hp)
+        );
+        assert!(any_damage, "Iron Ball: Flying-type with Iron Ball should take Earthquake damage");
+    }
+
+    // ── Weather Rocks ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn heat_rock_extends_sunny_day_to_8_turns() {
+        // Heat Rock: Sunny Day lasts 8 turns instead of 5. We set the weather via a move
+        // and check weather_turns after the turn resolves.
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        // Control: Sunny Day without Heat Rock → 5 turns.
+        let base = mon(Species::Charizard, PokemonMove::SunnyDay, Ability::None, None);
+        let state_base = battle_state_from_lists(vec![base], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
+        let (bs_base, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state_base),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs_base.weather, Some(Weather::Sun), "Control: Sunny Day should set Sun");
+        // 5-turn initial → after one turn elapses during EOT processing it becomes 4.
+        assert_eq!(bs_base.weather_turns, Some(4), "Control: Sunny Day (no rock) should have 4 turns left");
+
+        // Heat Rock: Sunny Day → 8 turns.
+        let rock = mon(Species::Charizard, PokemonMove::SunnyDay, Ability::None, Some(Item::HeatRock));
+        let state_rock = battle_state_from_lists(vec![rock], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
+        let (bs_rock, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state_rock),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs_rock.weather, Some(Weather::Sun), "Heat Rock: Sunny Day should set Sun");
+        assert_eq!(bs_rock.weather_turns, Some(7), "Heat Rock: Sunny Day should have 7 turns left (8-1)");
+    }
+
+    #[test]
+    fn damp_rock_extends_rain_dance_to_8_turns() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let rock = mon(Species::Vaporeon, PokemonMove::RainDance, Ability::None, Some(Item::DampRock));
+        let state = battle_state_from_lists(vec![rock], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.weather, Some(Weather::Rain), "Damp Rock: Rain Dance should set Rain");
+        assert_eq!(bs.weather_turns, Some(7), "Damp Rock: Rain Dance should have 7 turns left (8-1)");
+    }
+
+    #[test]
+    fn smooth_rock_extends_sandstorm_to_8_turns() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let rock = mon(Species::Tyranitar, PokemonMove::Sandstorm, Ability::None, Some(Item::SmoothRock));
+        let state = battle_state_from_lists(vec![rock], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.weather, Some(Weather::Sandstorm), "Smooth Rock: Sandstorm should be set");
+        assert_eq!(bs.weather_turns, Some(7), "Smooth Rock: Sandstorm should have 7 turns left (8-1)");
+    }
+
+    #[test]
+    fn icy_rock_extends_hail_to_8_turns() {
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+
+        let rock = mon(Species::Abomasnow, PokemonMove::Hail, Ability::None, Some(Item::IcyRock));
+        let state = battle_state_from_lists(vec![rock], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex,
+        ));
+        assert_eq!(bs.weather, Some(Weather::Snow), "Icy Rock: Hail should set Snow weather");
+        assert_eq!(bs.weather_turns, Some(7), "Icy Rock: Hail should have 7 turns left (8-1)");
+    }
+}
