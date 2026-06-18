@@ -10,8 +10,29 @@ hook and should be researchable, plannable, and implementable in a single focuse
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
 ## Season 2 New Stuff
-- 
+### Pokemon
+Vileplume	Grass/Poison
+Qwilfish	Water/Poison
+Sceptile	Grass
+Blaziken	Fire/Fighting
+Swampert	Water/Ground
+Mawile	Steel/Fairy
+Metagross	Steel/Psychic
+Staraptor	Normal/Flying
+Musharna	Psychic
+Scolipede	Bug/Poison
+Scrafty	Dark/Fighting
+Eelektross	Electric
+Pyroar	Fire/Normal
+Malamar	Dark/Psychic
+Barbaracle	Rock/Water
+Dragalge	Poison/Dragon
+Grimmsnarl	Dark/Fairy
+Falinks	Fighting
+Overqwil	Dark/Poison
+Houndstone	Ghost
+Annihilape	Fighting/Ghost
+Gholdengo	Steel/Ghost
 
 ## Refactors
-- Refactor Outrage-type moves to act more like sleep, having a 50% chance to end after 2nd attack, then 100% on the last one.
 - Recheck all tests, suggest new tests, verify mechanics.

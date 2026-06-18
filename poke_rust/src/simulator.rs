@@ -152,6 +152,8 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
                 ));
             }
             // Track the last move used (for Disable targeting); Struggle is excluded.
+            // consecutive_move_count is pre-updated in possible_damage_outcomes_for_move
+            // (before branches are created) so the Metronome item sees the correct streak.
             if *move_name != PokemonMove::Struggle {
                 mon.last_used_move = Some(move_name.clone());
             }
@@ -724,7 +726,6 @@ fn apply_single_hit_branch(
             // Moxie: +1 Attack when the attacker directly KOs a target with a damaging move.
             // Only fires if the attacker is still alive (doesn't trigger on recoil-KO).
             // Stacks naturally across multi-target / multi-hit KOs.
-            // (Future: Chilling Neigh / Beast Boost belong here too.)
             let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
             let attacker_alive = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
                 .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(&bs, m)
@@ -733,6 +734,21 @@ fn apply_single_hit_branch(
             if attacker_alive {
                 if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, attack_slot) {
                     simulator_helpers::apply_stat_boost_external(atk, &[1, 0, 0, 0, 0, 0, 0], items_suppressed);
+                }
+            }
+
+            // Eelevate: +1 in the holder's highest non-HP base stat when it directly KOs a
+            // target with a damaging move. Fires after Moxie for ordering consistency.
+            let eelevate_alive = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
+                .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(&bs, m)
+                    && m.ability == Ability::Eelevate)
+                .unwrap_or(false);
+            if eelevate_alive {
+                if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, attack_slot) {
+                    let boost_index = simulator_helpers::highest_boostable_stat_index(atk);
+                    let mut boosts = [0i8; 7];
+                    boosts[boost_index] = 1;
+                    simulator_helpers::apply_stat_boost_external(atk, &boosts, items_suppressed);
                 }
             }
 
@@ -761,7 +777,11 @@ fn apply_single_hit_branch(
         }
 
         if sand_spit_triggered {
-            simulator_helpers::set_weather(&mut bs, crate::dex_data::Weather::Sandstorm, 5);
+            // Sand Spit also respects Smooth Rock (8 turns instead of 5).
+            let dur = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
+                .map(|m| simulator_helpers::weather_rock_duration(m, &crate::dex_data::Weather::Sandstorm))
+                .unwrap_or(5);
+            simulator_helpers::set_weather(&mut bs, crate::dex_data::Weather::Sandstorm, dur);
         }
 
         if seed_sower_triggered {
@@ -1075,6 +1095,25 @@ fn possible_damage_outcomes_for_move(
 
     // Save pre-move state for potential failure branches (paralysis, sleep, freeze)
     let pre_move_state = next_state.clone();
+
+    // Metronome item: pre-update consecutive_move_count *before* damage branches are created,
+    // so user_power_item_multiplier (called inside the damage function) sees the current-turn
+    // streak. `attacker` is a clone from line above; damage calculation reads it directly, so
+    // we must update both `attacker` and `next_state` (so branches also carry the new count).
+    // Uses last_used_move from the *previous* turn (set by decrement_move_pp post-damage).
+    // Failure branches (paralysis/sleep) use pre_move_state (old count) — correct, since the
+    // move did not execute. The miss reset later nulls last_used_move to break the streak.
+    if action.move_name != PokemonMove::Struggle {
+        let new_count = if attacker.last_used_move.as_ref() == Some(&action.move_name) {
+            attacker.consecutive_move_count.saturating_add(1)
+        } else {
+            0
+        };
+        attacker.consecutive_move_count = new_count;
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.consecutive_move_count = new_count;
+        }
+    }
 
     simulator_helpers::decrement_move_statuses(&mut attacker);
     write_back_volatiles(&mut next_state, action.user_slot, attacker.volatiles.clone());
@@ -3844,10 +3883,11 @@ fn possible_damage_outcomes_for_move(
             && !target_is_semi_invulnerable
             && !matches!(move_name, PokemonMove::ThousandArrows | PokemonMove::ThousandWaves)
         {
-            // Mold Breaker bypasses Levitate specifically (but not Flying-type, Air Balloon, etc.)
+            // Mold Breaker bypasses Levitate and Eelevate specifically
+            // (but not Flying-type, Air Balloon, etc.)
             let mold_breaks_levitate = simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
                 && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
-                && target.ability == Ability::Levitate;
+                && matches!(target.ability, Ability::Levitate | Ability::Eelevate);
             if !mold_breaks_levitate {
                 outcomes_for_target.push((0, false, false, 1.0));
                 per_target_outcomes.push((*target_slot, outcomes_for_target));
@@ -3965,8 +4005,10 @@ fn possible_damage_outcomes_for_move(
         }
 
         if !should_continue {
-            // Move is blocked by invulnerability
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+            // Move is blocked by invulnerability. PP is decremented once at the end
+            // (line ~4291 applies to all_outcomes), so we do NOT call decrement_move_pp
+            // here — doing so would double-count it (next_state is cloned into all_outcomes
+            // and then decremented again).
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5062,6 +5104,16 @@ fn apply_post_damage_move_effects(
         // Status moves keep their explicit fail paths (e.g. failed Aura Wheel).
         if !matches!(move_data.category, MoveCategory::Status) {
             attacker_mon.last_move_failed = total_effective_dmg == 0;
+            // Metronome item: a damaging move that dealt no damage (missed, protected,
+            // immune) breaks the consecutive streak. Reset last_used_move to None so the
+            // next pre-update (in possible_damage_outcomes_for_move) treats the next use
+            // as a fresh start, even if the same move is chosen again.
+            // Note: this is a Metronome-tracking null; Disable is triggered by the damage
+            // path before this point, so this doesn't affect Disable on zero-damage hits.
+            if total_effective_dmg == 0 {
+                attacker_mon.consecutive_move_count = 0;
+                attacker_mon.last_used_move = None;
+            }
         }
 
         let max_hp = attacker_mon.stats[0].max(1);
@@ -5124,6 +5176,32 @@ fn apply_post_damage_move_effects(
             } else { 0 };
 
             if recoil > 0 {
+                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
+                if attacker_mon.fainted {
+                    simulator_helpers::clear_pokemon_on_faint(attacker_mon);
+                    attacker_fainted = true;
+                    if opponent_wiped { forced_winner = Some(attacker_slot.player); }
+                }
+            }
+        }
+
+        // Life Orb: the holder loses 1/10 of its max HP (min 1) after using a damaging move
+        // that actually dealt damage.  Not triggered by status moves, nor if no damage was
+        // dealt (miss / Protect / full immunity).  Magic Guard blocks the recoil entirely.
+        // Sheer Force + eligible moves suppress Life Orb recoil (the BP boost cancels it).
+        if !matches!(move_data.category, MoveCategory::Status)
+            && total_effective_dmg > 0
+            && !attacker_fainted
+            && attacker_item_active
+            && attacker_mon.item == crate::data::item::Item::LifeOrb
+        {
+            let sheer_force_suppresses = !abilities_suppressed
+                && attacker_mon.ability == Ability::SheerForce
+                && simulator_helpers::move_has_sheer_force_secondary(move_data);
+            let magic_guard_blocks = !abilities_suppressed
+                && attacker_mon.ability == Ability::MagicGuard;
+            if !sheer_force_suppresses && !magic_guard_blocks {
+                let recoil = (max_hp as u32 / 10).max(1) as u16;
                 simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
@@ -5818,9 +5896,12 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     mon.stats_raised_this_turn = false;
     mon.stats_lowered_this_turn = false;
     mon.switched_in_this_turn = false;
-    // Both consecutive-use streaks reset on switch-out.
+    // All consecutive-use streaks reset on switch-out.
     mon.stall_counter = 0;
     mon.ally_switch_counter = 0;
+    mon.consecutive_move_count = 0;
+    // Null last_used_move so the Metronome streak doesn't carry across switch-ins.
+    mon.last_used_move = None;
 }
 
 fn perform_switch_out_in(

@@ -179,6 +179,10 @@ pub struct PokemonState{
 
     pub original_ability: Option<Ability>,
     pub last_used_move: Option<PokemonMove>,
+    /// Consecutive uses of the same move (for the Metronome item boost).
+    /// Incremented when the same move succeeds back-to-back; reset on a different move,
+    /// a miss, or switching out.  Saturates at 255 (well above the cap of 5).
+    pub consecutive_move_count: u8,
     /// Tracks which move slots have been used since this Pokémon was sent in (for Last Resort).
     /// Index matches `moves`; cleared on switch-in alongside `first_move_on_field`.
     pub used_moves_this_field: [bool; 4],
@@ -269,6 +273,7 @@ impl PartialEq for PokemonState {
             && self.last_move_failed == other.last_move_failed
             && self.original_ability == other.original_ability
             && self.last_used_move == other.last_used_move
+            && self.consecutive_move_count == other.consecutive_move_count
             // For non-fainted Pokémon, move-usage history affects Last Resort availability and
             // must distinguish branches. For fainted Pokémon it is irrelevant (they can't act).
             // At this point self.fainted == other.fainted is already established above, so
@@ -626,7 +631,7 @@ pub fn build_pokemon_state(
         status: None, volatiles: Vec::new(),
         base_ability: ability.clone(), ability,
         gender, weight_hg, tera_type, mega_species, mega_ability,
-        last_move_failed: false, original_ability: None, last_used_move: None, used_moves_this_field: [false; 4],
+        last_move_failed: false, original_ability: None, last_used_move: None, consecutive_move_count: 0, used_moves_this_field: [false; 4],
         one_time_ability_used: false, ate_berry_this_battle: false, first_move_on_field: false,
         first_turn_on_field_pending: false,
         entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
