@@ -1146,8 +1146,12 @@ fn effective_base_power(
     bp = (bp * terrain_type_bp_boost(state, attacker, &move_data.pokemon_type)).floor();
     bp = (bp * move_terrain_bp_modifier(state, attacker, target, move_data)).floor();
 
+    // Reckless: ×1.2 to moves with recoil OR crash damage (Jump Kick / High Jump Kick).
+    // Struggle is explicitly excluded (its struggleRecoil flag must NOT count here).
     if attacker.ability == Ability::Reckless
-        && (move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0 || move_data.struggle_recoil)
+        && move_data.name != PokemonMove::Struggle
+        && ((move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0)
+            || move_data.has_crash_damage)
     {
         bp = (bp * 1.2).floor();
     }
@@ -1378,6 +1382,33 @@ fn fur_coat_mult(state: &BattleState, target: &PokemonState, move_data: &MoveDat
         && target.ability == Ability::FurCoat
         && matches!(move_data.category, MoveCategory::Physical)
     { 0.5 } else { 1.0 }
+}
+
+/// Fluffy: ×0.5 damage from contact moves (negated when the attacker has Long Reach) and
+/// ×2 damage from Fire-type moves. The two stack, so a Fire-type contact move is neutral.
+/// Kept separate from `defender_type_reduction_mult` because it needs the move's contact flag
+/// and the attacker (for Long Reach), which that helper does not take.
+fn fluffy_mult(
+    state: &BattleState,
+    target: &PokemonState,
+    attacker: &PokemonState,
+    move_data: &MoveData,
+    attack_type: &PokemonType,
+    mold_breaker: bool,
+) -> f64 {
+    if pokemon_ability_is_suppressed(state, target) || mold_breaker || target.ability != Ability::Fluffy {
+        return 1.0;
+    }
+    let mut mult = 1.0f64;
+    let attacker_long_reach = !pokemon_ability_is_suppressed(state, attacker)
+        && attacker.ability == Ability::LongReach;
+    if move_has_flag(move_data, &MoveFlag::Contact) && !attacker_long_reach {
+        mult *= 0.5;
+    }
+    if matches!(attack_type, PokemonType::Fire) {
+        mult *= 2.0;
+    }
+    mult
 }
 
 /// Defender type-based damage reduction abilities.  Each ability halves damage from one or
@@ -1942,6 +1973,8 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let fur_coat_mult = fur_coat_mult(_state, target, move_data, mold_breaker);
     // Heatproof / Thick Fat / Water Bubble / Purifying Salt: type-keyed ×0.5.
     let defender_type_mult = defender_type_reduction_mult(_state, target, &attack_type, mold_breaker);
+    // Fluffy: ×0.5 from contact moves (unless attacker has Long Reach), ×2 from Fire moves.
+    let fluffy_mult = fluffy_mult(_state, target, attacker, move_data, &attack_type, mold_breaker);
     // Friend Guard: ×0.75 per unsuppressed, non-fainted ally carrying the ability.
     let friend_guard_mult = friend_guard_mult(_state, _target_slot);
 
@@ -2001,6 +2034,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
             dmg = (dmg * multiscale_mult).floor();       // Multiscale / Shadow Shield
             dmg = (dmg * fur_coat_mult).floor();         // Fur Coat
             dmg = (dmg * defender_type_mult).floor();    // Heatproof / Thick Fat / Water Bubble / Purifying Salt
+            dmg = (dmg * fluffy_mult).floor();           // Fluffy: ×0.5 contact, ×2 Fire
             dmg = (dmg * friend_guard_mult).floor();     // Friend Guard
 
             let mut damage = dmg.max(0.0) as u16;
@@ -6520,14 +6554,15 @@ fn apply_volatile_to_pokemon(state: &BattleState, mon: &mut PokemonState, volati
             return;
         }
 
-        // Sweet Veil: the holder cannot receive Yawn.
+        // Sweet Veil / Insomnia / Vital Spirit: the holder cannot receive Yawn (it can never
+        // fall asleep, so the drowsy volatile must not attach in the first place).
         // Ally protection (Sweet Veil protecting teammates' Yawn) is handled at the
         // apply_effect_to_target call site where side context is available.
         // Mold Breaker bypasses this self-protection (attacker_mold_break passed from caller).
         if matches!(volatile, VolatileStatus::Yawn)
             && !attacker_mold_break
             && !pokemon_ability_is_suppressed(state, mon)
-            && mon.ability == Ability::SweetVeil
+            && matches!(mon.ability, Ability::SweetVeil | Ability::Insomnia | Ability::VitalSpirit)
         {
             return;
         }
@@ -7245,6 +7280,15 @@ fn apply_healing_move(bs: &mut BattleState, attacker_slot: FieldSlot, move_name:
             if pokemon_is_on_terrain(terrain_snapshot, attacker_mon, &Terrain::ElectricTerrain) {
                 return false;
             }
+            // Insomnia / Vital Spirit cannot fall asleep, so Rest fails outright (no heal).
+            // NOTE: this Rest path sets Sleep directly rather than going through
+            // apply_status_to_pokemon, so Sweet Veil and the full-HP/already-asleep fail
+            // conditions are also bypassed here — worth a follow-up.
+            if !pokemon_ability_is_suppressed(terrain_snapshot, attacker_mon)
+                && matches!(attacker_mon.ability, Ability::Insomnia | Ability::VitalSpirit)
+            {
+                return false;
+            }
             attacker_mon.volatiles.clear();
             attacker_mon.status = Some(Status::Sleep(0));
             let max_hp = attacker_mon.stats[0].max(1);
@@ -7833,6 +7877,18 @@ pub fn apply_contact_hit_reactions(
         get_pokemon_at_slot(first_bs, attacker_slot)
             .map_or(false, |atk| contact_effects_apply(first_bs, atk, move_data))
     };
+    // Sheer Force: when the attacker's move is boosted by Sheer Force, a specific set of
+    // after-hit effects is skipped. Of the reactions handled here, only Pickpocket is in that
+    // negated set (Rough Skin / Static / Poison Point / Flame Body / Effect Spore / etc. are
+    // explicitly NOT negated). Life Orb recoil and Shell Bell are handled at their own sites.
+    let attacker_sheer_force_boosted = {
+        let first_bs = &branches[0].0;
+        get_pokemon_at_slot(first_bs, attacker_slot).map_or(false, |atk| {
+            !pokemon_ability_is_suppressed(first_bs, atk)
+                && atk.ability == Ability::SheerForce
+                && move_has_sheer_force_secondary(move_data)
+        })
+    };
     let is_physical = matches!(move_data.category, MoveCategory::Physical);
 
     // Beak Blast: if the holder has the BeakBlastCharging volatile and the attacker's move
@@ -7894,6 +7950,39 @@ pub fn apply_contact_hit_reactions(
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
                 apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
             })
+        }
+        // Effect Spore: on contact, the attacker has a 30% total chance of a status —
+        // split 11% sleep / 10% paralysis / 9% poison (NOT equal thirds). Independent roll
+        // per hit. Powder immunity (Grass-type / Overcoat / Safety Goggles) on the *attacker*
+        // skips it entirely; per-status immunities (Poison/Steel, Electric, Insomnia/Vital
+        // Spirit, etc.) are enforced downstream in apply_status_to_pokemon.
+        Ability::EffectSpore => {
+            if !contact_punish { return branches; }
+            let attacker_immune = {
+                let first_bs = &branches[0].0;
+                get_pokemon_at_slot(first_bs, attacker_slot)
+                    .map_or(true, |atk| is_immune_to_powder(first_bs, atk, None))
+            };
+            if attacker_immune { return branches; }
+            // (status, probability) — totals 0.30; remaining 0.70 is the no-status branch.
+            let statuses = [
+                (Status::Sleep(0), 0.11f64),
+                (Status::Paralysis, 0.10f64),
+                (Status::Poison, 0.09f64),
+            ];
+            branches.into_iter().flat_map(|(bs, prob)| {
+                let mut out = Vec::with_capacity(statuses.len() + 1);
+                let mut applied_chance = 0.0;
+                for (status, chance) in statuses.iter() {
+                    let eff = HitEffect { status: Some(status.clone()), ..Default::default() };
+                    let mut applied = bs.clone();
+                    apply_effect_to_target(&mut applied, holder_slot, attacker_slot, &eff, attacker_slot.player);
+                    out.push((applied, prob * chance));
+                    applied_chance += chance;
+                }
+                out.push((bs, prob * (1.0 - applied_chance)));
+                out
+            }).collect()
         }
         Ability::SpicySpray => {
             // Any damaging move; fires even when the holder has already fainted.
@@ -8005,7 +8094,7 @@ pub fn apply_contact_hit_reactions(
         // first contact hit rather than the cartridge's last strike — equivalent outcome,
         // since the attacker's item is gone either way.
         Ability::Pickpocket => {
-            if !contact_punish { return branches; }
+            if !contact_punish || attacker_sheer_force_boosted { return branches; }
             branches.into_iter().map(|(mut bs, prob)| {
                 let holder_alive = get_pokemon_at_slot(&bs, holder_slot)
                     .map(|m| !m.fainted)
@@ -8483,6 +8572,25 @@ pub fn apply_secondary_effects(
                 .map(|m| m.mon_id)
                 .unwrap_or(u8::MAX);
             branches = apply_binding_trap(branches, attacker_mon_id, target_slot);
+        }
+    }
+
+    // Poison Touch: the attacker's contact moves have a 30% chance per hit to poison the
+    // target. Independent of the move's own secondary effect; blocked by the target's Shield
+    // Dust; requires actual contact (Long Reach / Protective Pads handled by
+    // contact_effects_apply). Poison/Steel target immunity is enforced downstream in
+    // apply_status_to_pokemon.
+    if !target_has_shield_dust {
+        let poison_touch_contact = get_pokemon_at_slot(state, attacker_slot).map_or(false, |atk| {
+            !pokemon_ability_is_suppressed(state, atk)
+                && atk.ability == Ability::PoisonTouch
+                && contact_effects_apply(state, atk, move_data)
+        });
+        if poison_touch_contact {
+            let eff = HitEffect { status: Some(Status::Poison), ..Default::default() };
+            branches = branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
+                apply_effect_to_target(bs, attacker_slot, target_slot, e, target_slot.player);
+            });
         }
     }
 

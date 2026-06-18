@@ -8193,6 +8193,64 @@ mod tests {
                     }));
                 }
             }
+
+            #[test]
+            fn vital_spirit_prevents_yawn_volatile() {
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+                let mut attacker = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Yawn), None, None, None]),
+                    None, Some(Ability::None), None, None,
+                    Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                );
+                attacker.stats[5] = 200; // moves first
+                let target = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::VitalSpirit), None, None,
+                    Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                );
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex,
+                );
+                assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if !simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &crate::dex_data::VolatileStatus::Yawn))),
+                    "Vital Spirit: Yawn drowsy volatile should never attach");
+            }
+
+            #[test]
+            fn vital_spirit_rest_fails() {
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+                let mut rester = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Rest), None, None, None]),
+                    None, Some(Ability::VitalSpirit), None, None,
+                    Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                );
+                rester.stats[5] = 200; // moves first
+                rester.hp = rester.stats[0] / 2; // damaged, so Rest would otherwise heal
+                let hp_before = rester.hp;
+                let foe = build_pokemon_state(
+                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, None,
+                    Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                );
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(battle_state_from_lists(vec![rester], vec![], vec![foe], vec![])),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex,
+                );
+                assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status.is_none() && bs.p1_active_mons[0].hp == hp_before)),
+                    "Vital Spirit: Rest should fail (no sleep, no heal)");
+            }
         }
 
         mod confusion {
@@ -14895,6 +14953,70 @@ mod tests {
                 "Thick Fat: expected ~0.5× Ice damage (ratio={:.4})", dmg_thick_fat / dmg_none);
         }
 
+        // ── Fluffy ──────────────────────────────────────────────────────────────
+
+        #[test]
+        fn fluffy_halves_contact_move_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Tackle is a Normal-type contact move (no Fire interaction).
+            let attacker = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_fluffy / dmg_none - 0.5).abs() < 0.02,
+                "Fluffy: expected ~0.5× contact damage (ratio={:.4})", dmg_fluffy / dmg_none);
+        }
+
+        #[test]
+        fn fluffy_doubles_fire_move_damage() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Flamethrower is Fire-type and non-contact.
+            let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::Flamethrower);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_fluffy / dmg_none - 2.0).abs() < 0.04,
+                "Fluffy: expected ~2.0× Fire damage (ratio={:.4})", dmg_fluffy / dmg_none);
+        }
+
+        #[test]
+        fn fluffy_neutral_on_fire_contact_move() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Fire Punch is Fire-type AND makes contact: ×0.5 contact × ×2 Fire = ×1.
+            let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::FirePunch);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_fluffy / dmg_none - 1.0).abs() < 0.02,
+                "Fluffy: Fire + contact should be neutral (ratio={:.4})", dmg_fluffy / dmg_none);
+        }
+
+        #[test]
+        fn fluffy_long_reach_attacker_keeps_fire_doubling() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // Long Reach removes contact, so the ×0.5 halving is negated but Fire still doubles.
+            let attacker = make_mon(Species::Charizard, Ability::LongReach, PokemonMove::FirePunch);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_fluffy / dmg_none - 2.0).abs() < 0.04,
+                "Fluffy vs Long Reach: contact halving negated, Fire still doubles (ratio={:.4})", dmg_fluffy / dmg_none);
+        }
+
+        // ── Reckless (crash-damage moves) ─────────────────────────────────────────
+
+        #[test]
+        fn reckless_boosts_crash_move() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            // High Jump Kick has crash damage but no recoil array; Reckless must still boost it ×1.2.
+            // Charizard (Fire/Flying) resists Fighting, so it survives both runs (no faint clipping).
+            let dmg_none     = run_damage(make_mon(Species::Machamp, Ability::None,     PokemonMove::HighJumpKick), make_mon(Species::Charizard, Ability::None, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_reckless = run_damage(make_mon(Species::Machamp, Ability::Reckless, PokemonMove::HighJumpKick), make_mon(Species::Charizard, Ability::None, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            assert!((dmg_reckless / dmg_none - 1.2).abs() < 0.04,
+                "Reckless: expected ~1.2× on High Jump Kick (crash move) (ratio={:.4})", dmg_reckless / dmg_none);
+        }
+
         // ── Water Bubble ────────────────────────────────────────────────────────
 
         #[test]
@@ -15819,6 +15941,137 @@ mod contact_reactive_abilities {
             if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Poison))) { *p } else { 0.0 }
         ).sum();
         assert!((poison_prob - 0.30).abs() < 0.05, "Poison Point should poison ~30%; got {poison_prob}");
+    }
+
+    // ── Effect Spore ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn effect_spore_30_percent_status_split_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::EffectSpore, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let any: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status.is_some()) { *p } else { 0.0 }).sum();
+        let slp: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Sleep(_)))) { *p } else { 0.0 }).sum();
+        let par: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Paralysis))) { *p } else { 0.0 }).sum();
+        let psn: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Poison))) { *p } else { 0.0 }).sum();
+        assert!((any - 0.30).abs() < 0.05, "Effect Spore should status ~30%; got {any}");
+        assert!((slp - 0.11).abs() < 0.04, "Effect Spore sleep ~11%; got {slp}");
+        assert!((par - 0.10).abs() < 0.04, "Effect Spore paralysis ~10%; got {par}");
+        assert!((psn - 0.09).abs() < 0.04, "Effect Spore poison ~9%; got {psn}");
+    }
+
+    #[test]
+    fn effect_spore_immune_to_grass_attacker() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        // Venusaur is Grass-type → immune to powder/spore, so Effect Spore never fires.
+        let mut attacker = make_mon(
+            Species::Venusaur, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::EffectSpore, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status.is_none())),
+            "Effect Spore must not status a Grass-type attacker");
+    }
+
+    #[test]
+    fn effect_spore_no_status_on_non_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Garchomp, [Some(PokemonMove::Earthquake), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::EffectSpore, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status.is_none())),
+            "Effect Spore must not fire on a non-contact move (Earthquake)");
+    }
+
+    // ── Poison Touch ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn poison_touch_30_percent_poison_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::PoisonTouch, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::None, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        let poison_prob: f64 = outcomes.iter().map(|(s, p)|
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(crate::dex_data::Status::Poison))) { *p } else { 0.0 }
+        ).sum();
+        assert!((poison_prob - 0.30).abs() < 0.05, "Poison Touch should poison the target ~30%; got {poison_prob}");
+    }
+
+    #[test]
+    fn poison_touch_no_poison_on_non_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Garchomp, [Some(PokemonMove::Earthquake), None, None, None], Ability::PoisonTouch, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::None, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].status.is_none())),
+            "Poison Touch must not poison via a non-contact move (Earthquake)");
+    }
+
+    #[test]
+    fn poison_touch_blocked_by_shield_dust() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::PoisonTouch, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::ShieldDust, None,
+        );
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].status.is_none())),
+            "Shield Dust should block Poison Touch");
     }
 
     // ── Spicy Spray ───────────────────────────────────────────────────────────
@@ -17376,6 +17629,28 @@ mod priority_abilities {
                 "Pickpocket must not trigger while already holding an item");
         }
 
+        #[test]
+        fn pickpocket_suppressed_by_attacker_sheer_force() {
+            // Ice Punch makes contact and has a secondary (10% freeze), so it is boosted by
+            // Sheer Force — which suppresses Pickpocket on the hit (per Bulbapedia's negated set).
+            let dex = pokemon_dex();
+            let mdex = move_dex();
+            let p1 = splash_mon(Species::Shuckle, Ability::Pickpocket, None);
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &dex, &mdex, Some(50),
+                Some([Some(PokemonMove::IcePunch), None, None, None]),
+                None, Some(Ability::SheerForce), None, Some(Item::Leftovers),
+                None, Some([0; 6]), None, false,
+            );
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let (bs, _) = extract_battle_state(run(state));
+
+            assert_eq!(bs.p1_active_mons[0].item, Item::None,
+                "Sheer Force should suppress Pickpocket on a boosted contact move");
+            assert_eq!(bs.p2_active_mons[0].item, Item::Leftovers,
+                "attacker should keep its item when Sheer Force suppresses Pickpocket");
+        }
+
         // ─── Pickup ─────────────────────────────────────────────────────────────────
 
         #[test]
@@ -18496,6 +18771,69 @@ mod priority_abilities {
                 outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
                     if bs.p2_active_mons[0].hp < max_hp)),
                 "Soundproof: a Soundproof Exploud should still deal damage with Boomburst",
+            );
+        }
+
+        // ── Good as Gold ─────────────────────────────────────────────────────
+
+        #[test]
+        fn good_as_gold_blocks_thunder_wave() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let holder = mon(Species::Snorlax, Ability::GoodasGold, PokemonMove::Splash);
+            let attacker = mon(Species::Snorlax, Ability::None, PokemonMove::ThunderWave);
+            let state = battle_state_from_lists(vec![holder], vec![], vec![attacker], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].status.is_none())),
+                "Good as Gold: Thunder Wave should not paralyse the holder",
+            );
+        }
+
+        #[test]
+        fn good_as_gold_allows_own_self_status_move() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let holder = mon(Species::Snorlax, Ability::GoodasGold, PokemonMove::SwordsDance);
+            let foe = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![holder], vec![], vec![foe], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_active_mons[0].boosts[0] == 2)),
+                "Good as Gold: the holder's own Swords Dance should still raise Attack +2",
+            );
+        }
+
+        #[test]
+        fn good_as_gold_does_not_block_stealth_rock() {
+            // Side-targeting status moves are NOT blocked.
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let holder = mon(Species::Snorlax, Ability::GoodasGold, PokemonMove::Splash);
+            let attacker = mon(Species::Snorlax, Ability::None, PokemonMove::StealthRock);
+            let state = battle_state_from_lists(vec![holder], vec![], vec![attacker], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            assert!(
+                outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                    if bs.p1_side_conditions.iter().any(|c| matches!(c, crate::dex_data::SideCondition::StealthRock)))),
+                "Good as Gold: should not block side-targeting Stealth Rock",
             );
         }
 

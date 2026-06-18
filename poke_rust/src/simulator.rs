@@ -3922,6 +3922,33 @@ fn possible_damage_outcomes_for_move(
             continue;
         }
 
+        // Good as Gold: immune to single-target status moves used by OTHER Pokémon
+        // (including beneficial ally moves like Helping Hand / Howl). The holder's own
+        // self-targeted status moves still work (action.user_slot != target_slot). Side-
+        // targeting moves (Stealth Rock, Reflect, Tailwind) and whole-field moves (Haze,
+        // Trick Room, weather) are NOT blocked — they are excluded by the single-target
+        // gate below. Mold Breaker does NOT bypass Good as Gold (it is not a breakable
+        // ability), so no attacker_breaks_mold guard. Blocked moves fail without paying any
+        // self-cost because we `continue` before the move's effects are applied for this target.
+        if matches!(move_data.category, MoveCategory::Status)
+            && action.user_slot != *target_slot
+            && matches!(
+                move_data.target,
+                MoveTarget::Normal
+                    | MoveTarget::Any
+                    | MoveTarget::AdjacentFoe
+                    | MoveTarget::AdjacentAlly
+                    | MoveTarget::AdjacentAllyOrSelf
+                    | MoveTarget::RandomNormal
+            )
+            && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+            && target.ability == Ability::GoodasGold
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
         // Overcoat: immune to powder/spore moves (MoveFlag::Powder).
         // is_immune_to_powder also covers Grass-type and Safety Goggles; Mold Breaker
         // only bypasses Overcoat — not the type-based or item-based immunities.
@@ -5136,7 +5163,13 @@ fn apply_post_damage_move_effects(
 
         // Shell Bell: restore 1/8 of damage dealt (rounded down) to the attacker.
         // Does not consume the item. Based on damage dealt, not HP lost by target.
-        if !heal_blocked && attacker_item_active && attacker_mon.item == crate::data::item::Item::ShellBell {
+        // Sheer Force suppresses Shell Bell on a boosted move (same negated set as Life Orb recoil).
+        let shell_bell_sheer_force = !abilities_suppressed
+            && attacker_mon.ability == Ability::SheerForce
+            && simulator_helpers::move_has_sheer_force_secondary(move_data);
+        if !heal_blocked && !shell_bell_sheer_force && attacker_item_active
+            && attacker_mon.item == crate::data::item::Item::ShellBell
+        {
             let heal = (total_dmg / 8) as u16;
             if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
