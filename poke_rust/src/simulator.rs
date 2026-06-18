@@ -593,6 +593,16 @@ fn apply_single_hit_branch(
             |t| simulator_helpers::compute_endure_outcomes(t, damage, items_suppressed, target_ability_suppressed),
         );
 
+    // Sheer Force: a move boosted by Sheer Force must not trigger the target's Berserk.
+    // Berserk lives inside the generic `apply_damage`/`take_damage` HP-loss path (a deliberate
+    // broadened-trigger divergence), so we suppress it here by snapshotting and restoring the
+    // target's Sp. Atk boost around the hit — Berserk is the only effect in that path that
+    // touches `boosts[2]` / `stats_raised_this_turn`, so the restore is targeted.
+    let sheer_force_boosted = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot)
+        .map_or(false, |a| !simulator_helpers::pokemon_ability_is_suppressed(&branch_state, a)
+            && a.ability == Ability::SheerForce
+            && simulator_helpers::move_has_sheer_force_secondary(move_data));
+
     let n = endure_outcomes.len();
     // Use Option so the last iteration can move out of branch_state without cloning.
     let mut branch_state_opt = Some(branch_state);
@@ -614,7 +624,17 @@ fn apply_single_hit_branch(
             Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
             Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
         } {
+            let berserk_snapshot = if sheer_force_boosted {
+                Some((target_mon.boosts[2], target_mon.stats_raised_this_turn))
+            } else {
+                None
+            };
             simulator_helpers::take_damage(target_mon, eff_damage, target_env, as_);
+            if let Some((spa_boost, raised)) = berserk_snapshot {
+                // Undo any Berserk Sp. Atk boost the boosted hit just triggered.
+                target_mon.boosts[2] = spa_boost;
+                target_mon.stats_raised_this_turn = raised;
+            }
 
             // Per-turn damage tracking: Assurance reads `damaged_this_turn`; Avalanche
             // checks whether this specific attacker slot damaged the holder this turn.

@@ -14543,6 +14543,40 @@ mod tests {
         }
 
         #[test]
+        fn sheer_force_suppresses_berserk() {
+            let mdex = move_dex();
+            let pdex = pokemon_dex();
+            let mut p1 = make_mon(Species::Snorlax, Ability::Berserk, PokemonMove::Splash);
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp / 2 + 1; // just above 50%
+            // Iron Head has a 30% flinch secondary, so it is boosted by Sheer Force — and a
+            // Sheer-Force-boosted move must not trigger the target's Berserk.
+            let mut p2 = make_mon(Species::Snorlax, Ability::SheerForce, PokemonMove::IronHead);
+            p2.stats[4] = 300;
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            );
+            // Sanity: the boosted hit must actually drop the holder below 50% while it survives,
+            // otherwise the test would pass even if suppression were broken.
+            let crossed_alive = outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
+                if !bs.p1_active_mons[0].fainted
+                    && (bs.p1_active_mons[0].hp as u32) * 2 <= max_hp as u32));
+            assert!(crossed_alive, "setup: boosted Iron Head should drop the Berserk holder below 50% while alive");
+            for (s, _) in &outcomes {
+                if let MatchState::BattleState(bs) = s {
+                    if !bs.p1_active_mons[0].fainted {
+                        assert_eq!(bs.p1_active_mons[0].boosts[2], 0,
+                            "Sheer Force: Berserk must not fire on a boosted move");
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn berserk_triggers_on_burn_damage() {
             // Berserk fires on indirect damage (burn); set HP to just above 50%.
             let pdex = pokemon_dex();

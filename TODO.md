@@ -17,9 +17,8 @@ Bulbapedia before starting each batch.
 **Implemented in follow-up (2026-06-18):** Effect Spore, Poison Touch, Fluffy,
 Good as Gold (all four new), plus the partial fixes for Reckless (crash-move boost
 + Struggle exclusion), Vital Spirit (Yawn no-attach + Rest fails), and Sheer Force
-(now suppresses Pickpocket / Shell Bell on boosted moves; Life Orb recoil was
-already handled). These were removed from the lists below. (Remaining Sheer Force
-corner noted under *Other / cross-cutting*.)
+(now suppresses Pickpocket / Shell Bell / Berserk on boosted moves; Life Orb recoil
+was already handled). These were removed from the lists below.
 
 ### Variable-base-power moves (hook: dynamic-BP match block `simulator_helpers.rs` ~963-1090, alongside Hex/Assurance)
 - **Barb Barrage** — PARTIAL / signature mechanic missing (enum `pokemon_move.rs:50`; 50% poison secondary is data-driven and works). Missing: **double power vs targets with `psn`/`tox`** — needs a `BarbBarrage` arm doubling BP when `target.status` is poison/toxic (mirror the `Hex`/`InfernalParade` arm at ~1034).
@@ -42,7 +41,7 @@ corner noted under *Other / cross-cutting*.)
 ### Other / cross-cutting
 - **Make It Rain** — PARTIAL (Steel/Special/120 BP/spread are data-driven). Verify Champions values: data has self `spa: -1` and `accuracy: 100` (Scarlet/Violet); audit research indicates Champions uses **−2 SpA** (and possibly 95% accuracy). Confirm on Bulbapedia and correct the data/source if so. Coin scatter has no battle effect (ignore).
 - **Lucky Chant + always-crit / high-crit** — `SideCondition::LuckyChant` (`dex_data.rs:264`) is never checked by the crit system. It should prevent crits, including guaranteed-crit moves (Storm Throw, Frost Breath, Surging Strikes, Wicked Blow, Zippy Zap, Flower Trick) — none of which `crit_is_prevented`/`crit_is_guaranteed` currently consult. Niche but a real gap.
-- **Sheer Force + Berserk** — Sheer Force's negated set includes Berserk, but Berserk is woven into the generic `apply_damage` HP-loss path (`simulator_helpers.rs:2343`, a deliberate broadened-trigger project divergence) rather than the contact-reaction match, so it is not currently suppressed on Sheer-Force-boosted moves. Other negated effects that suppress correctly: Pickpocket, Shell Bell, Life Orb recoil. The rest of the negated set (Color Change, Wimp Out, Emergency Exit, Anger Shell, Eject Button, Red Card, Kee/Maranga Berry) is not yet implemented, so nothing to suppress there until those land.
+- **Sheer Force — remaining negated-set effects** — Sheer Force now suppresses every *implemented* effect in its negated set: Pickpocket, Shell Bell, Life Orb recoil, and Berserk (the last via a snapshot/restore around the boosted hit in `simulator.rs`, since Berserk is woven into the generic `apply_damage` path). The rest of the negated set — Color Change, Wimp Out, Emergency Exit, Anger Shell, Eject Button, Red Card, Kee/Maranga Berry — is not yet implemented, so each should add a Sheer-Force guard when it lands.
 
 ---
 ## Saved for later (Information only)
