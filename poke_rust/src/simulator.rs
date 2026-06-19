@@ -9,13 +9,11 @@ use crate::battle::{
 use crate::pokemon::{
     PokemonState, parse_team_sheet
 };
-use crate::dex_data::{MoveData, MoveFlag, MoveTarget, PokemonData};
-use crate::dex_data::{MoveCategory, SelfDestructType, SelfSwitchType, SideCondition, Status, VolatileStatus};
+use crate::dex_data::{MoveData, MoveFlag, MoveTarget, PokemonData, MoveCategory, SelfDestructType, SelfSwitchType, SideCondition, Status, VolatileStatus, PokemonType};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
-use crate::dex_data::PokemonType;
 use crate::simulator_helpers;
 
 #[derive(Clone, Copy)]
@@ -4724,7 +4722,7 @@ fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleSta
         Player::P1 => (&state.p1_active_mons, &state.p2_active_mons),
         Player::P2 => (&state.p2_active_mons, &state.p1_active_mons),
     };
-    
+
     let foe_player = match player {
         Player::P1 => Player::P2,
         Player::P2 => Player::P1,
@@ -4736,12 +4734,12 @@ fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleSta
                 MoveTarget::AdjacentFoe | MoveTarget::Normal | MoveTarget::Any | MoveTarget::Scripted => true,
                 _ => false,
             };
-            
+
             let can_target_ally = match target_type {
                 MoveTarget::AdjacentAlly | MoveTarget::AdjacentAllyOrSelf | MoveTarget::Normal | MoveTarget::Any => true,
                 _ => false,
             };
-            
+
             let can_target_self = match target_type {
                 MoveTarget::AdjacentAllyOrSelf => true,
                 _ => false,
@@ -4764,7 +4762,7 @@ fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleSta
                     }
                 }
             }
-            
+
             if targets.is_empty() {
                 targets.push(Some(FieldSlot { player: foe_player, slot_index: 0 })); // Fallback
             }
@@ -4773,7 +4771,7 @@ fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleSta
             targets.push(None); // Multi-target and self-target moves don't select a target
         }
     }
-    
+
     targets
 }
 

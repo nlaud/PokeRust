@@ -1,10 +1,12 @@
-use crate::dex_data::{PokemonBoostTable, PokemonData, PokemonType, VolatileStatus, Status, parse_type, MoveData};
+use crate::data::ability::Ability;
 use crate::data::item::Item;
+use crate::data::pokemon_move::PokemonMove;
+use crate::data::species::Species;
+use crate::dex_data::{
+    MoveData, PokemonBoostTable, PokemonData, PokemonType, Status, VolatileStatus, parse_type,
+};
 use std::collections::HashMap;
 use std::fs;
-use crate::data::species::Species;
-use crate::data::ability::Ability;
-use crate::data::pokemon_move::PokemonMove;
 
 pub type PokemonStatsTable = [u16; 6]; // hp, atk, def, spa, spd, spe
 
@@ -15,9 +17,11 @@ fn humanize_identifier(value: impl AsRef<str>) -> String {
 
     for current in value.chars() {
         let insert_space = match previous {
-            Some(prev) => (prev.is_ascii_lowercase() && current.is_ascii_uppercase())
-                || (prev.is_ascii_digit() && current.is_ascii_alphabetic())
-                || (prev.is_ascii_alphabetic() && current.is_ascii_digit()),
+            Some(prev) => {
+                (prev.is_ascii_lowercase() && current.is_ascii_uppercase())
+                    || (prev.is_ascii_digit() && current.is_ascii_alphabetic())
+                    || (prev.is_ascii_alphabetic() && current.is_ascii_digit())
+            }
             None => false,
         };
 
@@ -41,7 +45,7 @@ fn move_name(mov: &PokemonMove) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum VolatileStatusState{
+pub enum VolatileStatusState {
     /// Turn-counter volatile. Payload is decremented each EOT; 0 = permanent; 1 = removed
     /// next EOT. EXCEPTION: `Substitute` stores sub HP in the payload (never decremented).
     TurnStatus(VolatileStatus, u16),
@@ -50,14 +54,14 @@ pub enum VolatileStatusState{
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PokemonGender{
+pub enum PokemonGender {
     Male,
     Female,
-    Genderless
+    Genderless,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Nature{
+pub enum Nature {
     Hardy,
     Lonely,
     Adamant,
@@ -82,7 +86,7 @@ pub enum Nature{
     Hasty,
     Jolly,
     Naive,
-    Serious
+    Serious,
 }
 
 /// `used_moves_this_field` is intentionally excluded from `PartialEq`, `Eq`, and `Hash`.
@@ -90,7 +94,7 @@ pub enum Nature{
 /// purely runtime bookkeeping — including it would prevent coalescing branches that differ
 /// only in move usage history while being otherwise identical in game state.
 #[derive(Clone)]
-pub struct PokemonState{
+pub struct PokemonState {
     /// Stable identity within this Pokémon's own party (party-order index, assigned at team
     /// construction). Unlike a `FieldSlot` it is unaffected by switching, and unlike `species`
     /// it survives forme changes/Mega/Tera and distinguishes duplicate species. Used to record
@@ -160,11 +164,10 @@ pub struct PokemonState{
 
     pub boosts: PokemonBoostTable,
     pub stats: PokemonStatsTable,
-    
+
     pub status: Option<Status>,
     pub volatiles: Vec<VolatileStatusState>,
 
-    pub base_ability: Ability,
     pub ability: Ability,
 
     pub gender: PokemonGender,
@@ -175,7 +178,7 @@ pub struct PokemonState{
     pub mega_species: Option<Species>,
     pub mega_ability: Option<Ability>,
 
-    pub last_move_failed: bool,//For stomping tantrum
+    pub last_move_failed: bool, //For stomping tantrum
 
     pub original_ability: Option<Ability>,
     pub last_used_move: Option<PokemonMove>,
@@ -268,7 +271,6 @@ impl PartialEq for PokemonState {
             && self.stats == other.stats
             && self.status == other.status
             && self.volatiles == other.volatiles
-            && self.base_ability == other.base_ability
             && self.ability == other.ability
             && self.gender == other.gender
             && self.weight_hg == other.weight_hg
@@ -334,7 +336,6 @@ impl std::hash::Hash for PokemonState {
         self.stats.hash(state);
         self.status.hash(state);
         self.volatiles.hash(state);
-        self.base_ability.hash(state);
         self.ability.hash(state);
         self.gender.hash(state);
         self.weight_hg.hash(state);
@@ -396,13 +397,27 @@ impl std::fmt::Display for PokemonState {
         let ability_str = format!("{:?}", self.ability);
         let nature_str = format!("{:?}", self.nature);
 
-        let evs_str = self.evs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("/");
-        let ivs_str = self.ivs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("/");
+        let evs_str = self
+            .evs
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        let ivs_str = self
+            .ivs
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("/");
 
         let vol_str = if self.volatiles.is_empty() {
             "none".to_string()
         } else {
-            self.volatiles.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(", ")
+            self.volatiles
+                .iter()
+                .map(|v| format!("{:?}", v))
+                .collect::<Vec<_>>()
+                .join(", ")
         };
 
         let tera_info = if self.is_tera {
@@ -424,7 +439,10 @@ impl std::fmt::Display for PokemonState {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let name = m.as_ref().map(move_name).unwrap_or_else(|| format!("Move {}", i + 1));
+                let name = m
+                    .as_ref()
+                    .map(move_name)
+                    .unwrap_or_else(|| format!("Move {}", i + 1));
                 let pp = self.move_pp.get(i).copied().unwrap_or(0);
                 format!("{} (PP {})", name, pp)
             })
@@ -471,67 +489,66 @@ pub fn normalize_string(name: impl AsRef<str>) -> String {
 
 fn parse_nature_str(s: &str) -> Option<Nature> {
     match s.trim() {
-        "Hardy"   => Some(Nature::Hardy),
-        "Lonely"  => Some(Nature::Lonely),
+        "Hardy" => Some(Nature::Hardy),
+        "Lonely" => Some(Nature::Lonely),
         "Adamant" => Some(Nature::Adamant),
         "Naughty" => Some(Nature::Naughty),
-        "Brave"   => Some(Nature::Brave),
-        "Bold"    => Some(Nature::Bold),
-        "Docile"  => Some(Nature::Docile),
-        "Impish"  => Some(Nature::Impish),
-        "Lax"     => Some(Nature::Lax),
+        "Brave" => Some(Nature::Brave),
+        "Bold" => Some(Nature::Bold),
+        "Docile" => Some(Nature::Docile),
+        "Impish" => Some(Nature::Impish),
+        "Lax" => Some(Nature::Lax),
         "Relaxed" => Some(Nature::Relaxed),
-        "Modest"  => Some(Nature::Modest),
-        "Mild"    => Some(Nature::Mild),
+        "Modest" => Some(Nature::Modest),
+        "Mild" => Some(Nature::Mild),
         "Bashful" => Some(Nature::Bashful),
-        "Rash"    => Some(Nature::Rash),
-        "Quiet"   => Some(Nature::Quiet),
-        "Calm"    => Some(Nature::Calm),
-        "Gentle"  => Some(Nature::Gentle),
+        "Rash" => Some(Nature::Rash),
+        "Quiet" => Some(Nature::Quiet),
+        "Calm" => Some(Nature::Calm),
+        "Gentle" => Some(Nature::Gentle),
         "Careful" => Some(Nature::Careful),
-        "Quirky"  => Some(Nature::Quirky),
-        "Sassy"   => Some(Nature::Sassy),
-        "Timid"   => Some(Nature::Timid),
-        "Hasty"   => Some(Nature::Hasty),
-        "Jolly"   => Some(Nature::Jolly),
-        "Naive"   => Some(Nature::Naive),
+        "Quirky" => Some(Nature::Quirky),
+        "Sassy" => Some(Nature::Sassy),
+        "Timid" => Some(Nature::Timid),
+        "Hasty" => Some(Nature::Hasty),
+        "Jolly" => Some(Nature::Jolly),
+        "Naive" => Some(Nature::Naive),
         "Serious" => Some(Nature::Serious),
-        _         => None,
+        _ => None,
     }
 }
-
-
 
 /// Returns stat multipliers as [atk, def, spa, spd, spe] for the given nature.
 fn nature_stat_modifiers(nature: &Nature) -> [f32; 5] {
     match nature {
-        Nature::Hardy | Nature::Docile | Nature::Bashful | Nature::Quirky | Nature::Serious
-            => [1.0, 1.0, 1.0, 1.0, 1.0],
+        Nature::Hardy | Nature::Docile | Nature::Bashful | Nature::Quirky | Nature::Serious => {
+            [1.0, 1.0, 1.0, 1.0, 1.0]
+        }
         // +Atk
-        Nature::Lonely  => [1.1, 0.9, 1.0, 1.0, 1.0],
+        Nature::Lonely => [1.1, 0.9, 1.0, 1.0, 1.0],
         Nature::Adamant => [1.1, 1.0, 0.9, 1.0, 1.0],
         Nature::Naughty => [1.1, 1.0, 1.0, 0.9, 1.0],
-        Nature::Brave   => [1.1, 1.0, 1.0, 1.0, 0.9],
+        Nature::Brave => [1.1, 1.0, 1.0, 1.0, 0.9],
         // +Def
-        Nature::Bold    => [0.9, 1.1, 1.0, 1.0, 1.0],
-        Nature::Impish  => [1.0, 1.1, 0.9, 1.0, 1.0],
-        Nature::Lax     => [1.0, 1.1, 1.0, 0.9, 1.0],
+        Nature::Bold => [0.9, 1.1, 1.0, 1.0, 1.0],
+        Nature::Impish => [1.0, 1.1, 0.9, 1.0, 1.0],
+        Nature::Lax => [1.0, 1.1, 1.0, 0.9, 1.0],
         Nature::Relaxed => [1.0, 1.1, 1.0, 1.0, 0.9],
         // +SpA
-        Nature::Modest  => [0.9, 1.0, 1.1, 1.0, 1.0],
-        Nature::Mild    => [1.0, 0.9, 1.1, 1.0, 1.0],
-        Nature::Rash    => [1.0, 1.0, 1.1, 0.9, 1.0],
-        Nature::Quiet   => [1.0, 1.0, 1.1, 1.0, 0.9],
+        Nature::Modest => [0.9, 1.0, 1.1, 1.0, 1.0],
+        Nature::Mild => [1.0, 0.9, 1.1, 1.0, 1.0],
+        Nature::Rash => [1.0, 1.0, 1.1, 0.9, 1.0],
+        Nature::Quiet => [1.0, 1.0, 1.1, 1.0, 0.9],
         // +SpD
-        Nature::Calm    => [0.9, 1.0, 1.0, 1.1, 1.0],
-        Nature::Gentle  => [1.0, 0.9, 1.0, 1.1, 1.0],
+        Nature::Calm => [0.9, 1.0, 1.0, 1.1, 1.0],
+        Nature::Gentle => [1.0, 0.9, 1.0, 1.1, 1.0],
         Nature::Careful => [1.0, 1.0, 0.9, 1.1, 1.0],
-        Nature::Sassy   => [1.0, 1.0, 1.0, 1.1, 0.9],
+        Nature::Sassy => [1.0, 1.0, 1.0, 1.1, 0.9],
         // +Spe
-        Nature::Timid   => [0.9, 1.0, 1.0, 1.0, 1.1],
-        Nature::Hasty   => [1.0, 0.9, 1.0, 1.0, 1.1],
-        Nature::Jolly   => [1.0, 1.0, 0.9, 1.0, 1.1],
-        Nature::Naive   => [1.0, 1.0, 1.0, 0.9, 1.1],
+        Nature::Timid => [0.9, 1.0, 1.0, 1.0, 1.1],
+        Nature::Hasty => [1.0, 0.9, 1.0, 1.0, 1.1],
+        Nature::Jolly => [1.0, 1.0, 0.9, 1.0, 1.1],
+        Nature::Naive => [1.0, 1.0, 1.0, 0.9, 1.1],
     }
 }
 
@@ -548,14 +565,20 @@ fn calc_stat(base: u16, iv: u8, ev: u8, level: u8, nature_mod: f32) -> u16 {
 
 /// Scale EVs from Showdown stat-points format (0–252) to internal (0–252).
 fn scale_evs_for_stat_points(mut evs: [u8; 6]) -> [u8; 6] {
-    for ev in &mut evs { *ev = ((i16::from(*ev) * 8) - 4).max(0) as u8; }
+    for ev in &mut evs {
+        *ev = ((i16::from(*ev) * 8) - 4).max(0) as u8;
+    }
     evs
 }
 
 /// Compute the in-game PP for a move (with PP Max applied).
 fn compute_pp_for_move(move_name: &PokemonMove, move_dex: &HashMap<PokemonMove, MoveData>) -> u8 {
-    if *move_name == PokemonMove::Protect { return 8; }
-    let Some(data) = move_dex.get(move_name) else { return 0; };
+    if *move_name == PokemonMove::Protect {
+        return 8;
+    }
+    let Some(data) = move_dex.get(move_name) else {
+        return 0;
+    };
     match data.pp {
         5 => 8,
         10 => 12,
@@ -566,10 +589,15 @@ fn compute_pp_for_move(move_name: &PokemonMove, move_dex: &HashMap<PokemonMove, 
 }
 
 /// Compute the full move PP array for a 4-move set.
-fn compute_move_pp(moves: &[Option<PokemonMove>; 4], move_dex: &HashMap<PokemonMove, MoveData>) -> [u8; 4] {
+fn compute_move_pp(
+    moves: &[Option<PokemonMove>; 4],
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) -> [u8; 4] {
     let mut pp = [0u8; 4];
     for (i, mov) in moves.iter().enumerate() {
-        if let Some(m) = mov { pp[i] = compute_pp_for_move(m, move_dex); }
+        if let Some(m) = mov {
+            pp[i] = compute_pp_for_move(m, move_dex);
+        }
     }
     pp
 }
@@ -581,12 +609,21 @@ fn resolve_mega_info(
     dex_entry: Option<&PokemonData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> (bool, Option<Species>, Option<Ability>) {
-    let is_mega = dex_entry.map(|d| is_mega_dex_entry(species, d)).unwrap_or(false);
-    if is_mega { return (true, None, None); }
+    let is_mega = dex_entry
+        .map(|d| is_mega_dex_entry(species, d))
+        .unwrap_or(false);
+    if is_mega {
+        return (true, None, None);
+    }
 
-    let item_str = if *item == Item::None { String::new() } else { normalize_string(format!("{:?}", item)) };
+    let item_str = if *item == Item::None {
+        String::new()
+    } else {
+        normalize_string(format!("{:?}", item))
+    };
     let mega_sp = resolve_mega_species(species, &item_str, pokemon_dex);
-    let mega_ab = mega_sp.as_ref()
+    let mega_ab = mega_sp
+        .as_ref()
         .and_then(|key| pokemon_dex.get(key))
         .and_then(|d| d.primary_ability.clone());
     (false, mega_sp, mega_ab)
@@ -609,46 +646,89 @@ pub fn build_pokemon_state(
 ) -> PokemonState {
     let dex_entry = pokemon_dex.get(&species);
 
-    let level   = level.unwrap_or(50);
-    let moves   = moves.unwrap_or([None, None, None, None]);
-    let gender  = gender.unwrap_or_else(|| dex_entry.map(|d| d.default_gender).unwrap_or(PokemonGender::Genderless));
+    let level = level.unwrap_or(50);
+    let moves = moves.unwrap_or([None, None, None, None]);
+    let gender = gender.unwrap_or_else(|| {
+        dex_entry
+            .map(|d| d.default_gender)
+            .unwrap_or(PokemonGender::Genderless)
+    });
     let ability = ability.unwrap_or(Ability::Illuminate);
-    let nature  = nature.unwrap_or(Nature::Hardy);
-    let item    = item.unwrap_or(Item::None);
+    let nature = nature.unwrap_or(Nature::Hardy);
+    let item = item.unwrap_or(Item::None);
     let tera_type = tera_type.unwrap_or(PokemonType::Normal);
     let mut evs = evs.unwrap_or([0; 6]);
-    let ivs     = ivs.unwrap_or([31; 6]);
+    let ivs = ivs.unwrap_or([31; 6]);
 
-    if use_stat_points { evs = scale_evs_for_stat_points(evs); }
+    if use_stat_points {
+        evs = scale_evs_for_stat_points(evs);
+    }
 
     let move_pp = compute_move_pp(&moves, move_dex);
-    let max_pp  = move_pp;
+    let max_pp = move_pp;
     let (types, base_stats, weight_hg) = dex_entry
         .map(|d| (d.types.clone(), d.base_stats, d.weight))
         .unwrap_or_else(|| (vec![PokemonType::Normal], [100u16; 6], 0u16));
     let stats = calc_stats_for_level(base_stats, ivs, evs, level, &nature);
-    let (is_mega, mega_species, mega_ability) = resolve_mega_info(&species, &item, dex_entry, pokemon_dex);
+    let (is_mega, mega_species, mega_ability) =
+        resolve_mega_info(&species, &item, dex_entry, pokemon_dex);
 
     PokemonState {
         // Default identity; `parse_team_sheet` overwrites this with the party-order index.
         mon_id: 0,
-        fainted: false, species, types, is_tera: false, is_mega,
-        has_mega_form: mega_species.is_some(), level, hp: stats[0],
-        moves, move_pp, max_pp, item, nature, boosts: [0; 7], stats,
-        status: None, volatiles: Vec::new(),
-        base_ability: ability.clone(), ability,
-        gender, weight_hg, tera_type, mega_species, mega_ability,
-        last_move_failed: false, original_ability: None, last_used_move: None, consecutive_move_count: 0, used_moves_this_field: [false; 4],
-        one_time_ability_used: false, ate_berry_this_battle: false, first_move_on_field: false,
+        fainted: false,
+        species,
+        types,
+        is_tera: false,
+        is_mega,
+        has_mega_form: mega_species.is_some(),
+        level,
+        hp: stats[0],
+        moves,
+        move_pp,
+        max_pp,
+        item,
+        nature,
+        boosts: [0; 7],
+        stats,
+        status: None,
+        volatiles: Vec::new(),
+        ability,
+        gender,
+        weight_hg,
+        tera_type,
+        mega_species,
+        mega_ability,
+        last_move_failed: false,
+        original_ability: None,
+        last_used_move: None,
+        consecutive_move_count: 0,
+        used_moves_this_field: [false; 4],
+        one_time_ability_used: false,
+        ate_berry_this_battle: false,
+        first_move_on_field: false,
         first_turn_on_field_pending: false,
-        entered_this_turn: false, consumed_item: None, cud_chew_pending: None,
-        item_lost: false, damaged_this_turn: false, damaged_by_this_turn: Vec::new(),
-        last_physical_damage_taken: 0, last_physical_attacker: None,
-        last_special_damage_taken: 0, last_special_attacker: None,
-        last_damage_taken: 0, last_damage_attacker: None,
-        stats_raised_this_turn: false, stats_lowered_this_turn: false,
-        switched_in_this_turn: false, stall_counter: 0, ally_switch_counter: 0,
-        pre_transform: None, pre_mimicry_types: None, evs, ivs,
+        entered_this_turn: false,
+        consumed_item: None,
+        cud_chew_pending: None,
+        item_lost: false,
+        damaged_this_turn: false,
+        damaged_by_this_turn: Vec::new(),
+        last_physical_damage_taken: 0,
+        last_physical_attacker: None,
+        last_special_damage_taken: 0,
+        last_special_attacker: None,
+        last_damage_taken: 0,
+        last_damage_attacker: None,
+        stats_raised_this_turn: false,
+        stats_lowered_this_turn: false,
+        switched_in_this_turn: false,
+        stall_counter: 0,
+        ally_switch_counter: 0,
+        pre_transform: None,
+        pre_mimicry_types: None,
+        evs,
+        ivs,
         times_hit: 0,
     }
 }
@@ -691,7 +771,6 @@ fn resolve_mega_species(
         return None;
     }
 
-
     let mut fallback: Option<Species> = None;
 
     for (candidate_key, data) in pokemon_dex {
@@ -724,7 +803,15 @@ fn parse_stat_token(token: &str) -> Option<(usize, u8)> {
     let mut iter = token.trim().splitn(2, ' ');
     let val: u8 = iter.next()?.trim().parse().ok()?;
     let name = iter.next()?.trim();
-    let idx = match name { "HP" => 0, "Atk" => 1, "Def" => 2, "SpA" => 3, "SpD" => 4, "Spe" => 5, _ => return None };
+    let idx = match name {
+        "HP" => 0,
+        "Atk" => 1,
+        "Def" => 2,
+        "SpA" => 3,
+        "SpD" => 4,
+        "Spe" => 5,
+        _ => return None,
+    };
     Some((idx, val))
 }
 
@@ -746,7 +833,10 @@ struct PokemonHeader {
 }
 
 /// Parse the first line of a Showdown teamsheet block.
-fn parse_pokemon_header(header: &str, pokemon_dex: &HashMap<Species, PokemonData>) -> Option<PokemonHeader> {
+fn parse_pokemon_header(
+    header: &str,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> Option<PokemonHeader> {
     let (name_part, item_str) = if let Some(at_idx) = header.find(" @ ") {
         (&header[..at_idx], header[at_idx + 3..].trim().to_string())
     } else {
@@ -760,24 +850,42 @@ fn parse_pokemon_header(header: &str, pokemon_dex: &HashMap<Species, PokemonData
         search = &search[cp + 1..];
     }
 
-    let text_before = name_part.find('(').map(|op| name_part[..op].trim()).unwrap_or(name_part.trim());
+    let text_before = name_part
+        .find('(')
+        .map(|op| name_part[..op].trim())
+        .unwrap_or(name_part.trim());
     let explicit_gender = match paren_groups.last() {
         Some(&"M") => Some(PokemonGender::Male),
         Some(&"F") => Some(PokemonGender::Female),
-        _          => None,
+        _ => None,
     };
-    let non_gender: Vec<&str> = paren_groups.iter().filter(|&&g| g != "M" && g != "F").copied().collect();
+    let non_gender: Vec<&str> = paren_groups
+        .iter()
+        .filter(|&&g| g != "M" && g != "F")
+        .copied()
+        .collect();
     let species_name = non_gender.last().copied().unwrap_or(text_before);
 
     let key_str = {
         let k = normalize_string(species_name);
-        if pokemon_dex.contains_key(&Species::from_str(&k)) { k } else { normalize_string(text_before) }
+        if pokemon_dex.contains_key(&Species::from_str(&k)) {
+            k
+        } else {
+            normalize_string(text_before)
+        }
     };
     let species_key = Species::from_str(&key_str);
     if pokemon_dex.get(&species_key).is_none() {
-        eprintln!("Warning: '{}' not found in dex (key: '{:?}')", text_before, species_key);
+        eprintln!(
+            "Warning: '{}' not found in dex (key: '{:?}')",
+            text_before, species_key
+        );
     }
-    Some(PokemonHeader { species_key, item_str, explicit_gender })
+    Some(PokemonHeader {
+        species_key,
+        item_str,
+        explicit_gender,
+    })
 }
 
 /// Parses a Showdown-format teamsheet file and returns a Vec of PokemonStates.
@@ -793,10 +901,18 @@ pub fn parse_team_sheet(
     let mut team = Vec::new();
 
     for block in content.split("\n\n") {
-        let lines: Vec<&str> = block.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-        if lines.is_empty() { continue; }
+        let lines: Vec<&str> = block
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if lines.is_empty() {
+            continue;
+        }
 
-        let Some(header) = parse_pokemon_header(lines[0], pokemon_dex) else { continue; };
+        let Some(header) = parse_pokemon_header(lines[0], pokemon_dex) else {
+            continue;
+        };
 
         let mut ability: Option<Ability> = None;
         let mut level: Option<u8> = None;
@@ -808,28 +924,54 @@ pub fn parse_team_sheet(
         let mut move_count = 0;
 
         for &line in &lines[1..] {
-            if let Some(rest) = line.strip_prefix("Ability:")   { ability    = Some(Ability::from_str(rest.trim())); }
-            else if let Some(rest) = line.strip_prefix("Level:")      { level     = Some(rest.trim().parse().unwrap_or(50)); }
-            else if let Some(rest) = line.strip_prefix("Tera Type:")  { tera_type = Some(parse_type(rest.trim()).unwrap_or(PokemonType::Normal)); }
-            else if let Some(rest) = line.strip_prefix("EVs:") {
+            if let Some(rest) = line.strip_prefix("Ability:") {
+                ability = Some(Ability::from_str(rest.trim()));
+            } else if let Some(rest) = line.strip_prefix("Level:") {
+                level = Some(rest.trim().parse().unwrap_or(50));
+            } else if let Some(rest) = line.strip_prefix("Tera Type:") {
+                tera_type = Some(parse_type(rest.trim()).unwrap_or(PokemonType::Normal));
+            } else if let Some(rest) = line.strip_prefix("EVs:") {
                 let raw = parse_stat_line(rest, 0);
                 evs = Some(if use_stat_points {
                     let mut scaled = raw;
-                    for v in &mut scaled { *v = ((i16::from(*v) * 8) - 4).max(0) as u8; }
+                    for v in &mut scaled {
+                        *v = ((i16::from(*v) * 8) - 4).max(0) as u8;
+                    }
                     scaled
-                } else { raw });
-            }
-            else if let Some(rest) = line.strip_prefix("IVs:")        { ivs    = Some(parse_stat_line(rest, 31)); }
-            else if let Some(ns)   = line.strip_suffix(" Nature")     { nature = parse_nature_str(ns); }
-            else if let Some(mv)   = line.strip_prefix("- ") {
-                if move_count < 4 { moves[move_count] = Some(PokemonMove::from_str(mv)); move_count += 1; }
+                } else {
+                    raw
+                });
+            } else if let Some(rest) = line.strip_prefix("IVs:") {
+                ivs = Some(parse_stat_line(rest, 31));
+            } else if let Some(ns) = line.strip_suffix(" Nature") {
+                nature = parse_nature_str(ns);
+            } else if let Some(mv) = line.strip_prefix("- ") {
+                if move_count < 4 {
+                    moves[move_count] = Some(PokemonMove::from_str(mv));
+                    move_count += 1;
+                }
             }
         }
 
-        let item = if header.item_str.is_empty() { None } else { Some(Item::from_str(&header.item_str)) };
+        let item = if header.item_str.is_empty() {
+            None
+        } else {
+            Some(Item::from_str(&header.item_str))
+        };
         team.push(build_pokemon_state(
-            header.species_key, pokemon_dex, move_dex, level, Some(moves),
-            header.explicit_gender, ability, nature, item, tera_type, evs, ivs, use_stat_points,
+            header.species_key,
+            pokemon_dex,
+            move_dex,
+            level,
+            Some(moves),
+            header.explicit_gender,
+            ability,
+            nature,
+            item,
+            tera_type,
+            evs,
+            ivs,
+            use_stat_points,
         ));
     }
 
@@ -840,4 +982,3 @@ pub fn parse_team_sheet(
 
     team
 }
-

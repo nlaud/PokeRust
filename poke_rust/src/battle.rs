@@ -587,7 +587,6 @@ pub fn try_mega_evolution(
 
     if let Some(ability) = mega_ability {
         mon.ability = ability.clone();
-        mon.base_ability = ability;
     }
     mon.is_mega = true;
     mon.has_mega_form = false;
