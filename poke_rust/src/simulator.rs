@@ -593,6 +593,16 @@ fn apply_single_hit_branch(
             |t| simulator_helpers::compute_endure_outcomes(t, damage, items_suppressed, target_ability_suppressed),
         );
 
+    // Sheer Force: a move boosted by Sheer Force must not trigger the target's Berserk.
+    // Berserk lives inside the generic `apply_damage`/`take_damage` HP-loss path (a deliberate
+    // broadened-trigger divergence), so we suppress it here by snapshotting and restoring the
+    // target's Sp. Atk boost around the hit — Berserk is the only effect in that path that
+    // touches `boosts[2]` / `stats_raised_this_turn`, so the restore is targeted.
+    let sheer_force_boosted = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot)
+        .map_or(false, |a| !simulator_helpers::pokemon_ability_is_suppressed(&branch_state, a)
+            && a.ability == Ability::SheerForce
+            && simulator_helpers::move_has_sheer_force_secondary(move_data));
+
     let n = endure_outcomes.len();
     // Use Option so the last iteration can move out of branch_state without cloning.
     let mut branch_state_opt = Some(branch_state);
@@ -614,7 +624,17 @@ fn apply_single_hit_branch(
             Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
             Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
         } {
+            let berserk_snapshot = if sheer_force_boosted {
+                Some((target_mon.boosts[2], target_mon.stats_raised_this_turn))
+            } else {
+                None
+            };
             simulator_helpers::take_damage(target_mon, eff_damage, target_env, as_);
+            if let Some((spa_boost, raised)) = berserk_snapshot {
+                // Undo any Berserk Sp. Atk boost the boosted hit just triggered.
+                target_mon.boosts[2] = spa_boost;
+                target_mon.stats_raised_this_turn = raised;
+            }
 
             // Per-turn damage tracking: Assurance reads `damaged_this_turn`; Avalanche
             // checks whether this specific attacker slot damaged the holder this turn.
@@ -3922,6 +3942,33 @@ fn possible_damage_outcomes_for_move(
             continue;
         }
 
+        // Good as Gold: immune to single-target status moves used by OTHER Pokémon
+        // (including beneficial ally moves like Helping Hand / Howl). The holder's own
+        // self-targeted status moves still work (action.user_slot != target_slot). Side-
+        // targeting moves (Stealth Rock, Reflect, Tailwind) and whole-field moves (Haze,
+        // Trick Room, weather) are NOT blocked — they are excluded by the single-target
+        // gate below. Mold Breaker does NOT bypass Good as Gold (it is not a breakable
+        // ability), so no attacker_breaks_mold guard. Blocked moves fail without paying any
+        // self-cost because we `continue` before the move's effects are applied for this target.
+        if matches!(move_data.category, MoveCategory::Status)
+            && action.user_slot != *target_slot
+            && matches!(
+                move_data.target,
+                MoveTarget::Normal
+                    | MoveTarget::Any
+                    | MoveTarget::AdjacentFoe
+                    | MoveTarget::AdjacentAlly
+                    | MoveTarget::AdjacentAllyOrSelf
+                    | MoveTarget::RandomNormal
+            )
+            && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+            && target.ability == Ability::GoodasGold
+        {
+            outcomes_for_target.push((0, false, false, 1.0));
+            per_target_outcomes.push((*target_slot, outcomes_for_target));
+            continue;
+        }
+
         // Overcoat: immune to powder/spore moves (MoveFlag::Powder).
         // is_immune_to_powder also covers Grass-type and Safety Goggles; Mold Breaker
         // only bypasses Overcoat — not the type-based or item-based immunities.
@@ -5136,7 +5183,13 @@ fn apply_post_damage_move_effects(
 
         // Shell Bell: restore 1/8 of damage dealt (rounded down) to the attacker.
         // Does not consume the item. Based on damage dealt, not HP lost by target.
-        if !heal_blocked && attacker_item_active && attacker_mon.item == crate::data::item::Item::ShellBell {
+        // Sheer Force suppresses Shell Bell on a boosted move (same negated set as Life Orb recoil).
+        let shell_bell_sheer_force = !abilities_suppressed
+            && attacker_mon.ability == Ability::SheerForce
+            && simulator_helpers::move_has_sheer_force_secondary(move_data);
+        if !heal_blocked && !shell_bell_sheer_force && attacker_item_active
+            && attacker_mon.item == crate::data::item::Item::ShellBell
+        {
             let heal = (total_dmg / 8) as u16;
             if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
