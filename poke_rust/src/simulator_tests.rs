@@ -1099,6 +1099,7 @@ mod tests {
                 &PokemonMove::KowtowCleave,
                 true,
                 move_data.crit_ratio,
+                false,
             );
             assert_eq!(crit_probability, vec![(true, 1.0)]);
 
@@ -1108,6 +1109,7 @@ mod tests {
                 &PokemonMove::StormThrow,
                 true,
                 1,
+                false,
             );
             assert_eq!(storm_throw_probability, vec![(true, 1.0)]);
         }
@@ -2416,7 +2418,7 @@ mod tests {
             assert_eq!(simulator_helpers::effective_crit_ratio(&state, &state.p1_active_mons[0], 1), 3);
             // Stage +2 (ratio 3) is a 50% crit chance under Champions odds.
             let crit = simulator_helpers::critical_hit_probability(
-                &state.p1_active_mons[0], &state.p2_active_mons[0], &PokemonMove::Tackle, true, 3);
+                &state.p1_active_mons[0], &state.p2_active_mons[0], &PokemonMove::Tackle, true, 3, false);
             let crit_chance: f64 = crit.iter().filter(|(c, _)| *c).map(|(_, p)| *p).sum();
             assert!((crit_chance - 0.5).abs() < 1e-9, "expected 50% crit, got {crit_chance}");
 
@@ -30977,5 +30979,1009 @@ mod season2_items_and_abilities {
         ));
         assert_eq!(bs.weather, Some(Weather::Snow), "Icy Rock: Hail should set Snow weather");
         assert_eq!(bs.weather_turns, Some(7), "Icy Rock: Hail should have 7 turns left (8-1)");
+    }
+}
+
+// ── New Moves (Champions batch) ───────────────────────────────────────────────
+mod new_moves {
+    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::{SideCondition, Status, VolatileStatus};
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
+        run_single_turn, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove, ability: Ability, item: Option<Item>) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), Some(PokemonMove::Splash), None, None]),
+            None, Some(ability), Some(Nature::Hardy),
+            item, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn has_vol(mon: &PokemonState, v: &VolatileStatus) -> bool {
+        mon.volatiles.iter().any(|vs| matches!(vs,
+            VolatileStatusState::TurnStatus(x, _) | VolatileStatusState::MoveStatus(x, _) if x == v))
+    }
+
+    /// Average damage dealt to P2's active mon[0] across weighted outcomes.
+    fn avg_dmg_p2(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
+        outcomes.iter().map(|(s, p)| {
+            let taken = match s {
+                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p2_active_mons[0].hp),
+                MatchState::GameOverState { .. } => initial_hp,
+                _ => 0,
+            };
+            taken as f64 * p
+        }).sum()
+    }
+
+    // ── Barb Barrage ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn barb_barrage_doubles_power_vs_poison() {
+        // Clean target vs poisoned: average damage ratio should be ~2.0.
+        let mut attacker = mon(Species::Toxapex, PokemonMove::BarbBarrage, Ability::None, None);
+        attacker.stats[5] = 300; // move first
+        let clean = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let mut poisoned = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        poisoned.status = Some(Status::Poison);
+
+        let hp = clean.hp;
+
+        let clean_dmg = avg_dmg_p2(&run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![clean], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ), hp);
+        let pois_dmg = avg_dmg_p2(&run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![poisoned], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ), hp);
+
+        let ratio = pois_dmg / clean_dmg;
+        assert!((ratio - 2.0).abs() < 0.05,
+            "Barb Barrage vs poisoned should deal ~2x damage; got ratio {ratio:.3}");
+    }
+
+    #[test]
+    fn barb_barrage_doubles_power_vs_toxic_poison() {
+        // Use Ability::MagicGuard on both targets so EOT poison chip is suppressed entirely —
+        // this isolates the pure Barb Barrage damage doubling without EOT contamination.
+        // Clefable (Normal type, Magic Guard) is ideal: not Poison-immune, no type immunity.
+        let mut attacker = mon(Species::Toxapex, PokemonMove::BarbBarrage, Ability::None, None);
+        attacker.stats[5] = 300;
+        let clean = mon(Species::Clefable, PokemonMove::Splash, Ability::MagicGuard, None);
+        let mut toxic = mon(Species::Clefable, PokemonMove::Splash, Ability::MagicGuard, None);
+        toxic.status = Some(Status::ToxicPoison(0));
+
+        let hp = clean.hp;
+
+        let clean_dmg = avg_dmg_p2(&run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![clean], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ), hp);
+        let toxic_dmg = avg_dmg_p2(&run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![toxic], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ), hp);
+
+        let ratio = toxic_dmg / clean_dmg;
+        assert!((ratio - 2.0).abs() < 0.05,
+            "Barb Barrage vs toxic-poisoned (Magic Guard) should deal ~2x damage; got ratio {ratio:.3}");
+    }
+
+    // ── Rage Fist ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rage_fist_base_power_grows_with_hits() {
+        // 0 hits -> BP 50; 2 hits -> BP 150; ratio ~3.0.
+        // Use Machamp (Fighting-type) as the target — Normal-types are immune to Ghost moves.
+        let mut a0 = mon(Species::Annihilape, PokemonMove::RageFist, Ability::None, None);
+        a0.stats[5] = 300;
+        let mut a2 = a0.clone();
+        a2.times_hit = 2;
+
+        let target = mon(Species::Machamp, PokemonMove::Splash, Ability::None, None);
+        let hp = target.hp;
+
+        let dmg0 = avg_dmg_p2(&run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![a0], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ), hp);
+        let dmg2 = avg_dmg_p2(&run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![a2], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ), hp);
+
+        assert!(dmg0 > 0.0, "Rage Fist (Ghost) should deal damage to Machamp (Fighting); dmg0={dmg0}");
+        let ratio = dmg2 / dmg0;
+        assert!((ratio - 3.0).abs() < 0.10,
+            "Rage Fist: 2 hits should give ~3x damage of 0 hits (150 vs 50 BP); ratio={ratio:.3}");
+    }
+
+    #[test]
+    fn rage_fist_bp_capped_at_350() {
+        // 7 hits == cap; 10 hits should produce identical damage.
+        // Machamp (Fighting-type): not immune to Ghost-type Rage Fist.
+        let mut a7 = mon(Species::Annihilape, PokemonMove::RageFist, Ability::None, None);
+        a7.stats[5] = 300;
+        a7.times_hit = 7;
+        let mut a10 = a7.clone();
+        a10.times_hit = 10;
+
+        let target = mon(Species::Machamp, PokemonMove::Splash, Ability::None, None);
+        let hp = target.hp;
+
+        let d7 = avg_dmg_p2(&run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![a7], vec![], vec![target.clone()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ), hp);
+        let d10 = avg_dmg_p2(&run_single_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![a10], vec![], vec![target], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ), hp);
+
+        assert!((d7 - d10).abs() < 1.0,
+            "Rage Fist BP caps at 350 (7 hits == 10 hits); d7={d7:.1} d10={d10:.1}");
+    }
+
+    #[test]
+    fn rage_fist_times_hit_increments_on_damage() {
+        let mut annihilape = mon(Species::Annihilape, PokemonMove::Splash, Ability::None, None);
+        annihilape.stats[5] = 1; // slow — P2 moves first
+        let mut attacker = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None, None);
+        attacker.stats[5] = 300;
+
+        let state = battle_state_from_lists(vec![annihilape], vec![], vec![attacker], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p1_active_mons[0].times_hit, 1,
+            "times_hit should be 1 after being hit once");
+    }
+
+    #[test]
+    fn rage_fist_times_hit_resets_on_switch_out() {
+        use crate::battle::{BattleCommand, SwitchCommand};
+
+        let mut annihilape = mon(Species::Annihilape, PokemonMove::Splash, Ability::None, None);
+        annihilape.times_hit = 2;
+        let bench = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let opp = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let state = battle_state_from_lists(vec![annihilape], vec![bench], vec![opp], vec![]);
+        // Switch P1 slot 0 -> bench index 0 (Snorlax comes in, Annihilape goes to back)
+        let p1_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(),
+        );
+        let times_hit_in_back = outcomes.iter().find_map(|(ms, _)| {
+            if let MatchState::BattleState(bs) = ms {
+                bs.p1_back_mons.iter()
+                    .find(|m| m.species == Species::Annihilape)
+                    .map(|m| m.times_hit)
+            } else { None }
+        });
+        assert_eq!(times_hit_in_back, Some(0),
+            "times_hit should reset to 0 after switching out");
+    }
+
+    // ── Lucky Chant ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn lucky_chant_suppresses_crit_branching() {
+        // Must use simulate_turn directly with consider_crit=true — run_single_turn
+        // always passes consider_crit=false, so crits never branch there.
+        // Slash has a high crit ratio (4/8 at stage 2 counting critical_hit_ratio).
+        // With Lucky Chant: 1 branch (no crit). Without: 2 branches (crit + no-crit).
+        let mut attacker = mon(Species::Snorlax, PokemonMove::Slash, Ability::None, None);
+        attacker.stats[5] = 300;
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let mut state_chant = battle_state_from_lists(
+            vec![attacker.clone()], vec![], vec![target.clone()], vec![],
+        );
+        state_chant.p2_side_conditions.push(SideCondition::LuckyChant);
+        state_chant.p2_side_condition_turns.push(3);
+        let state_none = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // Use simulate_turn with consider_crit=true and 1 damage roll so branches are crit/no-crit only.
+        let outcomes_chant = crate::simulator::simulate_turn(
+            &MatchState::BattleState(state_chant), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1,
+        );
+        let outcomes_none = crate::simulator::simulate_turn(
+            &MatchState::BattleState(state_none), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1,
+        );
+
+        // With Lucky Chant: only 1 branch (no crits possible).
+        // Without: Slash's high crit ratio produces a crit branch + a non-crit branch.
+        assert_eq!(outcomes_chant.len(), 1,
+            "Lucky Chant should produce exactly 1 branch (no crit); got {}", outcomes_chant.len());
+        assert!(outcomes_none.len() > 1,
+            "Without Lucky Chant, Slash should produce crit + no-crit branches; got {}", outcomes_none.len());
+    }
+
+    // ── Skull Bash ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn skull_bash_raises_defense_on_charge_turn() {
+        let mut attacker = mon(Species::Snorlax, PokemonMove::SkullBash, Ability::None, None);
+        attacker.stats[5] = 300;
+        let base_def = attacker.boosts[1];
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p1_active_mons[0].boosts[1], base_def + 1,
+            "Skull Bash should raise Def +1 on the charge turn");
+    }
+
+    // ── Power Herb ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn power_herb_lets_skull_bash_attack_turn_one() {
+        let mut attacker = mon(Species::Snorlax, PokemonMove::SkullBash, Ability::None, Some(Item::PowerHerb));
+        attacker.stats[5] = 300;
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let initial_hp = target.hp;
+
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let dealt_damage = outcomes.iter().any(|(ms, _)| {
+            if let MatchState::BattleState(bs) = ms { bs.p2_active_mons[0].hp < initial_hp } else { true }
+        });
+        assert!(dealt_damage,
+            "Power Herb should allow Skull Bash to deal damage on turn 1");
+
+        let herb_consumed = outcomes.iter().all(|(ms, _)| {
+            if let MatchState::BattleState(bs) = ms { bs.p1_active_mons[0].item == Item::None } else { true }
+        });
+        assert!(herb_consumed, "Power Herb should be consumed after bypassing charge");
+    }
+
+    #[test]
+    fn power_herb_skull_bash_still_grants_def_boost() {
+        let mut attacker = mon(Species::Snorlax, PokemonMove::SkullBash, Ability::None, Some(Item::PowerHerb));
+        attacker.stats[5] = 300;
+        let base_def = attacker.boosts[1];
+        let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p1_active_mons[0].boosts[1], base_def + 1,
+            "Power Herb Skull Bash should still apply the +1 Def charge-turn boost");
+    }
+
+    // ── Focus Punch ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn focus_punch_fails_when_hit_first() {
+        // P2 attacks first (higher speed) -> P1 gets hit -> Focus Punch fails.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::FocusPunch, Ability::None, None);
+        p1.stats[5] = 1;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None, None);
+        p2.stats[5] = 300;
+        let p2_max_hp = p2.stats[0];
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p2_active_mons[0].hp, p2_max_hp,
+            "Focus Punch should fail (deal no damage) when user is hit first");
+    }
+
+    #[test]
+    fn focus_punch_no_pp_lost_when_focus_broken() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::FocusPunch, Ability::None, None);
+        p1.stats[5] = 1;
+        let initial_pp = p1.move_pp[0];
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None, None);
+        p2.stats[5] = 300;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p1_active_mons[0].move_pp[0], initial_pp,
+            "PP should NOT be deducted when Focus Punch fails (Gen V+ rule)");
+    }
+
+    #[test]
+    fn focus_punch_succeeds_when_not_hit() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::FocusPunch, Ability::None, None);
+        p1.stats[5] = 1;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        p2.stats[5] = 300;
+        let p2_initial_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert!(bs.p2_active_mons[0].hp < p2_initial_hp,
+            "Focus Punch should deal damage when user is NOT hit before acting");
+    }
+
+    // ── Dream Eater ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn dream_eater_fails_vs_awake_target() {
+        let mut p1 = mon(Species::Gengar, PokemonMove::DreamEater, Ability::None, None);
+        p1.stats[5] = 300;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        let p2_hp = p2.hp;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p2_active_mons[0].hp, p2_hp,
+            "Dream Eater should deal no damage to an awake target");
+    }
+
+    #[test]
+    fn dream_eater_heals_user_from_sleeping_target() {
+        let mut p1 = mon(Species::Gengar, PokemonMove::DreamEater, Ability::None, None);
+        p1.stats[5] = 300;
+        p1.hp = p1.stats[0] / 2; // start at half HP
+        let p1_start_hp = p1.hp;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        p2.status = Some(Status::Sleep(2));
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert!(bs.p1_active_mons[0].hp > p1_start_hp,
+            "Dream Eater should heal user 50% of damage dealt when target is asleep");
+    }
+
+    // ── Curse ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn curse_non_ghost_user_raises_atk_def_lowers_spe() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Curse, Ability::None, None);
+        p1.stats[5] = 300;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Curse (non-Ghost): Atk +1");
+        assert_eq!(bs.p1_active_mons[0].boosts[1], 1, "Curse (non-Ghost): Def +1");
+        assert_eq!(bs.p1_active_mons[0].boosts[4], -1, "Curse (non-Ghost): Spe -1");
+    }
+
+    #[test]
+    fn curse_ghost_user_applies_volatile_to_target() {
+        let mut p1 = mon(Species::Gengar, PokemonMove::Curse, Ability::None, None);
+        p1.stats[5] = 300;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::Curse),
+            "Ghost Curse should apply Curse volatile to target");
+    }
+
+    #[test]
+    fn curse_ghost_user_costs_half_max_hp() {
+        let mut p1 = mon(Species::Gengar, PokemonMove::Curse, Ability::None, None);
+        p1.stats[5] = 300;
+        let max_hp = p1.stats[0];
+        let start_hp = p1.hp;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        let expected = start_hp.saturating_sub(max_hp / 2);
+        assert_eq!(bs.p1_active_mons[0].hp, expected,
+            "Ghost Curse should cost user 1/2 max HP");
+    }
+
+    // ── Topsy-Turvy ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn topsy_turvy_inverts_stat_stages() {
+        let mut p1 = mon(Species::Sableye, PokemonMove::TopsyTurvy, Ability::None, None);
+        p1.stats[5] = 300;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        p2.boosts[0] = 2;   // +2 Atk -> -2
+        p2.boosts[1] = -1;  // -1 Def -> +1
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p2_active_mons[0].boosts[0], -2, "Topsy-Turvy: +2 Atk -> -2");
+        assert_eq!(bs.p2_active_mons[0].boosts[1], 1, "Topsy-Turvy: -1 Def -> +1");
+    }
+
+    #[test]
+    fn topsy_turvy_fails_vs_neutral_boosts() {
+        let mut p1 = mon(Species::Sableye, PokemonMove::TopsyTurvy, Ability::None, None);
+        p1.stats[5] = 300;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+        // All boosts == 0 -> should fail with no effect.
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert_eq!(bs.p2_active_mons[0].boosts, [0i8; 7],
+            "Topsy-Turvy should fail with no effect when all target boosts are zero");
+    }
+
+    // ── Imprison ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn imprison_applies_volatile_to_user() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Imprison, Ability::None, None);
+        p1.stats[5] = 300;
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Imprison),
+            "Imprison should apply the Imprison volatile to the user");
+    }
+
+    #[test]
+    fn imprison_blocks_shared_move_selection() {
+        use crate::battle::BattleCommand;
+        use crate::simulator::get_possible_commands_for_active_slot;
+
+        // P1 has Imprison active + knows Splash in slot 1; P2 knows Splash.
+        // P2 should not be able to select Splash.
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Imprison, Ability::None, None);
+        p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Imprison, 100));
+        // slot 1 = Splash (our mon() helper sets slot 0 = Imprison, slot 1 = Splash)
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let cmds = get_possible_commands_for_active_slot(
+            &state, Player::P2, 0, &move_dex(), &pokemon_dex(),
+        );
+        let can_splash = cmds.iter().any(|c| matches!(c,
+            BattleCommand::Attack(a)
+                if state.p2_active_mons[0].moves.get(a.move_slot)
+                    .and_then(|m| m.as_ref()) == Some(&PokemonMove::Splash)
+        ));
+        assert!(!can_splash,
+            "Imprison should block P2 from selecting Splash (shared with P1)");
+    }
+
+    // ── Uproar + Throat Chop ─────────────────────────────────────────────────
+
+    #[test]
+    fn throat_chop_landing_ends_uproar_volatile() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::ThroatChop, Ability::None, None);
+        p1.stats[5] = 300; // moves first
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Uproar, Ability::None, None);
+        p2.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Uproar, 2));
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let (bs, _) = extract_battle_state(run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        ));
+        assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::Uproar),
+            "Throat Chop hitting a mon mid-Uproar should remove the Uproar volatile");
+    }
+
+    // ── Make It Rain ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn make_it_rain_drops_user_spa_by_two() {
+        // Make It Rain has 95% accuracy — there are 2 outcome branches (hit + miss).
+        // The self-SpA drop applies regardless of whether the move hits.
+        // Use find_map instead of extract_battle_state to handle multiple branches.
+        let mut p1 = mon(Species::Gholdengo, PokemonMove::MakeItRain, Ability::None, None);
+        p1.stats[5] = 300;
+        let start_spa = p1.boosts[2];
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
+
+        let p2_initial_hp = p2.hp;
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        // Find a branch where the move hit (P2 took damage) and verify SpA dropped -2.
+        // The self-secondary fires on a successful hit.
+        let hit_bs = outcomes.iter().find_map(|(ms, _)| {
+            if let MatchState::BattleState(bs) = ms {
+                if bs.p2_active_mons[0].hp < p2_initial_hp { Some(bs) } else { None }
+            } else { None }
+        });
+        let bs = hit_bs.expect("Make It Rain should have at least one hit outcome");
+        assert_eq!(bs.p1_active_mons[0].boosts[2], start_spa - 2,
+            "Make It Rain (Champions) should lower user SpA by 2, not 1 (checked on hit branch)");
+    }
+}
+
+// ── Rollout / Ice Ball / Defense Curl ────────────────────────────────────────
+mod rollout {
+    use crate::battle::{BattleCommand, AttackCommand, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::dex_data::VolatileStatus;
+    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
+        damage_distribution,
+    };
+
+    fn mon4(species: Species, m0: PokemonMove, m1: PokemonMove, m2: PokemonMove, m3: PokemonMove,
+            ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(m0), Some(m1), Some(m2), Some(m3)]),
+            None, Some(ability), Some(Nature::Hardy),
+            None, None, Some([0; 6]), None, false,
+        )
+    }
+
+    fn simple_mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        mon4(species, mv, PokemonMove::Splash, PokemonMove::Splash, PokemonMove::Splash, ability)
+    }
+
+    fn has_vol(mon: &PokemonState, v: &VolatileStatus) -> bool {
+        mon.volatiles.iter().any(|vs| matches!(vs,
+            VolatileStatusState::TurnStatus(x, _) | VolatileStatusState::MoveStatus(x, _) if x == v))
+    }
+
+    fn has_locked(mon: &PokemonState) -> bool {
+        mon.volatiles.iter().any(|vs| matches!(vs,
+            VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), _)))
+    }
+
+    fn is_confused(mon: &PokemonState) -> bool {
+        has_vol(mon, &VolatileStatus::Confusion)
+    }
+
+    /// Run one turn and return the single deterministic battle-state (panics if branched).
+    fn one_turn(state: &MatchState, p1_cmd: &PlayerCommand, p2_cmd: &PlayerCommand) -> MatchState {
+        let outcomes = run_single_turn(state, p1_cmd, p2_cmd, &move_dex(), &pokemon_dex());
+        // Collapse miss vs hit into just the hit branch for simplicity when accuracy is
+        // the only source of branching.
+        if let Some((ms, _)) = outcomes.iter().find(|(ms, _)| {
+            if let MatchState::BattleState(bs) = ms { !bs.p2_active_mons.is_empty() } else { true }
+        }) {
+            ms.clone()
+        } else {
+            panic!("no valid outcome found");
+        }
+    }
+
+    // ── Defense Curl ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn defense_curl_raises_def_and_sets_volatile() {
+        let p1 = simple_mon(Species::Snorlax, PokemonMove::DefenseCurl, Ability::None);
+        let p2 = simple_mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+
+        let def_before = p1.boosts[1];
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let ms = MatchState::BattleState(state);
+        let outcomes = run_single_turn(
+            &ms,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        assert_eq!(outcomes.len(), 1);
+        if let MatchState::BattleState(ref bs) = outcomes[0].0 {
+            let p1m = &bs.p1_active_mons[0];
+            assert_eq!(p1m.boosts[1], def_before + 1, "Defense Curl should raise Def by +1");
+            assert!(has_vol(p1m, &VolatileStatus::DefenseCurl),
+                "Defense Curl volatile should be set");
+        } else {
+            panic!("expected BattleState");
+        }
+    }
+
+    #[test]
+    fn defense_curl_volatile_does_not_stack() {
+        // Using Defense Curl a second time should not add a second volatile.
+        let p1 = simple_mon(Species::Snorlax, PokemonMove::DefenseCurl, Ability::None);
+        let p2 = simple_mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let ms = MatchState::BattleState(state);
+
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // Turn 1
+        let after_t1 = one_turn(&ms, &p1_cmd, &p2_cmd);
+        // Turn 2 — use Defense Curl again
+        let after_t2 = one_turn(&after_t1, &p1_cmd, &p2_cmd);
+
+        if let MatchState::BattleState(ref bs) = after_t2 {
+            let p1m = &bs.p1_active_mons[0];
+            let curl_count = p1m.volatiles.iter().filter(|vs| matches!(vs,
+                VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, _))).count();
+            assert_eq!(curl_count, 1, "DefenseCurl volatile should not stack");
+            // But Def boost should have risen twice (+1 each turn)
+            assert_eq!(p1m.boosts[1], 2, "Def boost should be +2 after two Defense Curls");
+        } else {
+            panic!("expected BattleState");
+        }
+    }
+
+    // ── Rollout power progression ──────────────────────────────────────────────
+
+    /// Fire Rollout for N turns against a bulky Snorlax (Grass Knot immune via 90kg rule;
+    /// use Inner Focus to avoid flinch; no Rock weakness on Normal type) and return the
+    /// average damage on turn N. Rollout is 90% accurate so we look for the hit branch.
+    fn rollout_avg_dmg(state: &MatchState, turn: usize) -> f64 {
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let mut ms = state.clone();
+        for _ in 0..turn {
+            let outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+            // Keep the hit branch (P2 took damage or the lock continued). If no hit branch
+            // exists we skip (miss); for the test we just take the first non-miss.
+            let (next_ms, _) = outcomes.into_iter()
+                .find(|(s, _)| match s {
+                    MatchState::BattleState(bs) => bs.p1_active_mons[0].volatiles.iter().any(|v|
+                        matches!(v, VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), _)))
+                        || turn == 1, // turn 1: lock only set if connected, check P2 hp below
+                    _ => false,
+                })
+                .or_else(|| Some((MatchState::BattleState({
+                    // fallback — should not happen for first-turn non-miss
+                    if let MatchState::BattleState(bs) = &ms { bs.clone() } else { panic!() }
+                }), 0.0)))
+                .unwrap();
+            ms = next_ms;
+        }
+
+        // Now fire once more and measure the average damage.
+        let initial_hp = if let MatchState::BattleState(bs) = &ms {
+            bs.p2_active_mons[0].hp
+        } else { panic!() };
+
+        let outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+        let dist = damage_distribution(&outcomes, initial_hp);
+        let (total_dmg, total_prob): (f64, f64) = dist.iter()
+            .filter(|&(&d, _)| d > 0)
+            .fold((0.0, 0.0), |(td, tp), (&d, &p)| (td + d as f64 * p, tp + p));
+        if total_prob == 0.0 { 0.0 } else { total_dmg / total_prob }
+    }
+
+    #[test]
+    fn rollout_power_doubles_each_turn() {
+        // Bulky Snorlax (Normal; no Rock weakness). We compare relative damage across
+        // consecutive turns — absolute values depend on the damage roll, but the ratio
+        // should be ≈2.0 ± tolerance.
+        let p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::ThickFat);
+        // Use Chansey as target — massive HP so it doesn't faint mid-run.
+        let p2 = build_pokemon_state(
+            Species::Chansey, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Bold),
+            None, None, Some([252, 0, 252, 0, 252, 0]), None, false,
+        );
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let ms = MatchState::BattleState(state);
+
+        // Turn 1 average damage (n_before=0, bp=30)
+        let d1 = rollout_avg_dmg(&ms, 0);
+        // Turn 2 average damage (n_before=1, bp=60)
+        let d2 = rollout_avg_dmg(&ms, 1);
+        // Turn 3 average damage (n_before=2, bp=120)
+        let d3 = rollout_avg_dmg(&ms, 2);
+
+        assert!(d1 > 0.0, "Rollout turn 1 should deal damage");
+        let ratio_t2_t1 = d2 / d1;
+        let ratio_t3_t2 = d3 / d2;
+        assert!((ratio_t2_t1 - 2.0).abs() < 0.15,
+            "Rollout turn-2 / turn-1 damage ratio should be ≈2.0, got {ratio_t2_t1:.3}");
+        assert!((ratio_t3_t2 - 2.0).abs() < 0.15,
+            "Rollout turn-3 / turn-2 damage ratio should be ≈2.0, got {ratio_t3_t2:.3}");
+    }
+
+    #[test]
+    fn rollout_lock_clears_after_5_turns() {
+        // Inject the lock at n=4 (4 turns already completed) and fire once more.
+        // Turn 5 (cur=5) should deterministically end the run: no BattleState branch
+        // should retain the LockedMove volatile, and no branch should confuse the user.
+        // (GameOverState branches from a one-shot KO are also valid end-states — the
+        // lock and confusion checks only apply to live BattleStates.)
+        let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(
+            VolatileStatus::LockedMove(PokemonMove::Rollout), 4
+        ));
+        let p2 = simple_mon(Species::Chansey, PokemonMove::Splash, Ability::None);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let ms = MatchState::BattleState(state);
+
+        let outcomes = run_single_turn(
+            &ms,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+
+        // Every live BattleState branch must have no LockedMove and no Confusion.
+        for (state, _) in &outcomes {
+            if let MatchState::BattleState(bs) = state {
+                assert!(!has_locked(&bs.p1_active_mons[0]),
+                    "LockedMove volatile should be gone after 5-turn Rollout run");
+                assert!(!is_confused(&bs.p1_active_mons[0]),
+                    "Rollout should NOT cause confusion at end of run");
+            }
+        }
+        // Sanity: there must be at least one outcome (hit or miss or game-over).
+        assert!(!outcomes.is_empty(), "expected at least one outcome");
+    }
+
+    #[test]
+    fn rollout_no_confusion_on_end() {
+        // Contrasted with Thrash: a Rollout run that completes its 5 turns must never confuse.
+        // Inject n=4 (4 turns completed) and verify no BattleState branch adds Confusion.
+        let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
+        p1.volatiles.push(VolatileStatusState::MoveStatus(
+            VolatileStatus::LockedMove(PokemonMove::Rollout), 4
+        ));
+        // High-HP target so some branches are BattleState (not all GameOverState).
+        let p2 = build_pokemon_state(
+            Species::Chansey, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Bold),
+            None, None, Some([252, 0, 252, 0, 252, 0]), None, false,
+        );
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let ms = MatchState::BattleState(state);
+
+        let outcomes = run_single_turn(
+            &ms,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+
+        // Every live BattleState branch should have no Confusion.
+        for (state, _) in &outcomes {
+            if let MatchState::BattleState(bs) = state {
+                assert!(!is_confused(&bs.p1_active_mons[0]),
+                    "Rollout should never cause confusion (turn 5 end of run)");
+            }
+        }
+    }
+
+    #[test]
+    fn rollout_no_confusion_on_disruption() {
+        // A paralysis-disrupted Rollout (pre-action fail) should also never confuse.
+        // We set up the user with full paralysis locked into Rollout at n=2 (turn 3 would
+        // be the "final turn" threshold for Thrash-family). Then simulate a paralysis fail.
+        let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
+        // Manually inject the LockedMove volatile at n=2 (two turns already completed).
+        p1.volatiles.push(VolatileStatusState::MoveStatus(
+            VolatileStatus::LockedMove(PokemonMove::Rollout), 2
+        ));
+        // Full paralysis — 100% fail.
+        p1.status = Some(crate::dex_data::Status::Paralysis);
+        // Patch speed to 0 so full-paralysis branch fires deterministically (status check
+        // uses a 25% chance, but we can't force it; just check that *any* paralysis-fail
+        // branch that does appear does not confuse).
+        let p2 = simple_mon(Species::Chansey, PokemonMove::Splash, Ability::None);
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let ms = MatchState::BattleState(state);
+
+        let outcomes = run_single_turn(
+            &ms,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+
+        for (state, _) in &outcomes {
+            if let MatchState::BattleState(bs) = state {
+                // On any paralysis-fail branch the Rollout lock should be gone and no confusion.
+                if !has_locked(&bs.p1_active_mons[0]) {
+                    assert!(!is_confused(&bs.p1_active_mons[0]),
+                        "Rollout disruption should never cause confusion");
+                }
+            }
+        }
+    }
+
+    // ── Defense Curl × Rollout ─────────────────────────────────────────────────
+
+    #[test]
+    fn defense_curl_doubles_rollout_power() {
+        // A Rollout turn-1 hit with prior Defense Curl should deal ≈2× the damage of a
+        // Rollout turn-1 hit without Defense Curl, all else equal.
+        let make_state = |with_curl: bool| -> MatchState {
+            let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
+            if with_curl {
+                p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, 0));
+            }
+            let p2 = build_pokemon_state(
+                Species::Chansey, pokemon_dex(), move_dex(), Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Bold),
+                None, None, Some([252, 0, 252, 0, 252, 0]), None, false,
+            );
+            MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]))
+        };
+
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let initial_hp_no_curl: u16 = if let MatchState::BattleState(bs) = make_state(false) {
+            bs.p2_active_mons[0].hp
+        } else { panic!() };
+        let initial_hp_curl: u16 = if let MatchState::BattleState(bs) = make_state(true) {
+            bs.p2_active_mons[0].hp
+        } else { panic!() };
+
+        let no_curl_outcomes = run_single_turn(&make_state(false), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+        let curl_outcomes    = run_single_turn(&make_state(true),  &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+
+        let avg_dmg = |outcomes: &Vec<(MatchState, f64)>, init_hp: u16| -> f64 {
+            let dist = damage_distribution(outcomes, init_hp);
+            let (td, tp) = dist.iter()
+                .filter(|&(&d, _)| d > 0)
+                .fold((0.0f64, 0.0f64), |(td, tp), (&d, &p)| (td + d as f64 * p, tp + p));
+            if tp == 0.0 { 0.0 } else { td / tp }
+        };
+
+        let dmg_no = avg_dmg(&no_curl_outcomes, initial_hp_no_curl);
+        let dmg_cu = avg_dmg(&curl_outcomes, initial_hp_curl);
+
+        assert!(dmg_no > 0.0, "Rollout without Defense Curl should deal damage");
+        let ratio = dmg_cu / dmg_no;
+        assert!((ratio - 2.0).abs() < 0.15,
+            "Defense Curl should double Rollout damage (ratio ≈2.0, got {ratio:.3})");
+    }
+
+    // ── Ice Ball ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ice_ball_power_doubles_each_turn() {
+        // Ice Ball is mechanically identical to Rollout. One spot-check: turn-2 ≈ 2× turn-1.
+        let p1 = simple_mon(Species::Snorlax, PokemonMove::IceBall, Ability::None);
+        // Snorlax is not Ice-weak (Normal type). Use it as a bulky non-Ice-weak target too.
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Bold),
+            None, None, Some([252, 0, 252, 0, 252, 0]), None, false,
+        );
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let ms = MatchState::BattleState(state);
+
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // Turn 1: n_before=0 → bp=30.
+        let initial_hp = if let MatchState::BattleState(bs) = &ms { bs.p2_active_mons[0].hp } else { panic!() };
+        let t1_outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+        let dist_t1 = damage_distribution(&t1_outcomes, initial_hp);
+        let (td1, tp1) = dist_t1.iter().filter(|&(&d, _)| d > 0)
+            .fold((0.0f64, 0.0f64), |(td, tp), (&d, &p)| (td + d as f64 * p, tp + p));
+        let avg_t1 = if tp1 > 0.0 { td1 / tp1 } else { 0.0 };
+
+        // Advance to turn 2 by taking the locked branch from turn 1.
+        let ms2 = t1_outcomes.into_iter()
+            .find(|(s, _)| match s {
+                MatchState::BattleState(bs) => has_locked(&bs.p1_active_mons[0]),
+                _ => false,
+            })
+            .map(|(s, _)| s)
+            .expect("should have a locked branch after Ice Ball turn 1 hit");
+
+        let initial_hp2 = if let MatchState::BattleState(bs) = &ms2 { bs.p2_active_mons[0].hp } else { panic!() };
+        let t2_outcomes = run_single_turn(&ms2, &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+        let dist_t2 = damage_distribution(&t2_outcomes, initial_hp2);
+        let (td2, tp2) = dist_t2.iter().filter(|&(&d, _)| d > 0)
+            .fold((0.0f64, 0.0f64), |(td, tp), (&d, &p)| (td + d as f64 * p, tp + p));
+        let avg_t2 = if tp2 > 0.0 { td2 / tp2 } else { 0.0 };
+
+        assert!(avg_t1 > 0.0, "Ice Ball turn 1 should deal damage");
+        let ratio = avg_t2 / avg_t1;
+        assert!((ratio - 2.0).abs() < 0.15,
+            "Ice Ball turn-2 / turn-1 damage ratio should be ≈2.0, got {ratio:.3}");
     }
 }

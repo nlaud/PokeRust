@@ -208,17 +208,25 @@ fn resolve_confusion_self_hit_outcomes(
     outcomes
 }
 
-/// Before any action resolves this turn, give Beak Blast users a `BeakBlastCharging` volatile.
-/// Any contact move that hits the holder while the volatile is active burns the attacker (100%).
-/// The volatile auto-expires at end-of-turn; it is also explicitly removed after Beak Blast fires.
+/// Before any action resolves this turn, give Beak Blast users a `BeakBlastCharging` volatile
+/// and Focus Punch users a `FocusPunchCharging` volatile.
+/// Both auto-expire at end-of-turn (TurnStatus, duration 1).
 fn apply_priority_charge_volatiles(bs: &mut BattleState) {
     use crate::dex_data::VolatileStatus;
     use crate::pokemon::VolatileStatusState;
-    let beak_blast_users: Vec<FieldSlot> = bs.action_queue.iter().filter_map(|a| {
+
+    // Collect slots for Beak Blast and Focus Punch in a single pass.
+    let mut beak_blast_users: Vec<FieldSlot> = Vec::new();
+    let mut focus_punch_users: Vec<FieldSlot> = Vec::new();
+    for a in &bs.action_queue {
         if let Action::MoveAction(ma) = a {
-            if ma.move_name == PokemonMove::BeakBlast { Some(ma.user_slot) } else { None }
-        } else { None }
-    }).collect();
+            match ma.move_name {
+                PokemonMove::BeakBlast   => beak_blast_users.push(ma.user_slot),
+                PokemonMove::FocusPunch  => focus_punch_users.push(ma.user_slot),
+                _ => {}
+            }
+        }
+    }
 
     for slot in beak_blast_users {
         if let Some(mon) = mon_at_slot_mut(bs, slot) {
@@ -228,6 +236,20 @@ fn apply_priority_charge_volatiles(bs: &mut BattleState) {
             ));
             if !already_has {
                 mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::BeakBlastCharging, 1));
+            }
+        }
+    }
+
+    // Focus Punch: set FocusPunchCharging so the damage-landing path can check it.
+    // If the holder takes direct damage from an opponent before their action, the move fails.
+    for slot in focus_punch_users {
+        if let Some(mon) = mon_at_slot_mut(bs, slot) {
+            if mon.fainted { continue; }
+            let already_has = mon.volatiles.iter().any(|v| matches!(v,
+                VolatileStatusState::TurnStatus(VolatileStatus::FocusPunchCharging, _)
+            ));
+            if !already_has {
+                mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::FocusPunchCharging, 1));
             }
         }
     }
@@ -349,6 +371,15 @@ fn handle_charging_and_semi_invulnerability(
             if raised { mon.stats_raised_this_turn = true; }
         }
     }
+    // Skull Bash: +1 Def on the charge turn (boosts[1] = Defense).
+    if action.move_name == PokemonMove::SkullBash && charging_data.is_none() {
+        let raised = attacker.boosts[1] < 6;
+        attacker.boosts[1] = (attacker.boosts[1] + 1).clamp(-6, 6);
+        if let Some(mon) = mon_at_slot_mut(next_state, action.user_slot) {
+            mon.boosts = attacker.boosts;
+            if raised { mon.stats_raised_this_turn = true; }
+        }
+    }
 
     // Semi-invulnerable: first turn → enter invulnerability
     if move_causes_invulnerability && !is_semi_invulnerable {
@@ -361,9 +392,29 @@ fn handle_charging_and_semi_invulnerability(
         write_back_volatiles(next_state, action.user_slot, attacker.volatiles.clone());
     }
 
-    // Charging: first turn → store volatile and wait
+    // Power Herb: skip the charge turn for any two-turn charging move. The herb is consumed
+    // immediately, and the move executes in the same turn (fall through to damage).
+    // Charge-turn stat boosts (ElectroShot/MeteorBeam/Skull Bash, handled above) still apply
+    // because they are gated on `charging_data.is_none()`, which is true on the Power Herb turn.
     if move_has_charge && charging_data.is_none() && !move_causes_invulnerability {
-        return handle_charging_first_turn(attacker, action, move_data, next_state);
+        let items_suppressed = simulator_helpers::items_are_suppressed(next_state);
+        let has_power_herb = !items_suppressed
+            && simulator_helpers::get_pokemon_at_slot(next_state, action.user_slot)
+                .map(|m| simulator_helpers::item_is_active(next_state, m)
+                    && m.item == crate::data::item::Item::PowerHerb)
+                .unwrap_or(false);
+        if has_power_herb {
+            // Consume the herb: clear the item slot, record for Recycle, and fire Unburden/Pickup.
+            if let Some(mon) = mon_at_slot_mut(next_state, action.user_slot) {
+                mon.consumed_item = Some(crate::data::item::Item::PowerHerb);
+                mon.item = crate::data::item::Item::None;
+                mon.item_lost = true;
+                next_state.items_consumed_this_turn.push((action.user_slot, crate::data::item::Item::PowerHerb));
+            }
+            // Fall through to damage (skip handle_charging_first_turn).
+        } else {
+            return handle_charging_first_turn(attacker, action, move_data, next_state);
+        }
     }
 
     // Charging: second turn → validate target, remove volatile, fall through
@@ -634,6 +685,16 @@ fn apply_single_hit_branch(
                 // Undo any Berserk Sp. Atk boost the boosted hit just triggered.
                 target_mon.boosts[2] = spa_boost;
                 target_mon.stats_raised_this_turn = raised;
+            }
+
+            // Rage Fist hit counter: any Physical/Special move that connects (even if HP is not
+            // lost, e.g. Disguise absorption) increments the counter. Confusion self-damage and
+            // Substitute-absorbed hits do not reach this site so they are naturally excluded.
+            if matches!(
+                move_data.category,
+                crate::dex_data::MoveCategory::Physical | crate::dex_data::MoveCategory::Special
+            ) {
+                target_mon.times_hit = target_mon.times_hit.saturating_add(1);
             }
 
             // Per-turn damage tracking: Assurance reads `damaged_this_turn`; Avalanche
@@ -1211,7 +1272,19 @@ fn possible_damage_outcomes_for_move(
             v,
             crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Disable(m), _) if *m == action.move_name
         ));
-        if blocked_by_taunt || blocked_by_throat_chop || blocked_by_disable {
+        // Imprison: if any opposing active mon holds the Imprison volatile AND knows this move,
+        // the move is blocked (no PP consumed, counts as failed).
+        let opponent_player = match action.user_slot.player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+        let blocked_by_imprison = {
+            let opp_mons = match opponent_player {
+                Player::P1 => &next_state.p1_active_mons,
+                Player::P2 => &next_state.p2_active_mons,
+            };
+            opp_mons.iter().any(|m| !m.fainted
+                && simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison)
+                && m.moves.iter().any(|slot| slot.as_ref() == Some(&action.move_name)))
+        };
+        if blocked_by_taunt || blocked_by_throat_chop || blocked_by_disable || blocked_by_imprison {
             if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
                 mon.last_move_failed = true;
                 mon.stall_counter = 0;
@@ -1842,6 +1915,45 @@ fn possible_damage_outcomes_for_move(
         };
         if let Some(slot) = override_slot {
             target_slots = vec![slot];
+        }
+    }
+
+    // Focus Punch: fails (no damage, no PP consumed) if the user was hit by a damaging move
+    // before their action this turn. Detected via `damaged_this_turn` (set whenever any
+    // direct hit deals effective damage). Status moves and Substitute-absorbed hits do NOT
+    // break focus (Substitute absorbs the hit before the attacker's mon records damage).
+    // Gen V+: PP is not consumed on a broken focus — return the pre-move state unchanged.
+    if move_name == PokemonMove::FocusPunch {
+        // FocusPunchCharging is present only if the user was alive at turn-start and selected
+        // Focus Punch. If damaged_this_turn is set, focus was broken.
+        let focus_broken = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| m.damaged_this_turn
+                && simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusPunchCharging))
+            .unwrap_or(false);
+        if focus_broken {
+            // Remove the FocusPunchCharging volatile and return — no PP cost, no damage.
+            if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                mon.last_move_failed = true;
+                simulator_helpers::remove_status_volatile(mon, &VolatileStatus::FocusPunchCharging);
+            }
+            return vec![(MatchState::BattleState(next_state), 1.0)];
+        }
+    }
+
+    // Dream Eater: only works against a sleeping target (or Comatose, which permanently acts as
+    // if asleep). If the target is not asleep and does not have Comatose, the move fails
+    // completely (no damage, sets last_move_failed). Abilities suppression via Mold Breaker is
+    // NOT considered here — Comatose's pseudo-sleep makes the move work even when sleep is faked.
+    if move_name == PokemonMove::DreamEater {
+        let target_slot = target_slots[0];
+        let target_ok = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| matches!(m.status, Some(Status::Sleep(_))) || m.ability == Ability::Comatose)
+            .unwrap_or(false);
+        if !target_ok {
+            if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                mon.last_move_failed = true;
+            }
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
     }
 
@@ -3088,6 +3200,20 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
+    // Defense Curl: +1 Def and apply the DefenseCurl volatile (Rollout/Ice Ball double their
+    // power for the entire run while the user holds this volatile).
+    if move_name == PokemonMove::DefenseCurl {
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            simulator_helpers::apply_stat_boost_external(mon, &[0, 1, 0, 0, 0, 0, 0], items_suppressed);
+            if !simulator_helpers::has_status_volatile(mon, &VolatileStatus::DefenseCurl) {
+                mon.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, 0));
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     // Minimize: +2 evasiveness and apply the Minimize volatile (certain moves hit it for double
     // and never miss — handled in the damage calculation).
     if move_name == PokemonMove::Minimize {
@@ -3310,6 +3436,92 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::remove_status_volatile(target, &VolatileStatus::SpeedSwap(0));
             target.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpeedSwap(target_spe), 0));
             target.stats[5] = user_spe;
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Curse: Ghost-type user loses ½ max HP and inflicts the Curse volatile on the target
+    // (¼ HP drain per end of turn, Baton-Passable). Non-Ghost users gain +1 Atk / +1 Def / −1 Spe.
+    // Behavior keys off the *current* type (after Terastallization / Soak / etc.).
+    // Fails vs a target that already has Curse. No HP cost if the move fails.
+    if move_name == PokemonMove::Curse {
+        let user_is_ghost = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| simulator_helpers::pokemon_has_type(m, &PokemonType::Ghost))
+            .unwrap_or(false);
+        if user_is_ghost {
+            let Some(&target_slot) = target_slots.first() else {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            };
+            let target_already_cursed = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Curse))
+                .unwrap_or(true);
+            if target_already_cursed {
+                return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+            }
+            // Cost: ½ max HP (move still completes even if this faints the user).
+            {
+                let user_env = simulator_helpers::berry_env(&next_state, action.user_slot);
+                let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&next_state);
+                if let Some(user) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                    let cost = (user.stats[0].max(1) / 2).max(1);
+                    simulator_helpers::take_damage(user, cost, user_env, abilities_suppressed);
+                    if user.fainted { simulator_helpers::clear_pokemon_on_faint(user); }
+                }
+            }
+            // Apply Curse volatile to the target (TurnStatus, permanent — Baton Pass carries TurnStatus(Curse,_)).
+            if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+                target.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Curse, 0));
+            }
+        } else {
+            // Non-Ghost: +1 Atk / +1 Def / −1 Spe — routed through the normal boost helpers so
+            // Contrary / Simple apply, but does NOT require a target.
+            let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+            if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+                simulator_helpers::apply_stat_boost_external(user, &[1, 1, 0, 0, -1, 0, 0], items_suppressed);
+            }
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Imprison: apply the Imprison volatile to the user. While active, opposing Pokémon cannot
+    // select or use any move the user knows. Fails if the user already has Imprison (no double-stack).
+    // Gen V+: succeeds even if no opponent shares a move (the volatile is still applied).
+    // Not Baton-Passable — the volatile stays on the user until they switch out.
+    if move_name == PokemonMove::Imprison {
+        let already_imprisoned = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison))
+            .unwrap_or(false);
+        if already_imprisoned {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            user.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Imprison, 0));
+        }
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Topsy-Turvy: invert all of the target's stat stages (×−1 for each of the 7 indices).
+    // Fails if every stage is already 0. Always hits (accuracy bypassed via dex data). Does NOT
+    // trigger Defiant/Competitive and ignores Contrary/Simple/Clear Body/Mist — manipulate the
+    // boost array directly without routing through apply_opponent_stat_drop.
+    // boosts[]: atk=0, def=1, spa=2, spd=3, spe=4, acc=5, eva=6
+    if move_name == PokemonMove::TopsyTurvy {
+        let Some(&target_slot) = target_slots.first() else {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        };
+        let all_zero = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| m.boosts.iter().all(|&b| b == 0))
+            .unwrap_or(true);
+        if all_zero {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            for b in target.boosts.iter_mut() {
+                *b = -*b;
+            }
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
@@ -4604,12 +4816,20 @@ fn disrupt_rampage_lock(
     attacks_completed: u16,
     is_misty_terrain: bool,
 ) {
+    // Read the locked move before removing it so we can skip confusion for rolling moves.
+    let locked_is_rolling = mon.volatiles.iter().any(|v| matches!(
+        v,
+        crate::pokemon::VolatileStatusState::MoveStatus(
+            VolatileStatus::LockedMove(m), _
+        ) if matches!(m, PokemonMove::Rollout | PokemonMove::IceBall)
+    ));
     simulator_helpers::remove_status_volatile(mon, &VolatileStatus::LockedMove(
         crate::data::pokemon_move::PokemonMove::Tackle // payload ignored by discriminant match
     ));
-    // Only confuse when the disrupted attack would have been the guaranteed-final 3rd turn.
+    // Only confuse when the disrupted attack would have been the guaranteed-final 3rd turn,
+    // and only for Thrash-family moves (Rollout/Ice Ball never confuse).
     let is_final_turn = attacks_completed >= 2;
-    if is_final_turn && !simulator_helpers::is_confused(mon) && !is_misty_terrain {
+    if is_final_turn && !locked_is_rolling && !simulator_helpers::is_confused(mon) && !is_misty_terrain {
         let duration = rand::thread_rng().gen_range(2u16..=5u16);
         mon.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
             VolatileStatus::Confusion,
@@ -4752,6 +4972,19 @@ fn generate_commands_for_active(
     let tormented = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Torment);
     // Uproar: while active, the user must keep using Uproar.
     let uproar_locked = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Uproar);
+    // Imprison: collect moves that are blocked by an opponent's Imprison.
+    // A move is imprisoned if any active opposing mon carries the Imprison volatile AND knows it.
+    let opponent_player = match player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+    let imprison_blocked_moves: std::collections::HashSet<PokemonMove> = {
+        let opp_mons = match opponent_player {
+            Player::P1 => &state.p1_active_mons,
+            Player::P2 => &state.p2_active_mons,
+        };
+        opp_mons.iter()
+            .filter(|m| !m.fainted && simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison))
+            .flat_map(|m| m.moves.iter().filter_map(|s| s.clone()))
+            .collect()
+    };
 
     // Attacks: filter by choice-lock and 0-PP, then fall back to Struggle.
     let mut emitted_attack = false;
@@ -4813,6 +5046,9 @@ fn generate_commands_for_active(
             crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::CantUseRepeatedly(m), _) if m == move_name
         ));
         if cant_repeat { continue; }
+
+        // Imprison: moves shared with an imprisoning opponent cannot be selected.
+        if imprison_blocked_moves.contains(move_name) { continue; }
 
         // Gravity: moves with the Gravity flag cannot be selected while Gravity is active.
         if simulator_helpers::is_gravity_active(state)
@@ -5139,6 +5375,16 @@ fn apply_post_damage_move_effects(
     let attacker_env = simulator_helpers::berry_env(&bs, attacker_slot);
     let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
     let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&bs);
+    // Capture whether any active opposing mon carries Liquid Ooze before the attacker borrow.
+    // If so, drain heals are reversed into damage on the attacker (mirrors Strength Sap and
+    // Leech Seed). Checked before the mutable borrow of attacker_mon to avoid borrow conflicts.
+    let drain_target_has_liquid_ooze = !abilities_suppressed && {
+        let opp_mons = match opposing_player {
+            Player::P1 => &bs.p1_active_mons,
+            Player::P2 => &bs.p2_active_mons,
+        };
+        opp_mons.iter().any(|m| !m.fainted && m.ability == Ability::LiquidOoze)
+    };
     let mut forced_winner: Option<Player> = None;
     let mut attacker_fainted = false;
     // (cur, end_prob, disrupt_now, can_confuse) — set inside the attacker_mon block below.
@@ -5175,10 +5421,23 @@ fn apply_post_damage_move_effects(
             if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
         }
 
-        // Drain heal
-        if !heal_blocked && move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
+        // Drain heal (e.g. Drain Punch, Giga Drain, Dream Eater, Leech Life).
+        // Liquid Ooze on the target reverses the heal into damage on the user —
+        // this mirrors the Strength Sap and Leech Seed implementations.
+        if move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
             let heal = ((total_dmg * move_data.drain_fraction[0] as u32) / move_data.drain_fraction[1] as u32) as u16;
-            if heal > 0 { simulator_helpers::gain_hp(attacker_mon, heal, attacker_env); }
+            if heal > 0 {
+                if drain_target_has_liquid_ooze {
+                    simulator_helpers::take_damage(attacker_mon, heal, attacker_env, abilities_suppressed);
+                    if attacker_mon.fainted {
+                        simulator_helpers::clear_pokemon_on_faint(attacker_mon);
+                        attacker_fainted = true;
+                        if opponent_wiped { forced_winner = Some(attacker_slot.player); }
+                    }
+                } else if !heal_blocked {
+                    simulator_helpers::gain_hp(attacker_mon, heal, attacker_env);
+                }
+            }
         }
 
         // Shell Bell: restore 1/8 of damage dealt (rounded down) to the attacker.
@@ -5301,14 +5560,20 @@ fn apply_post_damage_move_effects(
         let is_rampaging_move = matches!(move_data.name,
             PokemonMove::Thrash | PokemonMove::Outrage | PokemonMove::PetalDance | PokemonMove::RagingFury
         );
+        // Rolling moves (Rollout/Ice Ball): same LockedMove volatile as rampaging moves but with
+        // deterministic 5-turn duration (never end early except on disruption) and no confusion.
+        let is_rolling_move = matches!(move_data.name,
+            PokemonMove::Rollout | PokemonMove::IceBall
+        );
+        let is_locking_move = is_rampaging_move || is_rolling_move;
 
         // rampage_decision: Some((cur, end_prob, disrupt_now, can_confuse))
         //   cur          — attacks completed including this one
-        //   end_prob     — probability this is the final rampage attack
+        //   end_prob     — probability this is the final rampage/rolling attack
         //   disrupt_now  — move failed (total_dmg==0); end without confusion unless
         //                  end_prob==1.0 (final turn quirk)
-        //   can_confuse  — !is_confused && !misty_terrain at decision time
-        rampage_decision = if is_rampaging_move && !attacker_fainted {
+        //   can_confuse  — false for rolling moves; !is_confused && !misty_terrain for Thrash-family
+        rampage_decision = if is_locking_move && !attacker_fainted {
             let n_before: Option<u16> = attacker_mon.volatiles.iter().find_map(|v| {
                 if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v {
                     Some(*t)
@@ -5318,7 +5583,11 @@ fn apply_post_damage_move_effects(
             });
             let cur = n_before.unwrap_or(0) + 1;
             let disrupt_now = total_dmg == 0;
-            let can_confuse = !simulator_helpers::is_confused(attacker_mon) && !attacker_env.misty_terrain;
+            // Rolling moves never confuse on end. Thrash-family confuses unless already confused
+            // or the field is misty.
+            let can_confuse = !is_rolling_move
+                && !simulator_helpers::is_confused(attacker_mon)
+                && !attacker_env.misty_terrain;
 
             if cur == 1 {
                 // First use: set lock to n=1 only if move connected.
@@ -5333,7 +5602,14 @@ fn apply_post_damage_move_effects(
                 // Already locked: remove the existing lock entry now; the fork below
                 // will re-add it on the continue branch.
                 simulator_helpers::remove_status_volatile(attacker_mon, &VolatileStatus::LockedMove(move_data.name.clone()));
-                let end_prob = if cur >= 3 { 1.0 } else { 0.5 };
+                let end_prob = if is_rolling_move {
+                    // Rolling: deterministic 5-turn sequence — always end at turn 5 (cur==5),
+                    // never branch mid-run (unless disrupted via disrupt_now).
+                    if cur >= 5 { 1.0 } else { 0.0 }
+                } else {
+                    // Thrash-family: 50% end at turn 2; guaranteed end at turn 3+.
+                    if cur >= 3 { 1.0 } else { 0.5 }
+                };
                 Some((cur, end_prob, disrupt_now, can_confuse))
             }
         } else {
@@ -5955,6 +6231,8 @@ fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     mon.consecutive_move_count = 0;
     // Null last_used_move so the Metronome streak doesn't carry across switch-ins.
     mon.last_used_move = None;
+    // Rage Fist hit counter resets when the Pokémon leaves the field (Champions rules).
+    mon.times_hit = 0;
 }
 
 fn perform_switch_out_in(

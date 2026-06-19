@@ -569,8 +569,17 @@ pub fn critical_hit_probability(
     move_name: &PokemonMove,
     consider_crit: bool,
     crit_ratio: u8,
+    // Lucky Chant on the target's side blocks ALL crits, including guaranteed-crit moves
+    // (Storm Throw, Frost Breath, etc.) and Laser Focus. The check must come before
+    // crit_is_guaranteed so that always-crit moves cannot bypass it.
+    lucky_chant_active: bool,
 ) -> Vec<(bool, f64)> {
     if !consider_crit {
+        return vec![(false, 1.0)];
+    }
+
+    // Lucky Chant: suppress all critical hits — including guaranteed ones.
+    if lucky_chant_active {
         return vec![(false, 1.0)];
     }
 
@@ -1032,6 +1041,9 @@ fn variable_move_base_power(
         M::Acrobatics => Some(if attacker.item == Item::None { bp * 2 } else { bp }),
         // Non-volatile status on the target.
         M::Hex | M::InfernalParade => Some(if target.status.is_some() { bp * 2 } else { bp }),
+        // Target is poisoned or badly poisoned (Champions: both conditions double power).
+        M::BarbBarrage => Some(if matches!(target.status,
+            Some(Status::Poison) | Some(Status::ToxicPoison(_))) { bp * 2 } else { bp }),
         // Target took any damage earlier this turn (direct or indirect).
         M::Assurance => Some(if target.damaged_this_turn { bp * 2 } else { bp }),
         // This specific target damaged the user earlier this turn.
@@ -1074,6 +1086,30 @@ fn variable_move_base_power(
         M::SpitUp => Some(100 * stockpile_level(attacker) as u16),
         // Round: BP 60 on first cast this turn; 120 for every subsequent Round same turn.
         M::Round => Some(if state.round_used_this_turn { bp * 2 } else { bp }),
+        // Rage Fist: 50 base + 50 per hit taken, capped at 350 (= 7 hits).
+        // `attacker.times_hit` is incremented each time this Pokémon is hit by a damaging move
+        // and resets on switch-out or faint (Champions rules).
+        M::RageFist => Some((50u16 + 50 * attacker.times_hit).min(350)),
+        // Rollout / Ice Ball: power doubles each consecutive turn (30→60→120→240→480 over 5 turns).
+        // At damage-calc time the post-damage fork has not yet bumped the counter, so n_before is
+        // 0,1,2,3,4 on successive turns → bp << n_before = 30,60,120,240,480.
+        // If the user holds the DefenseCurl volatile, every hit in the run is doubled again.
+        M::Rollout | M::IceBall => {
+            let n_before = attacker.volatiles.iter().find_map(|v| {
+                if let crate::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v {
+                    Some(*t)
+                } else {
+                    None
+                }
+            }).unwrap_or(0);
+            let mut power = bp << n_before;
+            let has_curl = attacker.volatiles.iter().any(|v| matches!(
+                v,
+                crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, _)
+            ));
+            if has_curl { power *= 2; }
+            Some(power)
+        }
         _ => None,
     }
 }
@@ -1979,7 +2015,15 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     let friend_guard_mult = friend_guard_mult(_state, _target_slot);
 
     let rolls   = forced_damage_roll.map(|r| vec![r]).unwrap_or_else(|| selected_damage_rolls(config.damage_rolls));
-    let crits   = critical_hit_probability(attacker, target, &move_data.name, config.consider_crit, effective_crit_ratio(_state, attacker, move_data.crit_ratio));
+    // Lucky Chant is on the DEFENDER'S side — it blocks crits against that side's Pokémon.
+    let lucky_chant_on_target_side = {
+        let (conditions, _) = match _target_slot.player {
+            crate::battle::Player::P1 => (&_state.p1_side_conditions, &_state.p1_side_condition_turns),
+            crate::battle::Player::P2 => (&_state.p2_side_conditions, &_state.p2_side_condition_turns),
+        };
+        conditions.contains(&crate::dex_data::SideCondition::LuckyChant)
+    };
+    let crits   = critical_hit_probability(attacker, target, &move_data.name, config.consider_crit, effective_crit_ratio(_state, attacker, move_data.crit_ratio), lucky_chant_on_target_side);
 
     let mut outcomes = Vec::new();
 
@@ -5711,6 +5755,40 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
     // (the opposing active mon in singles). Liquid Ooze reverses the heal into damage.
     apply_leech_seed_residual(state, &p1_envs, &p2_envs, ctx.items_suppressed);
 
+    // Curse volatile: cursed Pokémon lose ¼ of their max HP each end of turn.
+    // Magic Guard prevents the damage. The volatile persists until the holder switches out or
+    // faints (it is Baton-Passable, so it can transfer, but the damage still applies to the
+    // new holder). Ordered after Leech Seed, before binding chip.
+    {
+        let abilities_suppressed = ctx.abilities_suppressed;
+        let cursed_p1: Vec<usize> = state.p1_active_mons.iter().enumerate()
+            .filter(|(_, m)| !m.fainted && has_status_volatile(m, &VolatileStatus::Curse))
+            .map(|(i, _)| i)
+            .collect();
+        let cursed_p2: Vec<usize> = state.p2_active_mons.iter().enumerate()
+            .filter(|(_, m)| !m.fainted && has_status_volatile(m, &VolatileStatus::Curse))
+            .map(|(i, _)| i)
+            .collect();
+        for idx in cursed_p1 {
+            let env = p1_envs[idx];
+            let mon = &mut state.p1_active_mons[idx];
+            let magic_guard = !abilities_suppressed && mon.ability == Ability::MagicGuard;
+            if !magic_guard {
+                let dmg = (mon.stats[0].max(1) / 4).max(1);
+                take_damage(mon, dmg, env, abilities_suppressed);
+            }
+        }
+        for idx in cursed_p2 {
+            let env = p2_envs[idx];
+            let mon = &mut state.p2_active_mons[idx];
+            let magic_guard = !abilities_suppressed && mon.ability == Ability::MagicGuard;
+            if !magic_guard {
+                let dmg = (mon.stats[0].max(1) / 4).max(1);
+                take_damage(mon, dmg, env, abilities_suppressed);
+            }
+        }
+    }
+
     // Binding chip damage (PartiallyTrapped residual).
     // Canonical order: same phase as Leech Seed, after Leftovers but before burn/poison.
     // Ghost-types are NOT exempt — they still take chip; they are only exempt from the
@@ -7100,6 +7178,12 @@ fn apply_effect_to_target(
                     && !has_status_volatile(target_mon, &VolatileStatus::GastroAcid)
                 {
                     apply_stat_boosts_to_pokemon(target_mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false);
+                }
+
+                // Throat Chop: if the target was in the middle of an Uproar, it ends immediately.
+                // (The ThroatChop volatile has just been applied; the Uproar self-lock must cease.)
+                if matches!(volatile, VolatileStatus::ThroatChop) {
+                    remove_status_volatile(target_mon, &VolatileStatus::Uproar);
                 }
             }
         }
@@ -8749,6 +8833,8 @@ pub fn apply_secondary_effects(
 pub fn clear_pokemon_on_faint(mon: &mut PokemonState) {
     mon.volatiles.clear();
     mon.status = None;
+    // Rage Fist hit counter resets on faint (Champions rules).
+    mon.times_hit = 0;
 }
 
 /// Check if a PokÃ©mon is immune to Rage Powder based on type, ability, or item.

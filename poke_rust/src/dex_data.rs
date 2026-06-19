@@ -210,6 +210,10 @@ pub enum VolatileStatus {
     /// Set at turn-start before any action resolves; any contact move hitting the holder burns
     /// the attacker. Cleared at end-of-turn or immediately after Beak Blast fires.
     BeakBlastCharging,
+    /// Set at turn-start for a Focus Punch user (priority −3). If the holder is hit by a
+    /// damaging move before their action resolves, Focus Punch fails (without consuming PP).
+    /// Cleared at end-of-turn (TurnStatus, duration 1).
+    FocusPunchCharging,
     Powder,
     PowerShift,
     PowerTrick,

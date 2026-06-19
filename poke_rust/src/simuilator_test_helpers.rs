@@ -201,6 +201,10 @@ pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(Match
         // should not fail just because the mover's used_moves_this_field changed.
         // Tests that care about Last Resort gating should check the field explicitly.
         mon.used_moves_this_field = [false; 4];
+        // Rage Fist hit counter — stripped so basic damage tests don't need to account
+        // for it. Tests that care about Rage Fist specifically read times_hit directly
+        // from the BattleState rather than using outcomes_permutation.
+        mon.times_hit = 0;
     }
     outcomes.into_iter().map(|(state, prob)| {
         let state = match state {

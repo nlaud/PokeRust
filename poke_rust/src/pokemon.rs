@@ -226,6 +226,11 @@ pub struct PokemonState{
 
     pub evs: [u8; 6],
     pub ivs: [u8; 6],
+
+    /// Hit counter for Rage Fist. Incremented each time this Pokémon is hit by a direct damaging
+    /// move (from any source, including allies). Reset on switch-out or faint (Champions rules);
+    /// never reset at end-of-turn while the mon remains on field.
+    pub times_hit: u16,
 }
 
 impl PartialEq for PokemonState {
@@ -288,6 +293,7 @@ impl PartialEq for PokemonState {
             && self.pre_mimicry_types == other.pre_mimicry_types
             && self.evs == other.evs
             && self.ivs == other.ivs
+            && self.times_hit == other.times_hit
     }
 }
 
@@ -351,6 +357,7 @@ impl std::hash::Hash for PokemonState {
         self.pre_mimicry_types.hash(state);
         self.evs.hash(state);
         self.ivs.hash(state);
+        self.times_hit.hash(state);
     }
 }
 
@@ -642,6 +649,7 @@ pub fn build_pokemon_state(
         stats_raised_this_turn: false, stats_lowered_this_turn: false,
         switched_in_this_turn: false, stall_counter: 0, ally_switch_counter: 0,
         pre_transform: None, pre_mimicry_types: None, evs, ivs,
+        times_hit: 0,
     }
 }
 
