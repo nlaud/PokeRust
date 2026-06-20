@@ -215,4 +215,50 @@ pub struct UnknownBattleState {
     /// Set to true after the first Round resolves this turn; causes subsequent Rounds
     /// to deal doubled base power. Cleared at end of turn. Excluded from PartialEq/Hash.
     pub round_used_this_turn: bool,
+
+    pub predicates: Vec<Vec<Statement>>, //AND of ORs
+}
+
+pub enum Statement {
+    HasItem {
+        mon_idx: usize,
+        item: Item,
+    },
+    HasStatus {
+        mon_idx: usize,
+        status: Status,
+    },
+    HasMove {
+        mon_idx: usize,
+        pokemon_move: PokemonMove,
+    },
+    HasAbility {
+        mon_idx: usize,
+        ability: Ability,
+    },
+    WeatherTurns {
+        turns: usize,
+    },
+    PseudoWeatherTurns {
+        turns: usize,
+    },
+    SideConditionTurns {
+        side: Player,
+        side_condition: SideCondition,
+        turns: usize,
+    },
+    NatureBoostsStat {
+        mon_idx: usize,
+        stat: Stat,
+    },
+    NatureNerfsStat {
+        mon_idx: usize,
+        stat: Stat,
+    },
+    EVIVStatGE {
+        mon_idx: usize,
+        stat: Stat,
+        value: u16,
+    },//Stats FROM EVs and IVs greater than or equal to a value
+    
 }
