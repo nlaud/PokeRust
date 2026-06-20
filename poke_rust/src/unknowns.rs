@@ -220,6 +220,7 @@ pub struct UnknownBattleState {
 }
 
 pub enum Statement {
+    Not(Box<Statement>),
     HasItem {
         mon_idx: usize,
         item: Item,
@@ -259,6 +260,5 @@ pub enum Statement {
         mon_idx: usize,
         stat: Stat,
         value: u16,
-    },//Stats FROM EVs and IVs greater than or equal to a value
-    
+    }, //Stats FROM EVs and IVs greater than or equal to a value
 }
