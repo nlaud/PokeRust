@@ -37,7 +37,8 @@ Soundness is preserved by NOT narrowing on these until they are implemented.
 - Trick / Switcheroo / Knock Off chains — transfer known items between mons.
 - Move-legality (learnset) constraints on `possible_species` beyond Illusion.
 - Ability activation sub-priority — currently switch-in abilities are ordered purely by effective
-  speed; revisit if Champions adds a sub-priority layer.
+  speed; revisit if Champions adds a sub-priority layer (this is a fix, currently unsound).
 
 ## Refactors
 - Hidden information stuff, adding information releases to simulate_turn on a flag input
+- Comments Deslop

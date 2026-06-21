@@ -1,16 +1,16 @@
-use std::collections::HashMap;
-use crate::state::battle::{FieldSlot, Player};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
+use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
     PokemonBoostTable, PokemonData, PokemonStat, PokemonType, PseudoWeather, SelfSwitchType,
     SideCondition, SlotCondition, Status, Terrain, Weather,
 };
 use crate::state::pokemon::{
-    calc_hp, calc_stat, Nature, PokemonGender, PokemonState, PokemonStatsTable, VolatileStatusState,
+    Nature, PokemonGender, PokemonState, PokemonStatsTable, VolatileStatusState, calc_hp, calc_stat,
 };
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Unknown<T> {
@@ -152,7 +152,7 @@ pub struct UnknownPokemonState {
 
     /// Saved pre-transform snapshot for Transform revert. Boxed to avoid
     /// an infinite-size struct (recursive types require indirection in Rust).
-    pub pre_transform: Option<Box<PokemonState>>, //Don't need to make this unknown unless pokemon with imposter + transform exists
+    pub pre_transform: Option<Box<UnknownPokemonState>>, //Don't need to make this unknown unless pokemon with imposter + transform exists
 
     /// Original types saved when Mimicry overwrites them. Restored when terrain ends or
     /// the holder switches out. `None` when Mimicry is not active.
@@ -391,7 +391,9 @@ impl UnknownPokemonState {
             status: mon.status.clone(),
             volatiles: mon.volatiles.clone(),
             possible_original_abilities: Unknown::Known(
-                mon.original_ability.clone().unwrap_or_else(|| mon.ability.clone()),
+                mon.original_ability
+                    .clone()
+                    .unwrap_or_else(|| mon.ability.clone()),
             ),
             possible_abilities: Unknown::Known(mon.ability.clone()),
             possible_genders: Unknown::Known(mon.gender),
