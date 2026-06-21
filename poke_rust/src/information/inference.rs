@@ -304,10 +304,29 @@ fn apply_information_team_preview(
     config: &InferenceConfig,
     dex: &HashMap<Species, PokemonData>,
 ) {
-    // At team preview only Switch (initial sends) and ability/item reveals appear.
-    // No speed inference — no ordering information yet.
+    // slot_map: (player, field_slot_index) → index in p1_mons / p2_mons.
+    // Persists across top-level events so reactions at any nesting depth can
+    // look up the right mon after a SimultaneousSwitch.
+    let mut slot_map: Vec<(Player, u8, usize)> = Vec::new();
     for event in events {
-        process_team_preview_event(state, event, config, dex);
+        process_team_preview_event(state, event, config, dex, &mut slot_map);
+    }
+}
+
+/// Look up the `UnknownPokemonState` currently occupying `(player, slot_index)`.
+/// Returns `None` if the slot has not been filled by a switch yet.
+fn find_preview_mon<'a>(
+    state: &'a mut UnknownTeamPreviewState,
+    player: &Player,
+    slot_index: u8,
+    slot_map: &[(Player, u8, usize)],
+) -> Option<&'a mut UnknownPokemonState> {
+    let mon_idx = slot_map.iter().find_map(|(p, s, idx)| {
+        if p == player && *s == slot_index { Some(*idx) } else { None }
+    })?;
+    match player {
+        Player::P1 => state.p1_mons.get_mut(mon_idx),
+        Player::P2 => state.p2_mons.get_mut(mon_idx),
     }
 }
 
@@ -316,81 +335,210 @@ fn process_team_preview_event(
     event: &InformationEvent,
     config: &InferenceConfig,
     dex: &HashMap<Species, PokemonData>,
+    // (player, field_slot_index) → roster index in p1_mons / p2_mons.
+    slot_map: &mut Vec<(Player, u8, usize)>,
 ) {
     match &event.kind {
+        // ── Switch-in events — register the field slot in the slot map ────────
         EventKind::Switch(sw) => {
             let mons = match sw.slot.player {
                 Player::P1 => &mut state.p1_mons,
                 Player::P2 => &mut state.p2_mons,
             };
-            if let Some(mon) = mons
-                .iter_mut()
-                .find(|m| unknown_is_known_as(&m.possible_species, &sw.species))
+            if let Some(roster_idx) = mons
+                .iter()
+                .position(|m| unknown_is_known_as(&m.possible_species, &sw.species))
             {
-                apply_switch_state_to_mon(mon, sw, config);
+                apply_switch_state_to_mon(&mut mons[roster_idx], sw, config);
+                slot_map.push((sw.slot.player.clone(), sw.slot.slot_index, roster_idx));
             }
         }
+
         EventKind::SimultaneousSwitch { switches } => {
             for sw in switches {
                 let mons = match sw.slot.player {
                     Player::P1 => &mut state.p1_mons,
                     Player::P2 => &mut state.p2_mons,
                 };
-                if let Some(mon) = mons
-                    .iter_mut()
-                    .find(|m| unknown_is_known_as(&m.possible_species, &sw.species))
+                if let Some(roster_idx) = mons
+                    .iter()
+                    .position(|m| unknown_is_known_as(&m.possible_species, &sw.species))
                 {
-                    apply_switch_state_to_mon(mon, sw, config);
+                    apply_switch_state_to_mon(&mut mons[roster_idx], sw, config);
+                    slot_map.push((sw.slot.player.clone(), sw.slot.slot_index, roster_idx));
                 }
             }
         }
-        EventKind::AbilityRevealed { slot, ability } => {
-            let mons = match slot.player {
-                Player::P1 => &mut state.p1_mons,
-                Player::P2 => &mut state.p2_mons,
-            };
-            if let Some(mon) = mons.get_mut(slot.slot_index as usize) {
-                unknown_set_known(
-                    &mut mon.possible_abilities,
-                    ability.clone(),
-                    "preview-ability",
-                );
+
+        // ── HP changes ───────────────────────────────────────────────────────
+        EventKind::DamageDealt { target, new_hp } => {
+            if let Some(mon) =
+                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            {
+                mon.hp = new_hp.clone();
             }
         }
+
+        EventKind::Healed { target, new_hp } => {
+            if let Some(mon) =
+                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            {
+                mon.hp = new_hp.clone();
+            }
+        }
+
+        // ── Fainting from entry damage ────────────────────────────────────────
+        EventKind::Faint { slot } => {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
+                mon.fainted = true;
+            }
+        }
+
+        // ── Stat boosts (Intimidate, Download, etc.) ──────────────────────────
+        EventKind::BoostChanged { target, boost_idx, stages } => {
+            if let Some(mon) =
+                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            {
+                if *boost_idx < 7 {
+                    mon.boosts[*boost_idx] = mon.boosts[*boost_idx].saturating_add(*stages);
+                }
+            }
+        }
+
+        EventKind::BoostsCleared { target } => {
+            if let Some(mon) =
+                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            {
+                mon.boosts = [0i8; 7];
+            }
+        }
+
+        // ── Items ─────────────────────────────────────────────────────────────
         EventKind::ItemRevealed { slot, item } => {
-            let mons = match slot.player {
-                Player::P1 => &mut state.p1_mons,
-                Player::P2 => &mut state.p2_mons,
-            };
-            if let Some(mon) = mons.get_mut(slot.slot_index as usize) {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
                 unknown_set_known(&mut mon.item, item.clone(), "preview-item");
             }
         }
+
+        EventKind::ItemGained { slot, item } => {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
+                unknown_set_known(&mut mon.item, item.clone(), "preview-item-gained");
+            }
+        }
+
+        EventKind::ItemLost { slot, item, consumed } => {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
+                if *consumed {
+                    mon.consumed_item = Some(item.clone());
+                } else {
+                    mon.item_lost = true;
+                }
+                unknown_set_known(&mut mon.item, Item::None, "preview-item-lost");
+            }
+        }
+
+        // ── Abilities ─────────────────────────────────────────────────────────
+        EventKind::AbilityRevealed { slot, ability } => {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
+                unknown_set_known(&mut mon.possible_abilities, ability.clone(), "preview-ability");
+            }
+        }
+
+        // ── Status ────────────────────────────────────────────────────────────
+        EventKind::StatusInflicted { target, status } => {
+            if let Some(mon) =
+                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            {
+                mon.status = Some(status.clone());
+            }
+        }
+
+        // ── Forme / type changes (entry abilities like Schooling) ─────────────
+        EventKind::FormeChange { slot, into, .. } => {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
+                unknown_set_known(&mut mon.possible_species, into.clone(), "preview-forme");
+            }
+        }
+
+        EventKind::TypeChanged { slot, new_types } => {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
+                unknown_set_known(&mut mon.possible_types, new_types.clone(), "preview-type");
+            }
+        }
+
         EventKind::Terastallization { slot, tera_type } => {
-            let mons = match slot.player {
-                Player::P1 => &mut state.p1_mons,
-                Player::P2 => &mut state.p2_mons,
-            };
-            if let Some(mon) = mons.get_mut(slot.slot_index as usize) {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
                 mon.is_tera = true;
                 unknown_set_known(&mut mon.possible_tera_type, tera_type.clone(), "preview-tera");
             }
         }
-        EventKind::StatusInflicted { target, status } => {
-            let mons = match target.player {
-                Player::P1 => &mut state.p1_mons,
-                Player::P2 => &mut state.p2_mons,
-            };
-            if let Some(mon) = mons.get_mut(target.slot_index as usize) {
-                mon.status = Some(status.clone());
+
+        EventKind::MegaEvolution { slot, into } => {
+            if let Some(mon) =
+                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
+            {
+                mon.is_mega = true;
+                unknown_set_known(&mut mon.possible_species, into.clone(), "preview-mega");
             }
         }
-        // Events that cannot meaningfully occur at team preview are silently ignored.
-        _ => {}
+
+        // ── Field effects — no-ops in preview state (no field fields to update)
+        // Weather/terrain are set on the BattleState when the battle begins.
+        EventKind::WeatherChanged { .. }
+        | EventKind::TerrainChanged { .. } => {}
+
+        // ── Illegal events — cannot happen before the first move is chosen ────
+        EventKind::MoveUsed { .. }
+        | EventKind::Cant { .. }
+        | EventKind::ChargingMove { .. }
+        | EventKind::MustRecharge { .. }
+        | EventKind::SingleMoveOrTurn { .. }
+        | EventKind::Crit { .. }
+        | EventKind::Missed { .. }
+        | EventKind::MoveFailed { .. }
+        | EventKind::Blocked { .. }
+        | EventKind::Immune { .. }
+        | EventKind::HitCount { .. }
+        | EventKind::SetHp { .. }
+        | EventKind::StatusCured { .. }
+        | EventKind::BoostsInverted { .. }
+        | EventKind::BoostsSwapped { .. }
+        | EventKind::BoostsCopied { .. }
+        | EventKind::PseudoWeatherStart { .. }
+        | EventKind::PseudoWeatherEnd { .. }
+        | EventKind::SideConditionStart { .. }
+        | EventKind::SideConditionEnd { .. }
+        | EventKind::SlotConditionStart { .. }
+        | EventKind::SlotConditionEnd { .. }
+        | EventKind::VolatileStart { .. }
+        | EventKind::VolatileEnd { .. }
+        | EventKind::PerishCount { .. }
+        | EventKind::EndOfTurn => {
+            panic!(
+                "[inference] illegal event {:?} at team preview",
+                event.kind
+            );
+        }
     }
 
     for reaction in &event.reactions {
-        process_team_preview_event(state, reaction, config, dex);
+        process_team_preview_event(state, reaction, config, dex, slot_map);
     }
 }
 
