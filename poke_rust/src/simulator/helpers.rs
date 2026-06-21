@@ -2234,7 +2234,7 @@ pub(crate) fn on_item_obtained_or_enabled(mon: &mut PokemonState, env: &BerryEnv
 }
 
 /// The canonical `(2L/5+2)*BP*Atk/Def/50+2` formula with floor after each step.
-fn base_damage_formula(level: u8, bp: f64, attack: f64, defense: f64) -> f64 {
+pub(crate) fn base_damage_formula(level: u8, bp: f64, attack: f64, defense: f64) -> f64 {
     let mut d = (2.0 * level as f64 / 5.0).floor();
     d = (d + 2.0).floor();
     d = (d * bp).floor();

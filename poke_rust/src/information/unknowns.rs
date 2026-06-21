@@ -233,6 +233,22 @@ pub struct UnknownBattleState {
     pub predicates: Vec<Vec<Statement>>, //AND of ORs
 }
 
+/// A literal fact about the battle state.
+///
+/// ## `mon_idx` indexing convention
+///
+/// `mon_idx` uniquely identifies a Pokémon within a flat list derived from
+/// `UnknownBattleState` in this order:
+///
+/// ```text
+/// [p1_active_mons..., p1_known_back_mons..., p1_possible_back_mons...,
+///  p2_active_mons..., p2_known_back_mons..., p2_possible_back_mons...]
+/// ```
+///
+/// For `UnknownTeamPreviewState` the list is simply `[p1_mons..., p2_mons...]`.
+///
+/// Use `mon_idx_for_slot()` and `get_mon_by_idx()` / `get_mon_mut_by_idx()`
+/// (defined in `information::inference`) to resolve indices.
 #[derive(Debug, Clone)]
 pub enum Statement {
     Not(Box<Statement>),
@@ -276,6 +292,24 @@ pub enum Statement {
         stat: PokemonStat,
         value: u16,
     }, //Stats FROM EVs and IVs greater than or equal to a value
+    /// Cross-mon effective-speed comparison in the same priority bracket.
+    ///
+    /// Invariant: `base_spe(fast_idx) * fast_mult >= base_spe(slow_idx) * slow_mult`
+    ///
+    /// `fast_mult` and `slow_mult` encode the product of all *observable* speed
+    /// multipliers (boost stages, paralysis, Tailwind, weather-speed abilities, etc.)
+    /// at the moment the ordering was observed, scaled to a common integer denominator.
+    /// Trick Room is already handled by swapping `fast_idx`/`slow_idx`.
+    ///
+    /// Worlds where hidden speed items (Iron Ball, Choice Scarf) or random sources
+    /// (Quick Claw, Quick Draw) could explain the ordering are emitted as **separate
+    /// disjunctive clauses** alongside this one, not folded into the multipliers here.
+    SpeedComparison {
+        fast_idx: usize,
+        slow_idx: usize,
+        fast_mult: u32,
+        slow_mult: u32,
+    },
 }
 
 // ── Team-preview fog-of-war state ─────────────────────────────────────────────

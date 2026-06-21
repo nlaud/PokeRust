@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use crate::data::pokemon_move::PokemonMove;
 
 mod data;
+mod information;
 mod simulator;
 mod state;
 #[cfg(test)]

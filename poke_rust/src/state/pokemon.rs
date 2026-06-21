@@ -519,7 +519,7 @@ fn parse_nature_str(s: &str) -> Option<Nature> {
 }
 
 /// Returns stat multipliers as [atk, def, spa, spd, spe] for the given nature.
-fn nature_stat_modifiers(nature: &Nature) -> [f32; 5] {
+pub(crate) fn nature_stat_modifiers(nature: &Nature) -> [f32; 5] {
     match nature {
         Nature::Hardy | Nature::Docile | Nature::Bashful | Nature::Quirky | Nature::Serious => {
             [1.0, 1.0, 1.0, 1.0, 1.0]
