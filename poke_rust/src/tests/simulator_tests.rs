@@ -11,9 +11,9 @@ mod tests {
     use crate::dex_data::{PseudoWeather, Status, Terrain, VolatileStatus, Weather};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::simulator::{simulate_turn, DamageConfig};
-    use crate::simulator_helpers;
-    use crate::simulator_helpers::coalesce_branches;
-    use crate::simuilator_test_helpers::{
+    use crate::simulator::helpers as simulator_helpers;
+    use crate::simulator::helpers::coalesce_branches;
+    use crate::tests::simuilator_test_helpers::{
         assert_distribution_close,
         battle_state_from_lists,
         combine_hit_distributions_with_hit_chances,
@@ -216,9 +216,9 @@ mod tests {
             let initial_hp = altaria.hp;
             let attack_slot = FieldSlot { player: Player::P1, slot_index: 0 };
             let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
-            let attacker = crate::simulator_helpers::get_pokemon_at_slot(&initial_state, attack_slot).unwrap();
-            let target = crate::simulator_helpers::get_pokemon_at_slot(&initial_state, target_slot).unwrap();
-            let single_hit = crate::simulator_helpers::calculate_damage_outcomes_for_target(
+            let attacker = crate::simulator::helpers::get_pokemon_at_slot(&initial_state, attack_slot).unwrap();
+            let target = crate::simulator::helpers::get_pokemon_at_slot(&initial_state, target_slot).unwrap();
+            let single_hit = crate::simulator::helpers::calculate_damage_outcomes_for_target(
                 &initial_state,
                 attacker,
                 target,
@@ -294,9 +294,9 @@ mod tests {
             let initial_hp = venusaur.hp;
             let attack_slot = FieldSlot { player: Player::P1, slot_index: 0 };
             let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
-            let attacker = crate::simulator_helpers::get_pokemon_at_slot(&initial_state, attack_slot).unwrap();
-            let target = crate::simulator_helpers::get_pokemon_at_slot(&initial_state, target_slot).unwrap();
-            let hit_chance = crate::simulator_helpers::accuracy_hit_probability(
+            let attacker = crate::simulator::helpers::get_pokemon_at_slot(&initial_state, attack_slot).unwrap();
+            let target = crate::simulator::helpers::get_pokemon_at_slot(&initial_state, target_slot).unwrap();
+            let hit_chance = crate::simulator::helpers::accuracy_hit_probability(
                 &initial_state,
                 attacker,
                 target,
@@ -304,7 +304,7 @@ mod tests {
                 target_slot,
                 move_dex.get(&PokemonMove::TripleAxel).unwrap(),
             );
-            let hit1 = crate::simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+            let hit1 = crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options(
                 &initial_state,
                 attacker,
                 target,
@@ -320,7 +320,7 @@ mod tests {
             .into_iter()
             .map(|(damage, _, probability)| (damage, probability))
             .collect::<Vec<_>>();
-            let hit2 = crate::simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+            let hit2 = crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options(
                 &initial_state,
                 attacker,
                 target,
@@ -336,7 +336,7 @@ mod tests {
             .into_iter()
             .map(|(damage, _, probability)| (damage, probability))
             .collect::<Vec<_>>();
-            let hit3 = crate::simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+            let hit3 = crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options(
                 &initial_state,
                 attacker,
                 target,
@@ -16036,8 +16036,8 @@ mod contact_reactive_abilities {
     use crate::dex_data::{VolatileStatus, Weather};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::simulator::{get_possible_commands_for_active_slot, simulate_turn};
-    use crate::simulator_helpers;
-    use crate::simuilator_test_helpers::{
+    use crate::simulator::helpers as simulator_helpers;
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
     };
 
@@ -16817,7 +16817,7 @@ mod priority_abilities {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::pokemon::{build_pokemon_state, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -17663,8 +17663,8 @@ mod priority_abilities {
         use crate::data::species::Species;
         use crate::dex_data::{Status, VolatileStatus};
         use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
-        use crate::simulator_helpers;
-        use crate::simuilator_test_helpers::{
+        use crate::simulator::helpers as simulator_helpers;
+        use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
             run_single_turn, simple_attack,
         };
@@ -18038,7 +18038,7 @@ mod priority_abilities {
         use crate::data::species::Species;
         use crate::dex_data::Status;
         use crate::pokemon::{build_pokemon_state, PokemonState};
-        use crate::simuilator_test_helpers::{
+        use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
             run_single_turn, simple_attack,
         };
@@ -18331,7 +18331,7 @@ mod priority_abilities {
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
         use crate::pokemon::{build_pokemon_state, PokemonState};
-        use crate::simuilator_test_helpers::{
+        use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
             run_single_turn, simple_attack,
         };
@@ -18412,7 +18412,7 @@ mod priority_abilities {
         use crate::data::species::Species;
         use crate::dex_data::Status;
         use crate::pokemon::{build_pokemon_state, PokemonState};
-        use crate::simuilator_test_helpers::{
+        use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
             run_single_turn, simple_attack,
         };
@@ -18869,7 +18869,7 @@ mod priority_abilities {
         #[test]
         fn alluring_voice_confuses_only_freshly_boosted_targets() {
             use crate::dex_data::VolatileStatus;
-            use crate::simulator_helpers::has_status_volatile;
+            use crate::simulator::helpers::has_status_volatile;
 
             // Target is faster, so its Swords Dance resolves before Alluring Voice lands.
             // Confusion duration branches (2–5 turns), so assert across every outcome.
@@ -18907,7 +18907,7 @@ mod priority_abilities {
     mod immunity_and_veil_abilities {
         use super::*;
         use crate::pokemon::Nature;
-        use crate::simuilator_test_helpers::extract_battle_state;
+        use crate::tests::simuilator_test_helpers::extract_battle_state;
 
         fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
             let dex = pokemon_dex();
@@ -19673,8 +19673,8 @@ mod priority_abilities {
         use crate::data::species::Species;
         use crate::dex_data::{SideCondition, Status};
         use crate::pokemon::{build_pokemon_state, PokemonState};
-        use crate::simulator_helpers;
-        use crate::simuilator_test_helpers::{
+        use crate::simulator::helpers as simulator_helpers;
+        use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
             simple_attack,
         };
@@ -20174,7 +20174,7 @@ mod priority_abilities {
         use crate::data::species::Species;
         use crate::dex_data::Status;
         use crate::pokemon::{build_pokemon_state, PokemonState};
-        use crate::simuilator_test_helpers::{
+        use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
             simple_attack,
         };
@@ -20382,7 +20382,7 @@ mod priority_abilities {
         use crate::data::species::Species;
         use crate::dex_data::{SideCondition, Status, VolatileStatus};
         use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
-        use crate::simuilator_test_helpers::{
+        use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
             simple_attack,
         };
@@ -20620,11 +20620,11 @@ mod binding_trapping {
     use crate::data::species::Species;
     use crate::dex_data::VolatileStatus;
     use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
     use crate::simulator;
-    use crate::simulator_helpers;
+    use crate::simulator::helpers as simulator_helpers;
 
     /// Build a test mon with overridden max HP for deterministic chip assertions.
     fn mon(species: Species, ability: Ability, mv: PokemonMove) -> crate::pokemon::PokemonState {
@@ -21012,11 +21012,11 @@ mod healing_moves {
     use crate::data::species::Species;
     use crate::dex_data::{SlotCondition, Status, VolatileStatus, PokemonType};
     use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
     };
-    use crate::simulator_helpers;
+    use crate::simulator::helpers as simulator_helpers;
 
     /// Build a level-50 mon with a single move, ability None, no item unless given.
     fn mon(
@@ -21344,8 +21344,8 @@ mod move_restriction {
     use crate::dex_data::VolatileStatus;
     use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
     use crate::simulator::get_possible_commands_for_active_slot;
-    use crate::simulator_helpers;
-    use crate::simuilator_test_helpers::{
+    use crate::simulator::helpers as simulator_helpers;
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
     };
@@ -21597,8 +21597,8 @@ mod volatile_status_debuffs {
     use crate::dex_data::{Status, Terrain, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::simulator::get_possible_commands_for_active_slot;
-    use crate::simulator_helpers;
-    use crate::simuilator_test_helpers::{
+    use crate::simulator::helpers as simulator_helpers;
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
     };
@@ -22153,8 +22153,8 @@ mod stat_manipulation {
     use crate::data::species::Species;
     use crate::dex_data::VolatileStatus;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simulator_helpers;
-    use crate::simuilator_test_helpers::{
+    use crate::simulator::helpers as simulator_helpers;
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
     };
@@ -22537,7 +22537,7 @@ mod self_fainting_and_crash_moves {
     use crate::data::species::Species;
     use crate::dex_data::{SlotCondition, Status, Terrain, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -23114,7 +23114,7 @@ mod rampaging_moves {
     use crate::data::species::Species;
     use crate::dex_data::VolatileStatus;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
     use crate::simulator;
@@ -23333,7 +23333,7 @@ mod rampaging_moves {
     #[test]
     fn outrage_doubles_branches_over_both_foes() {
         use crate::data::species::Species;
-        use crate::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
+        use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
         use crate::battle::{BattleCommand, AttackCommand};
         use crate::simulator;
 
@@ -23450,7 +23450,7 @@ mod counter_retaliation_moves {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -23593,8 +23593,8 @@ mod ability_manipulation_moves {
     use crate::dex_data::{Status, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::simulator::simulate_turn;
-    use crate::simulator_helpers;
-    use crate::simuilator_test_helpers::{
+    use crate::simulator::helpers as simulator_helpers;
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
@@ -23993,7 +23993,7 @@ mod ability_manipulation_moves {
         use super::*;
         use std::collections::HashMap;
         use crate::data::item::Item;
-        use crate::simuilator_test_helpers::hit_probability;
+        use crate::tests::simuilator_test_helpers::hit_probability;
 
         fn build(
             pdex: &HashMap<Species, crate::dex_data::PokemonData>,
@@ -24734,11 +24734,11 @@ mod turn_order_and_delayed_moves {
     use crate::data::species::Species;
     use crate::dex_data::SlotCondition;
     use crate::pokemon::{build_pokemon_state, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
-    use crate::simulator_helpers;
+    use crate::simulator::helpers as simulator_helpers;
 
     fn mon(species: Species, the_move: PokemonMove) -> PokemonState {
         let pdex = pokemon_dex();
@@ -25050,12 +25050,12 @@ mod side_and_field_condition_moves {
     use crate::dex_data::{PseudoWeather, SideCondition};
     use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
     use crate::dex_data::VolatileStatus;
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, damage_distribution, extract_battle_state,
         hit_probability, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
     use crate::simulator::get_possible_commands_for_active_slot;
-    use crate::simulator_helpers;
+    use crate::simulator::helpers as simulator_helpers;
 
     fn mon_with(species: Species, the_move: PokemonMove, ability: Ability, item: Item) -> PokemonState {
         let pdex = pokemon_dex();
@@ -25526,7 +25526,7 @@ mod two_turn_charging_moves {
     use crate::data::species::Species;
     use crate::dex_data::{Status, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
     };
@@ -25761,7 +25761,7 @@ mod conditional_damage_moves {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -26212,7 +26212,7 @@ mod turn_state_moves {
     use crate::data::species::Species;
     use crate::dex_data::Status;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -26591,7 +26591,7 @@ mod first_turn_on_field_mid_turn_entry {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -26690,8 +26690,8 @@ mod new_moves_session {
     use crate::data::species::Species;
     use crate::dex_data::{PokemonType, PseudoWeather, Status, Terrain, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simulator_helpers;
-    use crate::simuilator_test_helpers::{
+    use crate::simulator::helpers as simulator_helpers;
+    use crate::tests::simuilator_test_helpers::{
         assert_distribution_close, battle_state_from_lists, damage_distribution,
         extract_battle_state, hit_probability, move_dex, outcomes_permutation,
         pokemon_dex, run_single_turn, simple_attack,
@@ -27694,7 +27694,7 @@ mod seven_new_moves {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -27968,7 +27968,7 @@ mod flying_press_tests {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -28042,10 +28042,10 @@ mod substitute_move {
     use crate::data::species::Species;
     use crate::dex_data::VolatileStatus;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
-    use crate::simulator_helpers::get_substitute_hp;
+    use crate::simulator::helpers::get_substitute_hp;
 
     fn mon_with(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
         let pdex = pokemon_dex();
@@ -28209,7 +28209,7 @@ mod substitute_move {
         let all_broke = outcomes.iter().all(|(s, _)| {
             if let MatchState::BattleState(bs) = s {
                 get_substitute_hp(&bs.p1_active_mons[0]) == 0
-                    && !crate::simulator_helpers::has_status_volatile(
+                    && !crate::simulator::helpers::has_status_volatile(
                         &bs.p1_active_mons[0], &VolatileStatus::Substitute(0))
             } else { false }
         });
@@ -28300,7 +28300,7 @@ mod new_ability_tests {
     use crate::data::species::Species;
     use crate::dex_data::{Status, Weather};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, damage_distribution, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
@@ -28703,7 +28703,7 @@ mod abilities_cross_cutting {
     use crate::data::species::Species;
     use crate::dex_data::{PokemonType, SideCondition, Status, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, damage_distribution,
         move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -29211,11 +29211,11 @@ mod new_abilities_batch {
     use crate::data::species::Species;
     use crate::dex_data::{PokemonType, SideCondition, Terrain, VolatileStatus, Weather};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, damage_distribution, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
-    use crate::simulator_helpers;
+    use crate::simulator::helpers as simulator_helpers;
 
     fn mon_with_move(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
         build_pokemon_state(
@@ -29418,13 +29418,13 @@ mod new_abilities_batch {
         let mut state_normal = battle_state_from_lists(
             vec![attacker_normal], vec![], vec![target.clone()], vec![],
         );
-        crate::simulator_helpers::add_side_condition(
+        crate::simulator::helpers::add_side_condition(
             &mut state_normal, Player::P2, SideCondition::Reflect, 5,
         );
         let mut state_infil = battle_state_from_lists(
             vec![attacker_infil], vec![], vec![target], vec![],
         );
-        crate::simulator_helpers::add_side_condition(
+        crate::simulator::helpers::add_side_condition(
             &mut state_infil, Player::P2, SideCondition::Reflect, 5,
         );
 
@@ -29599,7 +29599,7 @@ mod new_abilities_batch {
         let original_types = holder.types.clone();
         let foe = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
         let mut state = battle_state_from_lists(vec![holder.clone()], vec![], vec![foe], vec![]);
-        crate::simulator_helpers::set_terrain(&mut state, Terrain::ElectricTerrain, 5);
+        crate::simulator::helpers::set_terrain(&mut state, Terrain::ElectricTerrain, 5);
         // update_mimicry_forms fires inside set_terrain.
         let p1_types = &state.p1_active_mons[0].types;
         assert_eq!(p1_types, &vec![PokemonType::Electric],
@@ -29614,9 +29614,9 @@ mod new_abilities_batch {
         let original_types = holder.types.clone();
         let foe = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
         let mut state = battle_state_from_lists(vec![holder], vec![], vec![foe], vec![]);
-        crate::simulator_helpers::set_terrain(&mut state, Terrain::GrassyTerrain, 5);
+        crate::simulator::helpers::set_terrain(&mut state, Terrain::GrassyTerrain, 5);
         assert_eq!(state.p1_active_mons[0].types, vec![PokemonType::Grass]);
-        crate::simulator_helpers::clear_terrain(&mut state);
+        crate::simulator::helpers::clear_terrain(&mut state);
         assert_eq!(state.p1_active_mons[0].types, original_types,
             "Mimicry should revert to original types when terrain ends");
     }
@@ -29653,7 +29653,7 @@ mod new_abilities_batch {
                 mega_evolve: false,
             }),
         ];
-        let p2_cmd = crate::simuilator_test_helpers::simple_attack(Player::P2, vec![0, 1]);
+        let p2_cmd = crate::tests::simuilator_test_helpers::simple_attack(Player::P2, vec![0, 1]);
 
         let stalwart_state = battle_state_from_lists(
             vec![attacker_stalwart, dummy.clone()], vec![],
@@ -29790,7 +29790,7 @@ mod new_abilities_batch {
         let mut state2 = battle_state_from_lists(
             vec![attacker], vec![], vec![holder], vec![],
         );
-        crate::simulator_helpers::add_side_condition(
+        crate::simulator::helpers::add_side_condition(
             &mut state2, Player::P1, SideCondition::ToxicSpikes(1), 0,
         );
         let outcomes2 = run(state2);
@@ -29874,7 +29874,7 @@ mod todo_refactor_mechanic_tests {
     use crate::data::species::Species;
     use crate::dex_data::{Status, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -30368,7 +30368,7 @@ mod doubles_faint_redirection {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex, run_single_turn};
+    use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex, run_single_turn};
     use crate::simulator;
 
     fn mon(species: Species, mv: PokemonMove) -> PokemonState {
@@ -30586,12 +30586,12 @@ mod season2_items_and_abilities {
     use crate::data::species::Species;
     use crate::dex_data::Weather;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
         extract_battle_state,
     };
     use crate::simulator;
-    use crate::simulator_helpers;
+    use crate::simulator::helpers as simulator_helpers;
 
     fn mon(species: Species, mv: PokemonMove, ability: Ability, item: Option<Item>) -> PokemonState {
         build_pokemon_state(
@@ -31254,7 +31254,7 @@ mod new_moves {
     use crate::data::species::Species;
     use crate::dex_data::{SideCondition, Status, VolatileStatus};
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
@@ -31861,7 +31861,7 @@ mod rollout {
     use crate::data::species::Species;
     use crate::dex_data::VolatileStatus;
     use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simuilator_test_helpers::{
+    use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
         damage_distribution,
     };

@@ -1,4 +1,13 @@
+use crate::battle::{FieldSlot, Player};
+use crate::data::ability::Ability;
 use crate::data::item::Item;
+use crate::data::pokemon_move::PokemonMove;
+use crate::data::species::Species;
+use crate::dex_data::{
+    PokemonBoostTable, PokemonStat, PokemonType, PseudoWeather, SelfSwitchType,
+    SideCondition, SlotCondition, Status, Terrain, Weather,
+};
+use crate::pokemon::{Nature, PokemonGender, PokemonState, PokemonStatsTable, VolatileStatusState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Unknown<T> {
@@ -6,13 +15,15 @@ pub enum Unknown<T> {
     Not(Vec<T>),
     Possibly(Vec<T>),
 }
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PokemonHP {
     Number(u16), //Allies use number
     Percent(u8), //Opponents use percent
 }
 
+#[derive(Debug, Clone)]
 pub struct UnknownPokemonState {
-    pub possible_mon_id: Unkown<u8>, //1:1 with species if there is only 1 of each pokemon
+    pub possible_mon_id: Unknown<u8>, //1:1 with species if there is only 1 of each pokemon
     pub fainted: bool,
     pub possible_species: Unknown<Species>,
     pub possible_types: Unknown<Vec<PokemonType>>, //These two fields correspont 1:1
@@ -219,6 +230,7 @@ pub struct UnknownBattleState {
     pub predicates: Vec<Vec<Statement>>, //AND of ORs
 }
 
+#[derive(Debug, Clone)]
 pub enum Statement {
     Not(Box<Statement>),
     HasItem {
@@ -250,15 +262,15 @@ pub enum Statement {
     },
     NatureBoostsStat {
         mon_idx: usize,
-        stat: Stat,
+        stat: PokemonStat,
     },
     NatureNerfsStat {
         mon_idx: usize,
-        stat: Stat,
+        stat: PokemonStat,
     },
     EVIVStatGE {
         mon_idx: usize,
-        stat: Stat,
+        stat: PokemonStat,
         value: u16,
     }, //Stats FROM EVs and IVs greater than or equal to a value
 }

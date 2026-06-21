@@ -7,7 +7,7 @@ use crate::data::species::Species;
 use crate::dex_data::{parse_move_dex, parse_pokemon_dex, VolatileStatus};
 use crate::pokemon::{PokemonState, VolatileStatusState};
 use crate::simulator::simulate_turn;
-use crate::simulator_helpers;
+use crate::simulator::helpers as simulator_helpers;
 
 static POKEMON_DEX: OnceLock<HashMap<Species, crate::dex_data::PokemonData>> = OnceLock::new();
 static MOVE_DEX: OnceLock<HashMap<PokemonMove, crate::dex_data::MoveData>> = OnceLock::new();

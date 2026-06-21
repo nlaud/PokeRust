@@ -10,11 +10,9 @@ mod data;
 mod pokemon;
 mod battle;
 mod simulator;
-mod simulator_helpers;
+mod state;
 #[cfg(test)]
-mod simuilator_test_helpers;
-#[cfg(test)]
-mod simulator_tests;
+mod tests;
 mod user;
 
 pub static VERBOSITY: OnceLock<u8> = OnceLock::new();

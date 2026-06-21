@@ -14,7 +14,8 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
-use crate::simulator_helpers;
+pub mod helpers;
+use self::helpers as simulator_helpers;
 
 #[derive(Clone, Copy)]
 pub struct DamageConfig {
