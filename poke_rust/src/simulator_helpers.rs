@@ -1124,9 +1124,14 @@ fn ate_ability_converts(
     if ate_typeset_unmodeled(&move_data.name) {
         return false;
     }
+    // Weather Ball is always exempt from -ate conversion regardless of weather.
+    // In active weather it returns a non-Normal type anyway; in clear weather it is Normal
+    // but Bulbapedia explicitly states -ate abilities do not affect it in any condition.
+    if move_data.name == PokemonMove::WeatherBall {
+        return false;
+    }
     // Convert only when the move's own-effect-resolved type is still Normal.
-    // This naturally handles Weather Ball (non-Normal in weather) and Terrain Pulse
-    // (non-Normal on grounded + active terrain) without any special-casing.
+    // Terrain Pulse (non-Normal on grounded + active terrain) is handled here too.
     matches!(
         natural_move_type(state, attacker, move_data),
         PokemonType::Normal
@@ -2830,20 +2835,19 @@ pub enum InvulnerabilityResolution {
 }
 
 fn target_has_sky_drop_airborne_immunity(target: &PokemonState) -> bool {
+    // Only Flying-type grants damage immunity to Sky Drop.
+    // Levitate, Magnet Rise, and Telekinesis grant general ground immunity but NOT Sky Drop immunity.
     pokemon_has_type(target, &PokemonType::Flying)
-        || target.ability == Ability::Levitate
-        || has_status_volatile(target, &VolatileStatus::MagnetRise)
-        || has_status_volatile(target, &VolatileStatus::Telekinesis)
 }
 
 fn move_can_hit_sky_drop_target(
     attacker: &PokemonState,
-    target: &PokemonState,
+    _target: &PokemonState,
     attack_move: &PokemonMove,
 ) -> bool {
+    // Only No Guard and the specific moves that hit airborne targets bypass Sky Drop invulnerability.
+    // Foresight and Miracle Eye do NOT override semi-invulnerable turns per Bulbapedia.
     attacker.ability == Ability::NoGuard
-        || has_status_volatile(target, &VolatileStatus::Foresight)
-        || has_status_volatile(target, &VolatileStatus::MiracleEye)
         || matches!(
             attack_move,
             PokemonMove::Gust

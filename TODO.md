@@ -7,4 +7,4 @@
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
 ## Refactors
-- Recheck all tests, suggest new tests, verify mechanics.
+- Hidden information stuff, adding information releases to simulate_turn on a flag input

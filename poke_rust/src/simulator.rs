@@ -1082,7 +1082,7 @@ fn resolve_multihit_move_for_target(
     final_outcomes
 }
 
-/// Build a "move did nothing" outcome, optionally mixing in a 50/50 confusion self-hit branch.
+/// Build a "move did nothing" outcome, optionally mixing in a 1/3 confusion self-hit branch (Gen VII+).
 fn no_effect_outcome(
     state: &BattleState,
     action: &MoveAction,
@@ -1093,9 +1093,9 @@ fn no_effect_outcome(
 
     if let Some(confusion) = confusion_outcomes {
         let mut combined: Vec<(MatchState, f64)> = confusion.iter()
-            .map(|(st, p)| (st.clone(), p * 0.5))
+            .map(|(st, p)| (st.clone(), p * (1.0 / 3.0)))
             .collect();
-        combined.push((MatchState::BattleState(no_effect_state), 0.5));
+        combined.push((MatchState::BattleState(no_effect_state), 2.0 / 3.0));
         simulator_helpers::coalesce_branches(combined)
     } else {
         vec![(MatchState::BattleState(no_effect_state), 1.0)]
@@ -1104,8 +1104,8 @@ fn no_effect_outcome(
 
 /// Build the standard success outcome for a status move that has already mutated `next_state`
 /// (PP already decremented). Mirrors the confusion-split bookkeeping used by Attract/Disable:
-/// if the user is confused, the move's success branch carries 50% weight alongside the 50%
-/// self-hit branches; otherwise it is the sole 100% outcome.
+/// if the user is confused, the move's success branch carries 2/3 weight alongside the 1/3
+/// self-hit branches (Gen VII+ confusion probability); otherwise it is the sole 100% outcome.
 fn status_move_self_outcome(
     next_state: BattleState,
     confusion_self_hit_outcomes: &Option<Vec<(MatchState, f64)>>,
@@ -1113,9 +1113,9 @@ fn status_move_self_outcome(
     let has_confusion = confusion_self_hit_outcomes.is_some();
     let mut result: Vec<(MatchState, f64)> = Vec::new();
     if let Some(c) = confusion_self_hit_outcomes {
-        for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+        for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
     }
-    result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+    result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
     simulator_helpers::coalesce_branches(result)
 }
 
@@ -1611,9 +1611,9 @@ fn possible_damage_outcomes_for_move(
         if let Some(confusion_outcomes) = confusion_self_hit_outcomes {
             let mut combined_confused = confusion_outcomes
                 .into_iter()
-                .map(|(state, probability)| (state, probability * 0.5))
+                .map(|(state, probability)| (state, probability * (1.0 / 3.0)))
                 .collect::<Vec<_>>();
-            combined_confused.extend(combined.into_iter().map(|(state, probability)| (state, probability * 0.5)));
+            combined_confused.extend(combined.into_iter().map(|(state, probability)| (state, probability * (2.0 / 3.0))));
             return simulator_helpers::coalesce_branches(combined_confused);
         }
 
@@ -1664,8 +1664,8 @@ fn possible_damage_outcomes_for_move(
             // Fold in the confusion self-hit branches, mirroring Attract/Disable.
             if let Some(c) = &confusion_self_hit_outcomes {
                 let mut folded: Vec<(MatchState, f64)> =
-                    c.iter().map(|(s, p)| (s.clone(), p * 0.5)).collect();
-                folded.extend(result.into_iter().map(|(s, p)| (s, p * 0.5)));
+                    c.iter().map(|(s, p)| (s.clone(), p * (1.0 / 3.0))).collect();
+                folded.extend(result.into_iter().map(|(s, p)| (s, p * (2.0 / 3.0))));
                 return simulator_helpers::coalesce_branches(folded);
             }
             return simulator_helpers::coalesce_branches(result);
@@ -1749,8 +1749,8 @@ fn possible_damage_outcomes_for_move(
 
         if let Some(c) = &confusion_self_hit_outcomes {
             let mut folded: Vec<(MatchState, f64)> =
-                c.iter().map(|(s, p)| (s.clone(), p * 0.5)).collect();
-            folded.extend(result.into_iter().map(|(s, p)| (s, p * 0.5)));
+                c.iter().map(|(s, p)| (s.clone(), p * (1.0 / 3.0))).collect();
+            folded.extend(result.into_iter().map(|(s, p)| (s, p * (2.0 / 3.0))));
             return simulator_helpers::coalesce_branches(folded);
         }
         return simulator_helpers::coalesce_branches(result);
@@ -2049,9 +2049,9 @@ fn possible_damage_outcomes_for_move(
             let has_confusion = confusion_self_hit_outcomes.is_some();
             let mut result = Vec::new();
             if let Some(ref c) = confusion_self_hit_outcomes {
-                for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+                for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
             }
-            result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+            result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
             return simulator_helpers::coalesce_branches(result);
         }
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -2081,9 +2081,9 @@ fn possible_damage_outcomes_for_move(
             let has_confusion = confusion_self_hit_outcomes.is_some();
             let mut result = Vec::new();
             if let Some(ref c) = confusion_self_hit_outcomes {
-                for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+                for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
             }
-            result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+            result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
             return simulator_helpers::coalesce_branches(result);
         }
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -2152,9 +2152,9 @@ fn possible_damage_outcomes_for_move(
         let has_confusion = confusion_self_hit_outcomes.is_some();
         let mut result = Vec::new();
         if let Some(ref c) = confusion_self_hit_outcomes {
-            for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+            for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
         }
-        result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+        result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
         return simulator_helpers::coalesce_branches(result);
     }
 
@@ -2713,6 +2713,9 @@ fn possible_damage_outcomes_for_move(
             if let Action::MoveAction(ma) = a { ma.user_slot == target_slot } else { false }
         });
         if target_is_invulnerable || !target_has_queued_move {
+            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+                mon.last_move_failed = true;
+            }
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         for queued in next_state.action_queue.iter_mut() {
@@ -2736,6 +2739,9 @@ fn possible_damage_outcomes_for_move(
             if let Action::MoveAction(ma) = a { ma.user_slot == target_slot } else { false }
         });
         if !target_has_queued_move {
+            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+                mon.last_move_failed = true;
+            }
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         for queued in next_state.action_queue.iter_mut() {
@@ -2987,9 +2993,9 @@ fn possible_damage_outcomes_for_move(
         let has_confusion = confusion_self_hit_outcomes.is_some();
         let mut result = Vec::new();
         if let Some(ref c) = confusion_self_hit_outcomes {
-            for (s, p) in c { result.push((s.clone(), p * 0.5)); }
+            for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
         }
-        result.push((MatchState::BattleState(next_state), if has_confusion { 0.5 } else { 1.0 }));
+        result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
         return simulator_helpers::coalesce_branches(result);
     }
 
@@ -3031,6 +3037,13 @@ fn possible_damage_outcomes_for_move(
             .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::DestinyBond))
             .unwrap_or(false);
         if already_has {
+            // Clear the stale volatile — consecutive use fails and leaves no DB flag active.
+            if let Some(user) = match action.user_slot.player {
+                Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+            } {
+                simulator_helpers::remove_status_volatile(user, &VolatileStatus::DestinyBond);
+            }
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let state_snapshot = next_state.clone();
@@ -3872,11 +3885,11 @@ fn possible_damage_outcomes_for_move(
             let mut final_outcomes: Vec<(MatchState, f64)> = Vec::new();
             if let Some(ref confusion_outcomes) = confusion_self_hit_outcomes {
                 for (state, prob) in confusion_outcomes {
-                    final_outcomes.push((state.clone(), prob * 0.5));
+                    final_outcomes.push((state.clone(), prob * (1.0 / 3.0)));
                 }
             }
             for (state, prob) in all_outcomes {
-                final_outcomes.push((state, prob * if has_confusion { 0.5 } else { 1.0 }));
+                final_outcomes.push((state, prob * if has_confusion { 2.0 / 3.0 } else { 1.0 }));
             }
             if !final_outcomes.is_empty() {
                 return simulator_helpers::coalesce_branches(final_outcomes);
@@ -3967,12 +3980,12 @@ fn possible_damage_outcomes_for_move(
         let mut final_outcomes: Vec<(MatchState, f64)> = Vec::new();
         if let Some(confusion_outcomes) = confusion_self_hit_outcomes {
             for (state, prob) in confusion_outcomes {
-                final_outcomes.push((state.clone(), prob * 0.5));
+                final_outcomes.push((state.clone(), prob * (1.0 / 3.0)));
             }
         }
 
         for (state, prob) in all_outcomes {
-            final_outcomes.push((state, prob * if has_confusion { 0.5 } else { 1.0 }));
+            final_outcomes.push((state, prob * if has_confusion { 2.0 / 3.0 } else { 1.0 }));
         }
 
         if final_outcomes.is_empty() {
@@ -4254,8 +4267,8 @@ fn possible_damage_outcomes_for_move(
                     .into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect();
                 let has_confusion = confusion_self_hit_outcomes.is_some();
                 if let Some(confusion_outcomes) = confusion_self_hit_outcomes {
-                    for (s, p) in confusion_outcomes { final_outcomes.push((s, p * 0.5)); }
-                    for (_, p) in &mut final_outcomes { *p *= if has_confusion { 0.5 } else { 1.0 }; }
+                    for (s, p) in confusion_outcomes { final_outcomes.push((s, p * (1.0 / 3.0))); }
+                    for (_, p) in &mut final_outcomes { *p *= if has_confusion { 2.0 / 3.0 } else { 1.0 }; }
                 }
                 return simulator_helpers::coalesce_branches(final_outcomes);
             }
@@ -4663,19 +4676,18 @@ fn possible_damage_outcomes_for_move(
 
     // Scale normal outcomes by success probability (1 - combined_fail_prob)
     let combined_fail_prob = par_fail_prob + status_fail_prob + attract_fail_prob;
-    let mut success_scale = (1.0 - combined_fail_prob).max(0.0);
-    if confusion_self_hit_outcomes.is_some() {
-        success_scale *= 0.5;
-    }
+    let success_scale = (1.0 - combined_fail_prob).max(0.0);
 
+    // Gen VII+: confusion self-hit fires 1/3 of the success probability; normal move fires 2/3.
     if let Some(confusion_outcomes) = &confusion_self_hit_outcomes {
         for (state, prob) in confusion_outcomes {
-            final_outcomes.push((state.clone(), prob * success_scale));
+            final_outcomes.push((state.clone(), prob * success_scale * (1.0 / 3.0)));
         }
     }
 
+    let normal_scale = success_scale * if confusion_self_hit_outcomes.is_some() { 2.0 / 3.0 } else { 1.0 };
     for (state, prob) in all_outcomes {
-        final_outcomes.push((state, prob * success_scale));
+        final_outcomes.push((state, prob * normal_scale));
     }
 
     if final_outcomes.is_empty() {

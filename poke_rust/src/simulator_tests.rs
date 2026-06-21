@@ -669,7 +669,7 @@ mod tests {
             let before_state = initial_state.clone();
 
 
-            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));//Earthquake
+            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));//Bite
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1]));//Splash
 
             let outcomes = simulate_turn(
@@ -925,7 +925,12 @@ mod tests {
         }
 
         #[test]
-        fn crit_ignores_drops() {
+        fn crit_ignores_negative_attack_stages() {
+            // P1 has -2 Atk (normally halves damage). Crits ignore unfavorable Atk stages,
+            // so crit damage ≈ non-crit × (stage correction 2.0) × (crit mult 1.5) = ~3×.
+            // Burn is intentionally absent: crits do NOT ignore burn halving in Gen VI+.
+            // P1's Atk stat is capped low so the crit branch doesn't faint P2 (faint caps
+            // observed damage to init_hp and compresses the ratio away from 3.0).
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -944,8 +949,8 @@ mod tests {
                 None,
                 true,
             );
+            p1_mon.stats[1] = 80; // low enough that crit doesn't KO P2 (avoids faint-masking)
             p1_mon.boosts[0] = -2;
-            p1_mon.status = Some(Status::Burn);
 
             let p2_mon = build_pokemon_state(
                 Species::Kingambit,
@@ -962,6 +967,7 @@ mod tests {
                 None,
                 true,
             );
+            let target_initial_hp = p2_mon.hp;
 
             let initial_state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
 
@@ -979,16 +985,41 @@ mod tests {
             let total_probability: f64 = outcomes.iter().map(|(_, p)| *p).sum();
             assert!((total_probability - 1.0).abs() < 1e-9);
 
-            assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp > 0)));
-            assert!(outcomes.iter().all(|(state, _)| match state {
-                MatchState::BattleState(bs) => bs.p2_active_mons[0].hp > 0,
-                MatchState::GameOverState { winner } => *winner == Player::P1,
-                _ => false,
-            }));
+            // Separate crit and non-crit branches by probability threshold.
+            // BrickBreak has no boosted crit ratio, so crit prob ≈ 1/24 ≈ 0.042.
+            let crit_threshold = 0.1;
+            let mut mean_crit = 0.0;
+            let mut crit_weight = 0.0;
+            let mut mean_noncrit = 0.0;
+            let mut noncrit_weight = 0.0;
+            for (state, prob) in &outcomes {
+                let dmg = match state {
+                    MatchState::BattleState(bs) => (target_initial_hp - bs.p2_active_mons[0].hp) as f64,
+                    MatchState::GameOverState { .. } => target_initial_hp as f64,
+                    _ => continue,
+                };
+                if *prob < crit_threshold {
+                    mean_crit += dmg * prob;
+                    crit_weight += prob;
+                } else {
+                    mean_noncrit += dmg * prob;
+                    noncrit_weight += prob;
+                }
+            }
+            assert!(crit_weight > 0.0, "expected crit branches in outcomes");
+            mean_crit /= crit_weight;
+            mean_noncrit /= noncrit_weight;
+
+            assert!(mean_crit > mean_noncrit, "crit should deal more damage than non-crit when attacker has -2 Atk");
+            // crit ignores -2 Atk (×2 correction) and applies 1.5× crit mult → ≈3× non-crit
+            assert!((mean_crit / mean_noncrit - 3.0).abs() < 0.5,
+                "crit/non-crit ratio should be ≈3.0 (stage×crit); got {:.2}", mean_crit / mean_noncrit);
         }
 
         #[test]
         fn crit_ignores_positive_defense_stages() {
+            // Target has +2 Def. Crits ignore favourable target stat stages, so crit
+            // damage ≈ non-crit × (stage correction 2.0) × (crit mult 1.5) = ~3×.
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -1024,6 +1055,7 @@ mod tests {
                 true,
             );
             p2_mon.boosts[1] = 2;
+            let target_initial_hp = p2_mon.hp;
 
             let initial_state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
 
@@ -1041,12 +1073,33 @@ mod tests {
             let total_probability: f64 = outcomes.iter().map(|(_, p)| *p).sum();
             assert!((total_probability - 1.0).abs() < 1e-9);
 
-            assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp > 0)));
-            assert!(outcomes.iter().all(|(state, _)| match state {
-                MatchState::BattleState(bs) => bs.p2_active_mons[0].hp > 0,
-                MatchState::GameOverState { winner } => *winner == Player::P1,
-                _ => false,
-            }));
+            // Separate crit and non-crit branches by probability threshold.
+            let crit_threshold = 0.1;
+            let mut mean_crit = 0.0;
+            let mut crit_weight = 0.0;
+            let mut mean_noncrit = 0.0;
+            let mut noncrit_weight = 0.0;
+            for (state, prob) in &outcomes {
+                let dmg = match state {
+                    MatchState::BattleState(bs) => (target_initial_hp - bs.p2_active_mons[0].hp) as f64,
+                    MatchState::GameOverState { .. } => target_initial_hp as f64,
+                    _ => continue,
+                };
+                if *prob < crit_threshold {
+                    mean_crit += dmg * prob;
+                    crit_weight += prob;
+                } else {
+                    mean_noncrit += dmg * prob;
+                    noncrit_weight += prob;
+                }
+            }
+            assert!(crit_weight > 0.0, "expected crit branches in outcomes");
+            mean_crit /= crit_weight;
+            mean_noncrit /= noncrit_weight;
+
+            // Crit ignores +2 Def (×2 correction) and applies 1.5× crit mult → ≈3× non-crit.
+            assert!(mean_crit > mean_noncrit * 1.5,
+                "crit should bypass +2 Def and deal significantly more damage; crit={mean_crit:.1} noncrit={mean_noncrit:.1}");
         }
 
         #[test]
@@ -1348,76 +1401,75 @@ mod tests {
         }
 
         #[test]
-        fn extremely_effective_damage() {
-            let pokemon_dex= pokemon_dex();
+        fn four_times_effective_damage() {
+            // Ice vs Dragon/Ground = 2× × 2× = 4×. Lapras (Water/Ice) uses Ice Beam vs
+            // Garchomp (Dragon/Ground) and vs Snorlax (Normal, neutral). The damage ratio
+            // should be ≈4.0.
+            let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            let p1_mon = build_pokemon_state(
-                Species::Blastoise,
-                &pokemon_dex,
-                &move_dex,
-                None,
-                Some([Some(PokemonMove::AuraSphere), None, None, None]),
-                None,
-                None,
-                Some(Nature::Modest),
-                None,
-                None,
-                Some([2, 0, 0, 32, 0, 32]),
-                None,
-                true,
+            let p1 = build_pokemon_state(
+                Species::Lapras,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::IceBeam), None, None, None]),
+                None, None, Some(Nature::Modest), None, None,
+                Some([2, 0, 0, 32, 0, 2]), None, true,
             );
 
-            let p2_mon = build_pokemon_state(
-                Species::Kingambit,
-                &pokemon_dex,
-                &move_dex,
-                Some(100),
+            let p2_4x = build_pokemon_state(
+                Species::Garchomp,
+                &pokemon_dex, &move_dex,
+                Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
-                None,
-                None,
-                Some(Nature::Adamant),
-                None,
-                None,
-                Some([32, 32, 0, 0, 0, 2]),
-                None,
-                true,
+                None, None, Some(Nature::Hardy), None, None,
+                Some([32, 0, 0, 0, 32, 0]), None, true,
             );
 
-            let initial_state = battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![]);
-            let before_state = initial_state.clone();
-
-
-            let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));//Energy Ball
-            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));//Splash
-
-            let outcomes = simulate_turn(
-                &MatchState::BattleState(initial_state),
-                &p1_cmd,
-                &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
-                false,
-                1,
+            let p2_neutral = build_pokemon_state(
+                Species::Snorlax,
+                &pokemon_dex, &move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, None, Some(Nature::Hardy), None, None,
+                Some([32, 0, 0, 0, 32, 0]), None, true,
             );
 
-            assert!(!outcomes.is_empty());
-            let total_probability: f64 = outcomes.iter().map(|(_, p)| *p).sum();
-            assert!((total_probability - 1.0).abs() < 1e-9);
+            let initial_hp_4x = p2_4x.hp;
+            let initial_hp_neutral = p2_neutral.hp;
 
-            let mut expected_final_state = before_state.clone();
-            expected_final_state.p1_active_mons[0].move_pp[0] -= 1;
-            expected_final_state.p2_active_mons[0].move_pp[0] -= 1;
-            expected_final_state.turn_number += 1;
+            let run = |p2: &crate::pokemon::PokemonState| {
+                simulate_turn(
+                    &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![])),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    &move_dex, &pokemon_dex, false, 16,
+                )
+            };
 
-            let mut expected_outcomes: Vec<(MatchState,f64)> = Vec::new();
+            let dmg_mean = |outcomes: &[(MatchState, f64)], init_hp: u16| -> f64 {
+                let mut sum = 0.0;
+                for (state, prob) in outcomes {
+                    let dmg = match state {
+                        MatchState::BattleState(bs) => (init_hp - bs.p2_active_mons[0].hp) as f64,
+                        MatchState::GameOverState { .. } => init_hp as f64,
+                        _ => 0.0,
+                    };
+                    sum += dmg * prob;
+                }
+                sum
+            };
 
-            let mut outcome = expected_final_state.clone();
-            outcome.p2_active_mons[0].hp -= 96;
-            expected_outcomes.push((MatchState::BattleState(outcome), 1.0));
+            let outcomes_4x = run(&p2_4x);
+            let outcomes_neutral = run(&p2_neutral);
 
-            println!("{:?}", outcomes);
-            assert!(outcomes_permutation(&outcomes, &expected_outcomes));
+            let d4x = dmg_mean(&outcomes_4x, initial_hp_4x);
+            let d1x = dmg_mean(&outcomes_neutral, initial_hp_neutral);
+
+            assert!(d1x > 0.0, "Ice Beam should deal damage to Normal-type baseline");
+            let ratio = d4x / d1x;
+            assert!((ratio - 4.0).abs() < 0.5,
+                "Ice Beam vs Dragon/Ground should be ~4× vs neutral; got ratio {ratio:.3} (4x={d4x:.1} 1x={d1x:.1})");
         }
 
         #[test]
@@ -1885,7 +1937,9 @@ mod tests {
         use super::*;
 
         #[test]
-        fn ohko_win() {
+        fn game_over_on_last_mon_faint() {
+            // Tests that simulate_turn returns GameOverState when P2's last mon faints.
+            // (Not a true OHKO move test — uses Dragon Claw on a 1-HP target for determinism.)
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -2363,14 +2417,15 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let mut p1 = build_mon(Species::Snorlax, [Some(PokemonMove::BellyDrum), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
-            p1.hp = p1.stats[0] / 2; // exactly half → fails
-            let half_hp = p1.hp;
+            // Belly Drum fails when HP is strictly less than ½ max (not at exactly ½).
+            p1.hp = p1.stats[0] / 2 - 1;
+            let below_half_hp = p1.hp;
             let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
             let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
             assert_eq!(state.p1_active_mons[0].boosts[0], 0);
-            assert_eq!(state.p1_active_mons[0].hp, half_hp);
+            assert_eq!(state.p1_active_mons[0].hp, below_half_hp);
             // The move still consumed PP.
             assert_eq!(state.p1_active_mons[0].move_pp[0], initial.p1_active_mons[0].move_pp[0] - 1);
         }
@@ -2888,6 +2943,47 @@ mod tests {
                 assert!((p - norm_1_flinch.get(damage).unwrap_or(&0.0)).abs() < eps);
                 assert!((p - norm_1_no_flinch.get(damage).unwrap_or(&0.0)).abs() < eps);
             }
+
+            // Verify 0.75× spread multiplier against a single-target run.
+            let single_outcomes = simulate_turn(
+                &MatchState::BattleState(battle_state_from_lists(
+                    vec![tyranitar.clone()], vec![],
+                    vec![corviknight.clone()], vec![],
+                )),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex, true, 16,
+            );
+            let single_initial_hp = corviknight.hp;
+            let single_dmg_mean: f64 = {
+                let mut sum = 0.0;
+                let mut weight = 0.0;
+                for (state, prob) in &single_outcomes {
+                    if let MatchState::BattleState(bs) = state {
+                        let dmg = (single_initial_hp - bs.p2_active_mons[0].hp) as f64;
+                        if dmg > 0.0 { sum += dmg * prob; weight += prob; }
+                    }
+                }
+                sum / weight
+            };
+            // Mean spread damage from doubles (hit branches for target 0).
+            let spread_dmg_mean: f64 = {
+                let mut sum = 0.0;
+                let mut weight = 0.0;
+                for (dmg, p) in dmg_0_flinch.iter().chain(dmg_0_no_flinch.iter()) {
+                    if *dmg > 0 {
+                        sum += (*dmg as f64) * p;
+                        weight += p;
+                    }
+                }
+                sum / weight
+            };
+            let spread_ratio = spread_dmg_mean / single_dmg_mean;
+            assert!(
+                (spread_ratio - 0.75).abs() < 0.05,
+                "Rock Slide spread damage should be ≈0.75× single-target; got ratio {:.3} ({:.1} vs {:.1})",
+                spread_ratio, spread_dmg_mean, single_dmg_mean,
+            );
         }
     }
 
@@ -3281,7 +3377,7 @@ mod tests {
         }
 
         #[test]
-        fn skydrop_bypassed_by_noguard_and_identify() {
+        fn skydrop_bypassed_by_noguard() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -3359,6 +3455,7 @@ mod tests {
             );
             assert!(noguard_outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < noguard_defender_hp)));
 
+            // Foresight and Miracle Eye do NOT bypass Sky Drop invulnerability per Bulbapedia.
             for identify_volatile in [VolatileStatus::Foresight, VolatileStatus::MiracleEye] {
                 let identify_attacker = build_pokemon_state(
                     Species::Snorlax,
@@ -3388,7 +3485,8 @@ mod tests {
                     move_dex,
                     pokemon_dex,
                 );
-                assert!(identify_outcomes.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < identify_defender_hp)));
+                assert!(identify_outcomes.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == identify_defender_hp)),
+                    "Foresight/MiracleEye should NOT bypass Sky Drop invulnerability");
             }
         }
 
@@ -3463,69 +3561,73 @@ mod tests {
         }
 
         #[test]
-        fn skydrop_immunities() {
+        fn skydrop_flying_type_immune() {
+            // Flying-type Pokémon are immune to Sky Drop (both turns). Dragonite (Flying/Dragon)
+            // should not take damage from Sky Drop.
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            let cases = vec!["flying", "levitate", "magnet_rise", "telekinesis"];
+            let attacker = build_pokemon_state(
+                Species::Dragonite,
+                pokemon_dex, move_dex, None,
+                Some([Some(PokemonMove::SkyDrop), None, None, None]),
+                None, Some(Ability::Illuminate), Some(Nature::Adamant),
+                None, None, Some([0, 252, 0, 0, 0, 252]), None, true,
+            );
+            let defender = build_pokemon_state(
+                Species::Dragonite, // Flying/Dragon — immune
+                pokemon_dex, move_dex, None,
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::Illuminate), Some(Nature::Careful),
+                None, None, Some([252, 0, 0, 0, 0, 0]), None, true,
+            );
+            let defender_hp = defender.hp;
+            let initial_state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
 
-            for case in cases {
+            let turn_one = run_single_turn(
+                &MatchState::BattleState(initial_state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex, pokemon_dex,
+            );
+            // Sky Drop should fail to grab a Flying-type target.
+            assert!(turn_one.iter().all(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp == defender_hp)),
+                "Flying-type should be immune to Sky Drop (no damage on either turn)");
+        }
+
+        #[test]
+        fn skydrop_levitate_magnet_rise_telekinesis_take_damage() {
+            // Levitate, Magnet Rise, and Telekinesis grant ground immunity but NOT Sky Drop
+            // immunity. Targets with these effects should still take damage from Sky Drop.
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let cases: &[(&str, Option<Ability>, Option<VolatileStatus>)] = &[
+                ("Levitate",    Some(Ability::Levitate), None),
+                ("MagnetRise",  None, Some(VolatileStatus::MagnetRise)),
+                ("Telekinesis", None, Some(VolatileStatus::Telekinesis)),
+            ];
+            for (label, ability_opt, volatile_opt) in cases {
                 let attacker = build_pokemon_state(
                     Species::Dragonite,
-                    pokemon_dex,
-                    move_dex,
-                    None,
+                    pokemon_dex, move_dex, None,
                     Some([Some(PokemonMove::SkyDrop), None, None, None]),
-                    None,
-                    Some(Ability::Illuminate),
-                    Some(Nature::Adamant),
-                    None,
-                    None,
-                    Some([0, 252, 0, 0, 0, 252]),
-                    None,
-                    true,
+                    None, Some(Ability::Illuminate), Some(Nature::Adamant),
+                    None, None, Some([0, 252, 0, 0, 0, 252]), None, true,
                 );
-
-                let mut defender = match case {
-                    "flying" => build_pokemon_state(
-                        Species::Dragonite,
-                        pokemon_dex,
-                        move_dex,
-                        None,
-                        Some([Some(PokemonMove::Splash), None, None, None]),
-                        None,
-                        Some(Ability::Illuminate),
-                        Some(Nature::Careful),
-                        None,
-                        None,
-                        Some([252, 0, 0, 0, 0, 0]),
-                        None,
-                        true,
-                    ),
-                    _ => build_pokemon_state(
-                        Species::Snorlax,
-                        pokemon_dex,
-                        move_dex,
-                        None,
-                        Some([Some(PokemonMove::Splash), None, None, None]),
-                        None,
-                        Some(Ability::Illuminate),
-                        Some(Nature::Careful),
-                        None,
-                        None,
-                        Some([252, 0, 0, 0, 0, 0]),
-                        None,
-                        true,
-                    ),
-                };
-
-                match case {
-                    "levitate" => defender.ability = Ability::Levitate,
-                    "magnet_rise" => defender.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, 0)),
-                    "telekinesis" => defender.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Telekinesis, 0)),
-                    _ => {}
+                let mut defender = build_pokemon_state(
+                    Species::Snorlax, // Normal, not immune
+                    pokemon_dex, move_dex, None,
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::Illuminate), Some(Nature::Careful),
+                    None, None, Some([252, 0, 0, 0, 0, 0]), None, true,
+                );
+                if let Some(ab) = ability_opt.as_ref().cloned() {
+                    defender.ability = ab;
                 }
-
+                if let Some(vol) = volatile_opt.as_ref().cloned() {
+                    defender.volatiles.push(VolatileStatusState::TurnStatus(vol, 0));
+                }
                 let defender_hp = defender.hp;
                 let initial_state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
 
@@ -3533,24 +3635,23 @@ mod tests {
                     &MatchState::BattleState(initial_state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    move_dex,
-                    pokemon_dex,
+                    move_dex, pokemon_dex,
                 );
                 let (state_after_turn_one, _) = extract_battle_state(turn_one);
-                assert!(has_sky_drop_move_volatile(&state_after_turn_one.p1_active_mons[0]));
-                assert!(has_sky_drop_turn_volatile(&state_after_turn_one.p2_active_mons[0]));
+                assert!(has_sky_drop_move_volatile(&state_after_turn_one.p1_active_mons[0]),
+                    "{label}: Sky Drop turn 1 should grab target");
+                assert!(has_sky_drop_turn_volatile(&state_after_turn_one.p2_active_mons[0]),
+                    "{label}: target should be in Sky Drop hold");
 
                 let turn_two = run_single_turn(
                     &MatchState::BattleState(state_after_turn_one.clone()),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    move_dex,
-                    pokemon_dex,
+                    move_dex, pokemon_dex,
                 );
                 let (state_after_turn_two, _) = extract_battle_state(turn_two);
-                assert_eq!(state_after_turn_two.p2_active_mons[0].hp, defender_hp);
-                assert!(!has_sky_drop_move_volatile(&state_after_turn_two.p1_active_mons[0]));
-                assert!(!has_sky_drop_turn_volatile(&state_after_turn_two.p2_active_mons[0]));
+                assert!(state_after_turn_two.p2_active_mons[0].hp < defender_hp,
+                    "{label}: target should take damage on Sky Drop turn 2");
             }
         }
 
@@ -5626,19 +5727,15 @@ mod tests {
         }
 
         #[test]
-        fn ate_weather_ball_conditional_conversion() {
-            // Weather Ball's own-effect sets its type to Water in rain — in that case -ate must
-            // NOT convert it (the move's own type already fired). Without rain, Weather Ball is
-            // Normal and SHOULD be converted+boosted by the -ate ability.
+        fn ate_weather_ball_not_converted_by_ate() {
+            // Bulbapedia explicitly states -ate abilities do NOT affect Weather Ball in any
+            // condition. Whether clear or rainy, Pixilate must leave Weather Ball's type and
+            // power unchanged.
             //
             // Assertions:
-            //   no_weather + Pixilate:  Fairy-type 60 BP (50 × 1.2) → some damage D_fairy
-            //   no_weather + no ability: Normal 50 BP → baseline damage D_normal; D_fairy > D_normal
-            //
-            //   rain + Pixilate:         Water 100 BP (Weather Ball doubles in rain), rain mult ×1.5
-            //                            → NOT converted, no ate boost → D_rain_pixilate
-            //   rain + no ability:       same Water 100 BP × ×1.5 → D_rain_no_ability
-            //   D_rain_pixilate == D_rain_no_ability  (Pixilate did nothing in rain)
+            //   no_weather + Pixilate:   same as no_weather + no_ability (no conversion)
+            //   rain + Pixilate:         same as rain + no_ability (no conversion in rain either)
+            //   rain genuinely increases damage vs no weather (sanity check)
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -5664,16 +5761,16 @@ mod tests {
             let no_weather_no_ability_dmg = initial_hp - no_weather_no_ability_hp;
             let no_weather_pixilate_dmg   = initial_hp - no_weather_pixilate_hp;
 
-            // Without rain: Pixilate converts Normal Weather Ball → Fairy (+1.2×); more damage.
-            assert!(
-                no_weather_pixilate_dmg > no_weather_no_ability_dmg,
-                "No weather: Pixilate should boost Weather Ball (Normal→Fairy +1.2×): {} vs {}",
+            // No weather: Weather Ball is Normal, but -ate still must NOT convert it.
+            assert_eq!(
+                no_weather_pixilate_dmg, no_weather_no_ability_dmg,
+                "No weather: Pixilate must NOT convert Weather Ball (identical damage expected): {} vs {}",
                 no_weather_pixilate_dmg, no_weather_no_ability_dmg,
             );
-            // With rain: Weather Ball's own type is Water; Pixilate does NOT convert → same damage.
+            // With rain: Weather Ball becomes Water; Pixilate also must NOT convert → same damage.
             assert_eq!(
                 rain_pixilate_hp, rain_no_ability_hp,
-                "Rain: Pixilate must NOT convert Weather Ball (already Water); damage should be identical",
+                "Rain: Pixilate must NOT convert Weather Ball; damage should be identical",
             );
             // Sanity: rain genuinely increases damage (Water Ball in rain = 100 BP × 1.5 weather mult).
             assert!(rain_no_ability_hp < no_weather_no_ability_hp,
@@ -5817,7 +5914,7 @@ mod tests {
                     }
                     _ => None,
                 })
-                .expect("expected a Fire Fang hit branch with Dry Skin");
+                .expect("expected a Flame Charge hit branch with Dry Skin");
 
             assert!((no_dry_skin_outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
             assert!((dry_skin_outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
@@ -5949,9 +6046,37 @@ mod tests {
                 &pokemon_dex,
             );
 
-            assert!(seed_sower_outcomes.iter().any(|(state, _)| {
+            assert!(seed_sower_outcomes.iter().all(|(state, _)| {
                 matches!(state, MatchState::BattleState(bs) if bs.terrain == Some(Terrain::GrassyTerrain))
-            }));
+            }), "SeedSower should set Grassy Terrain when hit (Tackle never misses; all branches must have terrain set)");
+
+            // Negative control: without SeedSower the Tackle should NOT set Grassy Terrain.
+            let no_seed_sower_outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(
+                    vec![build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex, &move_dex, Some(50),
+                        Some([Some(PokemonMove::Tackle), None, None, None]),
+                        None, Some(Ability::None), None, None,
+                        Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                    )],
+                    vec![],
+                    vec![build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex, &move_dex, Some(50),
+                        Some([Some(PokemonMove::Splash), None, None, None]),
+                        None, Some(Ability::None), None, None,
+                        Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                    )],
+                    vec![],
+                )),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            assert!(no_seed_sower_outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if bs.terrain != Some(Terrain::GrassyTerrain))
+            }), "Without SeedSower, Tackle should NOT set Grassy Terrain");
 
             let sand_spit_outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(
@@ -5994,9 +6119,37 @@ mod tests {
                 &pokemon_dex,
             );
 
-            assert!(sand_spit_outcomes.iter().any(|(state, _)| {
+            assert!(sand_spit_outcomes.iter().all(|(state, _)| {
                 matches!(state, MatchState::BattleState(bs) if bs.weather == Some(Weather::Sandstorm))
-            }));
+            }), "SandSpit should set Sandstorm when hit (Tackle never misses; all branches must have sandstorm set)");
+
+            // Negative control: without SandSpit the Tackle should NOT set Sandstorm.
+            let no_sand_spit_outcomes = run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(
+                    vec![build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex, &move_dex, Some(50),
+                        Some([Some(PokemonMove::Tackle), None, None, None]),
+                        None, Some(Ability::None), None, None,
+                        Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                    )],
+                    vec![],
+                    vec![build_pokemon_state(
+                        Species::Snorlax,
+                        &pokemon_dex, &move_dex, Some(50),
+                        Some([Some(PokemonMove::Splash), None, None, None]),
+                        None, Some(Ability::None), None, None,
+                        Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                    )],
+                    vec![],
+                )),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+            );
+            assert!(no_sand_spit_outcomes.iter().all(|(state, _)| {
+                matches!(state, MatchState::BattleState(bs) if bs.weather != Some(Weather::Sandstorm))
+            }), "Without SandSpit, Tackle should NOT set Sandstorm");
         }
 
         // While a Neutralizing Gas Pokémon is active it suppresses other abilities, so
@@ -6134,6 +6287,23 @@ mod tests {
             let spa_base   = simulator_helpers::effective_stat(&state, &mon,    crate::dex_data::PokemonStat::SpA, false, false);
             assert!((atk_hustle - 1.5 * atk_base).abs() < 1e-9, "Hustle should give 1.5x Attack");
             assert!((spa_hustle - spa_base).abs() < 1e-9, "Hustle must not affect SpA");
+
+            // Hustle also reduces physical-move accuracy by ×0.8 (Tackle 100% → 80%).
+            let mut hustle_mon = mon.clone();
+            hustle_mon.ability = Ability::Hustle;
+            let hustle_state = battle_state_from_lists(
+                vec![hustle_mon], vec![], vec![mon.clone()], vec![],
+            );
+            let hustle_outcomes = simulate_turn(
+                &MatchState::BattleState(hustle_state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex, false, 1,
+            );
+            let initial_p2_hp = mon.hp;
+            let hustle_hit_prob = hit_probability(&hustle_outcomes, initial_p2_hp);
+            assert!((hustle_hit_prob - 0.8).abs() < 0.01,
+                "Hustle should reduce Tackle accuracy from 100% to 80%, got {hustle_hit_prob:.4}");
         }
 
         // ── Group A: Move-flag-based BP boosts ────────────────────────────────
@@ -6614,6 +6784,15 @@ mod tests {
             let dmg_ember_no     = run(ember_attacker_no, make_defender());
             assert!((dmg_ember_aura - dmg_ember_no).abs() < 0.01,
                 "Fairy Aura must not boost non-Fairy moves");
+
+            // Aura Break reverses Fairy Aura: damage drops to ×(4096/5448) ≈ 0.75× baseline.
+            let mut aura_break_attacker = make_attacker();
+            aura_break_attacker.ability = Ability::FairyAura;
+            let mut aura_break_defender = make_defender();
+            aura_break_defender.ability = Ability::AuraBreak;
+            let dmg_aura_break = run(aura_break_attacker, aura_break_defender);
+            assert!(dmg_aura_break < dmg_no_aura,
+                "Aura Break should reverse Fairy Aura into a damage reduction below baseline");
         }
     }
 
@@ -7273,14 +7452,17 @@ mod tests {
                         None,
                         false,
                     ),
+                    // Ice-type Pokémon cannot be frozen. Use Glaceon (pure Ice) with no ability
+                    // to isolate the type-based immunity (Ice Face only blocks physical hits,
+                    // not the freeze status).
                     build_pokemon_state(
-                        Species::Eiscue,
+                        Species::Glaceon,
                         &pokemon_dex,
                         &move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
-                        Some(Ability::IceFace),
+                        Some(Ability::None),
                         None,
                         None,
                         Some(crate::dex_data::PokemonType::Ice),
@@ -7493,11 +7675,15 @@ mod tests {
                 }));
 
                 let immune_cases = vec![
-                    (Species::Jolteon, Ability::None),
-                    (Species::Lopunny, Ability::Limber),
+                    (Species::Jolteon,  Ability::None),         // Electric-type
+                    (Species::Lopunny,  Ability::Limber),       // Limber ability
+                    (Species::Komala,   Ability::Comatose),     // Comatose ability
+                    (Species::Snorlax,  Ability::PurifyingSalt), // Purifying Salt ability
                 ];
 
                 for (species, ability) in immune_cases {
+                    let species_debug = format!("{species:?}");
+                    let ability_debug = format!("{ability:?}");
                     let target = build_pokemon_state(
                         species,
                         &pokemon_dex,
@@ -7524,8 +7710,36 @@ mod tests {
 
                     assert!(outcomes.iter().all(|(state, _)| {
                         matches!(state, MatchState::BattleState(bs) if !matches!(bs.p2_active_mons[0].status, Some(Status::Paralysis)))
-                    }));
+                    }), "paralysis immunity failed for {species_debug} / {ability_debug}");
                 }
+
+                // Quick Feet: paralysis does NOT reduce Speed; instead grants a 1.5× Speed boost.
+                // A paralyzed Quick Feet holder should have HIGHER effective speed than a healthy
+                // mon with the same base speed.
+                let mut qf_paralyzed = build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::QuickFeet), None, None, None, None, None, false,
+                );
+                qf_paralyzed.status = Some(Status::Paralysis);
+
+                let qf_normal = build_pokemon_state(
+                    Species::Snorlax,
+                    &pokemon_dex, &move_dex, Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None, Some(Ability::None), None, None, None, None, None, false,
+                );
+
+                let qf_state = battle_state_from_lists(
+                    vec![qf_paralyzed], vec![], vec![qf_normal], vec![],
+                );
+                let qf_slot = crate::battle::FieldSlot { player: Player::P1, slot_index: 0 };
+                let norm_slot = crate::battle::FieldSlot { player: Player::P2, slot_index: 0 };
+                let qf_spe = simulator_helpers::effective_speed_for_slot(&qf_state, qf_slot, &qf_state.p1_active_mons[0]);
+                let norm_spe = simulator_helpers::effective_speed_for_slot(&qf_state, norm_slot, &qf_state.p2_active_mons[0]);
+                assert!(qf_spe > norm_spe,
+                    "Quick Feet + Paralysis should give 1.5× Speed boost, not halving; qf={qf_spe} vs norm={norm_spe}");
             }
         }
 
@@ -8492,8 +8706,10 @@ mod tests {
 
                 let mut target_damages = Vec::new();
                 let mut self_damages = Vec::new();
+                let mut self_hit_prob = 0.0f64;
+                let mut target_hit_prob = 0.0f64;
 
-                for (state, _) in &outcomes {
+                for (state, prob) in &outcomes {
                     let MatchState::BattleState(bs) = state else {
                         panic!("expected battle state outcome");
                     };
@@ -8503,8 +8719,10 @@ mod tests {
 
                     if p2_loss > 0 {
                         target_damages.push(p2_loss);
+                        target_hit_prob += prob;
                     } else if p1_loss > 0 {
                         self_damages.push(p1_loss);
+                        self_hit_prob += prob;
                     } else {
                         panic!("expected confusion to produce either self-damage or target damage");
                     }
@@ -8517,6 +8735,9 @@ mod tests {
 
                 assert_eq!(target_damages, vec![84, 85, 87, 88, 90, 91, 93, 94, 96, 97, 99, 100]);
                 assert_eq!(self_damages, vec![26, 27, 28, 29, 30, 31]);
+                // Gen VII+: confused Pokémon hits itself with 1/3 probability.
+                assert!((self_hit_prob - 1.0 / 3.0).abs() < 0.01,
+                    "self-hit probability should be ≈1/3, got {self_hit_prob:.4}");
             }
 
             #[test]
@@ -8681,9 +8902,11 @@ mod tests {
                     &pokemon_dex,
                 );
 
+                // Pokémon Champions: Dire Claw has 30% total chance of inflicting a status,
+                // with each of Poison / Paralysis / Sleep having equal 10% probability.
                 let dist = status_distribution(&outcomes);
-                let each = 0.50 / 3.0;
-                assert!((dist.get("none").copied().unwrap_or(0.0) - 0.50).abs() < 1e-9);
+                let each = 0.10;
+                assert!((dist.get("none").copied().unwrap_or(0.0) - 0.70).abs() < 1e-9);
                 assert!((dist.get("psn").copied().unwrap_or(0.0) - each).abs() < 1e-9);
                 assert!((dist.get("par").copied().unwrap_or(0.0) - each).abs() < 1e-9);
                 assert!((dist.get("slp").copied().unwrap_or(0.0) - each).abs() < 1e-9);
@@ -9289,22 +9512,28 @@ mod tests {
 
         #[test]
         fn curious_medicine_does_not_affect_self() {
-            // Give the CuriousMedicine holder itself some boosts before send-out.
-            // In practice boosts are always 0 at lead send-out, so we only check the post-state.
-            // The ally's boosts are zeroed; self remains 0.
+            // Give both the ally AND the medicine holder pre-set boosts. Curious Medicine should
+            // zero the ALLY's boosts (slot 0) but leave its own boosts (slot 1) intact.
             let ally = {
                 let mut m = mon(Species::Snorlax, Ability::Pressure, None, None);
                 m.boosts = [3, 0, 0, 0, 0, 0, 0];
                 m
             };
-            let medicine = mon(Species::Chansey, Ability::CuriousMedicine, None, None);
+            let medicine = {
+                let mut m = mon(Species::Chansey, Ability::CuriousMedicine, None, None);
+                m.boosts = [2, 1, 0, 0, 0, 0, 0];
+                m
+            };
             let state = battle_state_from_lists(
                 vec![ally, medicine],
                 vec![],
                 vec![mon(Species::Snorlax, Ability::Pressure, None, None), mon(Species::Snorlax, Ability::Pressure, None, None)],
                 vec![],
             );
+            // Ally's boosts are reset by Curious Medicine.
             assert_eq!(state.p1_active_mons[0].boosts, [0; 7]);
+            // Medicine holder's own boosts are untouched.
+            assert_eq!(state.p1_active_mons[1].boosts, [2, 1, 0, 0, 0, 0, 0]);
         }
 
         // ── Hospitality ──────────────────────────────────────────────────────────────
@@ -9931,13 +10160,16 @@ mod tests {
                 true,
             );
 
-            let _outside_outcomes = run_single_turn(
+            let outside_outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![garchomp.clone(), garchomp_partner.clone()], vec![], vec![aggron.clone(), aggron_partner.clone()], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
                 &move_dex,
                 &pokemon_dex,
             );
+            // Without Wonder Room, Aggron's high Defense absorbs Earthquake — no KO.
+            assert!(outside_outcomes.iter().all(|(state, _)| !matches!(state, MatchState::GameOverState { .. })),
+                "Aggron should survive Earthquake outside Wonder Room");
 
             let direct_state = battle_state_from_lists(vec![garchomp.clone(), garchomp_partner.clone()], vec![], vec![aggron.clone(), aggron_partner.clone()], vec![]);
             let _direct_outcomes = simulator_helpers::calculate_damage_outcomes_for_target(
@@ -23566,8 +23798,11 @@ mod ability_manipulation_moves {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex,
         ));
-        // same ability → no change, original_ability stays None
-        assert_eq!(bs.p2_active_mons[0].original_ability, None, "Entrainment should fail on same ability");
+        // Entrainment fails when target already has the same ability: ability is unchanged.
+        assert_eq!(bs.p2_active_mons[0].ability, Ability::Healer,
+            "Entrainment should not change ability when target already has the same ability");
+        assert_eq!(bs.p2_active_mons[0].original_ability, None,
+            "original_ability should not be set when Entrainment fails");
     }
 
     // ── Gastro Acid ──────────────────────────────────────────────────────────
@@ -24606,10 +24841,9 @@ mod turn_order_and_delayed_moves {
         let p1 = mon(Species::Torkoal, PokemonMove::Quash);
         let p2 = mon(Species::Pelipper, PokemonMove::Splash);
         let bs = run_turn(p1, p2);
-        // The test just verifies we reach a valid end state without panic.
-        // The Quash failed: Pelipper's HP is unchanged (Quash is status, deals no damage).
         let p2_max = bs.p2_active_mons[0].stats[0];
         assert_eq!(bs.p2_active_mons[0].hp, p2_max, "Quash is a status move; target should be at full HP");
+        assert!(bs.p1_active_mons[0].last_move_failed, "Quash should report last_move_failed when target already moved");
     }
 
     #[test]
@@ -24619,9 +24853,9 @@ mod turn_order_and_delayed_moves {
         let p1 = mon(Species::Torkoal, PokemonMove::AfterYou);
         let p2 = mon(Species::Pelipper, PokemonMove::Splash);
         let bs = run_turn(p1, p2);
-        // Just verify clean resolution; no damage should have been done.
         let p2_max = bs.p2_active_mons[0].stats[0];
         assert_eq!(bs.p2_active_mons[0].hp, p2_max, "After You is a status move; target HP unchanged");
+        assert!(bs.p1_active_mons[0].last_move_failed, "After You should report last_move_failed when target already moved");
     }
 
     // ── Future Sight ─────────────────────────────────────────────────────────
@@ -26601,80 +26835,109 @@ mod new_moves_session {
 
     #[test]
     fn freeze_dry_is_super_effective_vs_water_type() {
-        // Lapras is a Water/Ice type. Freeze-Dry vs Water should be 2× (override), ×0.5 for Ice
-        // → net effectiveness 1.0 for Water/Ice. A pure Water type should get 2×.
+        // Wartortle (pure Water, SpDef base 65) and Eevee (Normal, SpDef base 65) have identical
+        // SpDef at level 50 with 0 EVs → damage ratio equals type-effectiveness ratio (should be 2×).
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
         let p1 = mon(Species::Glaceon, PokemonMove::FreezeDry, Ability::None);
-        let p2_water = mon(Species::Vaporeon, PokemonMove::Splash, Ability::None); // pure Water
-        let p2_normal = mon(Species::Snorlax, PokemonMove::Splash, Ability::None); // Normal baseline
-
-        let initial_hp_water = p2_water.hp;
+        let make_target = |species: Species| -> PokemonState {
+            build_pokemon_state(
+                species, &pdex, &mdex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0; 6]), None, false,
+            )
+        };
+        let p2_water  = make_target(Species::Wartortle);
+        let p2_normal = make_target(Species::Eevee);
+        let initial_hp_water  = p2_water.hp;
         let initial_hp_normal = p2_normal.hp;
 
-        let state_water = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_water], vec![]);
-        let state_normal = battle_state_from_lists(vec![p1], vec![], vec![p2_normal], vec![]);
-
-        let outcomes_water = run_single_turn(
-            &MatchState::BattleState(state_water),
-            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
-            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
-        );
-        let outcomes_normal = run_single_turn(
-            &MatchState::BattleState(state_normal),
-            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
-            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
-        );
-
-        let mean_dmg = |outcomes: &[(MatchState, f64)], init_hp: u16| -> f64 {
-            damage_distribution(outcomes, init_hp)
-                .iter()
-                .map(|(&d, &p)| d as f64 * p)
-                .sum()
+        let run = |target: PokemonState| -> Vec<(MatchState, f64)> {
+            run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![target], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )
         };
 
-        let dmg_water = mean_dmg(&outcomes_water, initial_hp_water);
-        let dmg_normal = mean_dmg(&outcomes_normal, initial_hp_normal);
+        let mean_dmg = |outcomes: Vec<(MatchState, f64)>, init_hp: u16| -> f64 {
+            outcomes.iter().map(|(state, prob)| {
+                let dmg = match state {
+                    MatchState::BattleState(bs) => (init_hp - bs.p2_active_mons[0].hp) as f64,
+                    MatchState::GameOverState { .. } => init_hp as f64,
+                    _ => 0.0,
+                };
+                dmg * prob
+            }).sum()
+        };
 
-        // Vaporeon has Water type which should be 2× (override). Normal has ×1 effectiveness.
-        // Both have similar bulk at level 50, but Vaporeon has higher SpD. Let's just check
-        // Freeze-Dry hits (i.e., is not immune/ineffective) and that Water target takes damage.
-        assert!(dmg_water > 0.0,
-            "Freeze-Dry should be super-effective vs Water (not immune); water dmg={dmg_water}");
+        let dmg_water  = mean_dmg(run(p2_water),  initial_hp_water);
+        let dmg_normal = mean_dmg(run(p2_normal), initial_hp_normal);
 
-        // Verify effectiveness override: water target should take MORE damage per stat point
-        // than neutral. We compare against Snorlax (neutral) adjusted for stats.
-        // Simpler: just check that the move deals damage (non-zero) and is not resisted.
-        // A rigorous check: same attacker/defender base stats → damage should reflect 2× eff.
-        // For a cleaner test, use identical stats manually.
-        let _ = dmg_normal; // not used in assertion, kept for future ratio tests
+        assert!(dmg_water  > 0.0, "Freeze-Dry should deal damage to Water-type target");
+        assert!(dmg_normal > 0.0, "Freeze-Dry should deal damage to Normal-type target");
+        let ratio = dmg_water / dmg_normal;
+        assert!(
+            (ratio - 2.0).abs() < 0.3,
+            "Freeze-Dry should be 2× effective vs Water; ratio={ratio:.3} (water={dmg_water:.1}, normal={dmg_normal:.1})"
+        );
     }
 
     #[test]
     fn freeze_dry_4x_effective_vs_water_ground() {
-        // Swampert is Water/Ground. Freeze-Dry should give: Water override (2×) × Ground normal
-        // (Ice is SE vs Ground → 2×) = 4× total. Earthquake vs Snorlax (normal effectiveness)
-        // would be 1×. We verify Freeze-Dry vs Swampert is much more damaging than vs Normal.
-        let p1 = mon(Species::Glaceon, PokemonMove::FreezeDry, Ability::None);
-        let p2_swampert = mon(Species::Swampert, PokemonMove::Splash, Ability::None);
-        let initial_hp = p2_swampert.hp;
-        let state = battle_state_from_lists(vec![p1], vec![], vec![p2_swampert], vec![]);
-        let outcomes = run_single_turn(
-            &MatchState::BattleState(state),
-            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
-            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+        // Swampert (Water/Ground, SpDef base 90) vs Kangaskhan (Normal, SpDef base 80).
+        // Glaceon SpAtk is reduced so Swampert doesn't faint (faint caps damage and masks the ratio).
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut p1 = mon(Species::Glaceon, PokemonMove::FreezeDry, Ability::None);
+        p1.stats[3] = 40; // keep damage low enough that 4× target survives
+        let make_target = |species: Species| -> PokemonState {
+            build_pokemon_state(
+                species, &pdex, &mdex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0; 6]), None, false,
+            )
+        };
+        let p2_swampert   = make_target(Species::Swampert);
+        let p2_kangaskhan = make_target(Species::Kangaskhan);
+        let initial_hp_swampert   = p2_swampert.hp;
+        let initial_hp_kangaskhan = p2_kangaskhan.hp;
+
+        let run = |target: PokemonState| -> Vec<(MatchState, f64)> {
+            run_single_turn(
+                &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![target], vec![])),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &mdex, &pdex,
+            )
+        };
+
+        let mean_dmg = |outcomes: Vec<(MatchState, f64)>, init_hp: u16| -> f64 {
+            outcomes.iter().map(|(state, prob)| {
+                let dmg = match state {
+                    MatchState::BattleState(bs) => (init_hp - bs.p2_active_mons[0].hp) as f64,
+                    MatchState::GameOverState { .. } => init_hp as f64,
+                    _ => 0.0,
+                };
+                dmg * prob
+            }).sum()
+        };
+
+        let dmg_swampert   = mean_dmg(run(p2_swampert),   initial_hp_swampert);
+        let dmg_kangaskhan = mean_dmg(run(p2_kangaskhan), initial_hp_kangaskhan);
+
+        assert!(dmg_swampert   > 0.0, "Freeze-Dry should deal damage to Water/Ground target");
+        assert!(dmg_kangaskhan > 0.0, "Freeze-Dry should deal damage to Normal-type baseline");
+        let ratio = dmg_swampert / dmg_kangaskhan;
+        // Swampert SpDef base 90 vs Kangaskhan SpDef base 80 → true ratio ≈ 4×(80/90) ≈ 3.56;
+        // tolerance 0.8 covers rounding across the 16 damage rolls.
+        assert!(
+            (ratio - 4.0).abs() < 0.8,
+            "Freeze-Dry should be ~4× effective vs Water/Ground (adjusted for SpDef gap); ratio={ratio:.3} (swampert={dmg_swampert:.1}, kangaskhan={dmg_kangaskhan:.1})"
         );
-        // Freeze-Dry should deal damage (4× effectiveness means heavy damage on Swampert)
-        let hit = hit_probability(&outcomes, initial_hp);
-        assert!(hit > 0.99, "Freeze-Dry should hit Swampert (Water/Ground)");
-        let mean_dmg: f64 = damage_distribution(&outcomes, initial_hp)
-            .iter()
-            .map(|(&d, &p)| d as f64 * p)
-            .sum();
-        // At 4× Swampert should take significant damage. At level 50 with 70 BP and Glaceon's
-        // Sp. Atk vs Swampert's SpD, even with type effectiveness, this should be well above 0.
-        assert!(mean_dmg > 0.0, "Freeze-Dry should deal damage to Swampert at 4× effectiveness");
     }
 
     // ── Grav Apple ────────────────────────────────────────────────────────────
@@ -27068,16 +27331,18 @@ mod new_moves_session {
 
     #[test]
     fn grassy_glide_has_priority_on_grassy_terrain() {
-        // Slower user with Grassy Glide should outspeed a faster foe under Grassy Terrain.
-        let mut p1 = mon(Species::Rillaboom, PokemonMove::GrassyGlide, Ability::None);
-        p1.stats[5] = 50; // slow
+        // Prove priority by a "race": both mons at 1 HP so whoever attacks first wins.
+        // P1 is slower but Grassy Glide gains +1 priority under Grassy Terrain → P1 must act first.
+        let mut p1 = mon(Species::Leafeon, PokemonMove::GrassyGlide, Ability::None);
+        p1.stats[5] = 50;  // slow
+        p1.hp = 1;         // guaranteed KO from any hit
         let mut p2 = mon(Species::Garchomp, PokemonMove::Earthquake, Ability::None);
         p2.stats[5] = 200; // fast
+        p2.hp = 1;         // guaranteed KO from any hit
 
         let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         state.terrain = Some(Terrain::GrassyTerrain);
         state.terrain_turns = Some(5);
-        let initial_hp = state.p2_active_mons[0].hp;
 
         let outcomes = run_single_turn(
             &MatchState::BattleState(state),
@@ -27085,13 +27350,12 @@ mod new_moves_session {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             &move_dex(), &pokemon_dex(),
         );
-        // P1 should have moved first so P2 took damage before EQ. P1 should be unharmed (EQ misses
-        // due to EQ not going first, so P1 still lives at full HP in all branches after P2's move).
-        // Actually: if P1 goes first with +1 priority GrassyGlide, P2's EQ fires after.
-        // We verify P1 (slot 0) isn't damaged in the first move = P2 doesn't faint P1 before P1 acts.
-        // Simplest check: P2 takes damage (GrassyGlide hits).
-        let p2_hit_prob = hit_probability(&outcomes, initial_hp);
-        assert!(p2_hit_prob > 0.99, "Grassy Glide should hit P2 under Grassy Terrain; prob={p2_hit_prob:.4}");
+        // P1 has +1 priority from Grassy Glide → attacks first → P2 faints → P1 wins.
+        // If priority were 0, P2 (faster) would go first and P1 would faint → P2 wins.
+        let p1_won = outcomes.iter().all(|(state, _)| {
+            matches!(state, MatchState::GameOverState { winner: Player::P1 })
+        });
+        assert!(p1_won, "Grassy Glide should grant +1 priority under Grassy Terrain; P1 must act first and win the race");
     }
 
     // ── Acupressure ───────────────────────────────────────────────────────────
@@ -27652,10 +27916,9 @@ mod seven_new_moves {
                     let has_db = bs.p1_active_mons[0].volatiles.iter().any(|v| matches!(v,
                         crate::pokemon::VolatileStatusState::TurnStatus(crate::dex_data::VolatileStatus::DestinyBond, _)
                     ));
-                    // Second use should fail (no volatile applied since it was already there)
-                    // The first turn's volatile is cleared at start of turn 2 (pre-move removal)
-                    // So on turn 2, the volatile was removed then consecutive use fails
-                    let _ = has_db; // just ensure it doesn't panic
+                    // Turn 1's TurnStatus volatile is cleared at turn 2 start; consecutive use
+                    // then fails → no new volatile is set. DestinyBond should be absent.
+                    assert!(!has_db, "DestinyBond volatile should be absent after consecutive use fails");
                 }
             }
         }
