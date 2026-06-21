@@ -4,12 +4,12 @@ use colored::Colorize;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::thread_rng;
 
-use crate::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, TeamPreviewCommand};
+use crate::state::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, TeamPreviewCommand};
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::{MoveData, PokemonData};
+use crate::state::dex_data::{MoveData, PokemonData};
 use crate::simulator;
-use crate::pokemon::PokemonState;
+use crate::state::pokemon::PokemonState;
 
 fn get_verbosity() -> u8 {
     crate::VERBOSITY.get().copied().unwrap_or(1)
@@ -19,7 +19,7 @@ fn format_pokemon_detailed(mon: &PokemonState) -> String {
     format!("{}", mon)
 }
 
-fn print_team_section(label: &str, mons: &[crate::pokemon::PokemonState]) {
+fn print_team_section(label: &str, mons: &[crate::state::pokemon::PokemonState]) {
     println!("{}", label);
     if mons.is_empty() {
         println!("  {}", "(none)".dimmed());
@@ -254,7 +254,7 @@ fn prompt_choice(prompt: &str, options: &[String]) -> usize {
     }
 }
 
-pub fn choose_team_preview_command(preview: &crate::battle::TeamPreviewState, player: Player) -> TeamPreviewCommand {
+pub fn choose_team_preview_command(preview: &crate::state::battle::TeamPreviewState, player: Player) -> TeamPreviewCommand {
     let mons = match player {
         Player::P1 => &preview.p1_mons,
         Player::P2 => &preview.p2_mons,
@@ -359,7 +359,7 @@ fn choose_replacement_command_for_slot(
             &format!("{} {}'s {} {}. Choose a replacement for slot {}:", "[REPLACEMENT]".bright_magenta(), player_name(player), mon_label.bright_red(), "fainted".bright_red(), slot_idx + 1),
             &options,
         );
-        Some(BattleCommand::Switch(crate::battle::SwitchCommand { party_index: healthy_bench[choice] }))
+        Some(BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: healthy_bench[choice] }))
     } else {
         let mon_label = species_name(&mon.species);
         let _ = prompt_choice(
@@ -455,7 +455,7 @@ fn choose_self_switch_commands(state: &BattleState, player: Player, pending_slot
                 ),
                 &options,
             );
-            BattleCommand::Switch(crate::battle::SwitchCommand { party_index: healthy_bench[choice] })
+            BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: healthy_bench[choice] })
         } else {
             BattleCommand::Pass
         }

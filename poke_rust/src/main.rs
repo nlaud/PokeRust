@@ -1,14 +1,11 @@
 use clap::Parser;
 use colored::Colorize;
-use battle::MatchState;
+use state::battle::MatchState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use crate::data::pokemon_move::PokemonMove;
 
-mod dex_data;
 mod data;
-mod pokemon;
-mod battle;
 mod simulator;
 mod state;
 #[cfg(test)]
@@ -68,10 +65,10 @@ fn main() {
     if args.verbosity >= 2 { println!("{}", format!("Got paths: {}, {}", args.p1, args.p2).cyan()) }
 
     //Put dex data into a hashmap
-    let pokemon_dex = dex_data::parse_pokemon_dex(&args.poke_dex);
+    let pokemon_dex = state::dex_data::parse_pokemon_dex(&args.poke_dex);
 
     //Put move data into a hashmap
-    let move_dex = dex_data::parse_move_dex(&args.move_dex);
+    let move_dex = state::dex_data::parse_move_dex(&args.move_dex);
 
     // Print info about a sample move (before printing teamsheets)
     

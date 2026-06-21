@@ -1,22 +1,22 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player};
+use crate::state::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player};
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::{parse_move_dex, parse_pokemon_dex, VolatileStatus};
-use crate::pokemon::{PokemonState, VolatileStatusState};
+use crate::state::dex_data::{parse_move_dex, parse_pokemon_dex, VolatileStatus};
+use crate::state::pokemon::{PokemonState, VolatileStatusState};
 use crate::simulator::simulate_turn;
 use crate::simulator::helpers as simulator_helpers;
 
-static POKEMON_DEX: OnceLock<HashMap<Species, crate::dex_data::PokemonData>> = OnceLock::new();
-static MOVE_DEX: OnceLock<HashMap<PokemonMove, crate::dex_data::MoveData>> = OnceLock::new();
+static POKEMON_DEX: OnceLock<HashMap<Species, crate::state::dex_data::PokemonData>> = OnceLock::new();
+static MOVE_DEX: OnceLock<HashMap<PokemonMove, crate::state::dex_data::MoveData>> = OnceLock::new();
 
-pub fn pokemon_dex() -> &'static HashMap<Species, crate::dex_data::PokemonData> {
+pub fn pokemon_dex() -> &'static HashMap<Species, crate::state::dex_data::PokemonData> {
     POKEMON_DEX.get_or_init(|| parse_pokemon_dex("../pokemon_info/showdownDex.txt"))
 }
 
-pub fn move_dex() -> &'static HashMap<PokemonMove, crate::dex_data::MoveData> {
+pub fn move_dex() -> &'static HashMap<PokemonMove, crate::state::dex_data::MoveData> {
     MOVE_DEX.get_or_init(|| parse_move_dex("../pokemon_info/showdownMoves.txt"))
 }
 
@@ -226,10 +226,10 @@ pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(Match
 
 pub fn run_single_turn(
     state: &MatchState,
-    p1_cmd: &crate::battle::PlayerCommand,
-    p2_cmd: &crate::battle::PlayerCommand,
-    move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
-    pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>,
+    p1_cmd: &crate::state::battle::PlayerCommand,
+    p2_cmd: &crate::state::battle::PlayerCommand,
+    move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>,
+    pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>,
 ) -> Vec<(MatchState, f64)> {
     simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1)
 }

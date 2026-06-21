@@ -1,13 +1,16 @@
-use crate::battle::{FieldSlot, Player};
+use std::collections::HashMap;
+use crate::state::battle::{FieldSlot, Player};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::{
-    PokemonBoostTable, PokemonStat, PokemonType, PseudoWeather, SelfSwitchType,
+use crate::state::dex_data::{
+    PokemonBoostTable, PokemonData, PokemonStat, PokemonType, PseudoWeather, SelfSwitchType,
     SideCondition, SlotCondition, Status, Terrain, Weather,
 };
-use crate::pokemon::{Nature, PokemonGender, PokemonState, PokemonStatsTable, VolatileStatusState};
+use crate::state::pokemon::{
+    calc_hp, calc_stat, Nature, PokemonGender, PokemonState, PokemonStatsTable, VolatileStatusState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Unknown<T> {
@@ -55,19 +58,19 @@ pub struct UnknownPokemonState {
     pub damaged_this_turn: bool,
     /// Slots whose direct move hits damaged this Pokémon this turn. Read by Avalanche
     /// ("the target damaged the user this turn").
-    pub damaged_by_this_turn: Vec<crate::battle::FieldSlot>,
+    pub damaged_by_this_turn: Vec<crate::state::battle::FieldSlot>,
     /// Damage taken from the most recent physical direct-move hit this turn, and the slot
     /// that landed it. Overwritten per-hit (multi-hit: final hit wins). Read by Counter.
     pub last_physical_damage_taken: PokemonHP,
-    pub last_physical_attacker: Option<crate::battle::FieldSlot>,
+    pub last_physical_attacker: Option<crate::state::battle::FieldSlot>,
     /// Damage taken from the most recent special direct-move hit this turn, and the slot
     /// that landed it. Read by Mirror Coat.
     pub last_special_damage_taken: PokemonHP,
-    pub last_special_attacker: Option<crate::battle::FieldSlot>,
+    pub last_special_attacker: Option<crate::state::battle::FieldSlot>,
     /// Damage taken from the most recent direct-move hit this turn (any category), and the
     /// slot that landed it. Read by Metal Burst and Comeuppance.
     pub last_damage_taken: PokemonHP,
-    pub last_damage_attacker: Option<crate::battle::FieldSlot>,
+    pub last_damage_attacker: Option<crate::state::battle::FieldSlot>,
     /// Any stat stage actually rose this turn (post-clamp). Gates Burning Jealousy's burn.
     pub stats_raised_this_turn: bool,
     /// Any stat stage actually fell this turn (post-clamp). Read by Lash Out's ×2.
@@ -153,7 +156,7 @@ pub struct UnknownPokemonState {
 
     /// Original types saved when Mimicry overwrites them. Restored when terrain ends or
     /// the holder switches out. `None` when Mimicry is not active.
-    pub pre_mimicry_types: Option<Vec<crate::dex_data::PokemonType>>,
+    pub pre_mimicry_types: Option<Vec<crate::state::dex_data::PokemonType>>,
 
     /// Hit counter for Rage Fist. Incremented each time this Pokémon is hit by a direct damaging
     /// move (from any source, including allies). Reset on switch-out or faint (Champions rules);
@@ -273,4 +276,259 @@ pub enum Statement {
         stat: PokemonStat,
         value: u16,
     }, //Stats FROM EVs and IVs greater than or equal to a value
+}
+
+// ── Team-preview fog-of-war state ─────────────────────────────────────────────
+
+/// The fog-of-war view of both teams at team preview.  Mirrors `battle::TeamPreviewState`
+/// but carries `UnknownPokemonState` entries so one side can be fully known while the
+/// other is species-only.
+#[derive(Debug, Clone)]
+pub struct UnknownTeamPreviewState {
+    pub active_per_side: u8,
+    pub brought_per_side: u8,
+    pub p1_mons: Vec<UnknownPokemonState>,
+    pub p2_mons: Vec<UnknownPokemonState>,
+}
+
+/// Fog-of-war analogue of `battle::MatchState`.  Tracks the game phase from a single
+/// player's perspective so observation code can pattern-match symmetrically with the
+/// concrete state machine.
+#[derive(Debug, Clone)]
+pub enum UnknownMatchState {
+    TeamPreview(UnknownTeamPreviewState),
+    Battle(UnknownBattleState),
+    GameOver { winner: Player },
+}
+
+// ── UnknownPokemonState constructors ──────────────────────────────────────────
+
+impl UnknownPokemonState {
+    /// Build a fully-known fog-of-war view from one of **your own** Pokémon.
+    /// Every `Unknown<T>` field is set to `Known(…)` and every scalar is copied directly.
+    pub fn from_known_pokemon(mon: &PokemonState) -> Self {
+        UnknownPokemonState {
+            possible_mon_id: Unknown::Known(mon.mon_id),
+            fainted: mon.fainted,
+            possible_species: Unknown::Known(mon.species.clone()),
+            possible_types: Unknown::Known(mon.types.clone()),
+            is_tera: mon.is_tera,
+            is_mega: mon.is_mega,
+            level: mon.level,
+            hp: PokemonHP::Number(mon.hp),
+            known_moves: mon.moves.clone(),
+            move_pp: [
+                mon.move_pp[0] as i8,
+                mon.move_pp[1] as i8,
+                mon.move_pp[2] as i8,
+                mon.move_pp[3] as i8,
+            ],
+            max_pp: [
+                mon.max_pp[0] as i8,
+                mon.max_pp[1] as i8,
+                mon.max_pp[2] as i8,
+                mon.max_pp[3] as i8,
+            ],
+            item: Unknown::Known(mon.item.clone()),
+            consumed_item: mon.consumed_item.clone(),
+            cud_chew_pending: mon.cud_chew_pending.clone(),
+            item_lost: mon.item_lost,
+            damaged_this_turn: mon.damaged_this_turn,
+            damaged_by_this_turn: mon.damaged_by_this_turn.clone(),
+            last_physical_damage_taken: PokemonHP::Number(mon.last_physical_damage_taken),
+            last_physical_attacker: mon.last_physical_attacker,
+            last_special_damage_taken: PokemonHP::Number(mon.last_special_damage_taken),
+            last_special_attacker: mon.last_special_attacker,
+            last_damage_taken: PokemonHP::Number(mon.last_damage_taken),
+            last_damage_attacker: mon.last_damage_attacker,
+            stats_raised_this_turn: mon.stats_raised_this_turn,
+            stats_lowered_this_turn: mon.stats_lowered_this_turn,
+            switched_in_this_turn: mon.switched_in_this_turn,
+            stall_counter: mon.stall_counter,
+            ally_switch_counter: mon.ally_switch_counter,
+            possible_natures: Unknown::Known(mon.nature),
+            minEvs: mon.evs,
+            maxEvs: mon.evs,
+            minIvs: mon.ivs,
+            maxIvs: mon.ivs,
+            minStats: mon.stats,
+            maxStats: mon.stats,
+            boosts: mon.boosts,
+            status: mon.status.clone(),
+            volatiles: mon.volatiles.clone(),
+            possible_original_abilities: Unknown::Known(
+                mon.original_ability.clone().unwrap_or_else(|| mon.ability.clone()),
+            ),
+            possible_abilities: Unknown::Known(mon.ability.clone()),
+            possible_genders: Unknown::Known(mon.gender),
+            possible_weight_hg: Unknown::Known(mon.weight_hg),
+            possible_tera_type: Unknown::Known(mon.tera_type.clone()),
+            mega_species: Unknown::Known(mon.mega_species.clone()),
+            mega_ability: Unknown::Known(mon.mega_ability.clone()),
+            last_move_failed: mon.last_move_failed,
+            last_used_move: mon.last_used_move.clone(),
+            consecutive_move_count: mon.consecutive_move_count,
+            used_moves_this_field: mon.used_moves_this_field,
+            one_time_ability_used: mon.one_time_ability_used,
+            ate_berry_this_battle: mon.ate_berry_this_battle,
+            first_move_on_field: mon.first_move_on_field,
+            first_turn_on_field_pending: mon.first_turn_on_field_pending,
+            entered_this_turn: mon.entered_this_turn,
+            pre_transform: mon.pre_transform.clone(),
+            pre_mimicry_types: mon.pre_mimicry_types.clone(),
+            times_hit: mon.times_hit,
+        }
+    }
+
+    /// Build a species-only fog-of-war view of an **opponent's** Pokémon as seen at team
+    /// preview.
+    ///
+    /// Fields that are 1:1 with species (types, weight) are set to `Known`; everything
+    /// else is fully unknown (`Not(vec![])`).  Stat bounds are computed as the theoretical
+    /// worst-case (0 IVs / 0 EVs / hindering nature) and best-case (31 IVs / 252 EVs /
+    /// boosting nature) for each stat independently.
+    pub fn from_opponent_species(
+        species: Species,
+        dex: &HashMap<Species, PokemonData>,
+        level: u8,
+    ) -> Self {
+        let data = dex.get(&species);
+        let types = data
+            .map(|d| d.types.clone())
+            .unwrap_or_else(|| vec![PokemonType::Normal]);
+        let weight_hg = data.map(|d| d.weight).unwrap_or(0);
+        let base = data.map(|d| d.base_stats).unwrap_or([100u16; 6]);
+        let default_gender = data
+            .map(|d| d.default_gender)
+            .unwrap_or(PokemonGender::Genderless);
+
+        // Independent per-stat min/max: natures boost one stat ×1.1 and hinder another ×0.9,
+        // so each stat's range is calculated separately rather than using a single nature.
+        let min_stats: PokemonStatsTable = [
+            calc_hp(base[0], 0, 0, level),
+            calc_stat(base[1], 0, 0, level, 0.9),
+            calc_stat(base[2], 0, 0, level, 0.9),
+            calc_stat(base[3], 0, 0, level, 0.9),
+            calc_stat(base[4], 0, 0, level, 0.9),
+            calc_stat(base[5], 0, 0, level, 0.9),
+        ];
+        let max_stats: PokemonStatsTable = [
+            calc_hp(base[0], 31, 252, level),
+            calc_stat(base[1], 31, 252, level, 1.1),
+            calc_stat(base[2], 31, 252, level, 1.1),
+            calc_stat(base[3], 31, 252, level, 1.1),
+            calc_stat(base[4], 31, 252, level, 1.1),
+            calc_stat(base[5], 31, 252, level, 1.1),
+        ];
+
+        // Genderless species are always genderless; sexed species gender is unknown.
+        let possible_genders = if default_gender == PokemonGender::Genderless {
+            Unknown::Known(PokemonGender::Genderless)
+        } else {
+            Unknown::Not(Vec::new())
+        };
+
+        UnknownPokemonState {
+            possible_mon_id: Unknown::Not(Vec::new()),
+            fainted: false,
+            possible_species: Unknown::Known(species),
+            possible_types: Unknown::Known(types),
+            is_tera: false,
+            is_mega: false,
+            level,
+            hp: PokemonHP::Percent(100),
+            known_moves: [None, None, None, None],
+            move_pp: [-1; 4],
+            max_pp: [-1; 4],
+            item: Unknown::Not(Vec::new()),
+            consumed_item: None,
+            cud_chew_pending: None,
+            item_lost: false,
+            damaged_this_turn: false,
+            damaged_by_this_turn: Vec::new(),
+            last_physical_damage_taken: PokemonHP::Percent(0),
+            last_physical_attacker: None,
+            last_special_damage_taken: PokemonHP::Percent(0),
+            last_special_attacker: None,
+            last_damage_taken: PokemonHP::Percent(0),
+            last_damage_attacker: None,
+            stats_raised_this_turn: false,
+            stats_lowered_this_turn: false,
+            switched_in_this_turn: false,
+            stall_counter: 0,
+            ally_switch_counter: 0,
+            possible_natures: Unknown::Not(Vec::new()),
+            minEvs: [0; 6],
+            maxEvs: [252; 6],
+            minIvs: [0; 6],
+            maxIvs: [31; 6],
+            minStats: min_stats,
+            maxStats: max_stats,
+            boosts: [0; 7],
+            status: None,
+            volatiles: Vec::new(),
+            possible_original_abilities: Unknown::Not(Vec::new()),
+            possible_abilities: Unknown::Not(Vec::new()),
+            possible_genders,
+            possible_weight_hg: Unknown::Known(weight_hg),
+            possible_tera_type: Unknown::Not(Vec::new()),
+            mega_species: Unknown::Not(Vec::new()),
+            mega_ability: Unknown::Not(Vec::new()),
+            last_move_failed: false,
+            last_used_move: None,
+            consecutive_move_count: 0,
+            used_moves_this_field: [false; 4],
+            one_time_ability_used: false,
+            ate_berry_this_battle: false,
+            first_move_on_field: false,
+            first_turn_on_field_pending: false,
+            entered_this_turn: false,
+            pre_transform: None,
+            pre_mimicry_types: None,
+            times_hit: 0,
+        }
+    }
+}
+
+// ── UnknownMatchState constructors ────────────────────────────────────────────
+
+impl UnknownMatchState {
+    /// Build a team-preview fog-of-war state from the perspective of `viewer`.
+    ///
+    /// * `my_team` — the viewer's own Pokémon, fully parsed from the teamsheet.
+    /// * `opponent_species` — the 6 species shown at team preview for the other side.
+    ///
+    /// The viewer's side is fully known; the opponent's side carries only species-derived
+    /// information.  `viewer = P1` places `my_team` into `p1_mons` and the opponent into
+    /// `p2_mons`; `viewer = P2` reverses the assignment.
+    pub fn team_preview_from_perspective(
+        viewer: Player,
+        my_team: &[PokemonState],
+        opponent_species: &[Species],
+        dex: &HashMap<Species, PokemonData>,
+        active_per_side: u8,
+        brought_per_side: u8,
+        level: u8,
+    ) -> UnknownMatchState {
+        let my_mons: Vec<UnknownPokemonState> = my_team
+            .iter()
+            .map(UnknownPokemonState::from_known_pokemon)
+            .collect();
+        let opp_mons: Vec<UnknownPokemonState> = opponent_species
+            .iter()
+            .map(|s| UnknownPokemonState::from_opponent_species(s.clone(), dex, level))
+            .collect();
+
+        let (p1_mons, p2_mons) = match viewer {
+            Player::P1 => (my_mons, opp_mons),
+            Player::P2 => (opp_mons, my_mons),
+        };
+
+        UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
+            active_per_side,
+            brought_per_side,
+            p1_mons,
+            p2_mons,
+        })
+    }
 }

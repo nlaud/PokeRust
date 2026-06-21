@@ -2,7 +2,7 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::{
+use crate::state::dex_data::{
     MoveData, PokemonBoostTable, PokemonData, PokemonType, Status, VolatileStatus, parse_type,
 };
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ pub enum VolatileStatusState {
     /// next EOT. EXCEPTION: `Substitute` stores sub HP in the payload (never decremented).
     TurnStatus(VolatileStatus, u16),
     MoveStatus(VolatileStatus, u16),
-    Charging(PokemonMove, Vec<crate::battle::FieldSlot>),
+    Charging(PokemonMove, Vec<crate::state::battle::FieldSlot>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,19 +132,19 @@ pub struct PokemonState {
     pub damaged_this_turn: bool,
     /// Slots whose direct move hits damaged this Pokémon this turn. Read by Avalanche
     /// ("the target damaged the user this turn").
-    pub damaged_by_this_turn: Vec<crate::battle::FieldSlot>,
+    pub damaged_by_this_turn: Vec<crate::state::battle::FieldSlot>,
     /// Damage taken from the most recent physical direct-move hit this turn, and the slot
     /// that landed it. Overwritten per-hit (multi-hit: final hit wins). Read by Counter.
     pub last_physical_damage_taken: u16,
-    pub last_physical_attacker: Option<crate::battle::FieldSlot>,
+    pub last_physical_attacker: Option<crate::state::battle::FieldSlot>,
     /// Damage taken from the most recent special direct-move hit this turn, and the slot
     /// that landed it. Read by Mirror Coat.
     pub last_special_damage_taken: u16,
-    pub last_special_attacker: Option<crate::battle::FieldSlot>,
+    pub last_special_attacker: Option<crate::state::battle::FieldSlot>,
     /// Damage taken from the most recent direct-move hit this turn (any category), and the
     /// slot that landed it. Read by Metal Burst and Comeuppance.
     pub last_damage_taken: u16,
-    pub last_damage_attacker: Option<crate::battle::FieldSlot>,
+    pub last_damage_attacker: Option<crate::state::battle::FieldSlot>,
     /// Any stat stage actually rose this turn (post-clamp). Gates Burning Jealousy's burn.
     pub stats_raised_this_turn: bool,
     /// Any stat stage actually fell this turn (post-clamp). Read by Lash Out's ×2.
@@ -225,7 +225,7 @@ pub struct PokemonState {
 
     /// Original types saved when Mimicry overwrites them. Restored when terrain ends or
     /// the holder switches out. `None` when Mimicry is not active.
-    pub pre_mimicry_types: Option<Vec<crate::dex_data::PokemonType>>,
+    pub pre_mimicry_types: Option<Vec<crate::state::dex_data::PokemonType>>,
 
     pub evs: [u8; 6],
     pub ivs: [u8; 6],
@@ -552,12 +552,12 @@ fn nature_stat_modifiers(nature: &Nature) -> [f32; 5] {
     }
 }
 
-fn calc_hp(base: u16, iv: u8, ev: u8, level: u8) -> u16 {
+pub(crate) fn calc_hp(base: u16, iv: u8, ev: u8, level: u8) -> u16 {
     let ev_contrib = ev as u16 / 4;
     (2 * base + iv as u16 + ev_contrib) * level as u16 / 100 + level as u16 + 10
 }
 
-fn calc_stat(base: u16, iv: u8, ev: u8, level: u8, nature_mod: f32) -> u16 {
+pub(crate) fn calc_stat(base: u16, iv: u8, ev: u8, level: u8, nature_mod: f32) -> u16 {
     let ev_contrib = ev as u16 / 4;
     let inner = (2 * base + iv as u16 + ev_contrib) * level as u16 / 100 + 5;
     (inner as f32 * nature_mod).floor() as u16

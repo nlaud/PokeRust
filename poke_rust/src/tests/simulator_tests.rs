@@ -2,14 +2,14 @@
 mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
-    use crate::battle::{Action, MatchState, MoveAction, PlayerCommand, SwitchCommand};
-    use crate::battle::{BattleCommand, BattleState, FieldSlot, Player};
+    use crate::state::battle::{Action, MatchState, MoveAction, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{BattleCommand, BattleState, FieldSlot, Player};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{PseudoWeather, Status, Terrain, VolatileStatus, Weather};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{PseudoWeather, Status, Terrain, VolatileStatus, Weather};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::simulator::{simulate_turn, DamageConfig};
     use crate::simulator::helpers as simulator_helpers;
     use crate::simulator::helpers::coalesce_branches;
@@ -1438,7 +1438,7 @@ mod tests {
             let initial_hp_4x = p2_4x.hp;
             let initial_hp_neutral = p2_neutral.hp;
 
-            let run = |p2: &crate::pokemon::PokemonState| {
+            let run = |p2: &crate::state::pokemon::PokemonState| {
                 simulate_turn(
                     &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
@@ -1728,7 +1728,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -1744,7 +1744,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -1779,7 +1779,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -1795,7 +1795,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -1842,7 +1842,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -1858,7 +1858,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -1892,7 +1892,7 @@ mod tests {
                 Some(Ability::None),
                 None,
                 None,
-                Some(crate::dex_data::PokemonType::Normal),
+                Some(crate::state::dex_data::PokemonType::Normal),
                 Some([0, 0, 0, 0, 0, 0]),
                 None,
                 false,
@@ -1908,7 +1908,7 @@ mod tests {
                 Some(Ability::None),
                 None,
                 None,
-                Some(crate::dex_data::PokemonType::Normal),
+                Some(crate::state::dex_data::PokemonType::Normal),
                 Some([0, 0, 0, 0, 0, 0]),
                 None,
                 false,
@@ -2360,8 +2360,8 @@ mod tests {
             species: Species,
             moves: [Option<PokemonMove>; 4],
             ability: Option<Ability>,
-            pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>,
-            move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
+            pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>,
+            move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>,
         ) -> PokemonState {
             build_pokemon_state(
                 species, pokemon_dex, move_dex, None, Some(moves), None, ability,
@@ -2373,8 +2373,8 @@ mod tests {
             state: &BattleState,
             p1_slots: Vec<usize>,
             p2_slots: Vec<usize>,
-            move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
-            pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>,
+            move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>,
+            pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>,
             consider_crit: bool,
             rolls: u8,
         ) -> Vec<(MatchState, f64)> {
@@ -3740,7 +3740,7 @@ mod tests {
                 Some(Ability::None),
                 None,
                 None,
-                Some(crate::dex_data::PokemonType::Normal),
+                Some(crate::state::dex_data::PokemonType::Normal),
                 Some([0, 0, 0, 0, 0, 0]),
                 None,
                 false,
@@ -3756,7 +3756,7 @@ mod tests {
                 Some(Ability::None),
                 None,
                 None,
-                Some(crate::dex_data::PokemonType::Normal),
+                Some(crate::state::dex_data::PokemonType::Normal),
                 Some([0, 0, 0, 0, 0, 0]),
                 None,
                 false,
@@ -3795,7 +3795,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -3811,7 +3811,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -3827,7 +3827,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -3894,7 +3894,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -3910,7 +3910,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     Some([0, 0, 0, 0, 0, 0]),
                     None,
                     false,
@@ -4846,7 +4846,7 @@ mod tests {
                         Some(weather_ability.clone()),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         Some([0, 0, 0, 0, 0, 0]),
                         None,
                         false,
@@ -4862,7 +4862,7 @@ mod tests {
                         Some(Ability::None),
                         Some(speed_nature),
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         Some([0, 0, 0, 0, 0, 0]),
                         None,
                         false,
@@ -4928,7 +4928,7 @@ mod tests {
                     Some(ability),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -4944,7 +4944,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     Some(seed_item),
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -4976,7 +4976,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Grass),
+                        Some(crate::state::dex_data::PokemonType::Grass),
                         None,
                         None,
                         false,
@@ -4992,7 +4992,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -5026,7 +5026,7 @@ mod tests {
                 Some(Ability::None),
                 None,
                 None,
-                Some(crate::dex_data::PokemonType::Normal),
+                Some(crate::state::dex_data::PokemonType::Normal),
                 None,
                 None,
                 false,
@@ -5048,7 +5048,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -5084,7 +5084,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Grass),
+                        Some(crate::state::dex_data::PokemonType::Grass),
                         None,
                         None,
                         false,
@@ -5100,7 +5100,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -5142,7 +5142,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Electric),
+                        Some(crate::state::dex_data::PokemonType::Electric),
                         None,
                         None,
                         false,
@@ -5158,7 +5158,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -5195,7 +5195,7 @@ mod tests {
                             Some(Ability::None),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Psychic),
+                            Some(crate::state::dex_data::PokemonType::Psychic),
                             None,
                             None,
                             false,
@@ -5210,7 +5210,7 @@ mod tests {
                             Some(Ability::None),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Normal),
+                            Some(crate::state::dex_data::PokemonType::Normal),
                             None,
                             None,
                             false,
@@ -5228,7 +5228,7 @@ mod tests {
                             Some(Ability::None),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Normal),
+                            Some(crate::state::dex_data::PokemonType::Normal),
                             None,
                             None,
                             false,
@@ -5243,7 +5243,7 @@ mod tests {
                             Some(Ability::None),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Normal),
+                            Some(crate::state::dex_data::PokemonType::Normal),
                             None,
                             None,
                             false,
@@ -5286,7 +5286,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Fairy),
+                        Some(crate::state::dex_data::PokemonType::Fairy),
                         None,
                         None,
                         false,
@@ -5302,7 +5302,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Ground),
+                        Some(crate::state::dex_data::PokemonType::Ground),
                         None,
                         None,
                         false,
@@ -5339,7 +5339,7 @@ mod tests {
                             Some(Ability::None),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Normal),
+                            Some(crate::state::dex_data::PokemonType::Normal),
                             None,
                             None,
                             false,
@@ -5355,7 +5355,7 @@ mod tests {
                             Some(Ability::None),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Normal),
+                            Some(crate::state::dex_data::PokemonType::Normal),
                             None,
                             None,
                             false,
@@ -5391,7 +5391,7 @@ mod tests {
                     Some(Ability::Levitate),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -5406,7 +5406,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     Some(Item::AirBalloon),
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -5421,7 +5421,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -5436,7 +5436,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -5466,7 +5466,7 @@ mod tests {
                             Some(Ability::None),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Ground),
+                            Some(crate::state::dex_data::PokemonType::Ground),
                             None,
                             None,
                             false,
@@ -5561,8 +5561,8 @@ mod tests {
             attacker_move: PokemonMove,
             attacker_ability: Ability,
             defender_species: Species,
-            pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>,
-            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+            pokemon_dex: &std::collections::HashMap<Species, crate::state::dex_data::PokemonData>,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::state::dex_data::MoveData>,
         ) -> BattleState {
             let attacker = build_pokemon_state(
                 attacker_species, pokemon_dex, move_dex,
@@ -5581,7 +5581,7 @@ mod tests {
 
         /// Run one deterministic turn (1 damage roll, no crit) and return P2's HP after.
         /// Returns 0 if P2 fainted and the game ended (GameOverState / no back-mons).
-        fn ate_run_and_get_p2_hp(state: BattleState, move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>, pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>) -> u16 {
+        fn ate_run_and_get_p2_hp(state: BattleState, move_dex: &std::collections::HashMap<PokemonMove, crate::state::dex_data::MoveData>, pokemon_dex: &std::collections::HashMap<Species, crate::state::dex_data::PokemonData>) -> u16 {
             let outcomes = simulate_turn(
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
@@ -6017,7 +6017,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -6033,7 +6033,7 @@ mod tests {
                         Some(Ability::SeedSower),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -6058,7 +6058,7 @@ mod tests {
                         &pokemon_dex, &move_dex, Some(50),
                         Some([Some(PokemonMove::Tackle), None, None, None]),
                         None, Some(Ability::None), None, None,
-                        Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                        Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                     )],
                     vec![],
                     vec![build_pokemon_state(
@@ -6066,7 +6066,7 @@ mod tests {
                         &pokemon_dex, &move_dex, Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None, Some(Ability::None), None, None,
-                        Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                        Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                     )],
                     vec![],
                 )),
@@ -6090,7 +6090,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -6106,7 +6106,7 @@ mod tests {
                         Some(Ability::SandSpit),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -6131,7 +6131,7 @@ mod tests {
                         &pokemon_dex, &move_dex, Some(50),
                         Some([Some(PokemonMove::Tackle), None, None, None]),
                         None, Some(Ability::None), None, None,
-                        Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                        Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                     )],
                     vec![],
                     vec![build_pokemon_state(
@@ -6139,7 +6139,7 @@ mod tests {
                         &pokemon_dex, &move_dex, Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None, Some(Ability::None), None, None,
-                        Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                        Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                     )],
                     vec![],
                 )),
@@ -6244,10 +6244,10 @@ mod tests {
             let mut huge = mon.clone();
             huge.ability = Ability::HugePower;
             let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
-            let atk_base = simulator_helpers::effective_stat(&state, &mon,  crate::dex_data::PokemonStat::Atk, false, false);
-            let atk_huge = simulator_helpers::effective_stat(&state, &huge, crate::dex_data::PokemonStat::Atk, false, false);
-            let spa_huge = simulator_helpers::effective_stat(&state, &huge, crate::dex_data::PokemonStat::SpA, false, false);
-            let spa_base = simulator_helpers::effective_stat(&state, &mon,  crate::dex_data::PokemonStat::SpA, false, false);
+            let atk_base = simulator_helpers::effective_stat(&state, &mon,  crate::state::dex_data::PokemonStat::Atk, false, false);
+            let atk_huge = simulator_helpers::effective_stat(&state, &huge, crate::state::dex_data::PokemonStat::Atk, false, false);
+            let spa_huge = simulator_helpers::effective_stat(&state, &huge, crate::state::dex_data::PokemonStat::SpA, false, false);
+            let spa_base = simulator_helpers::effective_stat(&state, &mon,  crate::state::dex_data::PokemonStat::SpA, false, false);
             assert!((atk_huge - 2.0 * atk_base).abs() < 1e-9, "Huge Power should double Attack");
             assert!((spa_huge - spa_base).abs() < 1e-9, "Huge Power must not affect SpA");
         }
@@ -6264,8 +6264,8 @@ mod tests {
             let mut pure = mon.clone();
             pure.ability = Ability::PurePower;
             let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
-            let atk_base = simulator_helpers::effective_stat(&state, &mon,  crate::dex_data::PokemonStat::Atk, false, false);
-            let atk_pure = simulator_helpers::effective_stat(&state, &pure, crate::dex_data::PokemonStat::Atk, false, false);
+            let atk_base = simulator_helpers::effective_stat(&state, &mon,  crate::state::dex_data::PokemonStat::Atk, false, false);
+            let atk_pure = simulator_helpers::effective_stat(&state, &pure, crate::state::dex_data::PokemonStat::Atk, false, false);
             assert!((atk_pure - 2.0 * atk_base).abs() < 1e-9, "Pure Power should double Attack");
         }
 
@@ -6281,10 +6281,10 @@ mod tests {
             let mut hustle = mon.clone();
             hustle.ability = Ability::Hustle;
             let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
-            let atk_base   = simulator_helpers::effective_stat(&state, &mon,    crate::dex_data::PokemonStat::Atk, false, false);
-            let atk_hustle = simulator_helpers::effective_stat(&state, &hustle, crate::dex_data::PokemonStat::Atk, false, false);
-            let spa_hustle = simulator_helpers::effective_stat(&state, &hustle, crate::dex_data::PokemonStat::SpA, false, false);
-            let spa_base   = simulator_helpers::effective_stat(&state, &mon,    crate::dex_data::PokemonStat::SpA, false, false);
+            let atk_base   = simulator_helpers::effective_stat(&state, &mon,    crate::state::dex_data::PokemonStat::Atk, false, false);
+            let atk_hustle = simulator_helpers::effective_stat(&state, &hustle, crate::state::dex_data::PokemonStat::Atk, false, false);
+            let spa_hustle = simulator_helpers::effective_stat(&state, &hustle, crate::state::dex_data::PokemonStat::SpA, false, false);
+            let spa_base   = simulator_helpers::effective_stat(&state, &mon,    crate::state::dex_data::PokemonStat::SpA, false, false);
             assert!((atk_hustle - 1.5 * atk_base).abs() < 1e-9, "Hustle should give 1.5x Attack");
             assert!((spa_hustle - spa_base).abs() < 1e-9, "Hustle must not affect SpA");
 
@@ -6316,8 +6316,8 @@ mod tests {
             attacker_species: Species,
             attacker_move: PokemonMove,
             ability: Ability,
-            pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>,
-            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+            pokemon_dex: &std::collections::HashMap<Species, crate::state::dex_data::PokemonData>,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::state::dex_data::MoveData>,
         ) -> f64 {
             let attacker = build_pokemon_state(
                 attacker_species, pokemon_dex, move_dex, Some(50),
@@ -6418,7 +6418,7 @@ mod tests {
 
         #[test]
         fn rivalry_boosts_vs_same_gender_and_reduces_vs_opposite() {
-            use crate::pokemon::PokemonGender;
+            use crate::state::pokemon::PokemonGender;
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -6443,7 +6443,7 @@ mod tests {
                 mon
             };
 
-            let run = |attacker: crate::pokemon::PokemonState, defender: crate::pokemon::PokemonState| -> u16 {
+            let run = |attacker: crate::state::pokemon::PokemonState, defender: crate::state::pokemon::PokemonState| -> u16 {
                 let initial_hp = defender.hp;
                 let state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
                 let _hp_after = state.p2_active_mons[0].hp; // baseline before turn
@@ -6492,7 +6492,7 @@ mod tests {
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
             );
 
-            let run = |attacker: crate::pokemon::PokemonState| -> f64 {
+            let run = |attacker: crate::state::pokemon::PokemonState| -> f64 {
                 let initial_hp = defender.hp;
                 let state = battle_state_from_lists(vec![attacker], vec![], vec![defender.clone()], vec![]);
                 let outcomes = simulate_turn(
@@ -6691,7 +6691,7 @@ mod tests {
                 d
             };
 
-            let run = |attacker: crate::pokemon::PokemonState| -> f64 {
+            let run = |attacker: crate::state::pokemon::PokemonState| -> f64 {
                 let initial_hp = defender.hp;
                 let state = battle_state_from_lists(
                     vec![attacker], vec![], vec![defender.clone()], vec![],
@@ -6742,7 +6742,7 @@ mod tests {
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
             );
 
-            let run = |attacker: crate::pokemon::PokemonState, defender: crate::pokemon::PokemonState| -> f64 {
+            let run = |attacker: crate::state::pokemon::PokemonState, defender: crate::state::pokemon::PokemonState| -> f64 {
                 let initial_hp: u16 = defender.hp;
                 let state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
                 let outcomes = simulate_turn(
@@ -6872,7 +6872,7 @@ mod tests {
                         Some(ability),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Ghost),
+                        Some(crate::state::dex_data::PokemonType::Ghost),
                         None,
                         None,
                         false,
@@ -6889,7 +6889,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -6952,7 +6952,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Fire),
+                    Some(crate::state::dex_data::PokemonType::Fire),
                     None,
                     None,
                     false,
@@ -6968,7 +6968,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -6995,7 +6995,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -7013,7 +7013,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Fire),
+                        Some(crate::state::dex_data::PokemonType::Fire),
                         None,
                         None,
                         false,
@@ -7028,7 +7028,7 @@ mod tests {
                         Some(Ability::WaterVeil),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Water),
+                        Some(crate::state::dex_data::PokemonType::Water),
                         None,
                         None,
                         false,
@@ -7043,7 +7043,7 @@ mod tests {
                         Some(Ability::Comatose),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -7083,7 +7083,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Fire),
+                    Some(crate::state::dex_data::PokemonType::Fire),
                     None,
                     None,
                     false,
@@ -7100,7 +7100,7 @@ mod tests {
                         Some(ability),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -7388,7 +7388,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Water),
+                    Some(crate::state::dex_data::PokemonType::Water),
                     None,
                     None,
                     false,
@@ -7404,7 +7404,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -7432,7 +7432,7 @@ mod tests {
                         Some(Ability::MagmaArmor),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -7447,7 +7447,7 @@ mod tests {
                         Some(Ability::Comatose),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -7465,7 +7465,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Ice),
+                        Some(crate::state::dex_data::PokemonType::Ice),
                         None,
                         None,
                         false,
@@ -7640,7 +7640,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Electric),
+                    Some(crate::state::dex_data::PokemonType::Electric),
                     None,
                     None,
                     false,
@@ -7656,7 +7656,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -7734,8 +7734,8 @@ mod tests {
                 let qf_state = battle_state_from_lists(
                     vec![qf_paralyzed], vec![], vec![qf_normal], vec![],
                 );
-                let qf_slot = crate::battle::FieldSlot { player: Player::P1, slot_index: 0 };
-                let norm_slot = crate::battle::FieldSlot { player: Player::P2, slot_index: 0 };
+                let qf_slot = crate::state::battle::FieldSlot { player: Player::P1, slot_index: 0 };
+                let norm_slot = crate::state::battle::FieldSlot { player: Player::P2, slot_index: 0 };
                 let qf_spe = simulator_helpers::effective_speed_for_slot(&qf_state, qf_slot, &qf_state.p1_active_mons[0]);
                 let norm_spe = simulator_helpers::effective_speed_for_slot(&qf_state, norm_slot, &qf_state.p2_active_mons[0]);
                 assert!(qf_spe > norm_spe,
@@ -7887,7 +7887,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -7903,7 +7903,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -7931,7 +7931,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Poison),
+                        Some(crate::state::dex_data::PokemonType::Poison),
                         None,
                         None,
                         false,
@@ -7946,7 +7946,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Steel),
+                        Some(crate::state::dex_data::PokemonType::Steel),
                         None,
                         None,
                         false,
@@ -7961,7 +7961,7 @@ mod tests {
                         Some(Ability::Immunity),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -7976,7 +7976,7 @@ mod tests {
                         Some(Ability::Comatose),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -8007,7 +8007,7 @@ mod tests {
                     Some(Ability::Corrosion),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Fire),
+                    Some(crate::state::dex_data::PokemonType::Fire),
                     None,
                     None,
                     false,
@@ -8024,7 +8024,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Poison),
+                        Some(crate::state::dex_data::PokemonType::Poison),
                         None,
                         None,
                         false,
@@ -8039,7 +8039,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Steel),
+                        Some(crate::state::dex_data::PokemonType::Steel),
                         None,
                         None,
                         false,
@@ -8346,7 +8346,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Grass),
+                    Some(crate::state::dex_data::PokemonType::Grass),
                     None,
                     None,
                     false,
@@ -8362,7 +8362,7 @@ mod tests {
                     Some(Ability::None),
                     None,
                     None,
-                    Some(crate::dex_data::PokemonType::Normal),
+                    Some(crate::state::dex_data::PokemonType::Normal),
                     None,
                     None,
                     false,
@@ -8390,7 +8390,7 @@ mod tests {
                         Some(ability),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -8418,14 +8418,14 @@ mod tests {
                     Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                     Some([Some(PokemonMove::Yawn), None, None, None]),
                     None, Some(Ability::None), None, None,
-                    Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                    Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                 );
                 attacker.stats[5] = 200; // moves first
                 let target = build_pokemon_state(
                     Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::VitalSpirit), None, None,
-                    Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                    Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                 );
                 let outcomes = run_single_turn(
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])),
@@ -8434,7 +8434,7 @@ mod tests {
                     &move_dex, &pokemon_dex,
                 );
                 assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
-                    if !simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &crate::dex_data::VolatileStatus::Yawn))),
+                    if !simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &crate::state::dex_data::VolatileStatus::Yawn))),
                     "Vital Spirit: Yawn drowsy volatile should never attach");
             }
 
@@ -8446,7 +8446,7 @@ mod tests {
                     Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                     Some([Some(PokemonMove::Rest), None, None, None]),
                     None, Some(Ability::VitalSpirit), None, None,
-                    Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                    Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                 );
                 rester.stats[5] = 200; // moves first
                 rester.hp = rester.stats[0] / 2; // damaged, so Rest would otherwise heal
@@ -8455,7 +8455,7 @@ mod tests {
                     Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None,
-                    Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                    Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                 );
                 let outcomes = run_single_turn(
                     &MatchState::BattleState(battle_state_from_lists(vec![rester], vec![], vec![foe], vec![])),
@@ -8488,7 +8488,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Grass),
+                        Some(crate::state::dex_data::PokemonType::Grass),
                         None,
                         None,
                         false,
@@ -8504,7 +8504,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -8535,7 +8535,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Grass),
+                        Some(crate::state::dex_data::PokemonType::Grass),
                         None,
                         None,
                         false,
@@ -8551,7 +8551,7 @@ mod tests {
                         Some(Ability::OwnTempo),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Normal),
+                        Some(crate::state::dex_data::PokemonType::Normal),
                         None,
                         None,
                         false,
@@ -8589,7 +8589,7 @@ mod tests {
                             Some(Ability::None),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Normal),
+                            Some(crate::state::dex_data::PokemonType::Normal),
                             None,
                             None,
                             false,
@@ -8605,7 +8605,7 @@ mod tests {
                             Some(Ability::TangledFeet),
                             None,
                             None,
-                            Some(crate::dex_data::PokemonType::Dragon),
+                            Some(crate::state::dex_data::PokemonType::Dragon),
                             None,
                             None,
                             false,
@@ -8849,13 +8849,13 @@ mod tests {
                     Species::Magikarp, &pokemon_dex, &move_dex, Some(1),
                     Some([Some(PokemonMove::TriAttack), None, None, None]),
                     None, Some(Ability::None), None, None,
-                    Some(crate::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
+                    Some(crate::state::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
                 );
                 let target = build_pokemon_state(
                     Species::Snorlax, &pokemon_dex, &move_dex, Some(100),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None,
-                    Some(crate::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
+                    Some(crate::state::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
                 );
 
                 let outcomes = run_single_turn(
@@ -8885,13 +8885,13 @@ mod tests {
                     Species::Magikarp, &pokemon_dex, &move_dex, Some(1),
                     Some([Some(PokemonMove::DireClaw), None, None, None]),
                     None, Some(Ability::None), None, None,
-                    Some(crate::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
+                    Some(crate::state::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
                 );
                 let target = build_pokemon_state(
                     Species::Snorlax, &pokemon_dex, &move_dex, Some(100),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None,
-                    Some(crate::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
+                    Some(crate::state::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
                 );
 
                 let outcomes = run_single_turn(
@@ -9603,7 +9603,7 @@ mod tests {
 
         #[test]
         fn screen_cleaner_removes_all_three_screens_from_both_sides() {
-            use crate::dex_data::SideCondition;
+            use crate::state::dex_data::SideCondition;
 
             let holder = mon(Species::Snorlax, Ability::ScreenCleaner, None, None);
             let target = mon(Species::Snorlax, Ability::Pressure, None, None);
@@ -10025,7 +10025,7 @@ mod tests {
                 Some(Ability::None),
                 None,
                 Some(Item::AirBalloon),
-                Some(crate::dex_data::PokemonType::Normal),
+                Some(crate::state::dex_data::PokemonType::Normal),
                 None,
                 None,
                 false,
@@ -10041,7 +10041,7 @@ mod tests {
                 Some(Ability::None),
                 None,
                 None,
-                Some(crate::dex_data::PokemonType::Water),
+                Some(crate::state::dex_data::PokemonType::Water),
                 None,
                 None,
                 false,
@@ -10071,7 +10071,7 @@ mod tests {
                         Some(Ability::None),
                         None,
                         None,
-                        Some(crate::dex_data::PokemonType::Ground),
+                        Some(crate::state::dex_data::PokemonType::Ground),
                         None,
                         None,
                         false,
@@ -10640,7 +10640,7 @@ mod tests {
         fn raw_damage(
             state: &BattleState,
             mov: &PokemonMove,
-            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::state::dex_data::MoveData>,
         ) -> u16 {
             let atk = FieldSlot { player: Player::P1, slot_index: 0 };
             let tgt = FieldSlot { player: Player::P2, slot_index: 0 };
@@ -11248,12 +11248,12 @@ mod tests {
 
         // Helper: run calculate_damage_outcomes_for_target and return all damage values.
         fn damage_values(
-            attacker: &crate::pokemon::PokemonState,
-            target: &crate::pokemon::PokemonState,
+            attacker: &crate::state::pokemon::PokemonState,
+            target: &crate::state::pokemon::PokemonState,
             state: &BattleState,
             move_name: PokemonMove,
             targets_mult: f64,
-            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::state::dex_data::MoveData>,
         ) -> Vec<u16> {
             let attack_slot = FieldSlot { player: Player::P1, slot_index: 0 };
             let target_slot = FieldSlot { player: Player::P2, slot_index: 0 };
@@ -11526,7 +11526,7 @@ mod tests {
             // Physical moves through the actual data: SeismicToss has basePower=0
             // and DamageOverride::Level — the override fires first. We confirm the
             // intent via a hand-built MoveData that is Physical, bp=0, no override.
-            use crate::dex_data::{DamageOverride, MoveCategory, MoveData, MoveTarget};
+            use crate::state::dex_data::{DamageOverride, MoveCategory, MoveData, MoveTarget};
 
             let attacker = build_pokemon_state(
                 Species::Machamp,
@@ -11564,8 +11564,8 @@ mod tests {
                 category: MoveCategory::Physical,
                 base_power: 0,
                 damage_override: DamageOverride::None,
-                pokemon_type: crate::dex_data::PokemonType::Normal,
-                accuracy: crate::dex_data::AccuracyType::Percent(100),
+                pokemon_type: crate::state::dex_data::PokemonType::Normal,
+                accuracy: crate::state::dex_data::AccuracyType::Percent(100),
                 pp: 10,
                 priority: 0,
                 target: MoveTarget::Normal,
@@ -11577,8 +11577,8 @@ mod tests {
                 recoil_fraction: [0, 0],
                 struggle_recoil: false,
                 drain_fraction: [0, 0],
-                self_destruct: crate::dex_data::SelfDestructType::None,
-                self_switch: crate::dex_data::SelfSwitchType::None,
+                self_destruct: crate::state::dex_data::SelfDestructType::None,
+                self_switch: crate::state::dex_data::SelfSwitchType::None,
                 force_switch: false,
                 thaws_target: false,
                 ohko: false,
@@ -11624,8 +11624,8 @@ mod tests {
     // -------------------------------------------------------------------------
     mod self_switch {
         use super::*;
-        use crate::battle::{AttackCommand, SwitchCommand};
-        use crate::dex_data::SelfSwitchType;
+        use crate::state::battle::{AttackCommand, SwitchCommand};
+        use crate::state::dex_data::SelfSwitchType;
         use crate::simulator::get_possible_commands_for_active_slot;
 
         // ── helpers ──────────────────────────────────────────────────────────
@@ -11871,7 +11871,7 @@ mod tests {
                 vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
             );
             // DesolateLand sets extreme sun on send-out
-            assert!(matches!(initial.weather, Some(crate::dex_data::Weather::ExtremeSunlight)),
+            assert!(matches!(initial.weather, Some(crate::state::dex_data::Weather::ExtremeSunlight)),
                 "DesolateLand should have set ExtremeSunlight on send-out");
 
             // U-turn fires — returns with self_switch_pending set but the switch is not yet done
@@ -11883,7 +11883,7 @@ mod tests {
             assert!(after_uturn.self_switch_pending.is_some());
             // The physical switch (and thus handle_pokemon_switch_out) has not happened yet;
             // extreme sun is still active while we await the replacement choice.
-            assert!(matches!(after_uturn.weather, Some(crate::dex_data::Weather::ExtremeSunlight)),
+            assert!(matches!(after_uturn.weather, Some(crate::state::dex_data::Weather::ExtremeSunlight)),
                 "Extreme sun should still be active while awaiting the switch-in choice");
 
             // Send in Slowpoke — this triggers perform_self_switch → perform_switch_out_in →
@@ -13264,10 +13264,10 @@ mod tests {
                 vec![pikachu_no_item.clone()], vec![], vec![pikachu_no_item.clone()], vec![],
             );
 
-            let atk_no_ball  = simulator_helpers::effective_stat(&state, &pikachu_no_item,  crate::dex_data::PokemonStat::Atk, false, false);
-            let spa_no_ball  = simulator_helpers::effective_stat(&state, &pikachu_no_item,  crate::dex_data::PokemonStat::SpA, false, false);
-            let atk_with_ball = simulator_helpers::effective_stat(&state, &pikachu_with_ball, crate::dex_data::PokemonStat::Atk, false, false);
-            let spa_with_ball = simulator_helpers::effective_stat(&state, &pikachu_with_ball, crate::dex_data::PokemonStat::SpA, false, false);
+            let atk_no_ball  = simulator_helpers::effective_stat(&state, &pikachu_no_item,  crate::state::dex_data::PokemonStat::Atk, false, false);
+            let spa_no_ball  = simulator_helpers::effective_stat(&state, &pikachu_no_item,  crate::state::dex_data::PokemonStat::SpA, false, false);
+            let atk_with_ball = simulator_helpers::effective_stat(&state, &pikachu_with_ball, crate::state::dex_data::PokemonStat::Atk, false, false);
+            let spa_with_ball = simulator_helpers::effective_stat(&state, &pikachu_with_ball, crate::state::dex_data::PokemonStat::SpA, false, false);
 
             assert!((atk_with_ball - 2.0 * atk_no_ball).abs() < 1e-9,
                 "Light Ball should double Pikachu's Attack: {atk_no_ball} → {atk_with_ball}");
@@ -13277,7 +13277,7 @@ mod tests {
 
         // ─── Berry-interaction abilities ───────────────────────────────────
 
-        fn snorlax_with(item: Item, ability: Ability, nature: Nature, move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>, pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>) -> crate::pokemon::PokemonState {
+        fn snorlax_with(item: Item, ability: Ability, nature: Nature, move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>, pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>) -> crate::state::pokemon::PokemonState {
             build_pokemon_state(
                 Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
@@ -13286,7 +13286,7 @@ mod tests {
             )
         }
 
-        fn splash_mon(pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>, move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>) -> crate::pokemon::PokemonState {
+        fn splash_mon(pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>, move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>) -> crate::state::pokemon::PokemonState {
             build_pokemon_state(
                 Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
@@ -13659,8 +13659,8 @@ mod tests {
                 vec![raichu_no_item.clone()], vec![], vec![raichu_no_item.clone()], vec![],
             );
 
-            let atk_no_ball  = simulator_helpers::effective_stat(&state, &raichu_no_item,  crate::dex_data::PokemonStat::Atk, false, false);
-            let atk_with_ball = simulator_helpers::effective_stat(&state, &raichu_with_ball, crate::dex_data::PokemonStat::Atk, false, false);
+            let atk_no_ball  = simulator_helpers::effective_stat(&state, &raichu_no_item,  crate::state::dex_data::PokemonStat::Atk, false, false);
+            let atk_with_ball = simulator_helpers::effective_stat(&state, &raichu_with_ball, crate::state::dex_data::PokemonStat::Atk, false, false);
 
             assert!((atk_with_ball - atk_no_ball).abs() < 1e-9,
                 "Light Ball should not boost Raichu's Attack");
@@ -13688,10 +13688,10 @@ mod tests {
 
             let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
 
-            let atk_no_band = simulator_helpers::effective_stat(&state, &mon, crate::dex_data::PokemonStat::Atk, false, false);
-            let atk_banded  = simulator_helpers::effective_stat(&state, &banded, crate::dex_data::PokemonStat::Atk, false, false);
-            let spa_banded  = simulator_helpers::effective_stat(&state, &banded, crate::dex_data::PokemonStat::SpA, false, false);
-            let spa_no_band = simulator_helpers::effective_stat(&state, &mon, crate::dex_data::PokemonStat::SpA, false, false);
+            let atk_no_band = simulator_helpers::effective_stat(&state, &mon, crate::state::dex_data::PokemonStat::Atk, false, false);
+            let atk_banded  = simulator_helpers::effective_stat(&state, &banded, crate::state::dex_data::PokemonStat::Atk, false, false);
+            let spa_banded  = simulator_helpers::effective_stat(&state, &banded, crate::state::dex_data::PokemonStat::SpA, false, false);
+            let spa_no_band = simulator_helpers::effective_stat(&state, &mon, crate::state::dex_data::PokemonStat::SpA, false, false);
 
             assert!((atk_banded - 1.5 * atk_no_band).abs() < 1e-9,
                 "Choice Band should give 1.5x Attack");
@@ -13714,10 +13714,10 @@ mod tests {
 
             let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![mon.clone()], vec![]);
 
-            let spa_no_specs = simulator_helpers::effective_stat(&state, &mon, crate::dex_data::PokemonStat::SpA, false, false);
-            let spa_specs    = simulator_helpers::effective_stat(&state, &specs, crate::dex_data::PokemonStat::SpA, false, false);
-            let atk_specs    = simulator_helpers::effective_stat(&state, &specs, crate::dex_data::PokemonStat::Atk, false, false);
-            let atk_no_specs = simulator_helpers::effective_stat(&state, &mon, crate::dex_data::PokemonStat::Atk, false, false);
+            let spa_no_specs = simulator_helpers::effective_stat(&state, &mon, crate::state::dex_data::PokemonStat::SpA, false, false);
+            let spa_specs    = simulator_helpers::effective_stat(&state, &specs, crate::state::dex_data::PokemonStat::SpA, false, false);
+            let atk_specs    = simulator_helpers::effective_stat(&state, &specs, crate::state::dex_data::PokemonStat::Atk, false, false);
+            let atk_no_specs = simulator_helpers::effective_stat(&state, &mon, crate::state::dex_data::PokemonStat::Atk, false, false);
 
             assert!((spa_specs - 1.5 * spa_no_specs).abs() < 1e-9,
                 "Choice Specs should give 1.5x SpA");
@@ -13743,7 +13743,7 @@ mod tests {
             let state = battle_state_from_lists(
                 vec![mon.clone()], vec![], vec![mon.clone()], vec![],
             );
-            let slot = crate::battle::FieldSlot { player: Player::P1, slot_index: 0 };
+            let slot = crate::state::battle::FieldSlot { player: Player::P1, slot_index: 0 };
 
             let speed_no_scarf = simulator_helpers::effective_speed_for_slot(&state, slot, &mon);
             let speed_scarfed  = simulator_helpers::effective_speed_for_slot(&state, slot, &scarfed);
@@ -13766,13 +13766,13 @@ mod tests {
                 Species::Machoke, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), Some(PokemonMove::BodySlam), None, None]),
                 None, Some(Ability::None), None, Some(Item::ChoiceBand),
-                Some(crate::dex_data::PokemonType::Fighting), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Fighting), None, None, false,
             );
             let dummy = build_pokemon_state(
                 Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
 
             // Before any move: both moves available.
@@ -13818,19 +13818,19 @@ mod tests {
                 Species::Machoke, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), Some(PokemonMove::BodySlam), None, None]),
                 None, Some(Ability::None), None, Some(Item::ChoiceBand),
-                Some(crate::dex_data::PokemonType::Fighting), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Fighting), None, None, false,
             );
             let bench = build_pokemon_state(
                 Species::Rattata, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
             let dummy = build_pokemon_state(
                 Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
 
             // Turn 1: use CrossChop → get locked.
@@ -13859,7 +13859,7 @@ mod tests {
             // Turn 2: switch out banded mon → switch back in next turn.
             let after_t2 = extract_battle_state(run_single_turn(
                 &MatchState::BattleState(after_t1),
-                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
                 &move_dex, &pokemon_dex,
             )).0;
@@ -13867,7 +13867,7 @@ mod tests {
             // Turn 3: switch banded back in.
             let after_t3 = extract_battle_state(run_single_turn(
                 &MatchState::BattleState(after_t2),
-                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
                 &move_dex, &pokemon_dex,
             )).0;
@@ -13903,7 +13903,7 @@ mod tests {
                 Species::Golem, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::QuickClaw),
-                Some(crate::dex_data::PokemonType::Rock), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Rock), None, None, false,
             );
             slow_qc.hp = 1;
 
@@ -13911,7 +13911,7 @@ mod tests {
                 Species::Electrode, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Electric), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Electric), None, None, false,
             );
             fast_no_item.hp = 1;
 
@@ -13950,13 +13950,13 @@ mod tests {
                 Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::BodySlam), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::QuickClaw),
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
             let fast_priority = build_pokemon_state(
                 Species::Pikachu, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::QuickAttack), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Electric), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Electric), None, None, false,
             );
 
             let state = battle_state_from_lists(
@@ -13988,12 +13988,12 @@ mod tests {
         use crate::simulator::get_possible_commands_for_active_slot;
 
         // Helper: a Pokémon whose single move has 0 PP.
-        fn exhausted_mon(species: Species, pokemon_dex: &HashMap<Species, crate::dex_data::PokemonData>, move_dex: &HashMap<PokemonMove, crate::dex_data::MoveData>) -> PokemonState {
+        fn exhausted_mon(species: Species, pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>, move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>) -> PokemonState {
             let mut mon = build_pokemon_state(
                 species, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
             mon.move_pp[0] = 0;
             mon
@@ -14009,7 +14009,7 @@ mod tests {
                 Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
 
             let state = battle_state_from_lists(vec![mon], vec![], vec![dummy], vec![]);
@@ -14030,7 +14030,7 @@ mod tests {
                 Species::Rattata, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), Some(PokemonMove::QuickAttack), None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
             mon.move_pp[0] = 0; // Tackle out of PP; Quick Attack still has PP.
 
@@ -14038,7 +14038,7 @@ mod tests {
                 Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
 
             let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![dummy], vec![]);
@@ -14071,7 +14071,7 @@ mod tests {
                 Species::Gengar, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Ghost), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Ghost), None, None, false,
             );
 
             let initial_hp = ghost_target.hp;
@@ -14080,7 +14080,7 @@ mod tests {
             );
             let outcomes = run_single_turn(
                 &MatchState::BattleState(state),
-                &PlayerCommand::Battle(vec![BattleCommand::Struggle { target: Some(crate::battle::FieldSlot { player: Player::P2, slot_index: 0 }) }]),
+                &PlayerCommand::Battle(vec![BattleCommand::Struggle { target: Some(crate::state::battle::FieldSlot { player: Player::P2, slot_index: 0 }) }]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
                 &move_dex, &pokemon_dex,
             );
@@ -14108,7 +14108,7 @@ mod tests {
                 Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
-                Some(crate::dex_data::PokemonType::Normal), None, None, false,
+                Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
 
             let initial_attacker_hp = attacker.hp;
@@ -14117,7 +14117,7 @@ mod tests {
             );
             let outcomes = run_single_turn(
                 &MatchState::BattleState(state),
-                &PlayerCommand::Battle(vec![BattleCommand::Struggle { target: Some(crate::battle::FieldSlot { player: Player::P2, slot_index: 0 }) }]),
+                &PlayerCommand::Battle(vec![BattleCommand::Struggle { target: Some(crate::state::battle::FieldSlot { player: Player::P2, slot_index: 0 }) }]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
                 &move_dex, &pokemon_dex,
             );
@@ -14555,8 +14555,8 @@ mod tests {
             let pdex = pokemon_dex();
             let mut p1 = mon(Ability::MirrorArmor, PokemonMove::Splash);
             // Manually apply Gastro Acid volatile to suppress the ability.
-            p1.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(
-                crate::dex_data::VolatileStatus::GastroAcid, 0,
+            p1.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                crate::state::dex_data::VolatileStatus::GastroAcid, 0,
             ));
             let p2 = mon(Ability::None, PokemonMove::Growl);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
@@ -14582,7 +14582,7 @@ mod tests {
     // ════════════════════════════════════════════════════════════════════
     mod damage_reaction_abilities {
         use super::*;
-        use crate::battle::AttackCommand;
+        use crate::state::battle::AttackCommand;
 
         fn make_mon(species: Species, ability: Ability, first_move: PokemonMove) -> PokemonState {
             let pdex = pokemon_dex();
@@ -14705,8 +14705,8 @@ mod tests {
             let p1 = make_mon(Species::Snorlax, Ability::AngerPoint, PokemonMove::Splash);
             let mut p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
             // LaserFocus is checked by crit_is_guaranteed → always crits
-            p2.volatiles.push(crate::pokemon::VolatileStatusState::MoveStatus(
-                crate::dex_data::VolatileStatus::LaserFocus, 0,
+            p2.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(
+                crate::state::dex_data::VolatileStatus::LaserFocus, 0,
             ));
             p2.stats[4] = 300;
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
@@ -14818,7 +14818,7 @@ mod tests {
             let mut p1 = make_mon(Species::Snorlax, Ability::Berserk, PokemonMove::Splash);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 2 + 1;
-            p1.status = Some(crate::dex_data::Status::Burn);
+            p1.status = Some(crate::state::dex_data::Status::Burn);
             let p2 = make_mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
             // Both use Splash so no move damage; only burn damage at end of turn.
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
@@ -14909,7 +14909,7 @@ mod tests {
             );
             let (bs, _) = extract_battle_state(outcomes);
             let has_charge = bs.p1_active_mons[0].volatiles.iter().any(|v| {
-                matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(crate::dex_data::VolatileStatus::Charge, _))
+                matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(crate::state::dex_data::VolatileStatus::Charge, _))
             });
             assert!(has_charge, "Electromorphosis: Charge volatile should be added on hit");
         }
@@ -14951,8 +14951,8 @@ mod tests {
             // With Charge volatile: effective BP doubles → ~2× damage
             let mut p1_charged = make_mon(Species::Snorlax, Ability::None, PokemonMove::Thunderbolt);
             p1_charged.stats[4] = 300;
-            p1_charged.volatiles.push(crate::pokemon::VolatileStatusState::TurnStatus(
-                crate::dex_data::VolatileStatus::Charge, 0,
+            p1_charged.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                crate::state::dex_data::VolatileStatus::Charge, 0,
             ));
             let charged_outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(
@@ -14971,8 +14971,8 @@ mod tests {
             let still_charged = charged_outcomes.iter().any(|(s, _)| {
                 matches!(s, MatchState::BattleState(bs)
                     if bs.p1_active_mons[0].volatiles.iter().any(|v| matches!(v,
-                        crate::pokemon::VolatileStatusState::TurnStatus(
-                            crate::dex_data::VolatileStatus::Charge, _))))
+                        crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            crate::state::dex_data::VolatileStatus::Charge, _))))
             });
             assert!(!still_charged, "Charge volatile should be consumed after an Electric move");
         }
@@ -15025,7 +15025,7 @@ mod tests {
     // ════════════════════════════════════════════════════════════════════
     mod damage_reduction_abilities {
         use super::*;
-        use crate::battle::AttackCommand;
+        use crate::state::battle::AttackCommand;
 
         /// Build a level-50 mon with a specific ability, first move, and Nature::Hardy.
         /// All stat-points are zero for predictable, reproducible stats.
@@ -15045,8 +15045,8 @@ mod tests {
         fn run_damage(
             attacker: PokemonState,
             defender: PokemonState,
-            move_dex: &std::collections::HashMap<PokemonMove, crate::dex_data::MoveData>,
-            pokemon_dex: &std::collections::HashMap<Species, crate::dex_data::PokemonData>,
+            move_dex: &std::collections::HashMap<PokemonMove, crate::state::dex_data::MoveData>,
+            pokemon_dex: &std::collections::HashMap<Species, crate::state::dex_data::PokemonData>,
         ) -> f64 {
             let initial_hp = defender.hp;
             let state = battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![]);
@@ -15403,7 +15403,7 @@ mod tests {
     // ── Type immunity & absorption abilities ─────────────────────────────────────
     mod type_immunity_abilities {
         use super::*;
-        use crate::battle::AttackCommand;
+        use crate::state::battle::AttackCommand;
 
         // Build a level-50 mon with the given ability and a single move.
         fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
@@ -16028,13 +16028,13 @@ mod tests {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod contact_reactive_abilities {
-    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{VolatileStatus, Weather};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::dex_data::{VolatileStatus, Weather};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::simulator::{get_possible_commands_for_active_slot, simulate_turn};
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
@@ -16045,7 +16045,7 @@ mod contact_reactive_abilities {
         species: Species,
         moves: [Option<PokemonMove>; 4],
         ability: Ability,
-        gender: Option<crate::pokemon::PokemonGender>,
+        gender: Option<crate::state::pokemon::PokemonGender>,
     ) -> PokemonState {
         let pdex = pokemon_dex();
         let mdex = move_dex();
@@ -16139,7 +16139,7 @@ mod contact_reactive_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex, false, 1);
         let burn_prob: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status == Some(crate::dex_data::Status::Burn)) { *p } else { 0.0 }
+            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status == Some(crate::state::dex_data::Status::Burn)) { *p } else { 0.0 }
         ).sum();
         assert!((burn_prob - 0.30).abs() < 0.05, "Flame Body should burn ~30%; got {burn_prob}");
     }
@@ -16160,7 +16160,7 @@ mod contact_reactive_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex, false, 1);
         let burn_prob: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status == Some(crate::dex_data::Status::Burn)) { *p } else { 0.0 }
+            if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status == Some(crate::state::dex_data::Status::Burn)) { *p } else { 0.0 }
         ).sum();
         assert!(burn_prob < 1e-9, "Fire-type attacker immune to Flame Body burn; got {burn_prob}");
     }
@@ -16183,7 +16183,7 @@ mod contact_reactive_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex, false, 1);
         let para_prob: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Paralysis))) { *p } else { 0.0 }
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Paralysis))) { *p } else { 0.0 }
         ).sum();
         assert!((para_prob - 0.30).abs() < 0.05, "Static should paralyse ~30%; got {para_prob}");
     }
@@ -16206,7 +16206,7 @@ mod contact_reactive_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex, false, 1);
         let poison_prob: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Poison))) { *p } else { 0.0 }
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Poison))) { *p } else { 0.0 }
         ).sum();
         assert!((poison_prob - 0.30).abs() < 0.05, "Poison Point should poison ~30%; got {poison_prob}");
     }
@@ -16231,11 +16231,11 @@ mod contact_reactive_abilities {
         let any: f64 = outcomes.iter().map(|(s, p)|
             if matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status.is_some()) { *p } else { 0.0 }).sum();
         let slp: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Sleep(_)))) { *p } else { 0.0 }).sum();
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Sleep(_)))) { *p } else { 0.0 }).sum();
         let par: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Paralysis))) { *p } else { 0.0 }).sum();
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Paralysis))) { *p } else { 0.0 }).sum();
         let psn: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Poison))) { *p } else { 0.0 }).sum();
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Poison))) { *p } else { 0.0 }).sum();
         assert!((any - 0.30).abs() < 0.05, "Effect Spore should status ~30%; got {any}");
         assert!((slp - 0.11).abs() < 0.04, "Effect Spore sleep ~11%; got {slp}");
         assert!((par - 0.10).abs() < 0.04, "Effect Spore paralysis ~10%; got {par}");
@@ -16299,7 +16299,7 @@ mod contact_reactive_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex, false, 1);
         let poison_prob: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(crate::dex_data::Status::Poison))) { *p } else { 0.0 }
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(crate::state::dex_data::Status::Poison))) { *p } else { 0.0 }
         ).sum();
         assert!((poison_prob - 0.30).abs() < 0.05, "Poison Touch should poison the target ~30%; got {poison_prob}");
     }
@@ -16360,7 +16360,7 @@ mod contact_reactive_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex, false, 1);
         let burn_prob: f64 = outcomes.iter().map(|(s, p)|
-            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Burn))) { *p } else { 0.0 }
+            if matches!(s, MatchState::BattleState(bs) if matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Burn))) { *p } else { 0.0 }
         ).sum();
         assert!((burn_prob - 1.0).abs() < 1e-9, "Spicy Spray should always burn attacker; got {burn_prob}");
     }
@@ -16489,7 +16489,7 @@ mod contact_reactive_abilities {
             .expect("Mummy should be applied turn 1");
 
         let t2 = simulate_turn(&mummy_state,
-            &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex, false, 1);
         let reverted = t2.iter().any(|(s, _)|
@@ -16529,12 +16529,12 @@ mod contact_reactive_abilities {
         let pdex = pokemon_dex(); let mdex = move_dex();
         let mut attacker = make_mon(
             Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None],
-            Ability::None, Some(crate::pokemon::PokemonGender::Male),
+            Ability::None, Some(crate::state::pokemon::PokemonGender::Male),
         );
         attacker.stats[5] = 200;
         let target = make_mon(
             Species::Snorlax, [Some(PokemonMove::Splash), None, None, None],
-            Ability::CuteCharm, Some(crate::pokemon::PokemonGender::Female),
+            Ability::CuteCharm, Some(crate::state::pokemon::PokemonGender::Female),
         );
         let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
         let outcomes = simulate_turn(&MatchState::BattleState(state),
@@ -16554,12 +16554,12 @@ mod contact_reactive_abilities {
         let pdex = pokemon_dex(); let mdex = move_dex();
         let mut attacker = make_mon(
             Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None],
-            Ability::None, Some(crate::pokemon::PokemonGender::Male),
+            Ability::None, Some(crate::state::pokemon::PokemonGender::Male),
         );
         attacker.stats[5] = 200;
         let target = make_mon(
             Species::Snorlax, [Some(PokemonMove::Splash), None, None, None],
-            Ability::CuteCharm, Some(crate::pokemon::PokemonGender::Male),
+            Ability::CuteCharm, Some(crate::state::pokemon::PokemonGender::Male),
         );
         let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
         let outcomes = simulate_turn(&MatchState::BattleState(state),
@@ -16581,12 +16581,12 @@ mod contact_reactive_abilities {
         let pdex = pokemon_dex(); let mdex = move_dex();
         let mut user = make_mon(
             Species::Snorlax, [Some(PokemonMove::Attract), None, None, None],
-            Ability::None, Some(crate::pokemon::PokemonGender::Female),
+            Ability::None, Some(crate::state::pokemon::PokemonGender::Female),
         );
         user.stats[5] = 200;
         let target = make_mon(
             Species::Snorlax, [Some(PokemonMove::Splash), None, None, None],
-            Ability::None, Some(crate::pokemon::PokemonGender::Male),
+            Ability::None, Some(crate::state::pokemon::PokemonGender::Male),
         );
         let state = battle_state_from_lists(vec![user], vec![], vec![target], vec![]);
         let outcomes = simulate_turn(&MatchState::BattleState(state),
@@ -16603,12 +16603,12 @@ mod contact_reactive_abilities {
         let pdex = pokemon_dex(); let mdex = move_dex();
         let mut user = make_mon(
             Species::Snorlax, [Some(PokemonMove::Attract), None, None, None],
-            Ability::None, Some(crate::pokemon::PokemonGender::Female),
+            Ability::None, Some(crate::state::pokemon::PokemonGender::Female),
         );
         user.stats[5] = 200;
         let target = make_mon(
             Species::Snorlax, [Some(PokemonMove::Splash), None, None, None],
-            Ability::None, Some(crate::pokemon::PokemonGender::Female),
+            Ability::None, Some(crate::state::pokemon::PokemonGender::Female),
         );
         let state = battle_state_from_lists(vec![user], vec![], vec![target], vec![]);
         let outcomes = simulate_turn(&MatchState::BattleState(state),
@@ -16628,12 +16628,12 @@ mod contact_reactive_abilities {
         // We set P2 faster so P2 moves first in turn 2 and hits P1 if not fail-to-acted.
         let mut user = make_mon(
             Species::Snorlax, [Some(PokemonMove::Attract), Some(PokemonMove::Splash), None, None],
-            Ability::None, Some(crate::pokemon::PokemonGender::Female),
+            Ability::None, Some(crate::state::pokemon::PokemonGender::Female),
         );
         user.stats[5] = 200; // fast in turn 1 to use Attract first
         let mut target = make_mon(
             Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None],
-            Ability::None, Some(crate::pokemon::PokemonGender::Male),
+            Ability::None, Some(crate::state::pokemon::PokemonGender::Male),
         );
         target.stats[5] = 1;
         // Turn 1: P1 uses Attract on P2 (P1 faster).
@@ -16811,12 +16811,12 @@ mod contact_reactive_abilities {
 // Paralysis-fail probe: P1 at high HP with Thunder Wave, P2 at high HP with Tackle;
 // if Prankster fires → Thunder Wave goes first → P2 paralyzed → 12.5% fail → P1 undamaged.
 mod priority_abilities {
-    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::pokemon::{build_pokemon_state, PokemonState};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -17275,8 +17275,8 @@ mod priority_abilities {
 
     mod end_of_turn_abilities {
         use super::*;
-        use crate::battle::BattleState;
-        use crate::dex_data::{Status, Weather};
+        use crate::state::battle::BattleState;
+        use crate::state::dex_data::{Status, Weather};
 
         fn splash_mon(species: Species, ability: Ability, item: Option<Item>, status: Option<Status>) -> PokemonState {
             let dex = pokemon_dex();
@@ -17656,13 +17656,13 @@ mod priority_abilities {
     // ─────────────────────────────────────────────────────────────────────────
     #[cfg(test)]
     mod item_interaction_abilities {
-        use crate::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand};
+        use crate::state::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand};
         use crate::data::ability::Ability;
         use crate::data::item::Item;
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
-        use crate::dex_data::{Status, VolatileStatus};
-        use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+        use crate::state::dex_data::{Status, VolatileStatus};
+        use crate::state::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
         use crate::simulator::helpers as simulator_helpers;
         use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
@@ -18032,12 +18032,12 @@ mod priority_abilities {
     // ─────────────────────────────────────────────────────────────────────────
     #[cfg(test)]
     mod form_change_abilities {
-        use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand, SwitchCommand};
+        use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand, SwitchCommand};
         use crate::data::ability::Ability;
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
-        use crate::dex_data::Status;
-        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::state::dex_data::Status;
+        use crate::state::pokemon::{build_pokemon_state, PokemonState};
         use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
             run_single_turn, simple_attack,
@@ -18282,13 +18282,13 @@ mod priority_abilities {
 
             assert_eq!(state.p1_active_mons[0].species, Species::CastformRainy,
                 "Castform should take Rainy Form as soon as rain starts");
-            assert_eq!(state.p1_active_mons[0].types, vec![crate::dex_data::PokemonType::Water],
+            assert_eq!(state.p1_active_mons[0].types, vec![crate::state::dex_data::PokemonType::Water],
                 "Rainy Form is pure Water-type");
         }
 
         #[test]
         fn forecast_reverts_when_weather_expires() {
-            use crate::dex_data::Weather;
+            use crate::state::dex_data::Weather;
             let castform = mon(Species::Castform, Ability::Forecast, PokemonMove::Splash);
             let foe = mon(Species::Shuckle, Ability::None, PokemonMove::Splash);
             let mut state = battle_state_from_lists(vec![castform], vec![], vec![foe], vec![]);
@@ -18303,12 +18303,12 @@ mod priority_abilities {
             let (bs2, _) = extract_battle_state(run(bs));
             assert_eq!(bs2.p1_active_mons[0].species, Species::Castform,
                 "Castform reverts to base form when the weather ends");
-            assert_eq!(bs2.p1_active_mons[0].types, vec![crate::dex_data::PokemonType::Normal]);
+            assert_eq!(bs2.p1_active_mons[0].types, vec![crate::state::dex_data::PokemonType::Normal]);
         }
 
         #[test]
         fn forecast_requires_the_ability() {
-            use crate::dex_data::Weather;
+            use crate::state::dex_data::Weather;
             let castform = mon(Species::Castform, Ability::None, PokemonMove::Splash);
             let foe = mon(Species::Shuckle, Ability::None, PokemonMove::Splash);
             let mut state = battle_state_from_lists(vec![castform], vec![], vec![foe], vec![]);
@@ -18326,11 +18326,11 @@ mod priority_abilities {
     // ─────────────────────────────────────────────────────────────────────────
     #[cfg(test)]
     mod receiver_ability {
-        use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+        use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
         use crate::data::ability::Ability;
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
-        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::state::pokemon::{build_pokemon_state, PokemonState};
         use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
             run_single_turn, simple_attack,
@@ -18405,13 +18405,13 @@ mod priority_abilities {
     // ─────────────────────────────────────────────────────────────────────────
     #[cfg(test)]
     mod variable_power_moves {
-        use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+        use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
         use crate::data::ability::Ability;
         use crate::data::item::Item;
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
-        use crate::dex_data::Status;
-        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::state::dex_data::Status;
+        use crate::state::pokemon::{build_pokemon_state, PokemonState};
         use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
             run_single_turn, simple_attack,
@@ -18714,8 +18714,8 @@ mod priority_abilities {
             let outcomes = run_single_turn(
                 &MatchState::BattleState(switch_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
-                &PlayerCommand::Battle(vec![crate::battle::BattleCommand::Switch(
-                    crate::battle::SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(vec![crate::state::battle::BattleCommand::Switch(
+                    crate::state::battle::SwitchCommand { party_index: 0 })]),
                 &mdex, &pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
@@ -18868,7 +18868,7 @@ mod priority_abilities {
 
         #[test]
         fn alluring_voice_confuses_only_freshly_boosted_targets() {
-            use crate::dex_data::VolatileStatus;
+            use crate::state::dex_data::VolatileStatus;
             use crate::simulator::helpers::has_status_volatile;
 
             // Target is faster, so its Swords Dance resolves before Alluring Voice lands.
@@ -18906,7 +18906,7 @@ mod priority_abilities {
     #[cfg(test)]
     mod immunity_and_veil_abilities {
         use super::*;
-        use crate::pokemon::Nature;
+        use crate::state::pokemon::Nature;
         use crate::tests::simuilator_test_helpers::extract_battle_state;
 
         fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
@@ -19100,7 +19100,7 @@ mod priority_abilities {
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
-                    if bs.p1_side_conditions.iter().any(|c| matches!(c, crate::dex_data::SideCondition::StealthRock)))),
+                    if bs.p1_side_conditions.iter().any(|c| matches!(c, crate::state::dex_data::SideCondition::StealthRock)))),
                 "Good as Gold: should not block side-targeting Stealth Rock",
             );
         }
@@ -19144,7 +19144,7 @@ mod priority_abilities {
                 vec![target], vec![],
                 vec![opponent], vec![],
             );
-            state.weather = Some(crate::dex_data::Weather::Sandstorm);
+            state.weather = Some(crate::state::dex_data::Weather::Sandstorm);
             state.weather_turns = Some(5);
             let (bs, _) = extract_battle_state(run_single_turn(
                 &MatchState::BattleState(state),
@@ -19266,7 +19266,7 @@ mod priority_abilities {
             // No branch should have the target poisoned.
             let poison_prob: f64 = outcomes.iter().map(|(s, p)| {
                 if matches!(s, MatchState::BattleState(bs)
-                    if bs.p1_active_mons[0].status == Some(crate::dex_data::Status::Poison)) { *p } else { 0.0 }
+                    if bs.p1_active_mons[0].status == Some(crate::state::dex_data::Status::Poison)) { *p } else { 0.0 }
             }).sum();
             assert!(
                 poison_prob < 1e-9,
@@ -19399,7 +19399,7 @@ mod priority_abilities {
             let mdex = move_dex();
             let pdex = pokemon_dex();
             let mut target = mon(Species::Clefable, Ability::MagicGuard, PokemonMove::Splash);
-            target.status = Some(crate::dex_data::Status::Burn);
+            target.status = Some(crate::state::dex_data::Status::Burn);
             let max_hp = target.stats[0];
             target.hp = max_hp;
             let opponent = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
@@ -19424,7 +19424,7 @@ mod priority_abilities {
             let mdex = move_dex();
             let pdex = pokemon_dex();
             let mut target = mon(Species::Clefable, Ability::MagicGuard, PokemonMove::Splash);
-            target.status = Some(crate::dex_data::Status::Poison);
+            target.status = Some(crate::state::dex_data::Status::Poison);
             let max_hp = target.stats[0];
             target.hp = max_hp;
             let opponent = mon(Species::Snorlax, Ability::None, PokemonMove::Splash);
@@ -19488,7 +19488,7 @@ mod priority_abilities {
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
                     assert!(
-                        !matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Sleep(_))),
+                        !matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Sleep(_))),
                         "Sweet Veil: Sleep Powder should not inflict sleep",
                     );
                 }
@@ -19514,7 +19514,7 @@ mod priority_abilities {
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
                     let has_yawn = bs.p1_active_mons[0].volatiles.iter().any(|v|
-                        matches!(v, crate::pokemon::VolatileStatusState::TurnStatus(crate::dex_data::VolatileStatus::Yawn, _))
+                        matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(crate::state::dex_data::VolatileStatus::Yawn, _))
                     );
                     assert!(!has_yawn, "Sweet Veil: Yawn volatile should not be applied");
                 }
@@ -19570,7 +19570,7 @@ mod priority_abilities {
             );
             let burn_prob: f64 = outcomes.iter().map(|(s, p)| {
                 if matches!(s, MatchState::BattleState(bs)
-                    if bs.p1_active_mons[0].status == Some(crate::dex_data::Status::Burn)) { *p } else { 0.0 }
+                    if bs.p1_active_mons[0].status == Some(crate::state::dex_data::Status::Burn)) { *p } else { 0.0 }
             }).sum();
             assert!(
                 burn_prob > 0.80,
@@ -19626,7 +19626,7 @@ mod priority_abilities {
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
                     let taunted = bs.p1_active_mons[0].volatiles.iter().any(|v|
-                        matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::Taunt, _))
+                        matches!(v, crate::state::pokemon::VolatileStatusState::MoveStatus(crate::state::dex_data::VolatileStatus::Taunt, _))
                     );
                     assert!(!taunted, "Aroma Veil: Taunt should not apply to the holder");
                 }
@@ -19654,7 +19654,7 @@ mod priority_abilities {
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
                     let encored = bs.p1_active_mons[0].volatiles.iter().any(|v|
-                        matches!(v, crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::Encore(_), _))
+                        matches!(v, crate::state::pokemon::VolatileStatusState::MoveStatus(crate::state::dex_data::VolatileStatus::Encore(_), _))
                     );
                     assert!(!encored, "Aroma Veil: Encore should not apply to the holder");
                 }
@@ -19664,15 +19664,15 @@ mod priority_abilities {
     }
 
     mod entry_hazards {
-        use crate::battle::{
+        use crate::state::battle::{
             BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand,
         };
         use crate::data::ability::Ability;
         use crate::data::item::Item;
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
-        use crate::dex_data::{SideCondition, Status};
-        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::state::dex_data::{SideCondition, Status};
+        use crate::state::pokemon::{build_pokemon_state, PokemonState};
         use crate::simulator::helpers as simulator_helpers;
         use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
@@ -20168,12 +20168,12 @@ mod priority_abilities {
     }
 
     mod protect_moves {
-        use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+        use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
         use crate::data::ability::Ability;
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
-        use crate::dex_data::Status;
-        use crate::pokemon::{build_pokemon_state, PokemonState};
+        use crate::state::dex_data::Status;
+        use crate::state::pokemon::{build_pokemon_state, PokemonState};
         use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
             simple_attack,
@@ -20376,12 +20376,12 @@ mod priority_abilities {
     }
 
     mod forced_switch_moves {
-        use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+        use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
         use crate::data::ability::Ability;
         use crate::data::pokemon_move::PokemonMove;
         use crate::data::species::Species;
-        use crate::dex_data::{SideCondition, Status, VolatileStatus};
-        use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+        use crate::state::dex_data::{SideCondition, Status, VolatileStatus};
+        use crate::state::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
         use crate::tests::simuilator_test_helpers::{
             battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
             simple_attack,
@@ -20536,7 +20536,7 @@ mod priority_abilities {
             let after = extract_battle_state(run(state, 0, 0)).0;
             assert_eq!(after.p2_active_mons[0].species, Species::Gyarados, "target was phazed");
             assert!(
-                after.pseudo_weathers.iter().all(|pw| !matches!(pw, crate::dex_data::PseudoWeather::TrickRoom)),
+                after.pseudo_weathers.iter().all(|pw| !matches!(pw, crate::state::dex_data::PseudoWeather::TrickRoom)),
                 "the switched-out target's queued Trick Room must not execute"
             );
         }
@@ -20613,13 +20613,13 @@ mod priority_abilities {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod binding_trapping {
-    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::VolatileStatus;
-    use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -20627,7 +20627,7 @@ mod binding_trapping {
     use crate::simulator::helpers as simulator_helpers;
 
     /// Build a test mon with overridden max HP for deterministic chip assertions.
-    fn mon(species: Species, ability: Ability, mv: PokemonMove) -> crate::pokemon::PokemonState {
+    fn mon(species: Species, ability: Ability, mv: PokemonMove) -> crate::state::pokemon::PokemonState {
         let dex = pokemon_dex();
         let mdex = move_dex();
         let mut m = build_pokemon_state(
@@ -20641,7 +20641,7 @@ mod binding_trapping {
         m
     }
 
-    fn mon_with_item(species: Species, ability: Ability, mv: PokemonMove, item: Item) -> crate::pokemon::PokemonState {
+    fn mon_with_item(species: Species, ability: Ability, mv: PokemonMove, item: Item) -> crate::state::pokemon::PokemonState {
         let mut m = mon(species, ability, mv);
         m.item = item;
         m
@@ -20860,7 +20860,7 @@ mod binding_trapping {
         // P1 switches out (trapper leaves).
         let outcomes = run_single_turn(
             &MatchState::BattleState(state),
-            &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             &mdex, &pdex,
         );
@@ -21005,13 +21005,13 @@ mod binding_trapping {
 }
 
 mod healing_moves {
-    use crate::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{SlotCondition, Status, VolatileStatus, PokemonType};
-    use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{SlotCondition, Status, VolatileStatus, PokemonType};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
@@ -21336,13 +21336,13 @@ mod healing_moves {
 }
 
 mod move_restriction {
-    use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::VolatileStatus;
-    use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
     use crate::simulator::get_possible_commands_for_active_slot;
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
@@ -21590,12 +21590,12 @@ mod move_restriction {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod volatile_status_debuffs {
-    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{Status, Terrain, VolatileStatus};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{Status, Terrain, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::simulator::get_possible_commands_for_active_slot;
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
@@ -22147,12 +22147,12 @@ mod volatile_status_debuffs {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod stat_manipulation {
-    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::VolatileStatus;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
@@ -22174,7 +22174,7 @@ mod stat_manipulation {
         simulator_helpers::has_status_volatile(mon, v)
     }
 
-    fn run(p1: PokemonState, p2: PokemonState) -> crate::battle::BattleState {
+    fn run(p1: PokemonState, p2: PokemonState) -> crate::state::battle::BattleState {
         let (bs, _) = extract_battle_state(run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
@@ -22531,12 +22531,12 @@ mod stat_manipulation {
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod self_fainting_and_crash_moves {
-    use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{SlotCondition, Status, Terrain, VolatileStatus};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{SlotCondition, Status, Terrain, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -23108,12 +23108,12 @@ mod self_fainting_and_crash_moves {
 // Rampaging moves (Thrash / Outrage / Petal Dance / Raging Fury)
 // ─────────────────────────────────────────────────────────────────────────────
 mod rampaging_moves {
-    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::VolatileStatus;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -23187,8 +23187,8 @@ mod rampaging_moves {
         // Only attack commands for Thrash (no switch commands)
         for cmd in &cmds {
             match cmd {
-                crate::battle::BattleCommand::Switch(_) => panic!("locked mon must not be able to switch"),
-                crate::battle::BattleCommand::Attack(a) => assert_eq!(a.move_slot, 0, "wrong move slot"),
+                crate::state::battle::BattleCommand::Switch(_) => panic!("locked mon must not be able to switch"),
+                crate::state::battle::BattleCommand::Attack(a) => assert_eq!(a.move_slot, 0, "wrong move slot"),
                 _ => {}
             }
         }
@@ -23334,7 +23334,7 @@ mod rampaging_moves {
     fn outrage_doubles_branches_over_both_foes() {
         use crate::data::species::Species;
         use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
-        use crate::battle::{BattleCommand, AttackCommand};
+        use crate::state::battle::{BattleCommand, AttackCommand};
         use crate::simulator;
 
         let pdex = pokemon_dex();
@@ -23343,25 +23343,25 @@ mod rampaging_moves {
         let attacker = build_pokemon_state(
             Species::Dragonite, &pdex, &mdex, Some(50),
             Some([Some(PokemonMove::Outrage), None, None, None]),
-            None, Some(Ability::None), Some(crate::pokemon::Nature::Hardy),
+            None, Some(Ability::None), Some(crate::state::pokemon::Nature::Hardy),
             None, None, Some([0; 6]), None, false,
         );
         let ally = build_pokemon_state(
             Species::Snorlax, &pdex, &mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(crate::pokemon::Nature::Hardy),
+            None, Some(Ability::None), Some(crate::state::pokemon::Nature::Hardy),
             None, None, Some([0; 6]), None, false,
         );
         let foe0 = build_pokemon_state(
             Species::Blissey, &pdex, &mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(crate::pokemon::Nature::Hardy),
+            None, Some(Ability::None), Some(crate::state::pokemon::Nature::Hardy),
             None, None, Some([0; 6]), None, false,
         );
         let foe1 = build_pokemon_state(
             Species::Blissey, &pdex, &mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(crate::pokemon::Nature::Hardy),
+            None, Some(Ability::None), Some(crate::state::pokemon::Nature::Hardy),
             None, None, Some([0; 6]), None, false,
         );
 
@@ -23373,29 +23373,29 @@ mod rampaging_moves {
 
         // P1 slot 0 uses Outrage (no target — RandomNormal fan-out resolves it).
         // P2 slots both use Splash.
-        let p1_cmd = crate::battle::PlayerCommand::Battle(vec![
+        let p1_cmd = crate::state::battle::PlayerCommand::Battle(vec![
             BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
             BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
         ]);
-        let p2_cmd = crate::battle::PlayerCommand::Battle(vec![
+        let p2_cmd = crate::state::battle::PlayerCommand::Battle(vec![
             BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
             BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
         ]);
         let outcomes = simulator::simulate_turn(
-            &crate::battle::MatchState::BattleState(state),
+            &crate::state::battle::MatchState::BattleState(state),
             &p1_cmd, &p2_cmd,
             &mdex, &pdex, false, 1,
         );
 
         // Probability that foe slot 0 was hit (lost HP)
         let foe0_hit_prob: f64 = outcomes.iter()
-            .filter(|(s, _)| matches!(s, crate::battle::MatchState::BattleState(bs)
+            .filter(|(s, _)| matches!(s, crate::state::battle::MatchState::BattleState(bs)
                 if bs.p2_active_mons.get(0).map(|m| m.hp < initial_hp).unwrap_or(false)))
             .map(|(_, p)| p)
             .sum();
 
         let foe1_hit_prob: f64 = outcomes.iter()
-            .filter(|(s, _)| matches!(s, crate::battle::MatchState::BattleState(bs)
+            .filter(|(s, _)| matches!(s, crate::state::battle::MatchState::BattleState(bs)
                 if bs.p2_active_mons.get(1).map(|m| m.hp < initial_hp).unwrap_or(false)))
             .map(|(_, p)| p)
             .sum();
@@ -23445,11 +23445,11 @@ mod rampaging_moves {
 // Counter / Mirror Coat / Metal Burst / Comeuppance
 // ─────────────────────────────────────────────────────────────────────────────
 mod counter_retaliation_moves {
-    use crate::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -23586,12 +23586,12 @@ mod counter_retaliation_moves {
 
 #[cfg(test)]
 mod ability_manipulation_moves {
-    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{Status, VolatileStatus};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::dex_data::{Status, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::simulator::simulate_turn;
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
@@ -23996,8 +23996,8 @@ mod ability_manipulation_moves {
         use crate::tests::simuilator_test_helpers::hit_probability;
 
         fn build(
-            pdex: &HashMap<Species, crate::dex_data::PokemonData>,
-            mdex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
+            pdex: &HashMap<Species, crate::state::dex_data::PokemonData>,
+            mdex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>,
             species: Species,
             level: u8,
             first_move: PokemonMove,
@@ -24013,8 +24013,8 @@ mod ability_manipulation_moves {
         }
 
         fn run(
-            mdex: &HashMap<PokemonMove, crate::dex_data::MoveData>,
-            pdex: &HashMap<Species, crate::dex_data::PokemonData>,
+            mdex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>,
+            pdex: &HashMap<Species, crate::state::dex_data::PokemonData>,
             p1: PokemonState,
             p2: PokemonState,
         ) -> Vec<(MatchState, f64)> {
@@ -24229,8 +24229,8 @@ mod ability_manipulation_moves {
     //    Reflect Type, Electrify ────────────────────────────────────────────────
     mod type_changing_moves {
         use super::*;
-        use crate::battle::{BattleState, FieldSlot};
-        use crate::dex_data::PokemonType;
+        use crate::state::battle::{BattleState, FieldSlot};
+        use crate::state::dex_data::PokemonType;
 
         fn build(species: Species, moves: [Option<PokemonMove>; 4], ability: Ability) -> PokemonState {
             let pdex = pokemon_dex();
@@ -24426,7 +24426,7 @@ mod ability_manipulation_moves {
             let after_t2 = extract_battle_state(run_single_turn(
                 &MatchState::BattleState(after_t1),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
-                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::battle::SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
                 &mdex, &pdex,
             )).0;
             let snorlax = after_t2.p2_back_mons.iter().find(|m| m.species == Species::Snorlax)
@@ -24438,9 +24438,9 @@ mod ability_manipulation_moves {
 
     mod item_manipulation_moves {
         use super::*;
-        use crate::battle::BattleState;
+        use crate::state::battle::BattleState;
         use crate::data::item::Item;
-        use crate::dex_data::Status;
+        use crate::state::dex_data::Status;
 
         fn build(species: Species, m: PokemonMove, ability: Ability, item: Item) -> PokemonState {
             let pdex = pokemon_dex();
@@ -24727,13 +24727,13 @@ mod ability_manipulation_moves {
 
 // ── Turn-order manipulation and delayed moves ────────────────────────────────
 mod turn_order_and_delayed_moves {
-    use crate::battle::{Action, BattleState, FieldSlot, MatchState, MoveAction, Player, PlayerCommand};
+    use crate::state::battle::{Action, BattleState, FieldSlot, MatchState, MoveAction, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::SlotCondition;
-    use crate::pokemon::{build_pokemon_state, PokemonState};
+    use crate::state::dex_data::SlotCondition;
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
@@ -25042,14 +25042,14 @@ mod turn_order_and_delayed_moves {
 
 // ── Side and field condition moves ────────────────────────────────────────────────────────────
 mod side_and_field_condition_moves {
-    use crate::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{PseudoWeather, SideCondition};
-    use crate::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
-    use crate::dex_data::VolatileStatus;
+    use crate::state::dex_data::{PseudoWeather, SideCondition};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::VolatileStatus;
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, damage_distribution, extract_battle_state,
         hit_probability, move_dex, pokemon_dex, run_single_turn, simple_attack,
@@ -25142,7 +25142,7 @@ mod side_and_field_condition_moves {
         let pdex = pokemon_dex();
         let attacker = mon_with(Species::Ninetales, PokemonMove::AuroraVeil, Ability::None, Item::LightClay);
         let mut state = battle_state_from_lists(vec![attacker], vec![], vec![bulky()], vec![]);
-        state.weather = Some(crate::dex_data::Weather::Snow);
+        state.weather = Some(crate::state::dex_data::Weather::Snow);
         state.weather_turns = Some(8);
         let outcomes = run_single_turn(
             &MatchState::BattleState(state),
@@ -25162,7 +25162,7 @@ mod side_and_field_condition_moves {
             vec![bulky()],
             vec![],
         );
-        state_no_clay.weather = Some(crate::dex_data::Weather::Snow);
+        state_no_clay.weather = Some(crate::state::dex_data::Weather::Snow);
         state_no_clay.weather_turns = Some(8);
         let outcomes_nc = run_single_turn(
             &MatchState::BattleState(state_no_clay),
@@ -25489,7 +25489,7 @@ mod side_and_field_condition_moves {
             mdex, pdex,
         );
         let (bs, _) = extract_battle_state(outcomes);
-        let is_asleep = matches!(bs.p1_active_mons[0].status, Some(crate::dex_data::Status::Sleep(_)));
+        let is_asleep = matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Sleep(_)));
         assert!(is_asleep, "Safeguard should NOT block Rest (self-induced sleep)");
     }
 
@@ -25510,7 +25510,7 @@ mod side_and_field_condition_moves {
         // At least some branch should have P2 burned (Will-O-Wisp has 85% accuracy but Infiltrator bypasses Safeguard)
         let any_burned = outcomes.iter().any(|(s, _)| {
             if let MatchState::BattleState(bs) = s {
-                matches!(bs.p2_active_mons[0].status, Some(crate::dex_data::Status::Burn))
+                matches!(bs.p2_active_mons[0].status, Some(crate::state::dex_data::Status::Burn))
             } else { false }
         });
         assert!(any_burned, "Infiltrator should bypass Safeguard and allow burn");
@@ -25519,19 +25519,19 @@ mod side_and_field_condition_moves {
 
 #[cfg(test)]
 mod two_turn_charging_moves {
-    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{Status, VolatileStatus};
-    use crate::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
+    use crate::state::dex_data::{Status, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
     };
 
-    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> crate::pokemon::PokemonState {
+    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> crate::state::pokemon::PokemonState {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
@@ -25541,7 +25541,7 @@ mod two_turn_charging_moves {
         )
     }
 
-    fn simple_mon(species: Species, mv: PokemonMove) -> crate::pokemon::PokemonState {
+    fn simple_mon(species: Species, mv: PokemonMove) -> crate::state::pokemon::PokemonState {
         mon(species, mv, Ability::None)
     }
 
@@ -25755,12 +25755,12 @@ mod two_turn_charging_moves {
 
 #[cfg(test)]
 mod conditional_damage_moves {
-    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -25790,8 +25790,8 @@ mod conditional_damage_moves {
     fn run(state: BattleState) -> Vec<(MatchState, f64)> {
         run_single_turn(
             &MatchState::BattleState(state),
-            &crate::battle::PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
-            &crate::battle::PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &crate::state::battle::PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &crate::state::battle::PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             &move_dex(), &pokemon_dex(),
         )
     }
@@ -26025,7 +26025,7 @@ mod conditional_damage_moves {
         let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
         let p1_mon = &state.p1_active_mons[0];
         let has_belch = cmds.iter().any(|c| {
-            if let crate::battle::BattleCommand::Attack(ac) = c {
+            if let crate::state::battle::BattleCommand::Attack(ac) = c {
                 p1_mon.moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::Belch)
             } else { false }
         });
@@ -26050,7 +26050,7 @@ mod conditional_damage_moves {
         let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
         let p1_mon = &state.p1_active_mons[0];
         let has_belch = cmds.iter().any(|c| {
-            if let crate::battle::BattleCommand::Attack(ac) = c {
+            if let crate::state::battle::BattleCommand::Attack(ac) = c {
                 p1_mon.moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::Belch)
             } else { false }
         });
@@ -26206,12 +26206,12 @@ mod conditional_damage_moves {
 
 #[cfg(test)]
 mod turn_state_moves {
-    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::Status;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::dex_data::Status;
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -26494,7 +26494,7 @@ mod turn_state_moves {
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
         let has_hammer = cmds.iter().any(|c| {
-            if let crate::battle::BattleCommand::Attack(ac) = c {
+            if let crate::state::battle::BattleCommand::Attack(ac) = c {
                 state.p1_active_mons[0].moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::GigatonHammer)
             } else { false }
         });
@@ -26528,7 +26528,7 @@ mod turn_state_moves {
         let bs1 = match &state1 { MatchState::BattleState(bs) => bs, _ => panic!() };
         let cmds2 = get_possible_commands_for_active_slot(bs1, Player::P1, 0, &mdex, &pdex);
         let has_hammer = cmds2.iter().any(|c| {
-            if let crate::battle::BattleCommand::Attack(ac) = c {
+            if let crate::state::battle::BattleCommand::Attack(ac) = c {
                 bs1.p1_active_mons[0].moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::GigatonHammer)
             } else { false }
         });
@@ -26586,11 +26586,11 @@ mod turn_state_moves {
 /// replacement Pokémon can use Fake Out / First Impression on the NEXT turn.
 #[cfg(test)]
 mod first_turn_on_field_mid_turn_entry {
-    use crate::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -26683,13 +26683,13 @@ mod first_turn_on_field_mid_turn_entry {
 
 #[cfg(test)]
 mod new_moves_session {
-    use crate::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{PokemonType, PseudoWeather, Status, Terrain, VolatileStatus};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{PokemonType, PseudoWeather, Status, Terrain, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
         assert_distribution_close, battle_state_from_lists, damage_distribution,
@@ -27689,11 +27689,11 @@ mod new_moves_session {
 
 #[cfg(test)]
 mod seven_new_moves {
-    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -27790,8 +27790,8 @@ mod seven_new_moves {
             if let MatchState::BattleState(bs) = s {
                 let flying = &bs.p2_active_mons[0];
                 let has_smack_down_volatile = flying.volatiles.iter().any(|v| matches!(v,
-                    crate::pokemon::VolatileStatusState::MoveStatus(crate::dex_data::VolatileStatus::SmackDown, _)
-                    | crate::pokemon::VolatileStatusState::TurnStatus(crate::dex_data::VolatileStatus::SmackDown, _)
+                    crate::state::pokemon::VolatileStatusState::MoveStatus(crate::state::dex_data::VolatileStatus::SmackDown, _)
+                    | crate::state::pokemon::VolatileStatusState::TurnStatus(crate::state::dex_data::VolatileStatus::SmackDown, _)
                 ));
                 assert!(has_smack_down_volatile || flying.hp < flying.stats[0],
                     "Smack Down: should hit Flying-type and/or apply grounded volatile");
@@ -27914,7 +27914,7 @@ mod seven_new_moves {
                     // Consecutive Destiny Bond should fail — the volatile shouldn't be present
                     // after failing (no re-application)
                     let has_db = bs.p1_active_mons[0].volatiles.iter().any(|v| matches!(v,
-                        crate::pokemon::VolatileStatusState::TurnStatus(crate::dex_data::VolatileStatus::DestinyBond, _)
+                        crate::state::pokemon::VolatileStatusState::TurnStatus(crate::state::dex_data::VolatileStatus::DestinyBond, _)
                     ));
                     // Turn 1's TurnStatus volatile is cleared at turn 2 start; consecutive use
                     // then fails → no new volatile is set. DestinyBond should be absent.
@@ -27963,11 +27963,11 @@ mod seven_new_moves {
 }
 
 mod flying_press_tests {
-    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -28035,13 +28035,13 @@ mod flying_press_tests {
 }
 
 mod substitute_move {
-    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::VolatileStatus;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -28294,12 +28294,12 @@ mod substitute_move {
 // ── New abilities: Super Luck, Sand Force, Early Bird, Sturdy, Pressure, Unaware, Sheer Force ──
 #[cfg(test)]
 mod new_ability_tests {
-    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{Status, Weather};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::dex_data::{Status, Weather};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, damage_distribution, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
@@ -28696,13 +28696,13 @@ mod new_ability_tests {
 
 // ── Cross-cutting ability tests ──────────────────────────────────────────────
 mod abilities_cross_cutting {
-    use crate::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{PokemonType, SideCondition, Status, VolatileStatus};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{PokemonType, SideCondition, Status, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, damage_distribution,
         move_dex, pokemon_dex, run_single_turn, simple_attack,
@@ -28994,7 +28994,7 @@ mod abilities_cross_cutting {
         let outcomes = run_state(state);
         let is_water = outcomes.iter().all(|(s, _)| {
             if let MatchState::BattleState(bs) = s {
-                bs.p1_active_mons[0].types == vec![crate::dex_data::PokemonType::Water]
+                bs.p1_active_mons[0].types == vec![crate::state::dex_data::PokemonType::Water]
             } else { true }
         });
         assert!(is_water, "Protean should change Greninja to pure Water after using Surf");
@@ -29102,7 +29102,7 @@ mod abilities_cross_cutting {
         let cmds = crate::simulator::get_possible_commands_for_active_slot(
             &state, Player::P1, 0, move_dex(), pokemon_dex(),
         );
-        let can_switch = cmds.iter().any(|c| matches!(c, crate::battle::BattleCommand::Switch(_)));
+        let can_switch = cmds.iter().any(|c| matches!(c, crate::state::battle::BattleCommand::Switch(_)));
         assert!(!can_switch, "Shadow Tag should prevent the opponent from switching");
     }
 
@@ -29117,7 +29117,7 @@ mod abilities_cross_cutting {
         let cmds = crate::simulator::get_possible_commands_for_active_slot(
             &state, Player::P1, 0, move_dex(), pokemon_dex(),
         );
-        let can_switch = cmds.iter().any(|c| matches!(c, crate::battle::BattleCommand::Switch(_)));
+        let can_switch = cmds.iter().any(|c| matches!(c, crate::state::battle::BattleCommand::Switch(_)));
         assert!(can_switch, "Ghost-types should be immune to Shadow Tag trapping");
     }
 
@@ -29132,7 +29132,7 @@ mod abilities_cross_cutting {
         let cmds = crate::simulator::get_possible_commands_for_active_slot(
             &state, Player::P1, 0, move_dex(), pokemon_dex(),
         );
-        let can_switch = cmds.iter().any(|c| matches!(c, crate::battle::BattleCommand::Switch(_)));
+        let can_switch = cmds.iter().any(|c| matches!(c, crate::state::battle::BattleCommand::Switch(_)));
         assert!(can_switch, "Shadow Tag holders should be immune to each other's trapping");
     }
 
@@ -29204,13 +29204,13 @@ mod abilities_cross_cutting {
 // Infiltrator screens, Intimidate immunity, Inner Focus flinch, Oblivious Taunt,
 // Scrappy ghost, Mega Sol, Mimicry, Stalwart, Stench, Toxic Debris, Innards Out)
 mod new_abilities_batch {
-    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{PokemonType, SideCondition, Terrain, VolatileStatus, Weather};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{PokemonType, SideCondition, Terrain, VolatileStatus, Weather};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, damage_distribution, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
@@ -29640,13 +29640,13 @@ mod new_abilities_batch {
 
         // Command: P1 slot 0 uses Thunderbolt explicitly targeting P2 slot 1.
         let p1_cmd = vec![
-            crate::battle::BattleCommand::Attack(crate::battle::AttackCommand {
+            crate::state::battle::BattleCommand::Attack(crate::state::battle::AttackCommand {
                 move_slot: 0,
-                target: Some(crate::battle::FieldSlot { player: Player::P2, slot_index: 1 }),
+                target: Some(crate::state::battle::FieldSlot { player: Player::P2, slot_index: 1 }),
                 terastallize: false,
                 mega_evolve: false,
             }),
-            crate::battle::BattleCommand::Attack(crate::battle::AttackCommand {
+            crate::state::battle::BattleCommand::Attack(crate::state::battle::AttackCommand {
                 move_slot: 0,
                 target: None,
                 terastallize: false,
@@ -29867,13 +29867,13 @@ mod new_abilities_batch {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod todo_refactor_mechanic_tests {
-    use crate::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{Status, VolatileStatus};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{Status, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
@@ -30363,11 +30363,11 @@ mod todo_refactor_mechanic_tests {
 // Doubles faint redirection + spread multiplier guard
 // ─────────────────────────────────────────────────────────────────────────────
 mod doubles_faint_redirection {
-    use crate::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex, run_single_turn};
     use crate::simulator;
 
@@ -30579,13 +30579,13 @@ mod doubles_faint_redirection {
 
 // ── Season-2 abilities and items ─────────────────────────────────────────────
 mod season2_items_and_abilities {
-    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::Weather;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::dex_data::Weather;
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
         extract_battle_state,
@@ -31124,7 +31124,7 @@ mod season2_items_and_abilities {
         let base = mon(Species::Raticate, PokemonMove::Splash, Ability::None, None);
         let iron = mon(Species::Raticate, PokemonMove::Splash, Ability::None, Some(Item::IronBall));
         let state = battle_state_from_lists(vec![base.clone()], vec![], vec![base.clone()], vec![]);
-        let slot = crate::battle::FieldSlot { player: Player::P1, slot_index: 0 };
+        let slot = crate::state::battle::FieldSlot { player: Player::P1, slot_index: 0 };
         let speed_no_ball = simulator_helpers::effective_speed_for_slot(&state, slot, &base);
         let speed_iron    = simulator_helpers::effective_speed_for_slot(&state, slot, &iron);
         assert!(
@@ -31247,13 +31247,13 @@ mod season2_items_and_abilities {
 
 // ── New Moves (Champions batch) ───────────────────────────────────────────────
 mod new_moves {
-    use crate::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::{SideCondition, Status, VolatileStatus};
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::{SideCondition, Status, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
@@ -31430,7 +31430,7 @@ mod new_moves {
 
     #[test]
     fn rage_fist_times_hit_resets_on_switch_out() {
-        use crate::battle::{BattleCommand, SwitchCommand};
+        use crate::state::battle::{BattleCommand, SwitchCommand};
 
         let mut annihilape = mon(Species::Annihilape, PokemonMove::Splash, Ability::None, None);
         annihilape.times_hit = 2;
@@ -31776,7 +31776,7 @@ mod new_moves {
 
     #[test]
     fn imprison_blocks_shared_move_selection() {
-        use crate::battle::BattleCommand;
+        use crate::state::battle::BattleCommand;
         use crate::simulator::get_possible_commands_for_active_slot;
 
         // P1 has Imprison active + knows Splash in slot 1; P2 knows Splash.
@@ -31854,13 +31854,13 @@ mod new_moves {
 
 // ── Rollout / Ice Ball / Defense Curl ────────────────────────────────────────
 mod rollout {
-    use crate::battle::{BattleCommand, AttackCommand, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleCommand, AttackCommand, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::dex_data::VolatileStatus;
-    use crate::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
         damage_distribution,
@@ -32121,7 +32121,7 @@ mod rollout {
             VolatileStatus::LockedMove(PokemonMove::Rollout), 2
         ));
         // Full paralysis — 100% fail.
-        p1.status = Some(crate::dex_data::Status::Paralysis);
+        p1.status = Some(crate::state::dex_data::Status::Paralysis);
         // Patch speed to 0 so full-paralysis branch fires deterministically (status check
         // uses a 25% chance, but we can't force it; just check that *any* paralysis-fail
         // branch that does appear does not confuse).

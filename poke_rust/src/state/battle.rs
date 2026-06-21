@@ -1,10 +1,10 @@
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::{
+use crate::state::dex_data::{
     PokemonData, PseudoWeather, SelfSwitchType, SideCondition, SlotCondition, Terrain, Weather,
 };
-use crate::pokemon::PokemonState;
+use crate::state::pokemon::PokemonState;
 use std::collections::HashMap;
 
 fn humanize_identifier(value: impl AsRef<str>) -> String {
@@ -539,7 +539,7 @@ pub fn change_form(
 
     let old_max_hp = mon.stats[0].max(1);
     let hp_ratio = mon.hp.min(old_max_hp) as f32 / old_max_hp as f32;
-    let stats = crate::pokemon::calc_stats_for_level(
+    let stats = crate::state::pokemon::calc_stats_for_level(
         form_data.base_stats,
         mon.ivs,
         mon.evs,

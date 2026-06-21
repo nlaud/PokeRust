@@ -37,12 +37,12 @@
 //! [`crate::unknowns::PokemonHP`] so that allies report exact HP and opponents report a
 //! percentage, exactly as a real player observes.
 
-use crate::battle::{FieldSlot, Player};
+use crate::state::battle::{FieldSlot, Player};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::{
+use crate::state::dex_data::{
     PokemonStat, PokemonType, PseudoWeather, SideCondition, SlotCondition, Status, Terrain,
     VolatileStatus, Weather,
 };

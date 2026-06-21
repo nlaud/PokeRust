@@ -445,7 +445,7 @@ pub struct PokemonData {
     pub forme: Option<Species>,
     pub required_item: Option<String>,
     pub battle_only: Option<Species>,
-    pub default_gender: crate::pokemon::PokemonGender,
+    pub default_gender: crate::state::pokemon::PokemonGender,
 }
 
 // --- Helpers ---
@@ -1182,7 +1182,7 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
     let mut forme: Option<Species> = None;
     let mut required_item: Option<String> = None;
     let mut battle_only: Option<Species> = None;
-    let mut default_gender = crate::pokemon::PokemonGender::Male;
+    let mut default_gender = crate::state::pokemon::PokemonGender::Male;
     let mut has_explicit_gender = false;
 
     for line in lines {
@@ -1263,11 +1263,11 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
             if let Some(val) = extract_quoted(trimmed, "gender") {
                 has_explicit_gender = true;
                 if val == "M" {
-                    default_gender = crate::pokemon::PokemonGender::Male;
+                    default_gender = crate::state::pokemon::PokemonGender::Male;
                 } else if val == "F" {
-                    default_gender = crate::pokemon::PokemonGender::Female;
+                    default_gender = crate::state::pokemon::PokemonGender::Female;
                 } else if val == "N" {
-                    default_gender = crate::pokemon::PokemonGender::Genderless;
+                    default_gender = crate::state::pokemon::PokemonGender::Genderless;
                 }
             }
         } else if trimmed.starts_with("genderRatio:") && !has_explicit_gender {
@@ -1292,12 +1292,12 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
                 }
             }
             if m_ratio > f_ratio {
-                default_gender = crate::pokemon::PokemonGender::Male;
+                default_gender = crate::state::pokemon::PokemonGender::Male;
             } else if f_ratio > m_ratio {
-                default_gender = crate::pokemon::PokemonGender::Female;
+                default_gender = crate::state::pokemon::PokemonGender::Female;
             } else {
                 // Default to Male if equal
-                default_gender = crate::pokemon::PokemonGender::Male;
+                default_gender = crate::state::pokemon::PokemonGender::Male;
             }
         }
     }

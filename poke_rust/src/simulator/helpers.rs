@@ -1,15 +1,15 @@
-use crate::battle::{Action, BattleState, FieldSlot, Player};
+use crate::state::battle::{Action, BattleState, FieldSlot, Player};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::dex_data::VolatileStatus;
-use crate::dex_data::{
+use crate::state::dex_data::VolatileStatus;
+use crate::state::dex_data::{
     AccuracyType, DamageOverride, HitEffect, MoveCategory, MoveData, MoveFlag, MoveTarget,
     PokemonStat, PokemonType, PseudoWeather, SelfSwitchType, SideCondition, Status, Terrain,
     Weather,
 };
-use crate::pokemon::{Nature, PokemonState, VolatileStatusState};
+use crate::state::pokemon::{Nature, PokemonState, VolatileStatusState};
 use rand::{Rng, thread_rng};
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -1538,7 +1538,7 @@ fn variable_move_base_power(
                 .volatiles
                 .iter()
                 .find_map(|v| {
-                    if let crate::pokemon::VolatileStatusState::MoveStatus(
+                    if let crate::state::pokemon::VolatileStatusState::MoveStatus(
                         VolatileStatus::LockedMove(_),
                         t,
                     ) = v
@@ -1553,7 +1553,7 @@ fn variable_move_base_power(
             let has_curl = attacker.volatiles.iter().any(|v| {
                 matches!(
                     v,
-                    crate::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, _)
+                    crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, _)
                 )
             });
             if has_curl {
@@ -1728,7 +1728,7 @@ fn effective_base_power(
     // Condition / stat power boosts (grouped together; suppression guard is shared).
     if !pokemon_ability_is_suppressed(state, attacker) {
         // Rivalry: ×1.25 same gender, ×0.75 opposite gender, ×1.0 if either is Genderless.
-        use crate::pokemon::PokemonGender;
+        use crate::state::pokemon::PokemonGender;
         let rivalry_mult = match (attacker.gender, target.gender) {
             (PokemonGender::Male, PokemonGender::Male)
             | (PokemonGender::Female, PokemonGender::Female)
@@ -2702,14 +2702,14 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     // Lucky Chant is on the DEFENDER'S side — it blocks crits against that side's Pokémon.
     let lucky_chant_on_target_side = {
         let (conditions, _) = match _target_slot.player {
-            crate::battle::Player::P1 => {
+            crate::state::battle::Player::P1 => {
                 (&_state.p1_side_conditions, &_state.p1_side_condition_turns)
             }
-            crate::battle::Player::P2 => {
+            crate::state::battle::Player::P2 => {
                 (&_state.p2_side_conditions, &_state.p2_side_condition_turns)
             }
         };
-        conditions.contains(&crate::dex_data::SideCondition::LuckyChant)
+        conditions.contains(&crate::state::dex_data::SideCondition::LuckyChant)
     };
     let crits = critical_hit_probability(
         attacker,
@@ -3032,13 +3032,13 @@ pub fn set_substitute_hp(mon: &mut PokemonState, hp: u16) {
 /// bypass the sub. Self-targeting damage is handled at the call site (never routed to sub).
 pub fn attack_bypasses_substitute(
     state: &BattleState,
-    attacker_slot: crate::battle::FieldSlot,
-    move_data: &crate::dex_data::MoveData,
+    attacker_slot: crate::state::battle::FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
 ) -> bool {
-    if move_has_flag(move_data, &crate::dex_data::MoveFlag::Sound) {
+    if move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Sound) {
         return true;
     }
-    if move_has_flag(move_data, &crate::dex_data::MoveFlag::BypassSub) {
+    if move_has_flag(move_data, &crate::state::dex_data::MoveFlag::BypassSub) {
         return true;
     }
     get_pokemon_at_slot(state, attacker_slot)
@@ -3521,7 +3521,7 @@ pub fn apply_damage_and_check_game_over(
     state: &mut BattleState,
     target_slot: FieldSlot,
     damage: u16,
-) -> Option<crate::battle::MatchState> {
+) -> Option<crate::state::battle::MatchState> {
     let item_active = get_pokemon_at_slot(state, target_slot)
         .map(|m| item_is_active(state, m))
         .unwrap_or(false);
@@ -3551,7 +3551,7 @@ pub fn apply_damage_and_check_game_over(
                 Player::P1 => Player::P2,
                 Player::P2 => Player::P1,
             };
-            return Some(crate::battle::MatchState::GameOverState { winner });
+            return Some(crate::state::battle::MatchState::GameOverState { winner });
         }
     }
 
@@ -5413,22 +5413,22 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     {
         let slot_idx = slot.slot_index as usize;
         let has_healing_wish = match slot.player {
-            crate::battle::Player::P1 => state
+            crate::state::battle::Player::P1 => state
                 .p1_slot_conditions
                 .get(slot_idx)
                 .map(|conds| {
                     conds
                         .iter()
-                        .any(|sc| matches!(sc, crate::dex_data::SlotCondition::HealingWish))
+                        .any(|sc| matches!(sc, crate::state::dex_data::SlotCondition::HealingWish))
                 })
                 .unwrap_or(false),
-            crate::battle::Player::P2 => state
+            crate::state::battle::Player::P2 => state
                 .p2_slot_conditions
                 .get(slot_idx)
                 .map(|conds| {
                     conds
                         .iter()
-                        .any(|sc| matches!(sc, crate::dex_data::SlotCondition::HealingWish))
+                        .any(|sc| matches!(sc, crate::state::dex_data::SlotCondition::HealingWish))
                 })
                 .unwrap_or(false),
         };
@@ -5445,12 +5445,12 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
                 }
                 // Remove the HealingWish condition from this slot.
                 let conds = match slot.player {
-                    crate::battle::Player::P1 => &mut state.p1_slot_conditions,
-                    crate::battle::Player::P2 => &mut state.p2_slot_conditions,
+                    crate::state::battle::Player::P1 => &mut state.p1_slot_conditions,
+                    crate::state::battle::Player::P2 => &mut state.p2_slot_conditions,
                 };
                 if let Some(slot_conds) = conds.get_mut(slot_idx) {
                     slot_conds
-                        .retain(|sc| !matches!(sc, crate::dex_data::SlotCondition::HealingWish));
+                        .retain(|sc| !matches!(sc, crate::state::dex_data::SlotCondition::HealingWish));
                 }
             }
             // If the entrant is already full HP with no status, leave the condition in place.
@@ -6392,7 +6392,7 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
                     sun_blocks_freeze,
                     false,
                     mon,
-                    &crate::dex_data::Status::Sleep(0),
+                    &crate::state::dex_data::Status::Sleep(0),
                 );
             }
         }
@@ -6485,7 +6485,7 @@ pub fn decrement_move_statuses(mon: &mut PokemonState) {
                 // LockedMove counter is count-up (attacks completed so far) and is
                 // managed exclusively by the rampage end-timing fork in
                 // apply_post_damage_move_effects. Do not decrement it here.
-                if matches!(effect, crate::dex_data::VolatileStatus::LockedMove(_)) {
+                if matches!(effect, crate::state::dex_data::VolatileStatus::LockedMove(_)) {
                     kept.push(VolatileStatusState::MoveStatus(effect, turns));
                 } else if turns == 0 {
                     kept.push(VolatileStatusState::MoveStatus(effect, 0));
@@ -6743,7 +6743,7 @@ fn apply_status_to_pokemon(
     sun_blocks_freeze: bool,
     mold_break: bool,
     mon: &mut PokemonState,
-    status: &crate::dex_data::Status,
+    status: &crate::state::dex_data::Status,
 ) {
     // Prevent statuses if ability blocks all non-volatile statuses
     if mon.ability == Ability::Comatose || mon.ability == Ability::PurifyingSalt {
@@ -7207,7 +7207,7 @@ fn resolve_wish_slot_conditions(state: &mut BattleState) {
         for (slot_idx, slot_conds) in conds.iter_mut().enumerate() {
             let mut resolved_heal: Option<u16> = None;
             slot_conds.retain_mut(|sc| {
-                if let crate::dex_data::SlotCondition::Wish {
+                if let crate::state::dex_data::SlotCondition::Wish {
                     heal,
                     turns_remaining,
                 } = sc
@@ -7241,8 +7241,8 @@ struct FiredFutureMove {
     snapshot_raw_spa: u16,
     snapshot_spa_boost: i8,
     snapshot_level: u8,
-    snapshot_type1: Option<crate::dex_data::PokemonType>,
-    snapshot_type2: Option<crate::dex_data::PokemonType>,
+    snapshot_type1: Option<crate::state::dex_data::PokemonType>,
+    snapshot_type2: Option<crate::state::dex_data::PokemonType>,
     snapshot_ability: Ability,
     snapshot_item: Item,
 }
@@ -7258,7 +7258,7 @@ fn extract_fired_future_moves(state: &mut BattleState) -> Vec<FiredFutureMove> {
         };
         for (slot_idx, slot_conds) in conds.iter_mut().enumerate() {
             slot_conds.retain_mut(|sc| {
-                if let crate::dex_data::SlotCondition::FutureMove {
+                if let crate::state::dex_data::SlotCondition::FutureMove {
                     move_name,
                     turns_remaining,
                     snapshot_raw_spa,
@@ -9677,7 +9677,7 @@ pub fn can_be_infatuated(
     source_slot: FieldSlot,
     target_slot: FieldSlot,
 ) -> bool {
-    use crate::pokemon::PokemonGender;
+    use crate::state::pokemon::PokemonGender;
     let (sg, tg, tab, already) = {
         let Some(src) = get_pokemon_at_slot(state, source_slot) else {
             return false;
@@ -9876,14 +9876,14 @@ pub(crate) fn encore_immune_move(
     mv: &PokemonMove,
     move_dex: &std::collections::HashMap<
         crate::data::pokemon_move::PokemonMove,
-        crate::dex_data::MoveData,
+        crate::state::dex_data::MoveData,
     >,
 ) -> bool {
     if matches!(mv, PokemonMove::Struggle | PokemonMove::Mimic) {
         return true;
     }
     move_dex.get(mv).map_or(false, |d| {
-        move_has_flag(d, &crate::dex_data::MoveFlag::FailEncore)
+        move_has_flag(d, &crate::state::dex_data::MoveFlag::FailEncore)
     })
 }
 
@@ -9896,7 +9896,7 @@ pub fn try_apply_encore(
     target_slot: FieldSlot,
     move_dex: &std::collections::HashMap<
         crate::data::pokemon_move::PokemonMove,
-        crate::dex_data::MoveData,
+        crate::state::dex_data::MoveData,
     >,
 ) -> Option<PokemonMove> {
     let last_move = {
@@ -10661,7 +10661,7 @@ pub(crate) fn try_absorb_move(
             if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
                 if !has_status_volatile(mon, &VolatileStatus::FlashFire) {
                     mon.volatiles
-                        .push(crate::pokemon::VolatileStatusState::MoveStatus(
+                        .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
                             VolatileStatus::FlashFire,
                             0,
                         ));
@@ -11179,7 +11179,7 @@ pub fn apply_secondary_effects(
                 .iter_mut()
                 .chain(bs.p2_active_mons.iter_mut())
             {
-                if matches!(mon.status, Some(crate::dex_data::Status::Sleep(_))) {
+                if matches!(mon.status, Some(crate::state::dex_data::Status::Sleep(_))) {
                     mon.status = None;
                 }
             }
