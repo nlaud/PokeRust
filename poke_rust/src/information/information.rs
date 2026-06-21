@@ -43,8 +43,8 @@ use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::state::dex_data::{
-    PokemonStat, PokemonType, PseudoWeather, SideCondition, SlotCondition, Status, Terrain,
-    VolatileStatus, Weather,
+    PokemonType, PseudoWeather, SideCondition, SlotCondition, Status, Terrain, VolatileStatus,
+    Weather,
 };
 use super::unknowns::PokemonHP;
 
@@ -121,6 +121,17 @@ pub enum EventKind {
 
     /// A Pokémon entered the field (voluntary switch, or nested under its forcer).
     Switch(SwitchState),
+
+    /// Multiple Pokémon entered the field simultaneously (battle-start leads or end-of-turn
+    /// faint replacements). Ability activations (Intimidate, weather setters, etc.) and
+    /// their downstream reactions are nested in this event's `reactions` in resolution order,
+    /// exactly as the simulator processes them (`process_sendouts_in_speed_order_branching`).
+    SimultaneousSwitch { switches: Vec<SwitchState> },
+
+    /// Marks the end of a turn. Visible EOT effects (weather chip, Leftovers heal, etc.) are
+    /// nested in `reactions`. The engine uses this event to trigger internal bookkeeping:
+    /// timer decrements and per-turn/per-move volatile flag resets.
+    EndOfTurn,
 
     /// A Pokémon fainted.
     Faint { slot: FieldSlot },
@@ -237,9 +248,12 @@ pub enum EventKind {
     /// A stat stage changed. `stages` is signed: positive = boost, negative = drop.
     /// Covers `-boost`, `-unboost`, and `-setboost` (set is expressed as an absolute
     /// stage value relative to the current stage when constructing the event).
+    ///
+    /// `boost_idx` is the index into the `PokemonBoostTable` / `[i8; 7]` boost array:
+    ///   0=Atk, 1=Def, 2=SpA, 3=SpD, 4=Spe, 5=Accuracy, 6=Evasion
     BoostChanged {
         target: FieldSlot,
-        stat: PokemonStat,
+        boost_idx: usize,
         stages: i8,
     },
 
@@ -348,7 +362,7 @@ pub enum EventKind {
     /// Trace, Skill Swap result, Mummy, Wandering Spirit, Mega Evolution ability,
     /// and any other ability disclosure.
     AbilityRevealed { slot: FieldSlot, ability: Ability },
-
-    /// The Pokémon's ability was suppressed (Gastro Acid, Neutralizing Gas).
-    AbilitySuppressed { slot: FieldSlot },
+    // NOTE: Ability suppression is NOT a discrete event; it is tracked as state via
+    // the GastroAcid volatile on the affected Pokémon and a field-wide NeutralizingGas scan,
+    // exactly mirroring `pokemon_ability_is_suppressed` in simulator/helpers.rs.
 }

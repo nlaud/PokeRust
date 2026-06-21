@@ -410,7 +410,10 @@ impl UnknownPokemonState {
             first_move_on_field: mon.first_move_on_field,
             first_turn_on_field_pending: mon.first_turn_on_field_pending,
             entered_this_turn: mon.entered_this_turn,
-            pre_transform: mon.pre_transform.clone(),
+            pre_transform: mon
+                .pre_transform
+                .as_deref()
+                .map(|p| Box::new(UnknownPokemonState::from_known_pokemon(p))),
             pre_mimicry_types: mon.pre_mimicry_types.clone(),
             times_hit: mon.times_hit,
         }

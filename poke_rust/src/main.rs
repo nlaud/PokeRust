@@ -35,6 +35,10 @@ struct Args {
     #[arg(long, default_value="../pokemon_info/showdownMoves.txt")]
     move_dex: String,
 
+    /// Path to the showdown ability data
+    #[arg(long, default_value="../pokemon_info/showdownAbilities.txt")]
+    ability_dex: String,
+
     /// How verbose debug output is (0 = Nothing, 1 = Minimal, 2 = Debug Trace, 3 = High Debug, 4 = Max Debug)
     #[arg(short, long, default_value_t = 1)]
     verbosity: u8,
@@ -71,6 +75,9 @@ fn main() {
     //Put move data into a hashmap
     let move_dex = state::dex_data::parse_move_dex(&args.move_dex);
 
+    // Put ability metadata into a hashmap (used by inference engine for ability absence/priority)
+    let ability_dex = state::dex_data::parse_ability_dex(&args.ability_dex);
+
     // Print info about a sample move (before printing teamsheets)
     
     let sample_move = PokemonMove::Roost;
@@ -80,7 +87,7 @@ fn main() {
     
 
     if args.verbosity >= 1 {
-        println!("{}", format!("Loaded {} Pokemon and {} moves", pokemon_dex.len(), move_dex.len()).bright_green());
+        println!("{}", format!("Loaded {} Pokemon, {} moves, {} abilities", pokemon_dex.len(), move_dex.len(), ability_dex.len()).bright_green());
     }
 
     if args.verbosity >= 4 {

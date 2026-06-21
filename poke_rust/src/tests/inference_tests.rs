@@ -14,7 +14,7 @@ use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
-    AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonData, PokemonStat,
+    AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonData,
     PokemonType, SelfDestructType, SelfSwitchType, Status,
 };
 use crate::information::inference::{
@@ -185,6 +185,7 @@ fn apply_ex(
         false,
         &dex,
         &move_dex,
+        &HashMap::new(), // ability_dex — not needed for most tests
         &InferenceConfig::default(),
     );
     match result {
@@ -317,8 +318,8 @@ fn test_boost_changed_net() {
     let result = apply(
         state,
         vec![
-            event(EventKind::BoostChanged { target: p2(0), stat: PokemonStat::Atk, stages: 2 }),
-            event(EventKind::BoostChanged { target: p2(0), stat: PokemonStat::Atk, stages: -1 }),
+            event(EventKind::BoostChanged { target: p2(0), boost_idx: 0, stages: 2 }),  // 0=Atk
+            event(EventKind::BoostChanged { target: p2(0), boost_idx: 0, stages: -1 }),
         ],
     );
     assert_eq!(result.p2_active_mons[0].boosts[0], 1, "net Atk boost should be +1");

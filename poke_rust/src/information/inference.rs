@@ -35,10 +35,10 @@ use crate::information::unknowns::{
 use crate::simulator::helpers::base_damage_formula;
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
-    AccuracyType, MoveCategory, MoveData, PokemonData, PokemonStat, PseudoWeather, SideCondition,
-    SlotCondition, Status, Terrain, VolatileStatus, Weather,
+    AbilityData, AccuracyType, MoveCategory, MoveData, PokemonData, PokemonStat, PseudoWeather,
+    SideCondition, SlotCondition, Status, Terrain, VolatileStatus, Weather,
 };
-use crate::state::pokemon::{Nature, calc_hp, calc_stat, nature_stat_modifiers};
+use crate::state::pokemon::{Nature, VolatileStatusState, calc_hp, calc_stat, nature_stat_modifiers};
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -270,6 +270,9 @@ fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
 /// Fold one turn's (or team preview's) ordered `events` into `state`, returning
 /// an updated `UnknownMatchState` that incorporates every fact the events imply.
 ///
+/// `ability_dex` supplies ability metadata (on-start visibility, priority modifiers).
+/// Pass `&HashMap::new()` if not available — ability-absence inference is silently skipped.
+///
 /// # Panics
 /// If the events are jointly impossible under the current state (soundness oracle).
 pub fn apply_information(
@@ -278,6 +281,7 @@ pub fn apply_information(
     is_team_preview: bool,
     dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
+    ability_dex: &HashMap<Ability, AbilityData>,
     config: &InferenceConfig,
 ) -> UnknownMatchState {
     match &mut state {
@@ -285,7 +289,7 @@ pub fn apply_information(
             apply_information_team_preview(preview, events, config, dex);
         }
         UnknownMatchState::Battle(battle) => {
-            apply_information_battle(battle, events, dex, move_dex, config);
+            apply_information_battle(battle, events, dex, move_dex, ability_dex, config);
         }
         UnknownMatchState::GameOver { .. } => {}
     }
@@ -313,18 +317,78 @@ fn process_team_preview_event(
     config: &InferenceConfig,
     dex: &HashMap<Species, PokemonData>,
 ) {
-    if let EventKind::Switch(sw) = &event.kind {
-        let mons = match sw.slot.player {
-            Player::P1 => &mut state.p1_mons,
-            Player::P2 => &mut state.p2_mons,
-        };
-        if let Some(mon) = mons
-            .iter_mut()
-            .find(|m| unknown_is_known_as(&m.possible_species, &sw.species))
-        {
-            apply_switch_state_to_mon(mon, sw, config);
+    match &event.kind {
+        EventKind::Switch(sw) => {
+            let mons = match sw.slot.player {
+                Player::P1 => &mut state.p1_mons,
+                Player::P2 => &mut state.p2_mons,
+            };
+            if let Some(mon) = mons
+                .iter_mut()
+                .find(|m| unknown_is_known_as(&m.possible_species, &sw.species))
+            {
+                apply_switch_state_to_mon(mon, sw, config);
+            }
         }
+        EventKind::SimultaneousSwitch { switches } => {
+            for sw in switches {
+                let mons = match sw.slot.player {
+                    Player::P1 => &mut state.p1_mons,
+                    Player::P2 => &mut state.p2_mons,
+                };
+                if let Some(mon) = mons
+                    .iter_mut()
+                    .find(|m| unknown_is_known_as(&m.possible_species, &sw.species))
+                {
+                    apply_switch_state_to_mon(mon, sw, config);
+                }
+            }
+        }
+        EventKind::AbilityRevealed { slot, ability } => {
+            let mons = match slot.player {
+                Player::P1 => &mut state.p1_mons,
+                Player::P2 => &mut state.p2_mons,
+            };
+            if let Some(mon) = mons.get_mut(slot.slot_index as usize) {
+                unknown_set_known(
+                    &mut mon.possible_abilities,
+                    ability.clone(),
+                    "preview-ability",
+                );
+            }
+        }
+        EventKind::ItemRevealed { slot, item } => {
+            let mons = match slot.player {
+                Player::P1 => &mut state.p1_mons,
+                Player::P2 => &mut state.p2_mons,
+            };
+            if let Some(mon) = mons.get_mut(slot.slot_index as usize) {
+                unknown_set_known(&mut mon.item, item.clone(), "preview-item");
+            }
+        }
+        EventKind::Terastallization { slot, tera_type } => {
+            let mons = match slot.player {
+                Player::P1 => &mut state.p1_mons,
+                Player::P2 => &mut state.p2_mons,
+            };
+            if let Some(mon) = mons.get_mut(slot.slot_index as usize) {
+                mon.is_tera = true;
+                unknown_set_known(&mut mon.possible_tera_type, tera_type.clone(), "preview-tera");
+            }
+        }
+        EventKind::StatusInflicted { target, status } => {
+            let mons = match target.player {
+                Player::P1 => &mut state.p1_mons,
+                Player::P2 => &mut state.p2_mons,
+            };
+            if let Some(mon) = mons.get_mut(target.slot_index as usize) {
+                mon.status = Some(status.clone());
+            }
+        }
+        // Events that cannot meaningfully occur at team preview are silently ignored.
+        _ => {}
     }
+
     for reaction in &event.reactions {
         process_team_preview_event(state, reaction, config, dex);
     }
@@ -337,12 +401,14 @@ fn apply_information_battle(
     events: &[InformationEvent],
     dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
+    ability_dex: &HashMap<Ability, AbilityData>,
     config: &InferenceConfig,
 ) {
     // ── Pass 1–3: depth-first event walk ─────────────────────────────────────
     let mut ctx = BattleContext {
         dex,
         move_dex,
+        ability_dex,
         config,
         move_context: None,
     };
@@ -379,6 +445,7 @@ fn apply_information_battle(
 struct BattleContext<'a> {
     dex: &'a HashMap<Species, PokemonData>,
     move_dex: &'a HashMap<PokemonMove, MoveData>,
+    ability_dex: &'a HashMap<Ability, AbilityData>,
     config: &'a InferenceConfig,
     /// The nearest enclosing `MoveUsed`, for nested-reaction analysis.
     move_context: Option<MoveContext>,
@@ -390,6 +457,10 @@ struct MoveContext {
     pokemon_move: PokemonMove,
     targets: Vec<FieldSlot>,
     is_crit: bool,
+    /// Pre-move HP of each target (for Pass 3 damage delta).
+    pre_hit_hp: Vec<(FieldSlot, PokemonHP)>,
+    /// Accumulated observed damage intervals per target, in hit order.
+    observed_damage: Vec<(FieldSlot, PokemonHP)>,
 }
 
 /// Depth-first event walk applying Passes 1–3.
@@ -412,11 +483,23 @@ fn process_battle_event(
         targets,
     } = &event.kind
     {
+        // Snapshot pre-hit HP for all targets (Pass 3 scaffold).
+        let pre_hit_hp = targets
+            .iter()
+            .filter_map(|t| {
+                mon_idx_for_active_slot(state, t)
+                    .and_then(|i| get_mon_by_idx(state, i))
+                    .map(|m| (t.clone(), m.hp.clone()))
+            })
+            .collect();
+
         ctx.move_context = Some(MoveContext {
             user_slot: user.clone(),
             pokemon_move: move_used.clone(),
             targets: targets.clone(),
             is_crit,
+            pre_hit_hp,
+            observed_damage: Vec::new(),
         });
     }
 
@@ -445,7 +528,33 @@ fn pass1_apply_event(
     ctx: &BattleContext,
 ) {
     match &event.kind {
-        EventKind::Switch(sw) => pass1_switch(state, sw, ctx),
+        EventKind::Switch(sw) => {
+            // Apply switch-out bench reset to the mon leaving the slot (if any).
+            apply_switch_out_reset(state, &sw.slot);
+            pass1_switch(state, sw, ctx);
+            // Ability absence inference: no other entries in the same wave.
+            pass1_ability_absence_inference(state, &[sw.slot.clone()], &event.reactions, ctx);
+        }
+
+        EventKind::SimultaneousSwitch { switches } => {
+            // Apply switch-out bench reset to all slots being replaced.
+            for sw in switches {
+                apply_switch_out_reset(state, &sw.slot);
+            }
+            // Process each switch-in.
+            for sw in switches {
+                pass1_switch(state, sw, ctx);
+            }
+            // Ability absence inference over the combined reaction list.
+            let slots: Vec<FieldSlot> = switches.iter().map(|sw| sw.slot.clone()).collect();
+            pass1_ability_absence_inference(state, &slots, &event.reactions, ctx);
+        }
+
+        EventKind::EndOfTurn => {
+            // Visible EOT effects (damage chip, heals, etc.) are in reactions and will be
+            // processed by the recursive descent. This arm triggers internal bookkeeping.
+            apply_end_of_turn(state);
+        }
 
         EventKind::MoveUsed {
             user, move_used, ..
@@ -458,15 +567,16 @@ fn pass1_apply_event(
                     } else {
                         mon.consecutive_move_count = 1;
                     }
-                    // Choice-item cross-turn exclusion: a second different move
-                    // while potentially Choice-locked rules out Choice items.
-                    pass1_choice_exclusion(mon, move_used);
-                    mon.last_used_move = Some(move_used.clone());
+                    // Update used_moves_this_field BEFORE choice exclusion (it reads it).
                     for i in 0..4 {
                         if mon.known_moves[i] == Some(move_used.clone()) {
                             mon.used_moves_this_field[i] = true;
                         }
                     }
+                    // Choice-item exclusion: keyed on used_moves_this_field (not last_used_move
+                    // which survives switch-out).
+                    pass1_choice_exclusion(mon, move_used);
+                    mon.last_used_move = Some(move_used.clone());
                 }
             }
         }
@@ -481,7 +591,44 @@ fn pass1_apply_event(
         }
 
         EventKind::DamageDealt { target, new_hp } => {
+            let old_hp = mon_idx_for_active_slot(state, target)
+                .and_then(|i| get_mon_by_idx(state, i))
+                .map(|m| m.hp.clone());
             update_mon_hp(state, target, new_hp.clone());
+
+            // Per-turn damage tracking (mirrors end_turn Phase 5 fields).
+            if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    mon.damaged_this_turn = true;
+                    mon.last_damage_taken = old_hp.clone().unwrap_or(PokemonHP::Percent(0));
+                    mon.times_hit = mon.times_hit.saturating_add(1);
+
+                    // Attribute to the enclosing MoveUsed if available.
+                    if let Some(ref mctx) = ctx.move_context {
+                        let attacker = &mctx.user_slot;
+                        if !mon.damaged_by_this_turn.contains(attacker) {
+                            mon.damaged_by_this_turn.push(attacker.clone());
+                        }
+                        mon.last_damage_attacker = Some(attacker.clone());
+                        // Physical vs special from move category.
+                        if let Some(md) = ctx.move_dex.get(&mctx.pokemon_move) {
+                            match md.category {
+                                MoveCategory::Physical => {
+                                    mon.last_physical_damage_taken =
+                                        old_hp.clone().unwrap_or(PokemonHP::Percent(0));
+                                    mon.last_physical_attacker = Some(attacker.clone());
+                                }
+                                MoveCategory::Special => {
+                                    mon.last_special_damage_taken =
+                                        old_hp.clone().unwrap_or(PokemonHP::Percent(0));
+                                    mon.last_special_attacker = Some(attacker.clone());
+                                }
+                                MoveCategory::Status => {}
+                            }
+                        }
+                    }
+                }
+            }
         }
         EventKind::Healed { target, new_hp } => {
             update_mon_hp(state, target, new_hp.clone());
@@ -577,20 +724,23 @@ fn pass1_apply_event(
                 }
             }
         }
-        EventKind::AbilitySuppressed { .. } => {
-            // TODO: track ability-suppression flag on UnknownPokemonState.
-        }
 
         EventKind::BoostChanged {
             target,
-            stat,
+            boost_idx,
             stages,
         } => {
             if let Some(idx) = mon_idx_for_active_slot(state, target) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    if let Some(i) = pokemon_stat_to_boost_idx(stat) {
-                        let new_stage = (mon.boosts[i] as i16 + *stages as i16).clamp(-6, 6) as i8;
-                        mon.boosts[i] = new_stage;
+                    if *boost_idx < 7 {
+                        let new_stage =
+                            (mon.boosts[*boost_idx] as i16 + *stages as i16).clamp(-6, 6) as i8;
+                        mon.boosts[*boost_idx] = new_stage;
+                    }
+                    if *stages > 0 {
+                        mon.stats_raised_this_turn = true;
+                    } else if *stages < 0 {
+                        mon.stats_lowered_this_turn = true;
                     }
                 }
             }
@@ -886,12 +1036,12 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     let mut mon = if let Some(m) = back_mon {
         m
     } else {
-        // Completely new opponent mon: build from species.
+        // Completely new opponent mon: build from species, then recompute stat bounds for
+        // the configured IV mode (always call — fixes the bug where non-force_max_ivs mode
+        // left the mon with the from_opponent_species defaults instead of proper bounds).
         let mut new_mon =
             UnknownPokemonState::from_opponent_species(species.clone(), ctx.dex, ctx.config.level);
-        if ctx.config.force_max_ivs {
-            pin_ivs_and_recompute_stats(&mut new_mon, species, ctx);
-        }
+        recompute_stats_for_iv_mode(&mut new_mon, species, ctx);
         if let Some(legal) = &ctx.config.legal_items {
             let mut candidates: Vec<Item> = legal.iter().cloned().collect();
             candidates.push(Item::None);
@@ -902,6 +1052,19 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
 
     apply_switch_state_to_mon(&mut mon, sw, ctx.config);
 
+    // Illusion widening (only for unknown / opponent mons).
+    let opponent_known_back_species: Vec<Species> = {
+        let back = match player {
+            Player::P1 => &state.p1_known_back_mons,
+            Player::P2 => &state.p2_known_back_mons,
+        };
+        back.iter()
+            .filter_map(|m| {
+                if let Unknown::Known(s) = &m.possible_species { Some(s.clone()) } else { None }
+            })
+            .collect()
+    };
+
     let actives = match sw.slot.player {
         Player::P1 => &mut state.p1_active_mons,
         Player::P2 => &mut state.p2_active_mons,
@@ -911,25 +1074,40 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     } else {
         actives.push(mon);
     }
+
+    maybe_widen_for_illusion(state, &sw.slot, &opponent_known_back_species);
 }
 
-fn pin_ivs_and_recompute_stats(
+/// Recompute `minStats`/`maxStats` and pin IVs according to `config.force_max_ivs`.
+///
+/// When `force_max_ivs = true`: IVs are pinned to [31;6], min stats use EV=0 and nature×0.9,
+///   max stats use EV=252 and nature×1.1.
+/// When `force_max_ivs = false`: IV range is [0,31], min uses IV=0 + EV=0 + nature×0.9,
+///   max uses IV=31 + EV=252 + nature×1.1.
+fn recompute_stats_for_iv_mode(
     mon: &mut UnknownPokemonState,
     species: &Species,
     ctx: &BattleContext,
 ) {
-    mon.minIvs = [31; 6];
-    mon.maxIvs = [31; 6];
+    let force_max = ctx.config.force_max_ivs;
+    if force_max {
+        mon.minIvs = [31; 6];
+        mon.maxIvs = [31; 6];
+    } else {
+        mon.minIvs = [0; 6];
+        mon.maxIvs = [31; 6];
+    }
     if let Some(data) = ctx.dex.get(species) {
         let b = data.base_stats;
         let lv = ctx.config.level;
+        let min_iv: u8 = if force_max { 31 } else { 0 };
         mon.minStats = [
-            calc_hp(b[0], 31, 0, lv),
-            calc_stat(b[1], 31, 0, lv, 0.9),
-            calc_stat(b[2], 31, 0, lv, 0.9),
-            calc_stat(b[3], 31, 0, lv, 0.9),
-            calc_stat(b[4], 31, 0, lv, 0.9),
-            calc_stat(b[5], 31, 0, lv, 0.9),
+            calc_hp(b[0], min_iv, 0, lv),
+            calc_stat(b[1], min_iv, 0, lv, 0.9),
+            calc_stat(b[2], min_iv, 0, lv, 0.9),
+            calc_stat(b[3], min_iv, 0, lv, 0.9),
+            calc_stat(b[4], min_iv, 0, lv, 0.9),
+            calc_stat(b[5], min_iv, 0, lv, 0.9),
         ];
         mon.maxStats = [
             calc_hp(b[0], 31, 252, lv),
@@ -951,13 +1129,54 @@ fn apply_switch_state_to_mon(
     mon.hp = sw.hp.clone();
     mon.status = sw.status.clone();
     mon.switched_in_this_turn = true;
+    mon.entered_this_turn = true;
+    // Clear per-field flags on switch-in (mirrors helpers.rs:5396-5399).
+    mon.first_move_on_field = true;
+    mon.first_turn_on_field_pending = false; // caller can override for mid-turn entries
+    mon.used_moves_this_field = [false; 4];
     if let Some(tt) = &sw.tera_type {
         mon.is_tera = true;
         mon.possible_tera_type = Unknown::Known(tt.clone());
     }
+    // IV range is set by recompute_stats_for_iv_mode; apply_switch_state_to_mon only
+    // enforces the flag for mons that arrive from back (already built without force_max).
     if config.force_max_ivs {
         mon.minIvs = [31; 6];
         mon.maxIvs = [31; 6];
+    }
+}
+
+/// Apply the bench (switch-out) reset to whatever mon is currently in `slot`, if any.
+/// Mirrors the switch-out field clearing at `simulator/mod.rs:6225-6246`.
+fn apply_switch_out_reset(state: &mut UnknownBattleState, slot: &FieldSlot) {
+    let actives = match slot.player {
+        Player::P1 => &mut state.p1_active_mons,
+        Player::P2 => &mut state.p2_active_mons,
+    };
+    let i = slot.slot_index as usize;
+    if let Some(mon) = actives.get_mut(i) {
+        // Unburden ends on switch-out.
+        mon.item_lost = false;
+        // Per-turn event flags don't follow to the bench.
+        mon.damaged_this_turn = false;
+        mon.damaged_by_this_turn.clear();
+        mon.last_physical_damage_taken = PokemonHP::Percent(0);
+        mon.last_physical_attacker = None;
+        mon.last_special_damage_taken = PokemonHP::Percent(0);
+        mon.last_special_attacker = None;
+        mon.last_damage_taken = PokemonHP::Percent(0);
+        mon.last_damage_attacker = None;
+        mon.stats_raised_this_turn = false;
+        mon.stats_lowered_this_turn = false;
+        mon.switched_in_this_turn = false;
+        // Consecutive-use streaks reset on switch-out.
+        mon.stall_counter = 0;
+        mon.ally_switch_counter = 0;
+        mon.consecutive_move_count = 0;
+        // Null last_used_move so the Metronome streak doesn't carry across switch-ins.
+        mon.last_used_move = None;
+        // Rage Fist hit counter resets (Champions rules).
+        mon.times_hit = 0;
     }
 }
 
@@ -979,13 +1198,34 @@ fn reveal_move_on_mon(mon: &mut UnknownPokemonState, pokemon_move: &PokemonMove)
     // Don't panic; widening is sound.
 }
 
+/// Exclude Choice items when the mon has used 2+ different moves in the same field stint.
+///
+/// Uses `used_moves_this_field` (cleared on switch-in) rather than `last_used_move`
+/// (not cleared on switch-out) so that a Pokémon using a new move after switching back
+/// in is never incorrectly flagged as Choice-locked.
+///
+/// Call AFTER `used_moves_this_field` has been updated for `new_move`.
 fn pass1_choice_exclusion(mon: &mut UnknownPokemonState, new_move: &PokemonMove) {
-    if let Some(ref last) = mon.last_used_move.clone() {
-        if last != new_move {
-            let choices = [Item::ChoiceBand, Item::ChoiceScarf, Item::ChoiceSpecs];
-            for ci in &choices {
-                unknown_exclude(&mut mon.item, ci, "choice-lock");
+    // Count how many distinct known moves have been used this field.
+    let distinct_used: Vec<&PokemonMove> = mon
+        .known_moves
+        .iter()
+        .enumerate()
+        .filter_map(|(i, slot)| {
+            if mon.used_moves_this_field[i] {
+                slot.as_ref()
+            } else {
+                None
             }
+        })
+        .collect();
+
+    // If the mon has used more than one distinct move since it came in, Choice items are out.
+    let has_different = distinct_used.iter().any(|&m| m != new_move);
+    if has_different && distinct_used.len() >= 2 {
+        let choices = [Item::ChoiceBand, Item::ChoiceScarf, Item::ChoiceSpecs];
+        for ci in &choices {
+            unknown_exclude(&mut mon.item, ci, "choice-lock");
         }
     }
 }
@@ -998,14 +1238,405 @@ fn update_mon_hp(state: &mut UnknownBattleState, slot: &FieldSlot, new_hp: Pokem
     }
 }
 
-fn pokemon_stat_to_boost_idx(stat: &PokemonStat) -> Option<usize> {
-    match stat {
-        PokemonStat::Atk => Some(0),
-        PokemonStat::Def => Some(1),
-        PokemonStat::SpA => Some(2),
-        PokemonStat::SpD => Some(3),
-        PokemonStat::Spe => Some(4),
+// ── Ability suppression helpers ────────────────────────────────────────────────
+
+/// `true` if this mon's ability is DEFINITELY suppressed (Gastro Acid volatile present).
+/// Does NOT check for Neutralizing Gas because we only call this when the active
+/// field scan (below) already cleared the NeutralizingGas check.
+fn has_gastro_acid(mon: &UnknownPokemonState) -> bool {
+    mon.volatiles.iter().any(|v| {
+        matches!(v,
+            VolatileStatusState::TurnStatus(VolatileStatus::GastroAcid, _)
+            | VolatileStatusState::MoveStatus(VolatileStatus::GastroAcid, _))
+    })
+}
+
+/// `true` if we can be CERTAIN that some active mon has Neutralizing Gas (meaning
+/// that all non-NeutralizingGas abilities are suppressed field-wide). We are
+/// certain only when `possible_abilities == Known(NeutralizingGas)`.
+fn neutralizing_gas_definitely_active(state: &UnknownBattleState) -> bool {
+    state
+        .p1_active_mons
+        .iter()
+        .chain(state.p2_active_mons.iter())
+        .any(|m| {
+            !m.fainted
+                && unknown_is_known_as(&m.possible_abilities, &Ability::NeutralizingGas)
+        })
+}
+
+/// `true` if this mon's ability might be suppressed (sound: returns true whenever
+/// suppression is possible, not just certain). Used to skip absence-of-effect inference.
+fn unknown_ability_might_be_suppressed(state: &UnknownBattleState, slot: &FieldSlot) -> bool {
+    // If Neutralizing Gas might be on the field → suppress inference (sound: might be true).
+    let maybe_ng = state
+        .p1_active_mons
+        .iter()
+        .chain(state.p2_active_mons.iter())
+        .any(|m| {
+            !m.fainted
+                && !unknown_is_excluded(&m.possible_abilities, &Ability::NeutralizingGas)
+        });
+    if maybe_ng {
+        return true;
     }
+    // Check per-mon Gastro Acid.
+    if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+        if let Some(mon) = get_mon_by_idx(state, idx) {
+            return has_gastro_acid(mon);
+        }
+    }
+    false
+}
+
+// ── End-of-turn bookkeeping ────────────────────────────────────────────────────
+
+/// Apply internal EOT resets that mirror `end_turn` Phase 5 and
+/// `decrement_effect_timers` in `simulator/helpers.rs`.
+///
+/// Visible EOT effects (weather chip, heal, etc.) are handled by the event walk
+/// visiting `EndOfTurn::reactions`; this function handles the invisible internal state.
+fn apply_end_of_turn(state: &mut UnknownBattleState) {
+    // ── Decrement field timers ────────────────────────────────────────────────
+    decrement_unknown_turns(&mut state.weather_turns, &mut state.weather);
+    decrement_unknown_turns(&mut state.terrain_turns, &mut state.terrain);
+    for t in state.pseudo_weather_turns.iter_mut() {
+        decrement_unknown_turns_raw(t);
+    }
+    // Remove expired pseudo-weathers (those whose turn set collapsed to empty).
+    // (We don't know which pseudo-weather expired — leave for event-driven clearing.)
+    for (sc_turns, _sc) in state
+        .p1_side_condition_turns
+        .iter_mut()
+        .zip(state.p1_side_conditions.iter())
+    {
+        decrement_unknown_turns_raw(sc_turns);
+    }
+    for (sc_turns, _sc) in state
+        .p2_side_condition_turns
+        .iter_mut()
+        .zip(state.p2_side_conditions.iter())
+    {
+        decrement_unknown_turns_raw(sc_turns);
+    }
+
+    // Also decrement the `turns` field inside any turn-count predicate.
+    for clause in state.predicates.iter_mut() {
+        for lit in clause.iter_mut() {
+            match lit {
+                Statement::WeatherTurns { turns }
+                | Statement::PseudoWeatherTurns { turns }
+                | Statement::SideConditionTurns { turns, .. } => {
+                    if *turns > 0 {
+                        *turns -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Remove predicates whose turns have all reached 0.
+    state.predicates.retain(|clause| {
+        !clause.iter().any(|lit| {
+            matches!(
+                lit,
+                Statement::WeatherTurns { turns: 0 }
+                    | Statement::PseudoWeatherTurns { turns: 0 }
+                    | Statement::SideConditionTurns { turns: 0, .. }
+            )
+        })
+    });
+
+    // ── Advance turn counter ──────────────────────────────────────────────────
+    state.turn_number = state.turn_number.saturating_add(1);
+
+    // ── Clear per-turn flags (mirrors end_turn Phase 5, helpers.rs:6623-6673) ─
+    for mon in state
+        .p1_active_mons
+        .iter_mut()
+        .chain(state.p2_active_mons.iter_mut())
+    {
+        mon.entered_this_turn = false;
+        // U-turn / self-switch mid-turn: first_turn_on_field_pending causes EOT to skip
+        // clearing first_move_on_field exactly once.
+        if mon.first_turn_on_field_pending {
+            mon.first_turn_on_field_pending = false;
+        } else {
+            mon.first_move_on_field = false;
+        }
+        mon.damaged_this_turn = false;
+        mon.damaged_by_this_turn.clear();
+        mon.last_physical_damage_taken = PokemonHP::Percent(0);
+        mon.last_physical_attacker = None;
+        mon.last_special_damage_taken = PokemonHP::Percent(0);
+        mon.last_special_attacker = None;
+        mon.last_damage_taken = PokemonHP::Percent(0);
+        mon.last_damage_attacker = None;
+        mon.stats_raised_this_turn = false;
+        mon.stats_lowered_this_turn = false;
+        mon.switched_in_this_turn = false;
+        // Turn-scoped volatiles (Roost, Electrify).
+        mon.volatiles.retain(|v| {
+            !matches!(v,
+                VolatileStatusState::TurnStatus(VolatileStatus::Roost, _)
+                | VolatileStatusState::TurnStatus(VolatileStatus::Electrify, _)
+                | VolatileStatusState::MoveStatus(VolatileStatus::Roost, _)
+                | VolatileStatusState::MoveStatus(VolatileStatus::Electrify, _))
+        });
+    }
+    state.round_used_this_turn = false;
+    state.items_consumed_this_turn.clear();
+}
+
+/// Decrement an `Unknown<u8>` field representing remaining effect turns.
+/// If the counter reaches 0 in all possibilities, clears the option to reflect expiry.
+fn decrement_unknown_turns<T>(turns_opt: &mut Option<Unknown<u8>>, field: &mut Option<T>) {
+    if let Some(t) = turns_opt.as_mut() {
+        decrement_unknown_turns_raw(t);
+        // If the Possibly set is now empty, all possibilities say the effect has expired.
+        // We leave clearing `field` to the event-driven path (WeatherChanged / SideConditionEnd)
+        // so that we don't accidentally clear weather that persisted (8-turn case).
+    }
+}
+
+fn decrement_unknown_turns_raw(t: &mut Unknown<u8>) {
+    match t {
+        Unknown::Known(n) => {
+            if *n > 0 {
+                *n -= 1;
+            }
+        }
+        Unknown::Possibly(v) => {
+            *v = v.iter().filter_map(|&n| if n > 1 { Some(n - 1) } else { None }).collect();
+            if v.len() == 1 {
+                *t = Unknown::Known(v[0]);
+            }
+        }
+        Unknown::Not(_) => {} // Not meaningful for turn counts
+    }
+}
+
+// ── Ability absence / priority inference ──────────────────────────────────────
+
+/// Weather-setting abilities whose activation is always visible (`WeatherChanged`).
+const WEATHER_SETTING_ABILITIES: &[Ability] = &[
+    Ability::Drizzle,
+    Ability::Drought,
+    Ability::SandStream,
+    Ability::SnowWarning,
+    Ability::OrichalcumPulse, // Sets Sun (from helpers.rs:5791)
+    Ability::HadronEngine,    // Sets Electric Terrain (from helpers.rs:5785)
+];
+
+/// Terrain-setting abilities whose activation is always visible (`TerrainChanged`).
+const TERRAIN_SETTING_ABILITIES: &[Ability] = &[
+    Ability::ElectricSurge,
+    Ability::GrassySurge,
+    Ability::MistySurge,
+    Ability::PsychicSurge,
+    // HadronEngine sets Electric Terrain (already listed above, checked separately)
+];
+
+/// After a batch of switch-ins, scan the combined `reactions` list and remove
+/// abilities from `possible_abilities` that MUST have activated but didn't.
+///
+/// Sound: only excludes when we can be certain the ability would have been visible.
+/// Conservative: multi-mon battles with multiple possible setters are skipped unless
+/// the attribution is unambiguous.
+fn pass1_ability_absence_inference(
+    state: &mut UnknownBattleState,
+    entered_slots: &[FieldSlot],
+    reactions: &[InformationEvent],
+    ctx: &BattleContext,
+) {
+    if entered_slots.is_empty() {
+        return;
+    }
+
+    let weather_changed = reactions
+        .iter()
+        .any(|r| matches!(&r.kind, EventKind::WeatherChanged { weather: Some(_) }));
+    let terrain_changed = reactions
+        .iter()
+        .any(|r| matches!(&r.kind, EventKind::TerrainChanged { terrain: Some(_) }));
+
+    for slot in entered_slots {
+        // Skip if ability might be suppressed (sound: conservative).
+        if unknown_ability_might_be_suppressed(state, slot) {
+            continue;
+        }
+
+        let Some(idx) = mon_idx_for_active_slot(state, slot) else {
+            continue;
+        };
+
+        // ── Weather-setting abilities ────────────────────────────────────────
+        if !weather_changed {
+            // If ONLY this slot's mons could have a weather setter (no other entering
+            // mon has one), absence of WeatherChanged proves this mon doesn't have it.
+            // For single-entry (Switch) this is always unambiguous.
+            let sole_possible_setter = entered_slots.len() == 1
+                || only_slot_with_weather_setter(state, entered_slots, slot);
+
+            if sole_possible_setter {
+                for ab in WEATHER_SETTING_ABILITIES {
+                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                        unknown_exclude(&mut mon.possible_abilities, ab, "ability-absence-weather");
+                    }
+                }
+            }
+        }
+
+        // ── Terrain-setting abilities ────────────────────────────────────────
+        if !terrain_changed {
+            let sole_possible_setter = entered_slots.len() == 1
+                || only_slot_with_terrain_setter(state, entered_slots, slot);
+
+            if sole_possible_setter {
+                for ab in TERRAIN_SETTING_ABILITIES {
+                    // HadronEngine is already in WEATHER_SETTING_ABILITIES (sets elec terrain
+                    // but appears as WeatherChanged in some sims); skip duplicates.
+                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                        unknown_exclude(&mut mon.possible_abilities, ab, "ability-absence-terrain");
+                    }
+                }
+            }
+        }
+
+        // ── Intimidate ───────────────────────────────────────────────────────
+        // Intimidate fires a BoostChanged {boost_idx:0, stages:-1} on each adjacent foe.
+        // Only check when this is the sole possible Intimidate user and no such boost appeared.
+        let sole_possible_intimidate = entered_slots.len() == 1
+            || only_slot_with_ability(state, entered_slots, slot, &Ability::Intimidate);
+
+        if sole_possible_intimidate {
+            // Look for any opponent-side BoostChanged{0,-1} in reactions.
+            let intimidate_fired = reactions.iter().any(|r| {
+                if let EventKind::BoostChanged { target, boost_idx: 0, stages: -1 } = &r.kind {
+                    // target must be on the opposite side from the entering mon.
+                    target.player != slot.player
+                } else {
+                    false
+                }
+            });
+            if !intimidate_fired {
+                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    unknown_exclude(
+                        &mut mon.possible_abilities,
+                        &Ability::Intimidate,
+                        "ability-absence-intimidate",
+                    );
+                }
+            }
+        }
+
+        // ── Intrepid Sword / Dauntless Shield ────────────────────────────────
+        // These give +1 Atk and +1 Def to self, respectively, on first entry only.
+        // Skip if one_time_ability_used (already known to have fired); we don't track
+        // this reliably for opponents so just check if it fired in this reaction.
+        let intrepid_fired = reactions.iter().any(|r| {
+            if let EventKind::BoostChanged { target, boost_idx: 0, stages: 1 } = &r.kind {
+                target == slot
+            } else {
+                false
+            }
+        });
+        let dauntless_fired = reactions.iter().any(|r| {
+            if let EventKind::BoostChanged { target, boost_idx: 1, stages: 1 } = &r.kind {
+                target == slot
+            } else {
+                false
+            }
+        });
+        if !intrepid_fired && entered_slots.len() == 1 {
+            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                if !mon.one_time_ability_used {
+                    unknown_exclude(
+                        &mut mon.possible_abilities,
+                        &Ability::IntrepidSword,
+                        "ability-absence-intrepid",
+                    );
+                }
+            }
+        }
+        if !dauntless_fired && entered_slots.len() == 1 {
+            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                if !mon.one_time_ability_used {
+                    unknown_exclude(
+                        &mut mon.possible_abilities,
+                        &Ability::DauntlessShield,
+                        "ability-absence-dauntless",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn only_slot_with_weather_setter(
+    state: &UnknownBattleState,
+    entered_slots: &[FieldSlot],
+    this_slot: &FieldSlot,
+) -> bool {
+    // Returns true if among entered_slots, only this_slot could possibly have a weather setter.
+    for slot in entered_slots {
+        if slot == this_slot {
+            continue;
+        }
+        if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+            if let Some(mon) = get_mon_by_idx(state, idx) {
+                for ab in WEATHER_SETTING_ABILITIES {
+                    if !unknown_is_excluded(&mon.possible_abilities, ab) {
+                        return false; // Another entering mon might also have a weather setter.
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn only_slot_with_terrain_setter(
+    state: &UnknownBattleState,
+    entered_slots: &[FieldSlot],
+    this_slot: &FieldSlot,
+) -> bool {
+    for slot in entered_slots {
+        if slot == this_slot {
+            continue;
+        }
+        if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+            if let Some(mon) = get_mon_by_idx(state, idx) {
+                for ab in TERRAIN_SETTING_ABILITIES {
+                    if !unknown_is_excluded(&mon.possible_abilities, ab) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn only_slot_with_ability(
+    state: &UnknownBattleState,
+    entered_slots: &[FieldSlot],
+    this_slot: &FieldSlot,
+    ability: &Ability,
+) -> bool {
+    for slot in entered_slots {
+        if slot == this_slot {
+            continue;
+        }
+        if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+            if let Some(mon) = get_mon_by_idx(state, idx) {
+                if !unknown_is_excluded(&mon.possible_abilities, ability) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 // ── Pass 2: Item presence/absence from behaviour ──────────────────────────────
@@ -1542,9 +2173,47 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
             let slow_min = get_mon_by_idx(state, *slow_idx).map_or(0u64, |m| m.minStats[5] as u64);
             fast_max * (*fast_mult as u64) < slow_min * (*slow_mult as u64)
         }
-        Statement::WeatherTurns { .. }
-        | Statement::PseudoWeatherTurns { .. }
-        | Statement::SideConditionTurns { .. } => false, // TODO
+        Statement::WeatherTurns { turns } => {
+            // Definitely false if no weather active, or if the turn count is excluded.
+            state
+                .weather_turns
+                .as_ref()
+                .map_or(true, |wt| unknown_is_excluded(wt, &(*turns as u8)))
+        }
+        Statement::PseudoWeatherTurns { turns } => {
+            // Conservative: only rule out when there is exactly one pseudo-weather
+            // active and its count definitively excludes this value.
+            if state.pseudo_weather_turns.len() == 1 {
+                unknown_is_excluded(&state.pseudo_weather_turns[0], &(*turns as u8))
+            } else {
+                false
+            }
+        }
+        Statement::SideConditionTurns {
+            side,
+            side_condition,
+            turns,
+        } => {
+            let (conditions, turns_vec) = match side {
+                Player::P1 => (
+                    &state.p1_side_conditions,
+                    &state.p1_side_condition_turns,
+                ),
+                Player::P2 => (
+                    &state.p2_side_conditions,
+                    &state.p2_side_condition_turns,
+                ),
+            };
+            conditions
+                .iter()
+                .position(|c| c == side_condition)
+                .map_or(true, |i| {
+                    // Condition not in list → it's not active → statement false.
+                    turns_vec
+                        .get(i)
+                        .map_or(true, |ct| unknown_is_excluded(ct, &(*turns as u8)))
+                })
+        }
     }
 }
 
@@ -1586,11 +2255,60 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
                 get_mon_by_idx(state, *slow_idx).map_or(999u64, |m| m.maxStats[5] as u64);
             fast_min * (*fast_mult as u64) >= slow_max * (*slow_mult as u64)
         }
-        Statement::NatureBoostsStat { .. }
-        | Statement::NatureNerfsStat { .. }
-        | Statement::WeatherTurns { .. }
-        | Statement::PseudoWeatherTurns { .. }
-        | Statement::SideConditionTurns { .. } => false, // TODO
+        Statement::NatureBoostsStat { mon_idx, stat } => {
+            get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                let boosters = boosting_natures_for_stat(stat);
+                match &m.possible_natures {
+                    Unknown::Known(n) => boosters.contains(n),
+                    Unknown::Possibly(v) => !v.is_empty() && v.iter().all(|n| boosters.contains(n)),
+                    Unknown::Not(_) => false, // Not(excluded) can't confirm without full enumeration
+                }
+            })
+        }
+        Statement::NatureNerfsStat { mon_idx, stat } => {
+            get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                let nerfers = nerfing_natures_for_stat(stat);
+                match &m.possible_natures {
+                    Unknown::Known(n) => nerfers.contains(n),
+                    Unknown::Possibly(v) => !v.is_empty() && v.iter().all(|n| nerfers.contains(n)),
+                    Unknown::Not(_) => false,
+                }
+            })
+        }
+        Statement::WeatherTurns { turns } => state
+            .weather_turns
+            .as_ref()
+            .map_or(false, |wt| matches!(wt, Unknown::Known(v) if *v == *turns as u8)),
+        Statement::PseudoWeatherTurns { turns } => {
+            if state.pseudo_weather_turns.len() == 1 {
+                matches!(&state.pseudo_weather_turns[0], Unknown::Known(v) if *v == *turns as u8)
+            } else {
+                false
+            }
+        }
+        Statement::SideConditionTurns {
+            side,
+            side_condition,
+            turns,
+        } => {
+            let (conditions, turns_vec) = match side {
+                Player::P1 => (
+                    &state.p1_side_conditions,
+                    &state.p1_side_condition_turns,
+                ),
+                Player::P2 => (
+                    &state.p2_side_conditions,
+                    &state.p2_side_condition_turns,
+                ),
+            };
+            conditions
+                .iter()
+                .position(|c| c == side_condition)
+                .and_then(|i| turns_vec.get(i))
+                .map_or(false, |ct| {
+                    matches!(ct, Unknown::Known(v) if *v == *turns as u8)
+                })
+        }
     }
 }
 
@@ -1628,13 +2346,113 @@ fn force_literal(state: &mut UnknownBattleState, lit: &Statement) {
                 }
             }
         }
+        Statement::NatureBoostsStat { mon_idx, stat } => {
+            if let Some(mon) = get_mon_mut_by_idx(state, *mon_idx) {
+                let valid = boosting_natures_for_stat(stat);
+                filter_natures_to_set(&mut mon.possible_natures, &valid, "bcp-nature-boosts");
+            }
+        }
+        Statement::NatureNerfsStat { mon_idx, stat } => {
+            if let Some(mon) = get_mon_mut_by_idx(state, *mon_idx) {
+                let valid = nerfing_natures_for_stat(stat);
+                filter_natures_to_set(&mut mon.possible_natures, &valid, "bcp-nature-nerfs");
+            }
+        }
+        Statement::WeatherTurns { turns } => {
+            let t = *turns as u8;
+            if let Some(wt) = &mut state.weather_turns {
+                unknown_set_known(wt, t, "bcp-weather-turns");
+            } else {
+                inference_contradiction!(
+                    "bcp-weather-turns",
+                    "WeatherTurns forced to {} but no weather is active",
+                    turns
+                );
+            }
+        }
+        Statement::PseudoWeatherTurns { turns } => {
+            // Only deterministic when exactly one pseudo-weather is active.
+            if state.pseudo_weather_turns.len() == 1 {
+                let t = *turns as u8;
+                unknown_set_known(
+                    &mut state.pseudo_weather_turns[0],
+                    t,
+                    "bcp-pseudo-weather-turns",
+                );
+            }
+            // Multiple pseudo-weathers → can't attribute; no-op (conservative).
+        }
+        Statement::SideConditionTurns {
+            side,
+            side_condition,
+            turns,
+        } => {
+            let t = *turns as u8;
+            let idx = match side {
+                Player::P1 => state
+                    .p1_side_conditions
+                    .iter()
+                    .position(|c| c == side_condition),
+                Player::P2 => state
+                    .p2_side_conditions
+                    .iter()
+                    .position(|c| c == side_condition),
+            };
+            if let Some(i) = idx {
+                let turns_vec = match side {
+                    Player::P1 => &mut state.p1_side_condition_turns,
+                    Player::P2 => &mut state.p2_side_condition_turns,
+                };
+                if let Some(ct) = turns_vec.get_mut(i) {
+                    unknown_set_known(ct, t, "bcp-side-condition-turns");
+                }
+            }
+        }
         Statement::Not(_)
-        | Statement::SpeedComparison { .. } // handled by propagate_speed_comparisons
-        | Statement::NatureBoostsStat { .. }
-        | Statement::NatureNerfsStat { .. }
-        | Statement::WeatherTurns { .. }
-        | Statement::PseudoWeatherTurns { .. }
-        | Statement::SideConditionTurns { .. } => {}
+        | Statement::SpeedComparison { .. } => {} // handled by propagate_speed_comparisons
+    }
+}
+
+/// Retain in `natures` only those that appear in `valid`.
+/// Converts `Not(excluded)` to an explicit `Possibly` before filtering.
+/// Panics (contradiction) if no valid natures remain.
+fn filter_natures_to_set(natures: &mut Unknown<Nature>, valid: &[Nature], ctx: &str) {
+    match natures {
+        Unknown::Known(n) => {
+            if !valid.contains(n) {
+                inference_contradiction!(
+                    ctx,
+                    "Nature {:?} does not satisfy constraint (valid: {:?})",
+                    n,
+                    valid
+                );
+            }
+        }
+        Unknown::Not(excluded) => {
+            let mut candidates: Vec<Nature> = ALL_NATURES
+                .iter()
+                .filter(|n| valid.contains(n) && !excluded.contains(n))
+                .cloned()
+                .collect();
+            if candidates.is_empty() {
+                inference_contradiction!(ctx, "No valid natures remain after constraint");
+            }
+            if candidates.len() == 1 {
+                *natures = Unknown::Known(candidates.remove(0));
+            } else {
+                *natures = Unknown::Possibly(candidates);
+            }
+        }
+        Unknown::Possibly(v) => {
+            v.retain(|n| valid.contains(n));
+            if v.is_empty() {
+                inference_contradiction!(ctx, "No valid natures remain after constraint");
+            }
+            if v.len() == 1 {
+                let n = v[0].clone();
+                *natures = Unknown::Known(n);
+            }
+        }
     }
 }
 

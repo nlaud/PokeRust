@@ -1846,3 +1846,100 @@ pub fn parse_move_dex(file_path: &str) -> HashMap<PokemonMove, MoveData> {
     }
     result
 }
+
+// ── Ability data ─────────────────────────────────────────────────────────────
+
+/// Metadata parsed from `showdownAbilities.txt` for one ability.
+#[derive(Debug, Clone)]
+pub struct AbilityData {
+    /// Display name (e.g. "Intimidate").
+    pub name: String,
+    /// Showdown internal rating (-1 = detrimental … 5 = essential).
+    pub rating: f32,
+    /// Showdown internal ability number (can be negative for non-standard abilities).
+    pub num: i16,
+    /// Whether this ability has a visible battle-start effect (`onStart` / `onSwitchIn`
+    /// body in the JS source). Used to identify candidates for absence-of-effect inference;
+    /// filter via `BATTLE_VISIBLE_ON_START_ABILITIES` before applying.
+    pub has_on_start: bool,
+    /// Whether this ability modifies move priority (`onModifyPriority`). Only Gale Wings,
+    /// Prankster, and Triage have this property.
+    pub modifies_priority: bool,
+}
+
+fn parse_ability_entry(lines: &[String]) -> Option<(Ability, AbilityData)> {
+    let mut name = String::new();
+    let mut rating: f32 = 0.0;
+    let mut num: i16 = 0;
+    let mut has_on_start = false;
+    let mut modifies_priority = false;
+    let mut depth: i32 = 0;
+
+    for line in lines {
+        let trimmed = line.trim();
+
+        // Track brace depth to skip nested JS function bodies.
+        let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
+        let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
+
+        // Detect onStart / onSwitchIn function headers at top level (depth == 0 before this line).
+        if depth == 0 {
+            if trimmed.starts_with("onStart(") || trimmed.starts_with("onSwitchIn(") {
+                has_on_start = true;
+            }
+            if trimmed.starts_with("onModifyPriority") {
+                modifies_priority = true;
+            }
+        }
+
+        depth += opens - closes;
+
+        // Only parse scalar fields at top level (depth == 0 after processing braces
+        // so that we don't mis-read fields inside nested function bodies).
+        if depth == 0 {
+            if trimmed.starts_with("name:") {
+                if let Some(v) = extract_first_quoted_value(trimmed) {
+                    name = v;
+                }
+            } else if trimmed.starts_with("rating:") {
+                let rest = trimmed.trim_start_matches("rating:").trim().trim_end_matches(',');
+                if let Ok(v) = rest.parse::<f32>() {
+                    rating = v;
+                }
+            } else if trimmed.starts_with("num:") {
+                let rest = trimmed.trim_start_matches("num:").trim().trim_end_matches(',');
+                if let Ok(v) = rest.parse::<i16>() {
+                    num = v;
+                }
+            }
+        }
+    }
+
+    if name.is_empty() {
+        return None;
+    }
+    let ability = Ability::from_str(&name);
+    Some((
+        ability,
+        AbilityData { name, rating, num, has_on_start, modifies_priority },
+    ))
+}
+
+/// Parse `showdownAbilities.txt` into a `HashMap<Ability, AbilityData>`.
+///
+/// Missing or unrecognised ability names map to `Ability::Unknown(...)` which is
+/// stored in the map but generally filtered out by callers.
+pub fn parse_ability_dex(file_path: &str) -> HashMap<Ability, AbilityData> {
+    let content = match fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let entries = split_entries(&content);
+    let mut result = HashMap::new();
+    for (_key, lines) in &entries {
+        if let Some((ability, data)) = parse_ability_entry(&lines) {
+            result.insert(ability, data);
+        }
+    }
+    result
+}
