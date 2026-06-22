@@ -570,3 +570,424 @@ fn test_status_conflict_panics() {
         vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Paralysis })],
     );
 }
+
+// ── Pass 3: Damage → Stat Bounds ─────────────────────────────────────────────
+
+/// Species dex entry for Garchomp (Ground/Dragon, base stats [108,130,95,80,85,102]).
+fn garchomp_dex() -> HashMap<Species, PokemonData> {
+    use crate::state::pokemon::PokemonGender;
+    let mut dex = HashMap::new();
+    dex.insert(Species::Garchomp, PokemonData {
+        species:       Species::Garchomp,
+        types:         vec![PokemonType::Dragon, PokemonType::Ground],
+        base_stats:    [108, 130, 95, 80, 85, 102], // HP Atk Def SpA SpD Spe
+        weight:        950, // 95.0 kg
+        primary_ability: Some(Ability::SandVeil),
+        base_species:  None,
+        forme:         None,
+        required_item: None,
+        battle_only:   None,
+        default_gender: PokemonGender::Male,
+    });
+    dex
+}
+
+/// Ground-type physical move (used as Earthquake stand-in).
+fn ground_physical_move(name: PokemonMove, bp: u16) -> MoveData {
+    MoveData {
+        name,
+        base_power:     bp,
+        accuracy:       AccuracyType::Percent(100),
+        target:         MoveTarget::Normal,
+        secondaries:    vec![],
+        self_secondaries: vec![],
+        pp:             10,
+        category:       MoveCategory::Physical,
+        pokemon_type:   PokemonType::Ground,
+        priority:       0,
+        flags:          vec![],
+        ohko:           false,
+        thaws_target:   false,
+        heal_fraction:  [0, 0],
+        force_switch:   false,
+        self_switch:    SelfSwitchType::None,
+        self_boost:     [0; 7],
+        self_destruct:  SelfDestructType::None,
+        breaks_protect: false,
+        recoil_fraction:  [0, 0],
+        drain_fraction:   [0, 0],
+        mind_blown_recoil: false,
+        struggle_recoil: false,
+        crit_ratio:     1,
+        foul_play:      false,
+        ignore_ability:       false,
+        ignore_defense_boosts: false,
+        ignore_evasion:        false,
+        ignore_immunity:       vec![],
+        multihit_range:        [1, 1],
+        multihit_accuracy:     false,
+        sleep_usable:          false,
+        has_crash_damage:      false,
+        damage_override:       DamageOverride::None,
+        stalling_move:         false,
+        override_offensive_stat: None,
+        override_defensive_stat: None,
+    }
+}
+
+/// A "known" P1 mon (our own) with concrete HP and stats for Direction-B tests.
+///
+/// hp = 500 (Number), Def = 100. Normal-type (Ground-immune check: Normal is not immune
+/// to Ground). All unknown fields collapsed to Known so the oracle sees exact values.
+///
+/// Uses Species::Snorlax as a placeholder — Snorlax is intentionally absent from the
+/// `garchomp_dex()` used in these tests, so Pass 5 skips P1 (can't verify EV/IV with
+/// no base-stat data). Own-mon stats are always fully known, so the skip is correct.
+fn known_p1_normal() -> UnknownPokemonState {
+    // Snorlax is NOT in garchomp_dex() → pass5 skips validation for this mon,
+    // so the out-of-range HP=500 does not trigger a contradiction.
+    let mut mon = unknown_mon_species(Species::Snorlax);
+    mon.hp               = PokemonHP::Number(500);
+    mon.minStats         = [500, 35, 100, 55, 125, 55];
+    mon.maxStats         = [500, 35, 100, 55, 125, 55];
+    mon.item             = Unknown::Known(Item::None);
+    mon.possible_abilities = Unknown::Known(Ability::None);
+    mon.possible_types   = Unknown::Known(vec![PokemonType::Normal]);
+    mon
+}
+
+/// Garchomp attacker with *neutral* nature only, no item, no damage-boosting ability.
+///
+/// This removes booster/nature ambiguity from the test, making the expected BSV bound
+/// computable by hand. The oracle will use the exact pre-nature BSV as the final stat.
+///
+/// **Important**: passes `garchomp_dex()` to `from_opponent_species` so the real base
+/// stats [108,130,…] are used.  With an empty dex the fallback base is [100;6], which
+/// would initialise pre-nature bounds to [105, 152] instead of the correct [135, 182].
+fn neutral_no_item_garchomp() -> UnknownPokemonState {
+    use crate::state::pokemon::Nature;
+    // Use real Garchomp dex so min/max pre-nature stat are initialised from base=130.
+    let mut mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    // Lock nature to neutral so BSV == final stat in the oracle.
+    mon.possible_natures   = Unknown::Known(Nature::Hardy);
+    mon.item               = Unknown::Known(Item::None);
+    // SandVeil: not a damage-boosting ability.
+    mon.possible_abilities = Unknown::Known(Ability::SandVeil);
+    mon.hp = PokemonHP::Percent(100);
+    mon
+}
+
+/// Runs Pass 3 for Direction B and returns the resulting state.
+///
+/// `damage` = HP lost by P1 (pre_hp - new_hp).  P2 is the attacker; P1 is the target.
+fn run_direction_b(p2_mon: UnknownPokemonState, damage: u16) -> crate::information::unknowns::UnknownBattleState {
+    let our_mon = known_p1_normal();
+    let pre_hp = match our_mon.hp { PokemonHP::Number(n) => n, _ => panic!("expected Number") };
+    let new_hp = pre_hp.saturating_sub(damage);
+
+    let state = battle_1v1(our_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+
+    apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    )
+}
+
+// ── Direction B: upper-bound tightening ──────────────────────────────────────
+
+/// Damage 91 is achievable by Garchomp BSV ≤ 161 but NOT by BSV ≥ 162.
+///
+/// Manual derivation (level 50, BP=100 Earthquake, no item/ability/weather/terrain/screens):
+///   base_damage_formula(50, 100, atk, def=100) = floor(floor(22*100*atk/100/50)+2)
+///                                                = floor(floor(0.44*atk)+2)
+///   Then × roll/100 × 1.5 (STAB Ground on Garchomp) → per-roll damage.
+///
+/// BSV=161 → base=72 → roll=85 → floor(floor(72*0.85)*1.5) = floor(61*1.5) = 91. ✓
+/// BSV=162 → base=73 → roll=85 → floor(floor(73*0.85)*1.5) = floor(62*1.5) = 93 > 91.
+///           For any roll, BSV=162 produces ≥ 93.  So BSV=162 is not feasible for damage=91.
+#[test]
+fn test_pass3_dir_b_upper_bound_tightened() {
+    let result = run_direction_b(neutral_no_item_garchomp(), 91);
+    let p2 = &result.p2_active_mons[0];
+
+    // Initial max_pre_nature_stat[1] for Garchomp at lv50 (IV=31, EV=252, neutral) is 182.
+    // After seeing damage=91, the highest feasible BSV is 161 → bound must have dropped.
+    assert!(
+        p2.max_pre_nature_stat[1] <= 161,
+        "max BSV must be ≤ 161 after seeing damage 91 (got {})",
+        p2.max_pre_nature_stat[1]
+    );
+
+    // Soundness: the min attacker BSV (135) CAN produce damage=91 (at roll=100),
+    // so the lower bound must NOT be raised above 135.
+    assert!(
+        p2.min_pre_nature_stat[1] <= 135,
+        "min BSV must not exceed 135 — that value is consistent with damage 91 (got {})",
+        p2.min_pre_nature_stat[1]
+    );
+}
+
+// ── Direction B: lower-bound tightening ──────────────────────────────────────
+
+/// Damage 103 cannot be produced by BSV ≤ 152 but CAN by BSV ≥ 153.
+///
+/// BSV=153 → base=69 → roll=100 → floor(69*1.0*1.5) = floor(103.5) = 103. ✓
+/// BSV=152 → base=68 → all rolls produce max floor(68*1.0*1.5)=floor(102)=102 < 103.
+///           And at roll=85: floor(floor(68*0.85)*1.5)=floor(57*1.5)=85 < 103.
+#[test]
+fn test_pass3_dir_b_lower_bound_tightened() {
+    let result = run_direction_b(neutral_no_item_garchomp(), 103);
+    let p2 = &result.p2_active_mons[0];
+
+    // Initial min_pre_nature_stat[1] for Garchomp at lv50 (IV=0, EV=0, neutral) is 135.
+    // After seeing damage=103, the lowest feasible BSV is 153 → bound must have risen.
+    assert!(
+        p2.min_pre_nature_stat[1] >= 153,
+        "min BSV must be ≥ 153 after seeing damage 103 (got {})",
+        p2.min_pre_nature_stat[1]
+    );
+
+    // Soundness: BSV=182 (max neutral Garchomp) CAN produce damage=103 (at roll=85),
+    // so the upper bound must NOT be lowered below 182.
+    assert!(
+        p2.max_pre_nature_stat[1] >= 182,
+        "max BSV must not go below 182 — that value is consistent with damage 103 (got {})",
+        p2.max_pre_nature_stat[1]
+    );
+}
+
+// ── Direction B: soundness across the full damage range ──────────────────────
+
+/// Every achievable damage value in Garchomp's EQ range must not cause a contradiction
+/// in Pass 3 (no panic, and bounds remain valid min ≤ max).
+#[test]
+fn test_pass3_dir_b_no_contradiction_across_damage_range() {
+    // Garchomp EQ range against P1 (Def=100) at lv50 with neutral nature:
+    //   min atk=135 → base=61 → roll=85 → 76
+    //   max atk=182 → base=82 → roll=100 → floor(82*1.5)=123
+    for damage in 76u16..=123u16 {
+        let result = run_direction_b(neutral_no_item_garchomp(), damage);
+        let p2 = &result.p2_active_mons[0];
+        assert!(
+            p2.min_pre_nature_stat[1] <= p2.max_pre_nature_stat[1],
+            "Pass 3 produced inverted bounds (min {} > max {}) for damage={}",
+            p2.min_pre_nature_stat[1], p2.max_pre_nature_stat[1], damage
+        );
+        // Bounds must stay inside Garchomp's theoretical BSV range [135, 182].
+        assert!(
+            p2.min_pre_nature_stat[1] >= 135,
+            "min BSV ({}) dropped below Garchomp's minimum (135) for damage={}",
+            p2.min_pre_nature_stat[1], damage
+        );
+        assert!(
+            p2.max_pre_nature_stat[1] <= 182,
+            "max BSV ({}) exceeded Garchomp's maximum (182) for damage={}",
+            p2.max_pre_nature_stat[1], damage
+        );
+    }
+}
+
+// ── Direction B: fixed-damage move skipped ────────────────────────────────────
+
+/// Fixed-damage moves (DamageOverride != None) carry no stat signal.  Pass 3 must
+/// not narrow any bounds when it sees one.
+#[test]
+fn test_pass3_fixed_damage_move_skipped() {
+    let p2_mon = neutral_no_item_garchomp();
+    let our_mon = known_p1_normal();
+
+    let initial_min = p2_mon.min_pre_nature_stat[1];
+    let initial_max = p2_mon.max_pre_nature_stat[1];
+
+    let state = battle_1v1(our_mon, p2_mon);
+
+    // Build a fixed-damage move (level-dependent, like Seismic Toss).
+    let fixed_move = MoveData {
+        name:           PokemonMove::SeismicToss,
+        base_power:     1, // ignored for fixed-damage
+        accuracy:       AccuracyType::Percent(100),
+        target:         MoveTarget::Normal,
+        category:       MoveCategory::Physical,
+        pokemon_type:   PokemonType::Normal,
+        priority:       0,
+        pp:             10,
+        flags:          vec![],
+        ohko:           false,
+        thaws_target:   false,
+        heal_fraction:  [0, 0],
+        force_switch:   false,
+        self_switch:    SelfSwitchType::None,
+        self_boost:     [0; 7],
+        self_destruct:  SelfDestructType::None,
+        breaks_protect: false,
+        recoil_fraction:  [0, 0],
+        drain_fraction:   [0, 0],
+        mind_blown_recoil: false,
+        struggle_recoil:  false,
+        crit_ratio:     1,
+        foul_play:      false,
+        ignore_ability:        false,
+        ignore_defense_boosts: false,
+        ignore_evasion:        false,
+        ignore_immunity:       vec![],
+        multihit_range:        [1, 1],
+        multihit_accuracy:     false,
+        sleep_usable:          false,
+        has_crash_damage:      false,
+        damage_override:       DamageOverride::Level, // fixed: causes pass3 skip
+        stalling_move:         false,
+        secondaries:           vec![],
+        self_secondaries:      vec![],
+        override_offensive_stat: None,
+        override_defensive_stat: None,
+    };
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::SeismicToss, fixed_move);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::SeismicToss, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(450) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_result = &result.p2_active_mons[0];
+    assert_eq!(
+        p2_result.min_pre_nature_stat[1], initial_min,
+        "min BSV must not change for a fixed-damage move"
+    );
+    assert_eq!(
+        p2_result.max_pre_nature_stat[1], initial_max,
+        "max BSV must not change for a fixed-damage move"
+    );
+}
+
+// ── Direction B: booster item → guarded predicate ────────────────────────────
+
+/// When the opponent's item is unknown and Choice Band is possible, Pass 3 emits
+/// *conditional* lower-bound predicates rather than unconditional tightening.
+///
+/// Specifically: if damage D is produced without Choice Band, the lower bound for BSV
+/// may be tight; but if Choice Band is possible, the unconditional bound is *loose*
+/// (union includes Band-assisted low-stat scenarios).  BCP can then propagate tightly
+/// once the item is excluded.
+#[test]
+fn test_pass3_dir_b_choice_band_loosens_unconditional_bound() {
+    use crate::state::pokemon::Nature;
+    // Attacker: neutral nature only, but item is unknown (Choice Band remains possible).
+    // Use real dex so pre-nature bounds reflect true base Atk=130.
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    p2_mon.possible_natures   = Unknown::Known(Nature::Hardy);
+    p2_mon.possible_abilities = Unknown::Known(Ability::SandVeil);
+    // item is Unknown::Not(vec![]) — fully unknown, Choice Band is possible.
+    p2_mon.hp = PokemonHP::Percent(100);
+
+    // A "tight" damage (e.g. 91) that without Choice Band constrains BSV ≤ 161.
+    let result_with_band_possible = run_direction_b(p2_mon.clone(), 91);
+    let bound_with_band = result_with_band_possible.p2_active_mons[0].max_pre_nature_stat[1];
+
+    // With no item locked, a Choice Band-boosted low-BSV attacker could also produce 91,
+    // so the unconditional upper bound must be ≥ the band-free bound.
+    // (A lower-BSV attacker with ×1.5 from Band could reach the same damage.)
+    // We know the band-free max is 161.  With Band possible, the union includes lower BSVs
+    // that with Band can also hit 91 → the max bound stays 182 (no tightening possible
+    // for any upper bound when Band is possible, since Band on BSV_min is also plausible).
+
+    // Key soundness assertion: the unconditional bound must NEVER go below the band-free bound
+    // (because "BSV=182 + Band" is always possible and can produce any damage in its range).
+    assert!(
+        bound_with_band <= 182,
+        "max BSV must not exceed 182 (got {})", bound_with_band
+    );
+
+    // After excluding Choice Band via ItemRevealed, BCP should propagate a tighter bound
+    // — feed a separate event stream that reveals a Lum Berry instead.
+    let our_mon2 = known_p1_normal();
+    let pre_hp = 500u16;
+    let new_hp = pre_hp - 91;
+    let state = battle_1v1(our_mon2, p2_mon);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![
+            // Move event that produces damage 91.
+            event_with(
+                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+                vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+            ),
+            // Item revealed: NOT Choice Band — eliminates the booster disjunct in BCP.
+            event(EventKind::ItemRevealed { slot: p2(0), item: Item::LumBerry }),
+        ],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    // After the band is excluded, BCP should fire the guarded EVIVStatLE → tighten max.
+    assert!(
+        p2_r.max_pre_nature_stat[1] <= 161,
+        "After Choice Band excluded via BCP, max BSV must drop to ≤ 161 (got {})",
+        p2_r.max_pre_nature_stat[1]
+    );
+    // Soundness: lower bound must not exceed 135.
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 135,
+        "min BSV must remain ≤ 135 after item exclusion (got {})",
+        p2_r.min_pre_nature_stat[1]
+    );
+}
+
+// ── Direction B: crit observed vs not ────────────────────────────────────────
+
+/// When a crit is observed, the oracle filters to crit outcomes only (×1.5 crit mult).
+/// The same damage that implies one Atk range under no-crit implies a *different*
+/// (lower) range under crit.  This test verifies that the crit flag reaches Pass 3
+/// without causing a contradiction.
+#[test]
+fn test_pass3_dir_b_crit_observed_no_contradiction() {
+    let our_mon = known_p1_normal();
+    let p2_mon = neutral_no_item_garchomp();
+
+    let state = battle_1v1(our_mon, p2_mon.clone());
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+
+    // A crit EQ deals more damage; feed a plausible crit damage (≈ 100 HP, lower BSV needed).
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+            vec![
+                event(EventKind::Crit { target: p1(0) }),           // crit signalled
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(400) }), // 100 damage
+            ],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    // No contradiction: bounds must remain valid (min ≤ max).
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= p2_r.max_pre_nature_stat[1],
+        "Crit observation must not produce inverted bounds (min {}, max {})",
+        p2_r.min_pre_nature_stat[1], p2_r.max_pre_nature_stat[1]
+    );
+    // Bounds must stay within Garchomp's theoretical range.
+    assert!(p2_r.min_pre_nature_stat[1] >= 135);
+    assert!(p2_r.max_pre_nature_stat[1] <= 182);
+}

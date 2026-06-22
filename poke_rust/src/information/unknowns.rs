@@ -96,6 +96,12 @@ pub struct UnknownPokemonState {
     pub minStats: PokemonStatsTable,
     pub maxStats: PokemonStatsTable,
 
+    /// Pre-nature base stat value bounds: `calc_stat(base, iv, ev, level, 1.0)` before ×0.9/1.0/1.1.
+    /// Tightened by Pass 3 (damage→stat inversion). Used by Pass 5 + Pass 6 `EVIVStatGE`/`EVIVStatLE`.
+    /// Index matches `minStats`/`maxStats`: 0=HP, 1=Atk, 2=Def, 3=SpA, 4=SpD, 5=Spe.
+    pub min_pre_nature_stat: PokemonStatsTable,
+    pub max_pre_nature_stat: PokemonStatsTable,
+
     pub boosts: PokemonBoostTable,
     pub status: Option<Status>,
 
@@ -287,11 +293,20 @@ pub enum Statement {
         mon_idx: usize,
         stat: PokemonStat,
     },
+    /// PRE-nature base stat value (calc_stat with mod=1.0) ≥ `value`.
+    /// Emitted by Pass 3. Checked and forced against `min_pre_nature_stat`/`max_pre_nature_stat`.
     EVIVStatGE {
         mon_idx: usize,
         stat: PokemonStat,
         value: u16,
-    }, //Stats FROM EVs and IVs greater than or equal to a value
+    },
+    /// PRE-nature base stat value (calc_stat with mod=1.0) ≤ `value`.
+    /// Symmetric upper-bound companion to `EVIVStatGE`.
+    EVIVStatLE {
+        mon_idx: usize,
+        stat: PokemonStat,
+        value: u16,
+    },
     /// Cross-mon effective-speed comparison in the same priority bracket.
     ///
     /// Invariant: `base_spe(fast_idx) * fast_mult >= base_spe(slow_idx) * slow_mult`
@@ -387,6 +402,15 @@ impl UnknownPokemonState {
             maxIvs: mon.ivs,
             minStats: mon.stats,
             maxStats: mon.stats,
+            // Pre-nature BSV bounds.
+            // For own (fully-known) Pokémon, PokemonState does not store base stats, so we
+            // cannot compute BSV exactly without the dex. Since EVIVStatGE/LE predicates are
+            // only ever emitted for *opponent* mons, these bounds on own mons are never used
+            // by BCP or Pass 3 to constrain anything — we set a maximally wide range that is
+            // vacuously sound.  If tighter own-mon BSV bounds are later needed, thread the
+            // dex through here and compute calc_stat(base, iv, ev, level, 1.0).
+            min_pre_nature_stat: [0u16; 6],
+            max_pre_nature_stat: [u16::MAX; 6],
             boosts: mon.boosts,
             status: mon.status.clone(),
             volatiles: mon.volatiles.clone(),
@@ -459,6 +483,27 @@ impl UnknownPokemonState {
             calc_stat(base[4], 31, 252, level, 1.1),
             calc_stat(base[5], 31, 252, level, 1.1),
         ];
+        // Pre-nature BSV bounds (nature-independent: calc_stat with mod=1.0).
+        // HP (index 0) has no nature modifier, so BSV == final stat.
+        // For non-HP stats, BSV range is wider than the post-nature range because nature is
+        // stripped: the minimum BSV (0 EV/IV, no nature boost) and maximum BSV (31 IV/252 EV,
+        // no nature nerf) span the achievable pre-nature lattice.
+        let min_pre_nature: PokemonStatsTable = [
+            calc_hp(base[0], 0, 0, level),
+            calc_stat(base[1], 0, 0, level, 1.0),
+            calc_stat(base[2], 0, 0, level, 1.0),
+            calc_stat(base[3], 0, 0, level, 1.0),
+            calc_stat(base[4], 0, 0, level, 1.0),
+            calc_stat(base[5], 0, 0, level, 1.0),
+        ];
+        let max_pre_nature: PokemonStatsTable = [
+            calc_hp(base[0], 31, 252, level),
+            calc_stat(base[1], 31, 252, level, 1.0),
+            calc_stat(base[2], 31, 252, level, 1.0),
+            calc_stat(base[3], 31, 252, level, 1.0),
+            calc_stat(base[4], 31, 252, level, 1.0),
+            calc_stat(base[5], 31, 252, level, 1.0),
+        ];
 
         // Genderless species are always genderless; sexed species gender is unknown.
         let possible_genders = if default_gender == PokemonGender::Genderless {
@@ -503,6 +548,8 @@ impl UnknownPokemonState {
             maxIvs: [31; 6],
             minStats: min_stats,
             maxStats: max_stats,
+            min_pre_nature_stat: min_pre_nature,
+            max_pre_nature_stat: max_pre_nature,
             boosts: [0; 7],
             status: None,
             volatiles: Vec::new(),

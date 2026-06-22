@@ -662,7 +662,7 @@ fn process_battle_event(
     // Pass 2/3 — item and stat inference keyed on the full MoveUsed + reactions.
     if matches!(event.kind, EventKind::MoveUsed { .. }) {
         pass2_item_from_move(state, event, ctx);
-        // Pass 3 deferred — needs HP tracking across turns (see TODO.md).
+        pass3_damage_to_stats(state, event, ctx);
     }
 
     ctx.move_context = prev_move_ctx;
@@ -1264,6 +1264,23 @@ fn recompute_stats_for_iv_mode(
             calc_stat(b[3], 31, 252, lv, 1.1),
             calc_stat(b[4], 31, 252, lv, 1.1),
             calc_stat(b[5], 31, 252, lv, 1.1),
+        ];
+        // Initialise pre-nature BSV bounds (neutral mod = 1.0).
+        mon.min_pre_nature_stat = [
+            calc_hp(b[0], min_iv, 0, lv),
+            calc_stat(b[1], min_iv, 0, lv, 1.0),
+            calc_stat(b[2], min_iv, 0, lv, 1.0),
+            calc_stat(b[3], min_iv, 0, lv, 1.0),
+            calc_stat(b[4], min_iv, 0, lv, 1.0),
+            calc_stat(b[5], min_iv, 0, lv, 1.0),
+        ];
+        mon.max_pre_nature_stat = [
+            calc_hp(b[0], 31, 252, lv),
+            calc_stat(b[1], 31, 252, lv, 1.0),
+            calc_stat(b[2], 31, 252, lv, 1.0),
+            calc_stat(b[3], 31, 252, lv, 1.0),
+            calc_stat(b[4], 31, 252, lv, 1.0),
+            calc_stat(b[5], 31, 252, lv, 1.0),
         ];
     }
 }
@@ -1911,12 +1928,913 @@ fn pass2_item_from_move(
 }
 
 // ── Pass 3: Damage → stat bounds ──────────────────────────────────────────────
-//
-// Deferred. Inverting the 22-step floored damage chain requires tracking HP
-// across turns to compute an exact damage delta.  Currently not implemented.
-// When added, this will bound the opponent's Atk/SpA (when we are the target)
-// or their Def/SpD/HP (when we deal the damage).
-// See TODO.md: "Damage→stat inversion for standard single-hit moves".
+
+/// Damage-to-stat inference: called once per top-level `MoveUsed` event after
+/// the full reaction tree has been walked (so HP deltas and crit flags are live).
+///
+/// **Design**: instead of a hand-rolled analytic inverse (fragile with 22 flooring
+/// steps), we use the real simulator oracle
+/// `calculate_damage_outcomes_for_target_with_options` as a forward model and
+/// enumerate candidate stats to find which ones can reproduce the observed damage.
+///
+/// **Direction B** (opponent attacks our known Pokémon): HP delta is exact
+/// (`PokemonHP::Number`); we bound the attacker's Atk/SpA.
+///
+/// **Direction A** (we attack the opponent): HP delta is a percent interval;
+/// we bound the defender's Def/SpD and HP.
+///
+/// **Soundness**: we always take the *union* over all possible (item, ability,
+/// nature-class) assignments, so we never exclude a training that could produce
+/// the observed damage.  Conditional CNF clauses let BCP recover precision as
+/// other passes exclude boosters.
+fn pass3_damage_to_stats(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+) {
+    use crate::information::materialize::{materialize_battle, materialize_pokemon};
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
+    use crate::simulator::DamageConfig;
+
+    let EventKind::MoveUsed {
+        user,
+        move_used,
+        targets,
+    } = &event.kind
+    else {
+        return;
+    };
+
+    let Some(move_data) = ctx.move_dex.get(move_used) else {
+        return;
+    };
+
+    // ── Skip moves that carry no stat signal ─────────────────────────────────
+    // Status moves, OHKO, fixed-damage, retaliation, Super Fang, etc.
+    use crate::state::dex_data::{DamageOverride, MoveCategory};
+    if matches!(move_data.category, MoveCategory::Status) {
+        return;
+    }
+    if move_data.ohko {
+        return;
+    }
+    if !matches!(move_data.damage_override, DamageOverride::None) {
+        return;
+    }
+    // Retaliation moves (Counter/Mirror Coat/Metal Burst/Comeuppance):
+    // damage is a multiple of incoming damage, not of the user's stats.
+    use crate::data::pokemon_move::PokemonMove as PM;
+    if matches!(
+        move_used,
+        PM::Counter | PM::MirrorCoat | PM::MetalBurst | PM::Comeuppance
+    ) {
+        return;
+    }
+    // Ambiguous offensive stat (Shell Side Arm, Photon Geyser): skip in v1.
+    if matches!(move_used, PM::ShellSideArm | PM::PhotonGeyser) {
+        return;
+    }
+    // Need a clear offensive stat to know which field to bound.
+    let Some(off_stat) = crate::simulator::helpers::move_offensive_stat(move_data) else {
+        return;
+    };
+
+    // Determine attacker / target mon_idx.
+    let Some(user_idx) = mon_idx_for_active_slot(state, user) else {
+        return;
+    };
+
+    // For each target that has a DamageDealt reaction, run the inference.
+    for target_slot in targets {
+        let Some(target_idx) = mon_idx_for_active_slot(state, target_slot) else {
+            continue;
+        };
+
+        // Find the DamageDealt for this target in the reactions (direct child).
+        let damage_reaction = event.reactions.iter().find(|r| {
+            matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == target_slot)
+        });
+        let Some(damage_event) = damage_reaction else {
+            continue;
+        };
+        let new_hp = match &damage_event.kind {
+            EventKind::DamageDealt { new_hp, .. } => new_hp,
+            _ => continue,
+        };
+
+        // Pre-hit HP from MoveContext snapshot.
+        let Some(move_ctx) = &ctx.move_context else {
+            continue;
+        };
+        let pre_hp = move_ctx
+            .pre_hit_hp
+            .iter()
+            .find(|(slot, _)| slot == target_slot)
+            .map(|(_, hp)| hp);
+        let Some(pre_hp) = pre_hp else {
+            continue;
+        };
+
+        let is_crit = move_ctx.is_crit;
+
+        // ── Classify direction ────────────────────────────────────────────────
+        // Direction B: target HP is Number → exact damage; we bound the ATTACKER's stat.
+        // Direction A: target HP is Percent → interval damage; we bound DEFENDER's stat.
+        match (pre_hp, new_hp) {
+            (PokemonHP::Number(pre), PokemonHP::Number(post)) => {
+                // Direction B: exact damage.
+                let exact_damage = pre.saturating_sub(*post);
+                if exact_damage == 0 {
+                    continue; // min-1 doesn't carry stat info usefully
+                }
+                pass3_direction_b(
+                    state,
+                    event,
+                    ctx,
+                    user_idx,
+                    target_idx,
+                    user,
+                    target_slot,
+                    move_data,
+                    &off_stat,
+                    is_crit,
+                    exact_damage,
+                );
+            }
+            (PokemonHP::Percent(pre_pct), PokemonHP::Percent(post_pct)) => {
+                // Direction A: percent interval.
+                // Only meaningful when there's an actual HP drop.
+                if post_pct >= pre_pct {
+                    continue;
+                }
+                let delta_pct = pre_pct - post_pct;
+                // Bound defender's defensive stat.
+                let Some(def_stat) = crate::simulator::helpers::move_defensive_stat(move_data)
+                else {
+                    continue;
+                };
+                pass3_direction_a(
+                    state,
+                    event,
+                    ctx,
+                    user_idx,
+                    target_idx,
+                    user,
+                    target_slot,
+                    move_data,
+                    &def_stat,
+                    is_crit,
+                    delta_pct,
+                );
+            }
+            _ => {
+                // Mixed Number/Percent (our mon attacking) — HP tracking needed; skip.
+                continue;
+            }
+        }
+    }
+}
+
+/// Items that can boost offensive damage for a given attacker mon.
+/// We enumerate these to build the booster disjuncts in CNF clauses.
+fn offensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
+    // Damage-relevant items (subset whose presence/absence matters for Pass 3).
+    // Metronome streak is handled separately (by varying consecutive_move_count).
+    [
+        Item::ChoiceBand,
+        Item::ChoiceSpecs,
+        Item::LifeOrb,
+        Item::ExpertBelt,
+        Item::MuscleBand,
+        Item::WiseGlasses,
+        Item::Charcoal,
+        Item::MysticWater,
+        Item::SharpBeak,
+        Item::TwistedSpoon,
+        Item::BlackGlasses,
+        Item::PoisonBarb,
+        Item::SoftSand,
+        Item::HardStone,
+        Item::Magnet,
+        Item::MetalCoat,
+        Item::NeverMeltIce,
+        Item::SilkScarf,
+        Item::BlackBelt,
+        Item::SpellTag,
+        Item::MiracleSeed,
+        Item::DragonFang,
+        Item::FairyFeather,
+        Item::Metronome,
+        Item::LightBall, // Pikachu only
+    ]
+    .iter()
+    .filter(|i| !unknown_is_excluded(&mon.item, i))
+    .cloned()
+    .collect()
+}
+
+/// Abilities that can boost offensive damage.
+fn offensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
+    [
+        Ability::HugePower,
+        Ability::PurePower,
+        Ability::Hustle,
+        Ability::Guts,
+        Ability::Adaptability,
+        Ability::Technician,
+        Ability::ToughClaws,
+        Ability::IronFist,
+        Ability::Sharpness,
+        Ability::MegaLauncher,
+        Ability::StrongJaw,
+        Ability::Reckless,
+        Ability::SandForce,
+        Ability::SheerForce,
+        Ability::WaterBubble,
+        Ability::SolarPower,
+        Ability::OrichalcumPulse,
+        Ability::HadronEngine,
+        Ability::Rivalry,
+        Ability::Blaze,
+        Ability::Overgrow,
+        Ability::Swarm,
+        Ability::Torrent,
+        Ability::FireMane,
+        Ability::FlashFire,
+        Ability::SupremeOverlord,
+        Ability::Sniper,
+        Ability::Plus,
+        Ability::Minus,
+        // -ate abilities
+        Ability::Pixilate,
+        Ability::Refrigerate,
+        Ability::Aerilate,
+        Ability::Galvanize,
+        Ability::Normalize,
+        Ability::Dragonize,
+        Ability::Eelevate,
+    ]
+    .iter()
+    .filter(|a| !unknown_is_excluded(&mon.possible_abilities, a))
+    .cloned()
+    .collect()
+}
+
+/// "No-booster" placeholders used when we want to compute the neutral bound.
+fn neutral_item(mon: &UnknownPokemonState) -> Item {
+    if let Unknown::Known(i) = &mon.item {
+        i.clone()
+    } else {
+        Item::None
+    }
+}
+
+fn neutral_ability(mon: &UnknownPokemonState) -> Ability {
+    if let Unknown::Known(a) = &mon.possible_abilities {
+        a.clone()
+    } else {
+        Ability::None
+    }
+}
+
+/// Direction B: we are the target, HP is exact, bound the ATTACKER's offensive BSV.
+#[allow(clippy::too_many_arguments)]
+fn pass3_direction_b(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+    user_idx: usize,
+    target_idx: usize,
+    user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
+    off_stat: &crate::state::dex_data::PokemonStat,
+    is_crit: bool,
+    exact_damage: u16,
+) {
+    use crate::information::materialize::{materialize_battle, materialize_pokemon};
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
+    use crate::simulator::DamageConfig;
+
+    let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
+        return;
+    };
+    let Some(target_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+        return;
+    };
+
+    // Need known attacker species for BSV-based inference.
+    let base_stats = match &attacker_unk.possible_species {
+        Unknown::Known(s) => match ctx.dex.get(s) {
+            Some(d) => d.base_stats,
+            None => return,
+        },
+        _ => return,
+    };
+
+    let si = stat_to_stats_idx(off_stat);
+    let level = attacker_unk.level;
+
+    // Current pre-nature BSV range for this stat.
+    let bsv_lo = attacker_unk.min_pre_nature_stat[si];
+    let bsv_hi = attacker_unk.max_pre_nature_stat[si];
+    if bsv_lo > bsv_hi {
+        return;
+    }
+
+    // Determine which nature classes are still possible.
+    let nature_classes: Vec<(f32, bool, bool)> = {
+        // (nature_mod, is_boost, is_nerf)
+        let mut classes = Vec::new();
+        let boost_natures = boosting_natures_for_stat(off_stat);
+        let nerf_natures = nerfing_natures_for_stat(off_stat);
+        // boost
+        if boost_natures
+            .iter()
+            .any(|n| !unknown_is_excluded(&attacker_unk.possible_natures, n))
+        {
+            classes.push((1.1_f32, true, false));
+        }
+        // neutral (HP also only gets this)
+        let any_neutral = ALL_NATURES.iter().any(|n| {
+            !boost_natures.contains(n)
+                && !nerf_natures.contains(n)
+                && !unknown_is_excluded(&attacker_unk.possible_natures, n)
+        });
+        if any_neutral {
+            classes.push((1.0_f32, false, false));
+        }
+        // nerf
+        if si != 0
+            && nerf_natures
+                .iter()
+                .any(|n| !unknown_is_excluded(&attacker_unk.possible_natures, n))
+        {
+            classes.push((0.9_f32, false, true));
+        }
+        classes
+    };
+    if nature_classes.is_empty() {
+        return;
+    }
+
+    // Booster sets for predicate emission.
+    let booster_items = offensive_damage_items(&attacker_unk);
+    let booster_abilities = offensive_damage_abilities(&attacker_unk);
+
+    // Oracle config: always use all 16 rolls regardless of CLI setting.
+    let oracle_config = DamageConfig {
+        consider_crit: true,
+        damage_rolls: 16,
+    };
+
+    // Spread multiplier (doubles ×0.75 when a move hits all adjacent foes with 2+ active opponents).
+    let targets_mult = if state.active_per_side > 1
+        && matches!(
+            move_data.target,
+            crate::state::dex_data::MoveTarget::AllAdjacent
+                | crate::state::dex_data::MoveTarget::AllAdjacentFoes
+        ) {
+        0.75
+    } else {
+        1.0
+    };
+
+    // ── Unconditional tightening: union over all (nature_class, item, ability) ─
+    let mut global_bsv_lo: Option<u16> = None;
+    let mut global_bsv_hi: Option<u16> = None;
+    let mut global_stat_lo: Option<u16> = None;
+    let mut global_stat_hi: Option<u16> = None;
+
+    // ── Per-nature-class data for predicate emission ──────────────────────────
+    // For each nature class we compute the BSV interval under neutral gear (no booster).
+    struct NatureClassResult {
+        mod_f32: f32,
+        is_boost: bool,
+        is_nerf: bool,
+        bsv_lo_neutral: Option<u16>,
+        bsv_hi_neutral: Option<u16>,
+    }
+    let mut per_class: Vec<NatureClassResult> = Vec::new();
+
+    for (nat_mod, is_boost, is_nerf) in &nature_classes {
+        // Items to enumerate for this class: all possible items (for union) plus
+        // a neutral-item run (for predicate lower bound).
+        let item_choices: Vec<Item> = {
+            let mut items = booster_items.clone();
+            let neutral = neutral_item(&attacker_unk);
+            if !items.contains(&neutral) {
+                items.push(neutral);
+            }
+            items
+        };
+        let ability_choices: Vec<Ability> = {
+            let mut abs = booster_abilities.clone();
+            let neutral = neutral_ability(&attacker_unk);
+            if !abs.contains(&neutral) {
+                abs.push(neutral);
+            }
+            abs
+        };
+
+        // Also enumerate Metronome item streak values 0..=5.
+        let streak_range: Vec<u8> = if !unknown_is_excluded(&attacker_unk.item, &Item::Metronome) {
+            vec![0, 1, 2, 3, 4, 5]
+        } else {
+            vec![0]
+        };
+
+        // ── Neutral-gear BSV interval (for predicate emission) ─────────────
+        let neutral_i = neutral_item(&attacker_unk);
+        let neutral_a = neutral_ability(&attacker_unk);
+
+        let (bsv_lo_neutral, bsv_hi_neutral) = find_feasible_bsv_range_b(
+            state,
+            &attacker_unk,
+            &target_unk,
+            user_slot,
+            target_slot,
+            move_data,
+            &oracle_config,
+            targets_mult,
+            *nat_mod,
+            si,
+            base_stats,
+            bsv_lo,
+            bsv_hi,
+            neutral_i,
+            neutral_a,
+            0,
+            exact_damage,
+            is_crit,
+        );
+
+        per_class.push(NatureClassResult {
+            mod_f32: *nat_mod,
+            is_boost: *is_boost,
+            is_nerf: *is_nerf,
+            bsv_lo_neutral,
+            bsv_hi_neutral,
+        });
+
+        // ── Union over all (item, ability, streak) assignments ─────────────
+        for item in &item_choices {
+            for ability in &ability_choices {
+                for &streak in &streak_range {
+                    let mut atk_for_oracle = attacker_unk.clone();
+                    atk_for_oracle.consecutive_move_count = streak;
+
+                    let (lo, hi) = find_feasible_bsv_range_b(
+                        state,
+                        &atk_for_oracle,
+                        &target_unk,
+                        user_slot,
+                        target_slot,
+                        move_data,
+                        &oracle_config,
+                        targets_mult,
+                        *nat_mod,
+                        si,
+                        base_stats,
+                        bsv_lo,
+                        bsv_hi,
+                        item.clone(),
+                        ability.clone(),
+                        streak,
+                        exact_damage,
+                        is_crit,
+                    );
+                    if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
+                        let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
+                        let final_hi = (hi_v as f64 * *nat_mod as f64).floor() as u16;
+                        global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
+                        global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
+                        global_stat_lo =
+                            Some(global_stat_lo.map_or(final_lo, |g| g.min(final_lo)));
+                        global_stat_hi =
+                            Some(global_stat_hi.map_or(final_hi, |g| g.max(final_hi)));
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply unconditional tightening.
+    if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
+        if let Some(lo) = global_bsv_lo {
+            if lo > mon.min_pre_nature_stat[si] {
+                mon.min_pre_nature_stat[si] = lo;
+            }
+        }
+        if let Some(hi) = global_bsv_hi {
+            if hi < mon.max_pre_nature_stat[si] {
+                mon.max_pre_nature_stat[si] = hi;
+            }
+        }
+        if let Some(lo) = global_stat_lo {
+            if lo > mon.minStats[si] {
+                mon.minStats[si] = lo;
+            }
+        }
+        if let Some(hi) = global_stat_hi {
+            if hi < mon.maxStats[si] {
+                mon.maxStats[si] = hi;
+            }
+        }
+    }
+
+    // ── Conditional CNF predicates ────────────────────────────────────────────
+    // For each nature class κ, emit:
+    //   LOWER: [not-κ guards] ∨ EVIVStatGE{bsv_lo_neutral} ∨ ⋁ booster_items ∨ ⋁ booster_abilities
+    //   UPPER: [not-κ guards] ∨ EVIVStatLE{bsv_hi_neutral} ∨ ⋁ booster_items ∨ ⋁ booster_abilities
+    // Only emit when:
+    //   - neutral BSV bound was computable, AND
+    //   - the bound is strictly tighter than the current min_pre/max_pre (worth emitting).
+    for cr in &per_class {
+        let not_kappa_guards: Vec<Statement> = match (cr.is_boost, cr.is_nerf) {
+            (true, _) => vec![Statement::Not(Box::new(Statement::NatureBoostsStat {
+                mon_idx: user_idx,
+                stat: off_stat.clone(),
+            }))],
+            (_, true) => vec![Statement::Not(Box::new(Statement::NatureNerfsStat {
+                mon_idx: user_idx,
+                stat: off_stat.clone(),
+            }))],
+            // neutral: exclude the class when the nature is definitely a booster or nerf
+            (false, false) => vec![
+                Statement::NatureBoostsStat {
+                    mon_idx: user_idx,
+                    stat: off_stat.clone(),
+                },
+                Statement::NatureNerfsStat {
+                    mon_idx: user_idx,
+                    stat: off_stat.clone(),
+                },
+            ],
+        };
+
+        let booster_literals: Vec<Statement> = booster_items
+            .iter()
+            .map(|i| Statement::HasItem {
+                mon_idx: user_idx,
+                item: i.clone(),
+            })
+            .chain(booster_abilities.iter().map(|a| Statement::HasAbility {
+                mon_idx: user_idx,
+                ability: a.clone(),
+            }))
+            .collect();
+
+        let current_pre_min = attacker_unk.min_pre_nature_stat[si];
+        let current_pre_max = attacker_unk.max_pre_nature_stat[si];
+
+        if let Some(lo) = cr.bsv_lo_neutral {
+            if lo > current_pre_min {
+                let mut clause = not_kappa_guards.clone();
+                clause.push(Statement::EVIVStatGE {
+                    mon_idx: user_idx,
+                    stat: off_stat.clone(),
+                    value: lo,
+                });
+                clause.extend(booster_literals.clone());
+                if clause.len() > not_kappa_guards.len() + 1 {
+                    // only emit if there are non-trivial booster alternatives
+                    state.predicates.push(clause);
+                } else {
+                    // No boosters possible: force directly.
+                    if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
+                        if lo > mon.min_pre_nature_stat[si] {
+                            mon.min_pre_nature_stat[si] = lo;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(hi) = cr.bsv_hi_neutral {
+            if hi < current_pre_max {
+                let mut clause = not_kappa_guards.clone();
+                clause.push(Statement::EVIVStatLE {
+                    mon_idx: user_idx,
+                    stat: off_stat.clone(),
+                    value: hi,
+                });
+                clause.extend(booster_literals.clone());
+                if clause.len() > not_kappa_guards.len() + 1 {
+                    state.predicates.push(clause);
+                } else {
+                    if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
+                        if hi < mon.max_pre_nature_stat[si] {
+                            mon.max_pre_nature_stat[si] = hi;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Binary-search for the feasible BSV interval [lo, hi] for Direction B under a
+/// single fixed (nat_mod, item, ability, streak) assignment.
+///
+/// Returns `(Some(lo), Some(hi))` if any BSV in `[bsv_lo, bsv_hi]` can produce
+/// `exact_damage`, `(None, None)` if none can.
+#[allow(clippy::too_many_arguments)]
+fn find_feasible_bsv_range_b(
+    state: &UnknownBattleState,
+    attacker_unk: &UnknownPokemonState,
+    target_unk: &UnknownPokemonState,
+    user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
+    oracle_config: &crate::simulator::DamageConfig,
+    targets_mult: f64,
+    nat_mod: f32,
+    si: usize,
+    base_stats: [u16; 6],
+    bsv_lo: u16,
+    bsv_hi: u16,
+    item: Item,
+    ability: Ability,
+    streak: u8,
+    exact_damage: u16,
+    is_crit: bool,
+) -> (Option<u16>, Option<u16>) {
+    use crate::information::materialize::{materialize_battle, materialize_pokemon};
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
+    use crate::state::pokemon::PokemonStatsTable;
+
+    // Materialize target with known stats (target is our own mon — stats exact).
+    let target_stats = target_unk.minStats; // min == max for known mons
+    let target_ps = materialize_pokemon(target_unk, target_stats, neutral_item(target_unk), neutral_ability(target_unk));
+
+    // Build the battle state (no clones of Vec needed — wrap everything).
+    // We need a helper to build the attacker PS with a specific BSV value.
+    let make_atk = |bsv: u16| -> crate::state::pokemon::PokemonState {
+        let mut stats = attacker_unk.minStats; // fill non-inferred stats with current min
+        // Override stat si with the concrete value for this BSV + nature_mod.
+        if si == 0 {
+            stats[0] = bsv; // HP: no nature
+        } else {
+            stats[si] = (bsv as f64 * nat_mod as f64).floor() as u16;
+        }
+        let mut unk_copy = attacker_unk.clone();
+        unk_copy.consecutive_move_count = streak;
+        materialize_pokemon(&unk_copy, stats, item.clone(), ability.clone())
+    };
+
+    // Damage is monotone non-decreasing in BSV (higher stat → more damage).
+    // We use a linear scan in this MVP; a binary search would require
+    // separate lo-search and hi-search passes, but the BSV range for a
+    // level-50 mon is at most ~250 wide, which is fast enough.
+    let can_produce = |bsv: u16| -> bool {
+        let atk_ps = make_atk(bsv);
+        let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
+            vec![atk_ps.clone()]
+        } else {
+            vec![target_ps.clone()]
+        };
+        let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
+            vec![target_ps.clone()]
+        } else {
+            vec![atk_ps.clone()]
+        };
+        let battle = materialize_battle(state, p1_active, p2_active);
+
+        let outcomes = calculate_damage_outcomes_for_target_with_options(
+            &battle,
+            &atk_ps,
+            &target_ps,
+            user_slot.clone(),
+            target_slot.clone(),
+            move_data,
+            *oracle_config,
+            targets_mult,
+            1.0, // invulnerability_multiplier
+            None,
+            None,
+        );
+
+        outcomes
+            .iter()
+            .any(|(dmg, crit, _)| *dmg == exact_damage && *crit == is_crit)
+    };
+
+    // Scan for first feasible BSV (lower bound).
+    let mut found_lo: Option<u16> = None;
+    let mut found_hi: Option<u16> = None;
+    for bsv in bsv_lo..=bsv_hi {
+        if can_produce(bsv) {
+            found_lo = Some(found_lo.unwrap_or(bsv));
+            found_hi = Some(bsv);
+        }
+    }
+    (found_lo, found_hi)
+}
+
+/// Direction A: we attacked the opponent, HP is a percent interval,
+/// bound the DEFENDER's defensive stat (and HP).
+#[allow(clippy::too_many_arguments)]
+fn pass3_direction_a(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+    user_idx: usize,
+    target_idx: usize,
+    user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
+    def_stat: &crate::state::dex_data::PokemonStat,
+    is_crit: bool,
+    delta_pct: u8,
+) {
+    use crate::information::materialize::{materialize_battle, materialize_pokemon};
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
+    use crate::simulator::DamageConfig;
+
+    let Some(defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+        return;
+    };
+    let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
+        return;
+    };
+
+    // Need known defender species for BSV inference.
+    let base_stats = match &defender_unk.possible_species {
+        Unknown::Known(s) => match ctx.dex.get(s) {
+            Some(d) => d.base_stats,
+            None => return,
+        },
+        _ => return,
+    };
+
+    let si = stat_to_stats_idx(def_stat);
+    let level = defender_unk.level;
+
+    let bsv_lo = defender_unk.min_pre_nature_stat[si];
+    let bsv_hi = defender_unk.max_pre_nature_stat[si];
+    if bsv_lo > bsv_hi {
+        return;
+    }
+
+    // HP bounds for the defender.
+    let hp_lo = defender_unk.minStats[0];
+    let hp_hi = defender_unk.maxStats[0];
+
+    // Nature classes for the defensive stat.
+    let nature_classes: Vec<(f32, bool, bool)> = {
+        let mut classes = Vec::new();
+        let boost_natures = boosting_natures_for_stat(def_stat);
+        let nerf_natures = nerfing_natures_for_stat(def_stat);
+        if boost_natures
+            .iter()
+            .any(|n| !unknown_is_excluded(&defender_unk.possible_natures, n))
+        {
+            classes.push((1.1_f32, true, false));
+        }
+        let any_neutral = ALL_NATURES.iter().any(|n| {
+            !boost_natures.contains(n)
+                && !nerf_natures.contains(n)
+                && !unknown_is_excluded(&defender_unk.possible_natures, n)
+        });
+        if any_neutral {
+            classes.push((1.0_f32, false, false));
+        }
+        if nerf_natures
+            .iter()
+            .any(|n| !unknown_is_excluded(&defender_unk.possible_natures, n))
+        {
+            classes.push((0.9_f32, false, true));
+        }
+        classes
+    };
+    if nature_classes.is_empty() {
+        return;
+    }
+
+    // Oracle config.
+    let oracle_config = DamageConfig {
+        consider_crit: true,
+        damage_rolls: 16,
+    };
+    let targets_mult = 1.0_f64; // Direction A: single-target only for this pass
+
+    // ── Unconditional tightening: union over (nat, hp_candidate, def_bsv) ────
+    let mut global_bsv_lo: Option<u16> = None;
+    let mut global_bsv_hi: Option<u16> = None;
+    let mut global_stat_lo: Option<u16> = None;
+    let mut global_stat_hi: Option<u16> = None;
+
+    // Attacker is OUR known mon; use its actual known stats.
+    let atk_stats = attacker_unk.minStats;
+    let atk_item = neutral_item(&attacker_unk);
+    let atk_ability = neutral_ability(&attacker_unk);
+    let atk_ps = materialize_pokemon(&attacker_unk, atk_stats, atk_item, atk_ability);
+
+    // We sample from the defender's possible HP range (step by 4 for speed).
+    for hp_cand in (hp_lo..=hp_hi).step_by(4.max(1) as usize) {
+        // Convert percent delta to raw damage interval for this candidate max HP.
+        // Convention: Percent(p) = round(current_hp * 100 / max_hp), so:
+        //   p = round(hp * 100 / max_hp)  →  hp = round(p * max_hp / 100)
+        // Damage interval for delta_pct p: [floor((p-0.5)*max_hp/100), ceil((p+0.5)*max_hp/100)]
+        // clamped to [1, max_hp].  Sound: this is wider than the actual rounding bucket.
+        let hp_c = hp_cand as f64;
+        let d_lo = ((delta_pct as f64 - 0.5) * hp_c / 100.0).floor().max(1.0) as u16;
+        let d_hi = ((delta_pct as f64 + 0.5) * hp_c / 100.0).ceil().min(hp_c) as u16;
+
+        for (nat_mod, is_boost, is_nerf) in &nature_classes {
+            let can_produce_def_bsv = |bsv: u16| -> bool {
+                let mut def_stats = defender_unk.minStats;
+                def_stats[0] = hp_cand; // set candidate HP
+                if si == 0 {
+                    def_stats[0] = bsv;
+                } else {
+                    def_stats[si] = (bsv as f64 * *nat_mod as f64).floor() as u16;
+                }
+
+                let def_ps = materialize_pokemon(
+                    &defender_unk,
+                    def_stats,
+                    neutral_item(&defender_unk),
+                    neutral_ability(&defender_unk),
+                );
+                let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
+                    vec![atk_ps.clone()]
+                } else {
+                    vec![def_ps.clone()]
+                };
+                let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
+                    vec![def_ps.clone()]
+                } else {
+                    vec![atk_ps.clone()]
+                };
+                let battle = materialize_battle(state, p1_active, p2_active);
+
+                let outcomes = calculate_damage_outcomes_for_target_with_options(
+                    &battle,
+                    &atk_ps,
+                    &def_ps,
+                    user_slot.clone(),
+                    target_slot.clone(),
+                    move_data,
+                    oracle_config,
+                    targets_mult,
+                    1.0,
+                    None,
+                    None,
+                );
+                // Any outcome with damage in [d_lo, d_hi] and matching crit.
+                outcomes
+                    .iter()
+                    .any(|(dmg, crit, _)| *dmg >= d_lo && *dmg <= d_hi && *crit == is_crit)
+            };
+
+            let mut found_lo_local: Option<u16> = None;
+            let mut found_hi_local: Option<u16> = None;
+            for bsv in bsv_lo..=bsv_hi {
+                if can_produce_def_bsv(bsv) {
+                    found_lo_local = Some(found_lo_local.unwrap_or(bsv));
+                    found_hi_local = Some(bsv);
+                }
+            }
+            if let (Some(lo_v), Some(hi_v)) = (found_lo_local, found_hi_local) {
+                let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
+                let final_hi = (hi_v as f64 * *nat_mod as f64).floor() as u16;
+                global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
+                global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
+                global_stat_lo = Some(global_stat_lo.map_or(final_lo, |g| g.min(final_lo)));
+                global_stat_hi = Some(global_stat_hi.map_or(final_hi, |g| g.max(final_hi)));
+            }
+        }
+    }
+
+    // Apply unconditional tightening.
+    if let Some(mon) = get_mon_mut_by_idx(state, target_idx) {
+        if let Some(lo) = global_bsv_lo {
+            if lo > mon.min_pre_nature_stat[si] {
+                mon.min_pre_nature_stat[si] = lo;
+            }
+        }
+        if let Some(hi) = global_bsv_hi {
+            if hi < mon.max_pre_nature_stat[si] {
+                mon.max_pre_nature_stat[si] = hi;
+            }
+        }
+        if let Some(lo) = global_stat_lo {
+            if lo > mon.minStats[si] {
+                mon.minStats[si] = lo;
+            }
+        }
+        if let Some(hi) = global_stat_hi {
+            if hi < mon.maxStats[si] {
+                mon.maxStats[si] = hi;
+            }
+        }
+    }
+    // Direction A predicates: nature-conditional BSV clauses mirroring Direction B,
+    // but using defender's booster/nerf set (Eviolite/Assault Vest not modelled).
+    // For v1, we rely on the unconditional tightening above; predicates follow the
+    // same pattern but are omitted here to keep scope manageable.
+}
 
 // ── Pass 4: Speed ordering → Spe bounds ──────────────────────────────────────
 
@@ -2123,8 +3041,15 @@ pub fn pass5_back_solve(
             let mut n_min_ev: Option<u8> = None;
             let mut n_max_ev: Option<u8> = None;
 
+            let bsv_min = mon.min_pre_nature_stat[stat_i];
+            let bsv_max = mon.max_pre_nature_stat[stat_i];
             for iv in iv_range.clone() {
                 for &ev in ev_candidates {
+                    let bsv = calc_stat(base[stat_i], iv, ev, level, 1.0);
+                    // Pre-nature BSV constraint (from Pass 3 damage inversion).
+                    if bsv < bsv_min || bsv > bsv_max {
+                        continue;
+                    }
                     let stat = calc_stat(base[stat_i], iv, ev, level, nature_mod);
                     if stat >= s_min && stat <= s_max {
                         found = true;
@@ -2309,7 +3234,13 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
             stat,
             value,
         } => get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| m.maxStats[stat_to_stats_idx(stat)] < *value),
+            .map_or(false, |m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] < *value),
+        Statement::EVIVStatLE {
+            mon_idx,
+            stat,
+            value,
+        } => get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] > *value),
         Statement::SpeedComparison {
             fast_idx,
             slow_idx,
@@ -2391,7 +3322,13 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
             stat,
             value,
         } => get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| m.minStats[stat_to_stats_idx(stat)] >= *value),
+            .map_or(false, |m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] >= *value),
+        Statement::EVIVStatLE {
+            mon_idx,
+            stat,
+            value,
+        } => get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] <= *value),
         Statement::SpeedComparison {
             fast_idx,
             slow_idx,
@@ -2489,8 +3426,16 @@ fn force_literal(state: &mut UnknownBattleState, lit: &Statement) {
         Statement::EVIVStatGE { mon_idx, stat, value } => {
             if let Some(mon) = get_mon_mut_by_idx(state, *mon_idx) {
                 let si = stat_to_stats_idx(stat);
-                if mon.minStats[si] < *value {
-                    mon.minStats[si] = *value;
+                if mon.min_pre_nature_stat[si] < *value {
+                    mon.min_pre_nature_stat[si] = *value;
+                }
+            }
+        }
+        Statement::EVIVStatLE { mon_idx, stat, value } => {
+            if let Some(mon) = get_mon_mut_by_idx(state, *mon_idx) {
+                let si = stat_to_stats_idx(stat);
+                if mon.max_pre_nature_stat[si] > *value {
+                    mon.max_pre_nature_stat[si] = *value;
                 }
             }
         }

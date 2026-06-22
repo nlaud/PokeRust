@@ -24,6 +24,7 @@ Soundness is preserved by NOT narrowing on these until they are implemented.
 
 **(B) Future inference sources (sound tightening opportunities, not yet implemented):**
 - PP-based move-set inference (Pressure interactions, max-PP reveals from PP Ups).
+- Ability inference by species
 - Status/secondary-effect absence revealing items/abilities (Shield Dust, no flinch → Inner Focus or
   King's Rock absent, etc.).
 - Priority-move reveals implying abilities (Prankster / Gale Wings / Triage) and resulting bracket
@@ -42,3 +43,4 @@ Soundness is preserved by NOT narrowing on these until they are implemented.
 ## Refactors
 - Hidden information stuff, adding information releases to simulate_turn on a flag input
 - Comments Deslop
+- https://github.com/PokeAPI/sprites for FE sprites
