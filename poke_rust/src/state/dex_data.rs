@@ -2,7 +2,7 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 pub type PokemonBoostTable = [i8; 7]; // atk, def, spa, spd, spe, accuracy, evasion
@@ -35,7 +35,7 @@ pub enum AccuracyType {
     Percent(u8),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MoveCategory {
     Physical,
     Special,
@@ -1941,5 +1941,74 @@ pub fn parse_ability_dex(file_path: &str) -> HashMap<Ability, AbilityData> {
             result.insert(ability, data);
         }
     }
+    result
+}
+
+/// Parse `showdownLearnsets.txt` into a `HashMap<Species, HashSet<PokemonMove>>`.
+///
+/// Each entry has the form:
+/// ```text
+/// speciesid: {
+///     learnset: {
+///         moveid: ["9M"],
+///         ...
+///     },
+/// },
+/// ```
+/// Unrecognised species or move names are silently skipped.
+pub fn parse_learnset_dex(file_path: &str) -> HashMap<Species, HashSet<PokemonMove>> {
+    let content = match fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut result: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    let entries = split_entries(&content);
+
+    for (species_id, lines) in &entries {
+        let species = Species::from_str(species_id);
+        if matches!(species, Species::Unknown(_)) {
+            continue;
+        }
+
+        // Find the `learnset: {` line and collect move IDs until the closing `}`.
+        let mut in_learnset = false;
+        let mut depth: i32 = 0;
+        let mut moves: HashSet<PokemonMove> = HashSet::new();
+
+        for line in lines {
+            let trimmed = line.trim();
+            if !in_learnset {
+                if trimmed.starts_with("learnset:") {
+                    in_learnset = true;
+                    depth = 1; // we are inside the learnset block
+                }
+                continue;
+            }
+
+            // Count braces to track depth inside the learnset block.
+            let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
+            let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
+            depth += opens - closes;
+
+            if depth <= 0 {
+                break; // closed the learnset block
+            }
+
+            // Each move line: `moveid: ["9M"],`
+            if let Some(colon_pos) = trimmed.find(':') {
+                let move_id = trimmed[..colon_pos].trim().trim_matches('"');
+                let pm = PokemonMove::from_str(move_id);
+                if !matches!(pm, PokemonMove::Unknown(_)) {
+                    moves.insert(pm);
+                }
+            }
+        }
+
+        if !moves.is_empty() {
+            result.insert(species, moves);
+        }
+    }
+
     result
 }

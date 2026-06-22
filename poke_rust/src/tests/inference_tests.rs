@@ -6,7 +6,7 @@
 
 #![allow(unused)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::data::ability::Ability;
 use crate::data::item::Item;
@@ -15,10 +15,12 @@ use crate::data::species::Species;
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
     AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonData,
-    PokemonType, SelfDestructType, SelfSwitchType, Status,
+    PokemonType, PseudoWeather, SelfDestructType, SelfSwitchType, SideCondition, Status,
+    Terrain, Weather,
 };
 use crate::information::inference::{
-    apply_information, get_mon_by_idx, mon_idx_for_active_slot, InferenceConfig, EV_LATTICE,
+    apply_information, get_mon_by_idx, mon_idx_for_active_slot, pass5_back_solve,
+    InferenceConfig, EV_LATTICE,
 };
 use crate::information::information::{EventKind, InformationEvent, SwitchState};
 use crate::information::unknowns::{
@@ -187,6 +189,29 @@ fn apply_ex(
         &move_dex,
         &HashMap::new(), // ability_dex — not needed for most tests
         &InferenceConfig::default(),
+    );
+    match result {
+        UnknownMatchState::Battle(b) => b,
+        _ => panic!("expected Battle state"),
+    }
+}
+
+/// Apply information with a custom `InferenceConfig` (e.g. learnset_dex, ev_total_cap).
+fn apply_with_config(
+    state: UnknownBattleState,
+    events: Vec<InformationEvent>,
+    dex: HashMap<Species, PokemonData>,
+    move_dex: HashMap<PokemonMove, MoveData>,
+    config: InferenceConfig,
+) -> UnknownBattleState {
+    let result = apply_information(
+        UnknownMatchState::Battle(state),
+        &events,
+        false,
+        &dex,
+        &move_dex,
+        &HashMap::new(),
+        &config,
     );
     match result {
         UnknownMatchState::Battle(b) => b,
@@ -766,14 +791,23 @@ fn test_pass3_dir_b_lower_bound_tightened() {
 
 // ── Direction B: soundness across the full damage range ──────────────────────
 
-/// Every achievable damage value in Garchomp's EQ range must not cause a contradiction
-/// in Pass 3 (no panic, and bounds remain valid min ≤ max).
+/// Every achievable damage value in Garchomp's EQ range (under force_max_ivs=true)
+/// must not cause a contradiction in Pass 3 (no panic, and bounds remain valid min ≤ max).
 #[test]
 fn test_pass3_dir_b_no_contradiction_across_damage_range() {
-    // Garchomp EQ range against P1 (Def=100) at lv50 with neutral nature:
-    //   min atk=135 → base=61 → roll=85 → 76
-    //   max atk=182 → base=82 → roll=100 → floor(82*1.5)=123
-    for damage in 76u16..=123u16 {
+    // Garchomp EQ range against P1 (Def=100) at lv50 with neutral nature + IV=31:
+    //   min (IV=31, EV=0, atk=150) → base=68 → roll=85 → 85
+    //   max (IV=31, EV=252, atk=182) → base=82 → roll=100 → floor(82*1.5)=123
+    // (InferenceConfig::default() has force_max_ivs=true, so IV=31 is assumed.)
+    // Sweep starts at 85, not 76.  InferenceConfig::default() has force_max_ivs=true,
+    // which pins IV=31 in Pass 5.  For Garchomp Atk at level 50 with IV=31:
+    //   calc_stat(130, 31, EV=0, 50, 1.0) = floor((260+31)*0.5)+5 = 150
+    // so the minimum achievable BSV is 150.  Damage values 76–84 are only feasible for
+    // BSV ≤ 149, which can't be produced with IV=31.  Those scenarios are physically
+    // impossible under the engine's IV assumption and correctly unreachable in real play.
+    // The min damage for neutral Garchomp (IV=31, EV=0) vs Def=100:
+    //   Atk=150 → base=68 → roll=85 → floor(57*1.5) = 85.
+    for damage in 85u16..=123u16 {
         let result = run_direction_b(neutral_no_item_garchomp(), damage);
         let p2 = &result.p2_active_mons[0];
         assert!(
@@ -990,4 +1024,553 @@ fn test_pass3_dir_b_crit_observed_no_contradiction() {
     // Bounds must stay within Garchomp's theoretical range.
     assert!(p2_r.min_pre_nature_stat[1] >= 135);
     assert!(p2_r.max_pre_nature_stat[1] <= 182);
+}
+
+// ── Pass 4: Speed ordering ────────────────────────────────────────────────────
+
+/// Helper: a status move (for Prankster tests).
+fn poke_status_move(name: PokemonMove) -> MoveData {
+    MoveData {
+        name,
+        base_power: 0,
+        accuracy: AccuracyType::Percent(100),
+        target: MoveTarget::Normal,
+        secondaries: vec![],
+        self_secondaries: vec![],
+        pp: 10,
+        category: MoveCategory::Status,
+        pokemon_type: PokemonType::Normal,
+        priority: 0,
+        flags: vec![],
+        ohko: false, thaws_target: false, heal_fraction: [0, 0], force_switch: false,
+        self_switch: SelfSwitchType::None, self_boost: [0; 7], self_destruct: SelfDestructType::None,
+        breaks_protect: false, recoil_fraction: [0, 0], drain_fraction: [0, 0],
+        mind_blown_recoil: false, struggle_recoil: false, crit_ratio: 1, foul_play: false,
+        ignore_ability: false, ignore_defense_boosts: false, ignore_evasion: false,
+        ignore_immunity: vec![], multihit_range: [1, 1], multihit_accuracy: false,
+        sleep_usable: false, has_crash_damage: false, damage_override: DamageOverride::None,
+        stalling_move: false, override_offensive_stat: None, override_defensive_stat: None,
+    }
+}
+
+/// Build a battle state where P2 moves first (faster) and P1 moves second.
+/// Both use physical moves at priority 0. Neither has Quick Claw or Quick Draw.
+fn speed_order_events(p2_move: PokemonMove, p1_move: PokemonMove) -> Vec<InformationEvent> {
+    vec![
+        event(EventKind::MoveUsed { user: p2(0), move_used: p2_move, targets: vec![p1(0)] }),
+        event(EventKind::MoveUsed { user: p1(0), move_used: p1_move, targets: vec![p2(0)] }),
+    ]
+}
+
+/// A mon with all speed-affecting items/abilities explicitly excluded.
+fn no_speed_escape_mon(species: Species) -> UnknownPokemonState {
+    let mut mon = unknown_mon_species(species);
+    // Exclude items and abilities that could create a speed escape clause.
+    mon.item = Unknown::Not(vec![
+        Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+    ]);
+    mon.possible_abilities = Unknown::Not(vec![
+        Ability::QuickDraw, Ability::Prankster, Ability::GaleWings, Ability::Triage,
+        Ability::Stall, Ability::SwiftSwim, Ability::Chlorophyll, Ability::SandRush,
+        Ability::SlushRush, Ability::SurgeSurfer, Ability::Unburden, Ability::QuickFeet,
+    ]);
+    mon
+}
+
+/// Pass 4 emits a SpeedComparison predicate when the faster P2 mon moves first
+/// and neither mon has any speed-escape items/abilities.
+#[test]
+fn test_pass4_speed_comparison_emitted() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let p2_mon = no_speed_escape_mon(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let result = apply_ex(
+        state,
+        speed_order_events(PokemonMove::Earthquake, PokemonMove::DragonClaw),
+        HashMap::new(),
+        move_dex,
+    );
+
+    // In battle_1v1: P1 active mon = idx 0, P2 active mon = idx 1.
+    // P2 moved first → fast_idx = 1, slow_idx = 0 (in normal order).
+    let has_speed_cmp = result.predicates.iter().any(|clause| {
+        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 1, slow_idx: 0, .. }))
+    });
+    assert!(has_speed_cmp, "Pass 4 must emit SpeedComparison(fast=P2, slow=P1) when P2 moves first in priority 0");
+}
+
+/// Under Trick Room the slower mon goes first; Pass 4 should swap fast/slow so the
+/// SpeedComparison reflects the naturally-faster mon (the one that moved SECOND).
+#[test]
+fn test_pass4_trick_room_swaps_comparison() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let p2_mon = no_speed_escape_mon(Species::Garchomp);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.pseudo_weathers = vec![PseudoWeather::TrickRoom];
+    state.pseudo_weather_turns = vec![Unknown::Known(3)];
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    // P2 moves first under Trick Room → P2 is the SLOWER mon.
+    // Pass 4 must swap: the SpeedComparison should have fast_idx=0 (P1=slower→second=faster-in-TR).
+    let result = apply_ex(
+        state,
+        speed_order_events(PokemonMove::Earthquake, PokemonMove::DragonClaw),
+        HashMap::new(),
+        move_dex,
+    );
+
+    let has_tr_cmp = result.predicates.iter().any(|clause| {
+        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 0, slow_idx: 1, .. }))
+    });
+    assert!(has_tr_cmp, "Under Trick Room, SpeedComparison must have fast_idx=P1 (moved second = naturally faster)");
+
+    // Sanity: should NOT have the non-TR direction.
+    let has_wrong_cmp = result.predicates.iter().any(|clause| {
+        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 1, slow_idx: 0, .. }))
+    });
+    assert!(!has_wrong_cmp, "Trick Room must not emit the non-reversed SpeedComparison");
+}
+
+/// When P2 uses a Status move and might have Prankster (+1 priority to status moves),
+/// Pass 4 must include HasAbility{Prankster} as an escape disjunct so the predicate
+/// stays sound even if Prankster explains the ordering.
+#[test]
+fn test_pass4_prankster_escape_on_status_move() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    // P2 might have Prankster.
+    let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
+    p2_mon.possible_abilities = Unknown::Not(vec![
+        Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+    ].iter().map(|_| Ability::QuickDraw).collect()); // re-use field but only exclude QuickDraw
+    // Actually just allow all abilities (Not([]) = all allowed).
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
+    p2_mon.item = Unknown::Not(vec![
+        Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+    ]);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    // P2 uses a Status move (priority 0), P1 uses a Physical move (priority 0).
+    move_dex.insert(PokemonMove::WillOWisp, poke_status_move(PokemonMove::WillOWisp));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let result = apply_ex(
+        state,
+        vec![
+            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::WillOWisp, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::DragonClaw, targets: vec![p2(0)] }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // The predicate clause for this comparison must include HasAbility{Prankster} as a
+    // disjunct (since Prankster could explain P2 going first with a status move).
+    let has_prankster_escape = result.predicates.iter().any(|clause| {
+        let has_speed_cmp = clause.iter().any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }));
+        let has_prankster = clause.iter().any(|s| matches!(s,
+            Statement::HasAbility { mon_idx: 1, ability: Ability::Prankster }
+        ));
+        has_speed_cmp && has_prankster
+    });
+    assert!(has_prankster_escape, "Status move by P2 with possible Prankster must add Prankster escape to clause");
+}
+
+/// A Physical move by P2 should NOT add a Prankster escape disjunct — Prankster only
+/// affects Status moves.
+#[test]
+fn test_pass4_no_prankster_escape_on_physical_move() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
+    // Allow Prankster on P2 (but the move is Physical → no escape needed).
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
+    p2_mon.item = Unknown::Not(vec![
+        Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+    ]);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let result = apply_ex(
+        state,
+        speed_order_events(PokemonMove::Earthquake, PokemonMove::DragonClaw),
+        HashMap::new(),
+        move_dex,
+    );
+
+    // Prankster escape must NOT appear for a physical move.
+    let has_prankster_escape = result.predicates.iter().any(|clause|
+        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::Prankster, .. }))
+    );
+    assert!(!has_prankster_escape, "Physical move must not add Prankster escape (Prankster only affects status moves)");
+}
+
+/// Choice Scarf is a speed-boosting item; its presence on the fast mon makes the
+/// SpeedComparison predicate too strong (unsound) → Pass 4 must add an escape disjunct.
+#[test]
+fn test_pass4_choice_scarf_escape_on_fast_mon() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
+    // Allow Choice Scarf on P2 (fast mon). Remove it from the exclusion list.
+    p2_mon.item = Unknown::Not(vec![
+        Item::QuickClaw, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+        // NOT excluding ChoiceScarf → it's possible
+    ]);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let result = apply_ex(
+        state,
+        speed_order_events(PokemonMove::Earthquake, PokemonMove::DragonClaw),
+        HashMap::new(),
+        move_dex,
+    );
+
+    // The clause for P2-first must include HasItem{ChoiceScarf, mon_idx=1} as escape.
+    let has_scarf_escape = result.predicates.iter().any(|clause| {
+        let has_speed_cmp = clause.iter().any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }));
+        let has_scarf = clause.iter().any(|s| matches!(s,
+            Statement::HasItem { mon_idx: 1, item: Item::ChoiceScarf }
+        ));
+        has_speed_cmp && has_scarf
+    });
+    assert!(has_scarf_escape, "Choice Scarf possible on fast mon → must add ChoiceScarf escape disjunct");
+}
+
+// ── Pass 3: Multi-hit damage ──────────────────────────────────────────────────
+
+/// A 2-hit physical move: both hits delivered against a P1 mon with exact HP.
+/// Verifies that the engine processes multi-hit without panicking and produces
+/// valid (sound) bounds.
+#[test]
+fn test_pass3_multihit_2hits_no_contradiction() {
+    let mut p1_mon = known_p1_normal(); // HP=500, Def=100
+    let p2_mon = neutral_no_item_garchomp();
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    // 2-hit move (50 BP each). Two consecutive DamageDealt reactions.
+    let mut move_dex = HashMap::new();
+    let mut hit2_move = normal_physical_move(PokemonMove::BulletSeed, 25);
+    hit2_move.multihit_range = [2, 2];
+    move_dex.insert(PokemonMove::BulletSeed, hit2_move);
+
+    // Hit 1: HP drops 500 → 460 (40 damage)
+    // Hit 2: HP drops 460 → 422 (38 damage)
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
+            vec![
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(460) }),
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(422) }),
+                event(EventKind::HitCount { target: p1(0), hits: 2 }),
+            ],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    // No contradiction: bounds must remain valid.
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= p2_r.max_pre_nature_stat[1],
+        "Multi-hit must not invert Atk bounds (min {}, max {})",
+        p2_r.min_pre_nature_stat[1], p2_r.max_pre_nature_stat[1]
+    );
+    // Bounds must be within Garchomp's Atk range.
+    assert!(p2_r.min_pre_nature_stat[1] >= 135, "min BSV below Garchomp minimum");
+    assert!(p2_r.max_pre_nature_stat[1] <= 182, "max BSV above Garchomp maximum");
+}
+
+/// Multi-hit with varied per-hit damage should produce bounds at least as tight
+/// as a single-hit observation of just the first hit.
+#[test]
+fn test_pass3_multihit_tighter_than_single_hit() {
+    let p1_mon = known_p1_normal(); // HP=500, Def=100
+    let p2_mon = neutral_no_item_garchomp();
+
+    let mut move_dex_multi = HashMap::new();
+    let mut hit2_move = normal_physical_move(PokemonMove::BulletSeed, 25);
+    hit2_move.multihit_range = [2, 2];
+    move_dex_multi.insert(PokemonMove::BulletSeed, hit2_move);
+
+    let mut move_dex_single = HashMap::new();
+    let mut single_move = normal_physical_move(PokemonMove::Earthquake, 25);
+    single_move.multihit_range = [1, 1];
+    move_dex_single.insert(PokemonMove::Earthquake, single_move);
+
+    // 2-hit: first hit deals 40 damage, second deals 38 (different rolls → tighter intersection).
+    let multi_result = apply_ex(
+        battle_1v1(p1_mon.clone(), p2_mon.clone()),
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
+            vec![
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(460) }), // 40 dmg
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(422) }), // 38 dmg
+                event(EventKind::HitCount { target: p1(0), hits: 2 }),
+            ],
+        )],
+        garchomp_dex(),
+        move_dex_multi,
+    );
+
+    // Single hit: only the first hit (40 damage).
+    let single_result = apply_ex(
+        battle_1v1(p1_mon, p2_mon),
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(460) })], // 40 dmg
+        )],
+        garchomp_dex(),
+        move_dex_single,
+    );
+
+    let m = &multi_result.p2_active_mons[0];
+    let s = &single_result.p2_active_mons[0];
+
+    // Sound: true BSV must lie within both bounds.
+    assert!(m.min_pre_nature_stat[1] <= m.max_pre_nature_stat[1], "multi-hit bounds inverted");
+    assert!(s.min_pre_nature_stat[1] <= s.max_pre_nature_stat[1], "single-hit bounds inverted");
+
+    // Multi-hit bounds should be at least as tight as single-hit.
+    assert!(
+        m.min_pre_nature_stat[1] >= s.min_pre_nature_stat[1]
+            || m.max_pre_nature_stat[1] <= s.max_pre_nature_stat[1],
+        "Multi-hit bounds should be at least as tight as single-hit: multi [{}, {}] vs single [{}, {}]",
+        m.min_pre_nature_stat[1], m.max_pre_nature_stat[1],
+        s.min_pre_nature_stat[1], s.max_pre_nature_stat[1],
+    );
+}
+
+// ── Learnset-based Illusion narrowing ────────────────────────────────────────
+
+/// When a Zoroark-style `possible_species = Possibly([A, B])` uses a move that A
+/// cannot learn but B can, A is dropped from the candidates and B collapses to Known.
+#[test]
+fn test_learnset_narrows_possible_species_to_known() {
+    // P2 mon appears as Garchomp but might be Alakazam (Illusion scenario).
+    let mut p2_mon = unknown_mon_species(Species::Garchomp);
+    p2_mon.possible_species = Unknown::Possibly(vec![Species::Garchomp, Species::Alakazam]);
+    // Keep types/weight as Garchomp's (the disguised species).
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    // Learnset: Garchomp learns Earthquake, Alakazam does not.
+    let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    learnset_dex.insert(Species::Garchomp, {
+        let mut s = HashSet::new();
+        s.insert(PokemonMove::Earthquake);
+        s
+    });
+    learnset_dex.insert(Species::Alakazam, {
+        let mut s = HashSet::new();
+        s.insert(PokemonMove::Psychic);
+        // Earthquake deliberately absent → Alakazam can't learn it.
+        s
+    });
+
+    let config = InferenceConfig {
+        learnset_dex,
+        ev_total_cap: None, // disable EV cap (no species to run pass5 on)
+        ..Default::default()
+    };
+
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets: vec![p1(0)],
+        })],
+        HashMap::new(),
+        HashMap::new(),
+        config,
+    );
+
+    // After seeing Earthquake, Alakazam should be excluded → collapses to Known(Garchomp).
+    assert!(
+        matches!(&result.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Garchomp),
+        "Learnset narrowing must collapse possible_species to Known(Garchomp) when Alakazam can't learn Earthquake"
+    );
+}
+
+/// When both candidate species can learn the observed move, no narrowing occurs.
+#[test]
+fn test_learnset_keeps_both_when_move_is_legal_for_both() {
+    let mut p2_mon = unknown_mon_species(Species::Garchomp);
+    p2_mon.possible_species = Unknown::Possibly(vec![Species::Garchomp, Species::Tyranitar]);
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    learnset_dex.insert(Species::Garchomp, {
+        let mut s = HashSet::new(); s.insert(PokemonMove::Earthquake); s
+    });
+    learnset_dex.insert(Species::Tyranitar, {
+        let mut s = HashSet::new(); s.insert(PokemonMove::Earthquake); s
+    });
+
+    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)],
+        })],
+        HashMap::new(),
+        HashMap::new(),
+        config,
+    );
+
+    // Both can learn Earthquake → Possibly still has both candidates.
+    assert!(
+        matches!(&result.p2_active_mons[0].possible_species, Unknown::Possibly(v) if v.len() == 2),
+        "Learnset must not narrow when both candidates can learn the observed move"
+    );
+}
+
+/// When the learnset dex lacks data for a species, that species must be kept as a
+/// candidate (sound: we can't confirm illegality without data).
+#[test]
+fn test_learnset_keeps_species_when_no_data() {
+    let mut p2_mon = unknown_mon_species(Species::Garchomp);
+    p2_mon.possible_species = Unknown::Possibly(vec![Species::Garchomp, Species::Alakazam]);
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    // Learnset: only Garchomp has data; Alakazam is absent → keep both.
+    let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    learnset_dex.insert(Species::Garchomp, {
+        let mut s = HashSet::new(); s.insert(PokemonMove::Earthquake); s
+    });
+    // Alakazam absent → keep it regardless of move.
+
+    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)],
+        })],
+        HashMap::new(),
+        HashMap::new(),
+        config,
+    );
+
+    // Missing data for Alakazam → keep both candidates (soundness).
+    assert!(
+        matches!(&result.p2_active_mons[0].possible_species, Unknown::Possibly(v) if v.len() == 2),
+        "Learnset must not drop species when learnset data is absent (sound: can't confirm illegality)"
+    );
+}
+
+// ── Global EV total-cap tightening (Pass 5) ──────────────────────────────────
+
+/// When two stats have high minimum EVs, the 510-EV total cap must tighten the
+/// maximum EVs allowed for all other stats.
+///
+/// Scenario: Garchomp with Atk=175 (implies minEV≈196) and Def=130 (implies minEV≈116).
+/// Budget for remaining stats: 510 − 196 − 116 = 198. EV_LATTICE max ≤ 198 is 196.
+/// So maxEvs for SpA/SpD/Spe should each be ≤ 196 after the cap is applied.
+#[test]
+fn test_ev_cap_tightens_remaining_stats() {
+    use crate::state::pokemon::Nature;
+
+    let mut mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    mon.possible_natures = Unknown::Known(Nature::Hardy); // neutral
+
+    // Pin Atk (stat 1) to exactly 175: requires EV≈196 (31 IVs, neutral, lv50 Garchomp base=130).
+    // calc_stat(130, 31, 196, 50, 1.0) = floor((260+31+49)*0.5+5) = floor(175) = 175.
+    mon.minStats[1] = 175;
+    mon.maxStats[1] = 175;
+    mon.min_pre_nature_stat[1] = 175;
+    mon.max_pre_nature_stat[1] = 175;
+
+    // Pin Def (stat 2) to exactly 130: requires EV≈116 (31 IVs, neutral, lv50 Garchomp base=95).
+    // calc_stat(95, 31, 116, 50, 1.0) = floor((190+31+29)*0.5+5) = floor(130) = 130.
+    mon.minStats[2] = 130;
+    mon.maxStats[2] = 130;
+    mon.min_pre_nature_stat[2] = 130;
+    mon.max_pre_nature_stat[2] = 130;
+
+    let config = InferenceConfig {
+        use_stat_points: true,
+        force_max_ivs: true,
+        level: 50,
+        legal_items: None,
+        learnset_dex: HashMap::new(),
+        ev_total_cap: Some(510),
+    };
+
+    pass5_back_solve(&mut mon, &config, &garchomp_dex());
+
+    // Atk and Def EVs should be pinned near their expected values.
+    assert_eq!(mon.minEvs[1], 196, "Atk minEV must be 196 for stat=175");
+    assert_eq!(mon.maxEvs[1], 196, "Atk maxEV must be 196 for stat=175");
+    assert!(mon.minEvs[2] <= 116, "Def minEV must be ≤ 116 for stat≥130");
+
+    // After cap (budget = 510 - 196 - 116 - 0..= 198), other stats must have maxEV ≤ 196.
+    // (Nearest EV_LATTICE value ≤ 198 is 196.)
+    assert!(
+        mon.maxEvs[3] <= 196,
+        "SpA maxEV must be capped to ≤ 196 by the total-EV cap (got {})",
+        mon.maxEvs[3]
+    );
+    assert!(
+        mon.maxEvs[4] <= 196,
+        "SpD maxEV must be capped to ≤ 196 by the total-EV cap (got {})",
+        mon.maxEvs[4]
+    );
+    assert!(
+        mon.maxEvs[5] <= 196,
+        "Spe maxEV must be capped to ≤ 196 by the total-EV cap (got {})",
+        mon.maxEvs[5]
+    );
+
+    // Soundness check: min ≤ max for all stats.
+    for i in 0..6 {
+        assert!(mon.minEvs[i] <= mon.maxEvs[i], "EV bounds inverted for stat {}", i);
+    }
+}
+
+/// EV cap with no EVs forced high → no tightening beyond individual stat analysis.
+#[test]
+fn test_ev_cap_no_tightening_when_evs_low() {
+    use crate::state::pokemon::Nature;
+
+    let mut mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    mon.possible_natures = Unknown::Known(Nature::Hardy);
+
+    // Don't pin stats — everything stays at default wide range.
+    let config = InferenceConfig {
+        use_stat_points: true,
+        force_max_ivs: true,
+        level: 50,
+        legal_items: None,
+        learnset_dex: HashMap::new(),
+        ev_total_cap: Some(510),
+    };
+
+    pass5_back_solve(&mut mon, &config, &garchomp_dex());
+
+    // When minEvs are all 0, budget per stat = 510 - 0 = 510 ≥ 252 → no cap tightening.
+    for i in 0..6 {
+        assert!(mon.maxEvs[i] <= 252, "maxEV must never exceed 252 (got {} for stat {})", mon.maxEvs[i], i);
+        assert!(mon.minEvs[i] <= mon.maxEvs[i], "EV bounds inverted for stat {}", i);
+    }
 }

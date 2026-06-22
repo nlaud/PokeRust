@@ -35,8 +35,8 @@ use crate::information::unknowns::{
 use crate::simulator::helpers::base_damage_formula;
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
-    AbilityData, AccuracyType, MoveCategory, MoveData, PokemonData, PokemonStat, PseudoWeather,
-    SideCondition, SlotCondition, Status, Terrain, VolatileStatus, Weather,
+    AbilityData, AccuracyType, MoveCategory, MoveData, PokemonData, PokemonStat, PokemonType,
+    PseudoWeather, SideCondition, SlotCondition, Status, Terrain, VolatileStatus, Weather,
 };
 use crate::state::pokemon::{Nature, VolatileStatusState, calc_hp, calc_stat, nature_stat_modifiers};
 
@@ -57,6 +57,15 @@ pub struct InferenceConfig {
     /// revealed item outside the whitelist triggers a contradiction panic. `None`
     /// means all items are considered possible.
     pub legal_items: Option<HashSet<Item>>,
+    /// Learnset data per species (from `showdownLearnsets.txt`). When non-empty,
+    /// enables learnset-based Illusion narrowing: after an opponent move is revealed,
+    /// any candidate species that cannot legally learn that move is dropped from
+    /// `possible_species`. Empty map disables this narrowing (default for tests).
+    pub learnset_dex: HashMap<Species, HashSet<PokemonMove>>,
+    /// Total EV budget across all six stats. When `Some(n)`, Pass 5 applies
+    /// cross-stat tightening: `maxEvs[i] ≤ n − Σ_{j≠i} minEvs[j]`. Standard
+    /// competitive value is 510. `None` disables the cap check.
+    pub ev_total_cap: Option<u16>,
 }
 
 impl Default for InferenceConfig {
@@ -66,6 +75,8 @@ impl Default for InferenceConfig {
             force_max_ivs: true,
             level: 50,
             legal_items: None,
+            learnset_dex: HashMap::new(),
+            ev_total_cap: Some(510),
         }
     }
 }
@@ -552,6 +563,14 @@ fn apply_information_battle(
     ability_dex: &HashMap<Ability, AbilityData>,
     config: &InferenceConfig,
 ) {
+    // ── Pass 4 (first): speed ordering → Spe bounds ─────────────────────────
+    // Run BEFORE the event walk so that speed bounds (minStats[5]/maxStats[5])
+    // are already tightened when Pass 3 calls the damage oracle for Gyro Ball
+    // and Electro Ball, which compute BP from effective speeds.
+    pass4_speed_from_order(state, events, move_dex, ability_dex);
+    // Propagate the emitted SpeedComparison predicates to fixpoint immediately.
+    while propagate_speed_comparisons(state) {}
+
     // ── Pass 1–3: depth-first event walk ─────────────────────────────────────
     let mut ctx = BattleContext {
         dex,
@@ -563,9 +582,6 @@ fn apply_information_battle(
     for event in events {
         process_battle_event(state, event, &mut ctx);
     }
-
-    // ── Pass 4: speed ordering from top-level MoveUsed sequence ──────────────
-    pass4_speed_from_order(state, events, move_dex);
 
     // ── Pass 5: back-solve EV/IV/nature from tightened stat bounds ────────────
     // Run on all mons whose species is unambiguous (Known).
@@ -710,6 +726,9 @@ fn pass1_apply_event(
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     reveal_move_on_mon(mon, move_used);
+                    narrow_species_by_learnset(
+                        mon, move_used, &ctx.config.learnset_dex, ctx.dex,
+                    );
                     if Some(move_used) == mon.last_used_move.as_ref() {
                         mon.consecutive_move_count = mon.consecutive_move_count.saturating_add(1);
                     } else {
@@ -1132,6 +1151,9 @@ fn pass1_apply_event(
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     reveal_move_on_mon(mon, move_used);
+                    narrow_species_by_learnset(
+                        mon, move_used, &ctx.config.learnset_dex, ctx.dex,
+                    );
                 }
             }
         }
@@ -1361,6 +1383,56 @@ fn reveal_move_on_mon(mon: &mut UnknownPokemonState, pokemon_move: &PokemonMove)
     }
     // All 4 slots filled but move not found — legal mon constraint violated.
     // Don't panic; widening is sound.
+}
+
+/// Narrow `possible_species` (when `Possibly`) by excluding candidates whose learnset
+/// doesn't include `move_used`. Collapses to `Known` when only one candidate remains
+/// and refreshes `possible_types` / `possible_weight_hg` from the species dex.
+///
+/// Sound: only removes a species if we have *positive* learnset data confirming it
+/// cannot learn the move.  Absent learnset data → keeps the candidate.
+fn narrow_species_by_learnset(
+    mon: &mut UnknownPokemonState,
+    move_used: &PokemonMove,
+    learnset_dex: &HashMap<Species, HashSet<PokemonMove>>,
+    dex: &HashMap<Species, PokemonData>,
+) {
+    if learnset_dex.is_empty() {
+        return;
+    }
+    let candidates = match &mon.possible_species {
+        Unknown::Possibly(v) => v.clone(),
+        _ => return, // Known → nothing to narrow; Not → can't enumerate safely
+    };
+
+    let remaining: Vec<Species> = candidates
+        .iter()
+        .filter(|s| {
+            // Sound: keep species if learnset data is absent (can't confirm illegality).
+            learnset_dex.get(*s).map_or(true, |moves| moves.contains(move_used))
+        })
+        .cloned()
+        .collect();
+
+    if remaining.len() == candidates.len() {
+        return; // Nothing excluded.
+    }
+    if remaining.is_empty() {
+        // All candidates illegal — learnset data may be wrong; don't narrow to contradiction.
+        return;
+    }
+
+    if remaining.len() == 1 {
+        let species = remaining[0].clone();
+        mon.possible_species = Unknown::Known(species.clone());
+        // Refresh types and weight from the now-pinned species.
+        if let Some(pd) = dex.get(&species) {
+            mon.possible_types = Unknown::Known(pd.types.clone());
+            mon.possible_weight_hg = Unknown::Known(pd.weight);
+        }
+    } else {
+        mon.possible_species = Unknown::Possibly(remaining);
+    }
 }
 
 /// Exclude Choice items when the mon has used 2+ different moves in the same field stint.
@@ -1994,6 +2066,10 @@ fn pass3_damage_to_stats(
     if matches!(move_used, PM::ShellSideArm | PM::PhotonGeyser) {
         return;
     }
+    // Beat Up BP depends on party members' base Attack — out of scope for inference.
+    if matches!(move_used, PM::BeatUp) {
+        return;
+    }
     // Need a clear offensive stat to know which field to bound.
     let Some(off_stat) = crate::simulator::helpers::move_offensive_stat(move_data) else {
         return;
@@ -2004,23 +2080,29 @@ fn pass3_damage_to_stats(
         return;
     };
 
-    // For each target that has a DamageDealt reaction, run the inference.
+    // Whether the move has variable BP determined by speed stats (Gyro Ball / Electro Ball).
+    let speed_dep_bp = is_speed_dependent_bp(move_used);
+
+    // For each target that has one or more DamageDealt reactions, run inference.
+    // Multi-hit moves produce multiple DamageDealt reactions per target; we process
+    // each hit independently to intersect BSV feasibility constraints.
     for target_slot in targets {
         let Some(target_idx) = mon_idx_for_active_slot(state, target_slot) else {
             continue;
         };
 
-        // Find the DamageDealt for this target in the reactions (direct child).
-        let damage_reaction = event.reactions.iter().find(|r| {
-            matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == target_slot)
-        });
-        let Some(damage_event) = damage_reaction else {
+        // Collect ALL DamageDealt reactions for this target, in event order.
+        let damage_reactions: Vec<&InformationEvent> = event
+            .reactions
+            .iter()
+            .filter(|r| {
+                matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == target_slot)
+            })
+            .collect();
+
+        if damage_reactions.is_empty() {
             continue;
-        };
-        let new_hp = match &damage_event.kind {
-            EventKind::DamageDealt { new_hp, .. } => new_hp,
-            _ => continue,
-        };
+        }
 
         // Pre-hit HP from MoveContext snapshot.
         let Some(move_ctx) = &ctx.move_context else {
@@ -2035,64 +2117,101 @@ fn pass3_damage_to_stats(
             continue;
         };
 
+        // For multi-hit: use a global crit flag (any hit critted) — sound but slightly
+        // looser than per-hit crit tracking. For single-hit this is exact.
         let is_crit = move_ctx.is_crit;
 
-        // ── Classify direction ────────────────────────────────────────────────
-        // Direction B: target HP is Number → exact damage; we bound the ATTACKER's stat.
-        // Direction A: target HP is Percent → interval damage; we bound DEFENDER's stat.
-        match (pre_hp, new_hp) {
-            (PokemonHP::Number(pre), PokemonHP::Number(post)) => {
-                // Direction B: exact damage.
-                let exact_damage = pre.saturating_sub(*post);
-                if exact_damage == 0 {
-                    continue; // min-1 doesn't carry stat info usefully
-                }
-                pass3_direction_b(
-                    state,
-                    event,
-                    ctx,
-                    user_idx,
-                    target_idx,
-                    user,
-                    target_slot,
-                    move_data,
-                    &off_stat,
-                    is_crit,
-                    exact_damage,
-                );
-            }
-            (PokemonHP::Percent(pre_pct), PokemonHP::Percent(post_pct)) => {
-                // Direction A: percent interval.
-                // Only meaningful when there's an actual HP drop.
-                if post_pct >= pre_pct {
+        // Detect whether this target's HP is a multi-hit sequence.
+        let is_multi = move_data.multihit_range[0] > 0 || damage_reactions.len() > 1;
+
+        // Running HP tracks the HP value between consecutive hits.
+        let mut current_hp: PokemonHP = pre_hp.clone();
+
+        for (hit_idx, dmg_reaction) in damage_reactions.iter().enumerate() {
+            let new_hp = match &dmg_reaction.kind {
+                EventKind::DamageDealt { new_hp, .. } => new_hp,
+                _ => {
+                    current_hp = current_hp.clone();
                     continue;
                 }
-                let delta_pct = pre_pct - post_pct;
-                // Bound defender's defensive stat.
-                let Some(def_stat) = crate::simulator::helpers::move_defensive_stat(move_data)
-                else {
-                    continue;
-                };
-                pass3_direction_a(
-                    state,
-                    event,
-                    ctx,
-                    user_idx,
-                    target_idx,
-                    user,
-                    target_slot,
-                    move_data,
-                    &def_stat,
-                    is_crit,
-                    delta_pct,
-                );
+            };
+
+            // Per-hit BP override for fixed-BP multi-hit moves (Triple Kick etc.).
+            // None for normal multi-hit moves (each hit uses move's base_power).
+            let bp_override: Option<u16> = if is_multi {
+                match move_used {
+                    PM::TripleKick => Some(10 + hit_idx as u16 * 10),
+                    PM::TripleAxel => Some(20 + hit_idx as u16 * 20),
+                    PM::PopulationBomb => Some(20),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // ── Classify direction ────────────────────────────────────────────
+            // Direction B: target HP is Number → exact damage; bound ATTACKER's stat.
+            // Direction A: target HP is Percent → interval damage; bound DEFENDER's stat.
+            match (&current_hp, new_hp) {
+                (PokemonHP::Number(pre), PokemonHP::Number(post)) => {
+                    let exact_damage = (*pre).saturating_sub(*post);
+                    if exact_damage > 0 {
+                        pass3_direction_b(
+                            state,
+                            event,
+                            ctx,
+                            user_idx,
+                            target_idx,
+                            user,
+                            target_slot,
+                            move_data,
+                            &off_stat,
+                            is_crit,
+                            exact_damage,
+                            bp_override,
+                            speed_dep_bp,
+                        );
+                    }
+                }
+                (PokemonHP::Percent(pre_pct), PokemonHP::Percent(post_pct)) => {
+                    if *post_pct < *pre_pct {
+                        let delta_pct = pre_pct - post_pct;
+                        let Some(def_stat) =
+                            crate::simulator::helpers::move_defensive_stat(move_data)
+                        else {
+                            current_hp = new_hp.clone();
+                            continue;
+                        };
+                        pass3_direction_a(
+                            state,
+                            event,
+                            ctx,
+                            user_idx,
+                            target_idx,
+                            user,
+                            target_slot,
+                            move_data,
+                            &def_stat,
+                            is_crit,
+                            delta_pct,
+                            bp_override,
+                            speed_dep_bp,
+                        );
+                    }
+                }
+                _ => {
+                    // Mixed Number/Percent — HP tracking not implemented; skip.
+                }
             }
-            _ => {
-                // Mixed Number/Percent (our mon attacking) — HP tracking needed; skip.
-                continue;
-            }
+
+            current_hp = new_hp.clone();
         }
     }
+}
+
+/// Returns `true` for moves whose base power depends on one or both mons' Speed stats.
+fn is_speed_dependent_bp(move_used: &PokemonMove) -> bool {
+    matches!(move_used, PokemonMove::GyroBall | PokemonMove::ElectroBall)
 }
 
 /// Items that can boost offensive damage for a given attacker mon.
@@ -2211,6 +2330,10 @@ fn pass3_direction_b(
     off_stat: &crate::state::dex_data::PokemonStat,
     is_crit: bool,
     exact_damage: u16,
+    // Per-hit base power override for multi-hit moves (None = use move's base_power).
+    bp_override: Option<u16>,
+    // True for Gyro Ball / Electro Ball — BP depends on attacker + target speeds.
+    speed_dep_bp: bool,
 ) {
     use crate::information::materialize::{materialize_battle, materialize_pokemon};
     use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
@@ -2300,6 +2423,15 @@ fn pass3_direction_b(
         1.0
     };
 
+    // For speed-dependent BP moves (Gyro Ball / Electro Ball), the attacker's speed
+    // also varies over its current [min, max] range. We scan both endpoints (sound
+    // because BP is monotone in the speed ratio — all intermediate BPs are covered).
+    let attacker_speed_range: Option<(u16, u16)> = if speed_dep_bp {
+        Some((attacker_unk.minStats[5], attacker_unk.maxStats[5]))
+    } else {
+        None
+    };
+
     // ── Unconditional tightening: union over all (nature_class, item, ability) ─
     let mut global_bsv_lo: Option<u16> = None;
     let mut global_bsv_hi: Option<u16> = None;
@@ -2367,6 +2499,8 @@ fn pass3_direction_b(
             0,
             exact_damage,
             is_crit,
+            bp_override,
+            attacker_speed_range,
         );
 
         per_class.push(NatureClassResult {
@@ -2403,6 +2537,8 @@ fn pass3_direction_b(
                         streak,
                         exact_damage,
                         is_crit,
+                        bp_override,
+                        attacker_speed_range,
                     );
                     if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
                         let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
@@ -2533,11 +2669,16 @@ fn pass3_direction_b(
     }
 }
 
-/// Binary-search for the feasible BSV interval [lo, hi] for Direction B under a
+/// Linear scan for the feasible BSV interval [lo, hi] for Direction B under a
 /// single fixed (nat_mod, item, ability, streak) assignment.
 ///
 /// Returns `(Some(lo), Some(hi))` if any BSV in `[bsv_lo, bsv_hi]` can produce
 /// `exact_damage`, `(None, None)` if none can.
+///
+/// `bp_override` — per-hit base power (for multi-hit moves); `None` uses move's BP.
+/// `attacker_speed_range` — for Gyro Ball / Electro Ball, the attacker's speed stat
+/// range to union over. The oracle is called at the speed endpoints (sound because
+/// BP is monotone in the speed ratio — all intermediate BPs lie in between).
 #[allow(clippy::too_many_arguments)]
 fn find_feasible_bsv_range_b(
     state: &UnknownBattleState,
@@ -2558,68 +2699,80 @@ fn find_feasible_bsv_range_b(
     streak: u8,
     exact_damage: u16,
     is_crit: bool,
+    bp_override: Option<u16>,
+    attacker_speed_range: Option<(u16, u16)>,
 ) -> (Option<u16>, Option<u16>) {
     use crate::information::materialize::{materialize_battle, materialize_pokemon};
     use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
-    use crate::state::pokemon::PokemonStatsTable;
 
     // Materialize target with known stats (target is our own mon — stats exact).
     let target_stats = target_unk.minStats; // min == max for known mons
-    let target_ps = materialize_pokemon(target_unk, target_stats, neutral_item(target_unk), neutral_ability(target_unk));
+    let target_ps = materialize_pokemon(
+        target_unk,
+        target_stats,
+        neutral_item(target_unk),
+        neutral_ability(target_unk),
+    );
 
-    // Build the battle state (no clones of Vec needed — wrap everything).
-    // We need a helper to build the attacker PS with a specific BSV value.
-    let make_atk = |bsv: u16| -> crate::state::pokemon::PokemonState {
+    // Speed endpoints for speed-dependent BP moves (Gyro Ball / Electro Ball).
+    // Scanning both endpoints of [min_spe, max_spe] is sound since BP is monotone
+    // in the speed ratio, covering all intermediate BPs.
+    let speed_endpoints: Vec<u16> = match attacker_speed_range {
+        Some((lo, hi)) if lo != hi => vec![lo, hi],
+        Some((lo, _)) => vec![lo],
+        None => vec![attacker_unk.minStats[5]],
+    };
+
+    // Build the attacker PS with a specific BSV and optional speed override.
+    let make_atk = |bsv: u16, spe_override: u16| -> crate::state::pokemon::PokemonState {
         let mut stats = attacker_unk.minStats; // fill non-inferred stats with current min
-        // Override stat si with the concrete value for this BSV + nature_mod.
         if si == 0 {
             stats[0] = bsv; // HP: no nature
         } else {
             stats[si] = (bsv as f64 * nat_mod as f64).floor() as u16;
         }
+        stats[5] = spe_override; // override speed (no-op for non-speed-dep moves)
         let mut unk_copy = attacker_unk.clone();
         unk_copy.consecutive_move_count = streak;
         materialize_pokemon(&unk_copy, stats, item.clone(), ability.clone())
     };
 
-    // Damage is monotone non-decreasing in BSV (higher stat → more damage).
-    // We use a linear scan in this MVP; a binary search would require
-    // separate lo-search and hi-search passes, but the BSV range for a
-    // level-50 mon is at most ~250 wide, which is fast enough.
+    // A BSV is feasible if the oracle produces `exact_damage` with correct crit for
+    // *any* speed endpoint (sound union over the speed range).
     let can_produce = |bsv: u16| -> bool {
-        let atk_ps = make_atk(bsv);
-        let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
-            vec![atk_ps.clone()]
-        } else {
-            vec![target_ps.clone()]
-        };
-        let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
-            vec![target_ps.clone()]
-        } else {
-            vec![atk_ps.clone()]
-        };
-        let battle = materialize_battle(state, p1_active, p2_active);
-
-        let outcomes = calculate_damage_outcomes_for_target_with_options(
-            &battle,
-            &atk_ps,
-            &target_ps,
-            user_slot.clone(),
-            target_slot.clone(),
-            move_data,
-            *oracle_config,
-            targets_mult,
-            1.0, // invulnerability_multiplier
-            None,
-            None,
-        );
-
-        outcomes
-            .iter()
-            .any(|(dmg, crit, _)| *dmg == exact_damage && *crit == is_crit)
+        speed_endpoints.iter().any(|&spe| {
+            let atk_ps = make_atk(bsv, spe);
+            let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
+                vec![atk_ps.clone()]
+            } else {
+                vec![target_ps.clone()]
+            };
+            let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
+                vec![target_ps.clone()]
+            } else {
+                vec![atk_ps.clone()]
+            };
+            let battle = materialize_battle(state, p1_active, p2_active);
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle,
+                &atk_ps,
+                &target_ps,
+                user_slot.clone(),
+                target_slot.clone(),
+                move_data,
+                *oracle_config,
+                targets_mult,
+                1.0, // invulnerability_multiplier
+                bp_override,
+                None,
+            );
+            outcomes
+                .iter()
+                .any(|(dmg, crit, _)| *dmg == exact_damage && *crit == is_crit)
+        })
     };
 
-    // Scan for first feasible BSV (lower bound).
+    // Linear scan over the BSV range.
     let mut found_lo: Option<u16> = None;
     let mut found_hi: Option<u16> = None;
     for bsv in bsv_lo..=bsv_hi {
@@ -2646,6 +2799,10 @@ fn pass3_direction_a(
     def_stat: &crate::state::dex_data::PokemonStat,
     is_crit: bool,
     delta_pct: u8,
+    // Per-hit base power override for multi-hit moves.
+    bp_override: Option<u16>,
+    // True for Gyro Ball / Electro Ball — defender's speed affects BP.
+    speed_dep_bp: bool,
 ) {
     use crate::information::materialize::{materialize_battle, materialize_pokemon};
     use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
@@ -2730,6 +2887,17 @@ fn pass3_direction_a(
     let atk_ability = neutral_ability(&attacker_unk);
     let atk_ps = materialize_pokemon(&attacker_unk, atk_stats, atk_item, atk_ability);
 
+    // Defender speed endpoints for Gyro Ball / Electro Ball (Direction A: we attacked
+    // the opponent, so the *target/defender's* speed is the unknown that affects BP).
+    // BP is monotone in the speed ratio, so scanning only the lo/hi endpoints is sound.
+    let defender_speed_endpoints: Vec<u16> = if speed_dep_bp {
+        let lo = defender_unk.minStats[5];
+        let hi = defender_unk.maxStats[5];
+        if lo == hi { vec![lo] } else { vec![lo, hi] }
+    } else {
+        vec![defender_unk.minStats[5]]
+    };
+
     // We sample from the defender's possible HP range (step by 4 for speed).
     for hp_cand in (hp_lo..=hp_hi).step_by(4.max(1) as usize) {
         // Convert percent delta to raw damage interval for this candidate max HP.
@@ -2751,41 +2919,48 @@ fn pass3_direction_a(
                     def_stats[si] = (bsv as f64 * *nat_mod as f64).floor() as u16;
                 }
 
-                let def_ps = materialize_pokemon(
-                    &defender_unk,
-                    def_stats,
-                    neutral_item(&defender_unk),
-                    neutral_ability(&defender_unk),
-                );
-                let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
-                    vec![atk_ps.clone()]
-                } else {
-                    vec![def_ps.clone()]
-                };
-                let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
-                    vec![def_ps.clone()]
-                } else {
-                    vec![atk_ps.clone()]
-                };
-                let battle = materialize_battle(state, p1_active, p2_active);
+                // Scan speed endpoints for speed-dependent-BP moves (Gyro Ball /
+                // Electro Ball): feasible if any speed in the defender's range yields
+                // a matching outcome (sound over-approximation across the speed range).
+                defender_speed_endpoints.iter().any(|&def_spe| {
+                    let mut spd_stats = def_stats;
+                    spd_stats[5] = def_spe;
+                    let def_ps = materialize_pokemon(
+                        &defender_unk,
+                        spd_stats,
+                        neutral_item(&defender_unk),
+                        neutral_ability(&defender_unk),
+                    );
+                    let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
+                        vec![atk_ps.clone()]
+                    } else {
+                        vec![def_ps.clone()]
+                    };
+                    let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
+                        vec![def_ps.clone()]
+                    } else {
+                        vec![atk_ps.clone()]
+                    };
+                    let battle = materialize_battle(state, p1_active, p2_active);
 
-                let outcomes = calculate_damage_outcomes_for_target_with_options(
-                    &battle,
-                    &atk_ps,
-                    &def_ps,
-                    user_slot.clone(),
-                    target_slot.clone(),
-                    move_data,
-                    oracle_config,
-                    targets_mult,
-                    1.0,
-                    None,
-                    None,
-                );
-                // Any outcome with damage in [d_lo, d_hi] and matching crit.
-                outcomes
-                    .iter()
-                    .any(|(dmg, crit, _)| *dmg >= d_lo && *dmg <= d_hi && *crit == is_crit)
+                    let outcomes = calculate_damage_outcomes_for_target_with_options(
+                        &battle,
+                        &atk_ps,
+                        &def_ps,
+                        user_slot.clone(),
+                        target_slot.clone(),
+                        move_data,
+                        oracle_config,
+                        targets_mult,
+                        1.0,
+                        bp_override,
+                        None,
+                    );
+                    // Any outcome with damage in [d_lo, d_hi] and matching crit.
+                    outcomes
+                        .iter()
+                        .any(|(dmg, crit, _)| *dmg >= d_lo && *dmg <= d_hi && *crit == is_crit)
+                })
             };
 
             let mut found_lo_local: Option<u16> = None;
@@ -2838,76 +3013,255 @@ fn pass3_direction_a(
 
 // ── Pass 4: Speed ordering → Spe bounds ──────────────────────────────────────
 
+/// Returns `true` if the mon at `mon_idx` is on P2's side (indices past the P1 segments).
+fn mon_is_p2(state: &UnknownBattleState, mon_idx: usize) -> bool {
+    let p1_count = state.p1_active_mons.len()
+        + state.p1_known_back_mons.len()
+        + state.p1_possible_back_mons.len();
+    mon_idx >= p1_count
+}
+
+/// Returns the effective move priority for `move_used`, folding in field-conditional
+/// boosts that are deterministically known from state (currently: Grassy Glide +1 on
+/// Grassy Terrain).  Does NOT fold in ability-based boosts (Prankster/Gale Wings/Triage);
+/// those are tracked as disjunct escape clauses instead.
+fn effective_move_priority(
+    move_used: &PokemonMove,
+    base_priority: i8,
+    state: &UnknownBattleState,
+) -> i8 {
+    if *move_used == PokemonMove::GrassyGlide
+        && state.terrain == Some(Terrain::GrassyTerrain)
+    {
+        base_priority + 1
+    } else {
+        base_priority
+    }
+}
+
 /// Emit `SpeedComparison` predicates from the observed top-level move order.
+///
+/// For each pair of consecutive moves in the same effective priority bracket:
+/// - Wraps the natural SpeedComparison in a disjunction with any move-order explanation
+///   that could account for the ordering without implying a speed edge (Quick Claw,
+///   Quick Draw, ability priority, Stall, item speed modifiers, weather abilities, etc.).
+/// - Accounts for Trick Room (reverses the inferred fast/slow assignment) and Tailwind
+///   (folds the ×2 multiplier into the comparison deterministically).
 fn pass4_speed_from_order(
     state: &mut UnknownBattleState,
     top_events: &[InformationEvent],
     move_dex: &HashMap<PokemonMove, MoveData>,
+    _ability_dex: &HashMap<Ability, AbilityData>,
 ) {
-    // Collect (slot, priority, mon_idx) for all top-level MoveUsed events in order.
-    let mut move_order: Vec<(FieldSlot, i8, usize)> = Vec::new();
+    // Collect (slot, eff_priority, mon_idx, move_used) for all top-level MoveUsed events.
+    let mut move_order: Vec<(FieldSlot, i8, usize, PokemonMove)> = Vec::new();
     for event in top_events {
         if let EventKind::MoveUsed {
             user, move_used, ..
         } = &event.kind
         {
-            let priority = move_dex.get(move_used).map(|md| md.priority).unwrap_or(0);
+            let base_prio = move_dex.get(move_used).map(|md| md.priority).unwrap_or(0);
+            let eff_prio = effective_move_priority(move_used, base_prio, state);
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
-                move_order.push((user.clone(), priority, idx));
+                move_order.push((user.clone(), eff_prio, idx, move_used.clone()));
             }
         }
     }
 
+    let trick_room_active = state.pseudo_weathers.contains(&PseudoWeather::TrickRoom);
+
     for window in move_order.windows(2) {
-        let (_, p0, idx0) = &window[0];
-        let (_, p1, idx1) = &window[1];
+        let (_, p0, idx0, mv0) = &window[0];
+        let (_, p1, idx1, _mv1) = &window[1];
+
+        // Different effective priority brackets — no speed inference possible.
         if p0 != p1 {
-            continue; // Different priority brackets — no speed info.
+            continue;
         }
-        let fast_idx = *idx0;
-        let slow_idx = *idx1;
+
+        // Under Trick Room the slower mon goes first; swap the fast/slow assignment.
+        let (fast_idx, slow_idx, fast_move) = if trick_room_active {
+            // idx1 went second → is the faster mon in normal ordering.
+            (*idx1, *idx0, _mv1.clone())
+        } else {
+            (*idx0, *idx1, mv0.clone())
+        };
 
         let (fast_mult, slow_mult) = compute_speed_multipliers(state, fast_idx, slow_idx);
 
-        // Can Quick Claw / Quick Draw explain the ordering without a speed advantage?
-        let fast_could_have_qc = get_mon_by_idx(state, fast_idx)
-            .map_or(false, |m| !unknown_is_excluded(&m.item, &Item::QuickClaw));
-        let fast_could_have_qd = get_mon_by_idx(state, fast_idx).map_or(false, |m| {
-            !unknown_is_excluded(&m.possible_abilities, &Ability::QuickDraw)
-        });
+        // ── Build escape disjuncts ────────────────────────────────────────────
+        // Every escape disjunct D means: "the SpeedComparison OR the escape D explains
+        // the observation" — so the predicate remains sound (a wider union).
 
-        let speed_cmp = Statement::SpeedComparison {
+        let fast_mon = get_mon_by_idx(state, fast_idx);
+        let slow_mon = get_mon_by_idx(state, slow_idx);
+
+        let mut clause: Vec<Statement> = vec![Statement::SpeedComparison {
             fast_idx,
             slow_idx,
             fast_mult,
             slow_mult,
-        };
+        }];
 
-        if !fast_could_have_qc && !fast_could_have_qd {
-            // Clean ordering.
-            state.predicates.push(vec![speed_cmp]);
-        } else {
-            // Disjunction: natural speed OR random first-mover.
-            let mut clause = vec![speed_cmp];
-            if fast_could_have_qc {
-                clause.push(Statement::HasItem {
-                    mon_idx: fast_idx,
-                    item: Item::QuickClaw,
-                });
-            }
-            if fast_could_have_qd {
+        // (1) Quick Claw / Quick Draw on the fast mon — random first-mover.
+        if fast_mon.map_or(false, |m| !unknown_is_excluded(&m.item, &Item::QuickClaw)) {
+            clause.push(Statement::HasItem {
+                mon_idx: fast_idx,
+                item: Item::QuickClaw,
+            });
+        }
+        if fast_mon.map_or(false, |m| {
+            !unknown_is_excluded(&m.possible_abilities, &Ability::QuickDraw)
+        }) {
+            clause.push(Statement::HasAbility {
+                mon_idx: fast_idx,
+                ability: Ability::QuickDraw,
+            });
+        }
+
+        // (2) Ability-priority boosts on the fast mon's move.
+        //     Each is conditional on the move type/category matching the ability's trigger.
+        if let (Some(fast_m), Some(fast_md)) = (fast_mon, move_dex.get(&fast_move)) {
+            // Prankster: +1 to Status-category moves.
+            if fast_md.category == MoveCategory::Status
+                && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Prankster)
+            {
                 clause.push(Statement::HasAbility {
                     mon_idx: fast_idx,
-                    ability: Ability::QuickDraw,
+                    ability: Ability::Prankster,
                 });
             }
-            state.predicates.push(clause);
+            // Gale Wings: +1 to Flying-type moves at full HP (Gen VIII+ condition).
+            let fast_at_full_hp = matches!(fast_m.hp, PokemonHP::Percent(100));
+            if fast_md.pokemon_type == PokemonType::Flying
+                && fast_at_full_hp
+                && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::GaleWings)
+            {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::GaleWings,
+                });
+            }
+            // Triage: +3 to draining/healing moves.
+            if fast_md.heal_fraction != [0, 0]
+                && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Triage)
+            {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::Triage,
+                });
+            }
         }
+
+        // (3) Stall on the slow mon: Stall forces the holder to always go last
+        //     within its priority bracket regardless of speed.
+        if slow_mon.map_or(false, |m| {
+            !unknown_is_excluded(&m.possible_abilities, &Ability::Stall)
+        }) {
+            clause.push(Statement::HasAbility {
+                mon_idx: slow_idx,
+                ability: Ability::Stall,
+            });
+        }
+
+        // (4) Choice Scarf on the fast mon: ×1.5 effective speed means the natural
+        //     SpeedComparison predicate is too strong (over-narrows) without this escape.
+        if fast_mon.map_or(false, |m| !unknown_is_excluded(&m.item, &Item::ChoiceScarf)) {
+            clause.push(Statement::HasItem {
+                mon_idx: fast_idx,
+                item: Item::ChoiceScarf,
+            });
+        }
+
+        // (5) Speed-reducing items on the slow mon: these force the holder to go last
+        //     in its bracket, explaining the ordering without implying a speed edge.
+        if let Some(slow_m) = slow_mon {
+            for slow_item in [Item::IronBall, Item::LaggingTail, Item::FullIncense] {
+                if !unknown_is_excluded(&slow_m.item, &slow_item) {
+                    clause.push(Statement::HasItem {
+                        mon_idx: slow_idx,
+                        item: slow_item,
+                    });
+                }
+            }
+        }
+
+        // (6) Weather-conditional speed-doubling abilities on the fast mon.
+        //     Only add escapes when the triggering weather is currently active.
+        if let Some(fast_m) = fast_mon {
+            let weather = &state.weather;
+            let is_rain = matches!(weather, Some(Weather::Rain) | Some(Weather::HeavyRain));
+            if is_rain && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SwiftSwim) {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::SwiftSwim,
+                });
+            }
+            let is_sun =
+                matches!(weather, Some(Weather::Sun) | Some(Weather::ExtremeSunlight));
+            if is_sun && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Chlorophyll) {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::Chlorophyll,
+                });
+            }
+            let is_sand = matches!(weather, Some(Weather::Sandstorm));
+            if is_sand && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SandRush) {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::SandRush,
+                });
+            }
+            let is_snow = matches!(weather, Some(Weather::Snow));
+            if is_snow && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SlushRush) {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::SlushRush,
+                });
+            }
+            // Surge Surfer: ×2 on Electric Terrain.
+            if state.terrain == Some(Terrain::ElectricTerrain)
+                && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SurgeSurfer)
+            {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::SurgeSurfer,
+                });
+            }
+            // Unburden: ×2 after losing held item.
+            if fast_m.item_lost
+                && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Unburden)
+            {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::Unburden,
+                });
+            }
+            // Quick Feet: ×1.5 when statused. Guard whenever the mon is statused;
+            // the paralysis factor in `compute_speed_multipliers` already handles the
+            // para case numerically, but Quick Feet *overrides* the paralysis penalty,
+            // so the predicate may be too strong without this escape when both apply.
+            if fast_m.status.is_some()
+                && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::QuickFeet)
+            {
+                clause.push(Statement::HasAbility {
+                    mon_idx: fast_idx,
+                    ability: Ability::QuickFeet,
+                });
+            }
+        }
+
+        // Emit: unit clause → unconditional bound; multi-entry → disjunction.
+        state.predicates.push(clause);
     }
 }
 
 /// Integer speed multipliers (fast_mult, slow_mult) scaled to a common denominator.
-/// Invariant: `base_spe(fast) * fast_mult >= base_spe(slow) * slow_mult`.
+///
+/// Encodes: `base_spe(fast) * fast_mult >= base_spe(slow) * slow_mult`.
+/// Accounts for boost stages, paralysis (×½), and Tailwind (×2, deterministic).
+/// Items (Choice Scarf, Iron Ball) and ability-based multipliers (Swift Swim, etc.)
+/// are NOT folded in — they are handled as escape disjuncts in `pass4_speed_from_order`.
 fn compute_speed_multipliers(
     state: &UnknownBattleState,
     fast_idx: usize,
@@ -2926,26 +3280,38 @@ fn compute_speed_multipliers(
         .map(|m| matches!(m.status, Some(Status::Paralysis)))
         .unwrap_or(false);
 
-    // Stage multiplier as (numerator, denominator) with denominator in [2, 8].
+    // Tailwind ×2: deterministically known from side conditions.
+    let fast_tailwind = if mon_is_p2(state, fast_idx) {
+        state.p2_side_conditions.contains(&SideCondition::TailWind)
+    } else {
+        state.p1_side_conditions.contains(&SideCondition::TailWind)
+    };
+    let slow_tailwind = if mon_is_p2(state, slow_idx) {
+        state.p2_side_conditions.contains(&SideCondition::TailWind)
+    } else {
+        state.p1_side_conditions.contains(&SideCondition::TailWind)
+    };
+
+    // Stage multiplier as (numerator, denominator).
     let stage_frac = |stage: i8| -> (u32, u32) {
         let s = stage.clamp(-6, 6);
-        if s >= 0 {
-            (2 + s as u32, 2)
-        } else {
-            (2, 2 + (-s) as u32)
-        }
+        if s >= 0 { (2 + s as u32, 2) } else { (2, 2 + (-s) as u32) }
     };
 
     let (fn_, fd) = stage_frac(fast_boost);
     let (sn_, sd) = stage_frac(slow_boost);
-
     // Paralysis ×1/2.
     let (fp_n, fp_d): (u32, u32) = if fast_para { (1, 2) } else { (1, 1) };
     let (sp_n, sp_d): (u32, u32) = if slow_para { (1, 2) } else { (1, 1) };
+    // Tailwind ×2.
+    let (ft_n, ft_d): (u32, u32) = if fast_tailwind { (2, 1) } else { (1, 1) };
+    let (st_n, st_d): (u32, u32) = if slow_tailwind { (2, 1) } else { (1, 1) };
 
-    // Combine to a common scale: fast_mult = fn_*fp_n * (sd*sp_d), slow_mult = sn_*sp_n * (fd*fp_d).
-    let fast_mult = fn_ * fp_n * sd * sp_d;
-    let slow_mult = sn_ * sp_n * fd * fp_d;
+    // Combine to a common scale.
+    // fast_mult = fn_*fp_n*ft_n * (sd*sp_d*st_d)
+    // slow_mult = sn_*sp_n*st_n * (fd*fp_d*ft_d)
+    let fast_mult = fn_ * fp_n * ft_n * sd * sp_d * st_d;
+    let slow_mult = sn_ * sp_n * st_n * fd * fp_d * ft_d;
     (fast_mult, slow_mult)
 }
 
@@ -3110,6 +3476,43 @@ pub fn pass5_back_solve(
         .count();
     if remaining == 0 {
         inference_contradiction!("pass5", "no valid nature remains after pass5");
+    }
+
+    // ── Global EV total-cap cross-stat tightening ─────────────────────────────
+    // Applies only when a cap is configured (default 510 for Pokémon Champions).
+    // Sound: only ever tightens maxEvs; never raises minEvs.
+    // Invariant: Σ_i evs[i] ≤ cap  →  evs[i] ≤ cap − Σ_{j≠i} minEvs[j].
+    if let Some(cap) = config.ev_total_cap {
+        let cap = cap as u16;
+        // Collect per-stat EV floor sum.
+        let min_ev_sum: u16 = (0..6).map(|i| mon.minEvs[i] as u16).sum();
+        let ev_lattice = if config.use_stat_points { Some(ev_candidates) } else { None };
+
+        for stat_i in 0..6 {
+            let other_min_sum = min_ev_sum - mon.minEvs[stat_i] as u16;
+            if other_min_sum >= cap {
+                // All other stats already use the full cap — this stat can't have any EVs.
+                mon.maxEvs[stat_i] = 0;
+                continue;
+            }
+            let budget = cap - other_min_sum; // max EVs allowed in stat_i
+            if budget < mon.maxEvs[stat_i] as u16 {
+                // Round down to the nearest valid lattice value.
+                let capped_max = if let Some(lattice) = ev_lattice {
+                    lattice
+                        .iter()
+                        .rev()
+                        .find(|&&v| (v as u16) <= budget)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    budget.min(252) as u8
+                };
+                if capped_max < mon.maxEvs[stat_i] {
+                    mon.maxEvs[stat_i] = capped_max;
+                }
+            }
+        }
     }
 }
 
