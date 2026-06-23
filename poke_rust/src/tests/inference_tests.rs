@@ -1873,3 +1873,329 @@ fn test_guaranteed_status_absence_emits_preventer_clause() {
     });
     assert!(has_preventer_clause, "Should emit burn-preventer clause when guaranteed burn doesn't land");
 }
+
+// ── Regression: B1 — MegaEvolution flag ──────────────────────────────────────
+
+/// After observing a MegaEvolution event the "mega resource available" flag must
+/// flip to `false` (resource spent).  Before B1 fix the handler set the flag to
+/// `true`, leaving the materialized battle claiming the Mega is still in the bank.
+#[test]
+fn test_mega_sets_has_mega_false() {
+    let p1_mon = unknown_mon();
+    let p2_mon = unknown_mon(); // Garchomp — mega evo uses same species for simplicity
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    // Both resources start as available (true = still in bank).
+    state.p1_has_mega = true;
+    state.p2_has_mega = true;
+
+    let result = apply(
+        state,
+        vec![event(EventKind::MegaEvolution {
+            slot: p2(0),
+            into: Species::Garchomp, // using Garchomp as a stand-in; no mega_stone check
+        })],
+    );
+    assert!(
+        !result.p2_has_mega,
+        "p2_has_mega must be false after P2 Mega Evolves (resource spent)"
+    );
+    assert!(
+        result.p1_has_mega,
+        "p1_has_mega must remain true — P1 has not yet Mega Evolved"
+    );
+}
+
+// ── Regression: B2 — DamageDealt records delta, not pre-hit HP ───────────────
+
+/// `last_damage_taken` must store the HP *delta* (amount dealt), not the pre-hit
+/// HP value.  The simulator stores `eff_damage` (the delta); the inference engine
+/// must match so Counter / Mirror Coat / Metal Burst back-solving is correct.
+#[test]
+fn test_damage_dealt_records_delta() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.hp = PokemonHP::Percent(100); // start at full HP
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    // P1 uses a move and deals ~20% damage.
+    let result = apply(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user:      p1(0),
+                move_used: PokemonMove::Ember,
+                targets:   vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80), // old=100, new=80 → delta=20
+            })],
+        )],
+    );
+
+    let m = &result.p2_active_mons[0];
+    assert_eq!(
+        m.last_damage_taken,
+        PokemonHP::Percent(20),
+        "last_damage_taken must be the HP delta (20 %), not the pre-hit HP (100 %)"
+    );
+}
+
+// ── Regression: S4 — Life Orb not excluded when no damage is dealt ────────────
+
+/// Life Orb recoil only fires when the holder *deals* HP damage.  If a damaging
+/// move produces no `DamageDealt` reaction (e.g. miss or immune target), the
+/// absence of LO recoil is uninformative — LO must NOT be excluded.
+#[test]
+fn test_life_orb_not_excluded_without_damage() {
+    let p1_mon = unknown_mon();
+    let mut p2_mon = unknown_mon();
+    // Nail down the ability so neither MagicGuard nor SheerForce can explain
+    // the missing recoil (those would also suppress LO exclusion).
+    p2_mon.possible_abilities = Unknown::Known(Ability::SandVeil);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+
+    // P2 uses Earthquake but there is NO DamageDealt reaction (the move missed).
+    let result = apply_ex(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user:      p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets:   vec![p1(0)],
+            // No DamageDealt child — the move missed.
+        })],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        !is_item_excluded(&result.p2_active_mons[0], &Item::LifeOrb),
+        "Life Orb must NOT be excluded when the move dealt no HP damage (e.g. miss)"
+    );
+}
+
+// ── Regression: S5 — Switch-out reset clears boosts and volatiles ────────────
+
+/// `apply_switch_out_reset` must clear boosts and volatile statuses from the mon
+/// leaving the field.  This regression verifies that processing a Switch event
+/// for a mon that carries non-zero boosts, a volatile, and a ToxicPoison tier
+/// does NOT panic and produces a consistent subsequent state.
+///
+/// **Architecture note**: `apply_switch_out_reset` modifies the active slot
+/// in-place, then `pass1_switch` immediately overwrites that slot with the
+/// incoming mon.  The cleared outgoing-mon state is not externally visible after
+/// the replacement; this test therefore covers the code path and verifies that
+/// the incoming mon has clean state regardless of what the outgoing mon carried.
+#[test]
+fn test_switch_out_clears_boosts_and_volatiles() {
+    use crate::state::pokemon::VolatileStatusState;
+    use crate::state::dex_data::VolatileStatus;
+
+    let mut p2_mon = unknown_mon(); // Garchomp in active slot
+    // Artificially set boosts, a volatile, and a ToxicPoison tier — all of which
+    // the real simulator clears on switch-out (mirrors/mod.rs 6205-6214).
+    p2_mon.boosts = [3, 2, 1, -1, 0, 0, 0];
+    p2_mon.volatiles = vec![
+        VolatileStatusState::TurnStatus(VolatileStatus::Confusion, 3),
+    ];
+    p2_mon.status = Some(Status::ToxicPoison(4)); // tier-4 toxic (escalates each EOT)
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    // Charizard switches in at P2 slot 0 (replacing the Garchomp).
+    // apply_switch_out_reset runs on the Garchomp slot before the replacement.
+    let result = apply(
+        state,
+        vec![event(EventKind::Switch(SwitchState {
+            slot:      p2(0),
+            species:   Species::Charizard,
+            level:     50,
+            hp:        PokemonHP::Percent(100),
+            status:    None,
+            tera_type: None,
+        }))],
+    );
+
+    // The incoming Charizard must have clean state — no stale boosts or volatiles
+    // from the outgoing Garchomp.
+    let incoming = &result.p2_active_mons[0];
+    assert_eq!(incoming.boosts, [0i8; 7], "incoming mon must start with 0 boosts");
+    assert!(incoming.volatiles.is_empty(), "incoming mon must have no volatiles");
+    // No ToxicPoison tier should bleed across into the fresh mon.
+    assert!(
+        !matches!(incoming.status, Some(Status::ToxicPoison(n)) if n > 0),
+        "incoming mon must not inherit a ToxicPoison tier from the outgoing slot"
+    );
+}
+
+// ── Regression: S1 — Pass 3 Direction A must not exclude AV-holder BSV ───────
+
+/// Soundness regression for S1: when P2 holds Assault Vest (×1.5 SpDef for
+/// Special moves) and the true SpDef BSV is 70, the inferred lower bound of
+/// `min_pre_nature_stat[4]` must remain ≤ 70.
+///
+/// Before the fix `can_produce_def_bsv` materialised the defender with no item,
+/// which over-estimated how much damage a low-SpDef mon would take and therefore
+/// raised the minimum BSV past the true value (excluding it — unsound).  After
+/// the fix the engine unions over defensive items (including AV) and pre-bakes
+/// the ×1.5 stat multiplier into the oracle call.
+///
+/// Setup arithmetic (Hardy nature, no boosts, P1 SpA = 100, BP = 100 Special):
+///   With AV: eff_SpD = 70 × 1.5 = 105
+///   base_dmg = ⌊⌊22×100×100/105/50⌋ + 2⌋ = ⌊41 + 2⌋ = 43
+///   roll range: [⌊43×0.85⌋, 43] = [36, 43] HP
+///   20 % of 200 HP → observed delta in [39, 41] HP — overlaps [36, 43] ✓
+///   → BSV = 70 is feasible via the AV path; min_pre_nature_stat[4] must stay ≤ 70.
+#[test]
+fn test_pass3_dir_a_assault_vest_defender_does_not_exclude_true_bsv() {
+    use crate::state::pokemon::Nature;
+
+    // P1: our own mon with exactly SpA = 100, no item/ability multipliers.
+    // Snorlax is NOT in garchomp_dex() → pass5 skips validation (out-of-range stats ok).
+    let mut p1_mon = unknown_mon_species(Species::Snorlax);
+    p1_mon.hp = PokemonHP::Number(500);
+    // Lock every stat to 100; the oracle reads minStats[3] for SpA.
+    p1_mon.minStats = [500, 100, 100, 100, 100, 100];
+    p1_mon.maxStats = [500, 100, 100, 100, 100, 100];
+    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    // P2: Garchomp defender with an artificially widened SpDef range that
+    // includes the target BSV of 70 (below Garchomp's natural minimum of 90).
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp, &garchomp_dex(), 50,
+    );
+    p2_mon.hp                    = PokemonHP::Percent(100);
+    p2_mon.min_pre_nature_stat[4] = 50;   // force scan to start below the true threshold
+    p2_mon.max_pre_nature_stat[4] = 200;
+    p2_mon.minStats[0]            = 200;  // fix max-HP to 200 for deterministic % → HP conversion
+    p2_mon.maxStats[0]            = 200;
+    p2_mon.possible_natures      = Unknown::Known(Nature::Hardy); // neutral → BSV == final stat
+    p2_mon.possible_abilities    = Unknown::Known(Ability::None); // no ability reduction
+    p2_mon.item                  = Unknown::Not(vec![]);          // AV not excluded
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    // Psychic: 100 BP Special Psychic-type move.
+    // Neutral vs Dragon/Ground (Garchomp's types), no STAB for Normal-type Snorlax.
+    let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
+    psychic.category     = MoveCategory::Special;
+    psychic.pokemon_type = PokemonType::Psychic;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Psychic, psychic);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user:      p1(0),
+                move_used: PokemonMove::Psychic,
+                targets:   vec![p2(0)],
+            },
+            // P2 takes 20% damage (100 % → 80 %) — consistent with AV-boosted SpD = 70×1.5 = 105.
+            vec![event(EventKind::DamageDealt {
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_result = &result.p2_active_mons[0];
+    assert!(
+        p2_result.min_pre_nature_stat[4] <= 70,
+        "Assault Vest defender with true SpDef BSV = 70 must remain feasible; \
+         got min_pre_nature_stat[4] = {} (expected ≤ 70)",
+        p2_result.min_pre_nature_stat[4]
+    );
+}
+
+// ── Regression: S3 — Custap Berry escape at low HP ───────────────────────────
+
+/// When the fast mon (first mover) is at ≤ 25 % HP and Custap Berry is not
+/// excluded from its item set, Pass 4 must include a Custap Berry escape
+/// disjunct alongside the SpeedComparison predicate — so the ordering can be
+/// explained by Custap (activates before priority resolution) rather than
+/// asserting a definitive speed edge, which would be unsound if the true item
+/// is Custap Berry.
+#[test]
+fn test_pass4_custap_escape_at_low_hp() {
+    // P1 goes second (slow mon); P2 goes first (fast mon) at ≤ 25 % HP.
+    // Exclude all speed-escape items/abilities EXCEPT Custap Berry and the
+    // standard Speed-comparison ones (Choice Scarf excluded to keep the clause
+    // clean for assertion).
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
+    // Remove Choice Scarf from P2's exclusion list (it's already excluded in
+    // no_speed_escape_mon), and keep Custap Berry NOT excluded.
+    // `no_speed_escape_mon` excludes: QuickClaw, ChoiceScarf, IronBall, LaggingTail, FullIncense.
+    // Custap Berry is NOT in that list → it remains possible on P2.
+    p2_mon.hp = PokemonHP::Percent(20); // ≤ 25 % HP — Custap Berry can activate.
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    // P2 moves first (fast_idx = 1 in battle_1v1), then P1.
+    let result = apply_ex(
+        state,
+        speed_order_events(PokemonMove::Earthquake, PokemonMove::DragonClaw),
+        HashMap::new(),
+        move_dex,
+    );
+
+    // The predicate clause for the speed comparison must include a Custap Berry
+    // disjunct on the fast mon (mon_idx = 1 = P2).
+    let has_custap_escape = result.predicates.iter().any(|clause| {
+        let has_speed_cmp = clause.iter().any(|s| {
+            matches!(s, Statement::SpeedComparison { fast_idx: 1, slow_idx: 0, .. })
+        });
+        let has_custap = clause.iter().any(|s| {
+            matches!(s, Statement::HasItem { mon_idx: 1, item: Item::CustapBerry })
+        });
+        has_speed_cmp && has_custap
+    });
+    assert!(
+        has_custap_escape,
+        "Pass 4 must add a Custap Berry escape disjunct when the fast mon is at ≤ 25 % HP \
+         and Custap Berry is not excluded"
+    );
+}
+
+/// When the fast mon is at > 25 % HP, Custap Berry activation is impossible and
+/// must NOT appear as an escape disjunct.
+#[test]
+fn test_pass4_no_custap_escape_at_full_hp() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
+    p2_mon.hp = PokemonHP::Percent(100); // full HP — Custap Berry cannot activate.
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let result = apply_ex(
+        state,
+        speed_order_events(PokemonMove::Earthquake, PokemonMove::DragonClaw),
+        HashMap::new(),
+        move_dex,
+    );
+
+    let has_custap_escape = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(s, Statement::HasItem { item: Item::CustapBerry, .. }))
+    });
+    assert!(
+        !has_custap_escape,
+        "Custap Berry must NOT appear as an escape disjunct when the fast mon is at full HP"
+    );
+}

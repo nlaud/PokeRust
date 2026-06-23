@@ -777,11 +777,24 @@ fn pass1_apply_event(
                 .map(|m| m.hp.clone());
             update_mon_hp(state, target, new_hp.clone());
 
+            // Compute the HP delta (amount of damage dealt, not the pre-hit HP value).
+            // The simulator stores eff_damage (the delta) in last_damage_taken; we must
+            // match that so Counter / Mirror Coat / Metal Burst work correctly.
+            let damage_delta: PokemonHP = match (&old_hp, &new_hp) {
+                (Some(PokemonHP::Number(o)), PokemonHP::Number(n)) => {
+                    PokemonHP::Number(o.saturating_sub(*n))
+                }
+                (Some(PokemonHP::Percent(o)), PokemonHP::Percent(n)) => {
+                    PokemonHP::Percent(o.saturating_sub(*n))
+                }
+                _ => PokemonHP::Percent(0),
+            };
+
             // Per-turn damage tracking (mirrors end_turn Phase 5 fields).
             if let Some(idx) = mon_idx_for_active_slot(state, target) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.damaged_this_turn = true;
-                    mon.last_damage_taken = old_hp.clone().unwrap_or(PokemonHP::Percent(0));
+                    mon.last_damage_taken = damage_delta.clone();
                     mon.times_hit = mon.times_hit.saturating_add(1);
 
                     // Attribute to the enclosing MoveUsed if available.
@@ -795,13 +808,11 @@ fn pass1_apply_event(
                         if let Some(md) = ctx.move_dex.get(&mctx.pokemon_move) {
                             match md.category {
                                 MoveCategory::Physical => {
-                                    mon.last_physical_damage_taken =
-                                        old_hp.clone().unwrap_or(PokemonHP::Percent(0));
+                                    mon.last_physical_damage_taken = damage_delta.clone();
                                     mon.last_physical_attacker = Some(attacker.clone());
                                 }
                                 MoveCategory::Special => {
-                                    mon.last_special_damage_taken =
-                                        old_hp.clone().unwrap_or(PokemonHP::Percent(0));
+                                    mon.last_special_damage_taken = damage_delta.clone();
                                     mon.last_special_attacker = Some(attacker.clone());
                                 }
                                 MoveCategory::Status => {}
@@ -1009,8 +1020,10 @@ fn pass1_apply_event(
                     }
                 }
                 match slot.player {
-                    Player::P1 => state.p1_has_mega = true,
-                    Player::P2 => state.p2_has_mega = true,
+                    // p1_has_mega / p2_has_mega means "resource still available" —
+                    // initialized true, flipped to false when the Mega is used.
+                    Player::P1 => state.p1_has_mega = false,
+                    Player::P2 => state.p2_has_mega = false,
                 }
                 // Pin the held item to the required Mega Stone.
                 let mega_stone = ctx
@@ -1390,6 +1403,19 @@ fn apply_switch_out_reset(state: &mut UnknownBattleState, slot: &FieldSlot) {
     };
     let i = slot.slot_index as usize;
     if let Some(mon) = actives.get_mut(i) {
+        // Clear all stat boosts (mirrors simulator clear_pokemon_for_switch_out:6206).
+        mon.boosts.iter_mut().for_each(|b| *b = 0);
+        // Clear all volatile statuses (mirrors simulator:6205).
+        mon.volatiles.clear();
+        // Reset ToxicPoison tier to 0 on switch-out (mirrors simulator:6213-6214).
+        if matches!(mon.status, Some(Status::ToxicPoison(_))) {
+            mon.status = Some(Status::ToxicPoison(0));
+        }
+        // Entry / field flags that don't persist on the bench.
+        mon.entered_this_turn = false;
+        mon.first_move_on_field = false;
+        mon.first_turn_on_field_pending = false;
+        mon.cud_chew_pending = None;
         // Unburden ends on switch-out.
         mon.item_lost = false;
         // Per-turn event flags don't follow to the bench.
@@ -1952,54 +1978,66 @@ fn pass2_item_from_move(
 
     // ── Life Orb ──────────────────────────────────────────────────────────────
     if is_damaging {
+        // LO recoil only fires when the move actually deals HP damage to at least one
+        // target (not when all targets miss, are immune, or are behind a Substitute).
+        // If no opponent took HP damage, the absence of LO recoil is uninformative —
+        // excluding LO based on it would be unsound.
+        let hit_any_opponent = targets.iter().any(|t| {
+            event.reactions.iter().any(|r| {
+                matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == t)
+            })
+        });
+
         let has_lo_recoil = event
             .reactions
             .iter()
             .any(|r| matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == user));
 
-        if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
-            if !has_lo_recoil {
-                let (could_mg, could_sf, has_secondary) = {
-                    let um = get_mon_by_idx(state, user_idx);
-                    (
-                        um.map_or(false, |m| {
-                            !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
-                        }),
-                        um.map_or(false, |m| {
-                            !unknown_is_excluded(&m.possible_abilities, &Ability::SheerForce)
-                        }),
-                        !move_data.secondaries.is_empty(),
-                    )
-                };
+        if hit_any_opponent {
+            if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
+                if !has_lo_recoil {
+                    let (could_mg, could_sf, has_secondary) = {
+                        let um = get_mon_by_idx(state, user_idx);
+                        (
+                            um.map_or(false, |m| {
+                                !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
+                            }),
+                            um.map_or(false, |m| {
+                                !unknown_is_excluded(&m.possible_abilities, &Ability::SheerForce)
+                            }),
+                            !move_data.secondaries.is_empty(),
+                        )
+                    };
 
-                if !could_mg && !(could_sf && has_secondary) {
-                    // Definitively no Life Orb on this mon.
-                    if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
-                        unknown_exclude(&mut mon.item, &Item::LifeOrb, "no-lo-recoil");
-                    }
-                } else {
-                    // Predicate: Not(LifeOrb) ∨ MagicGuard ∨ (SheerForce ∧ secondary)
-                    let mut clause = vec![Statement::Not(Box::new(Statement::HasItem {
-                        mon_idx: user_idx,
-                        item: Item::LifeOrb,
-                    }))];
-                    if could_mg {
-                        clause.push(Statement::HasAbility {
+                    if !could_mg && !(could_sf && has_secondary) {
+                        // Definitively no Life Orb on this mon.
+                        if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
+                            unknown_exclude(&mut mon.item, &Item::LifeOrb, "no-lo-recoil");
+                        }
+                    } else {
+                        // Predicate: Not(LifeOrb) ∨ MagicGuard ∨ (SheerForce ∧ secondary)
+                        let mut clause = vec![Statement::Not(Box::new(Statement::HasItem {
                             mon_idx: user_idx,
-                            ability: Ability::MagicGuard,
-                        });
+                            item: Item::LifeOrb,
+                        }))];
+                        if could_mg {
+                            clause.push(Statement::HasAbility {
+                                mon_idx: user_idx,
+                                ability: Ability::MagicGuard,
+                            });
+                        }
+                        if could_sf && has_secondary {
+                            clause.push(Statement::HasAbility {
+                                mon_idx: user_idx,
+                                ability: Ability::SheerForce,
+                            });
+                        }
+                        state.predicates.push(clause);
                     }
-                    if could_sf && has_secondary {
-                        clause.push(Statement::HasAbility {
-                            mon_idx: user_idx,
-                            ability: Ability::SheerForce,
-                        });
-                    }
-                    state.predicates.push(clause);
                 }
             }
-        }
-    }
+        } // end hit_any_opponent
+    } // end is_damaging
 
     // ── Bright Powder / Lax Incense from 100%-accurate miss ───────────────────
     for reaction in &event.reactions {
@@ -3099,6 +3137,62 @@ fn neutral_ability(mon: &UnknownPokemonState) -> Ability {
     }
 }
 
+/// Items that can reduce incoming damage for the **defender**.
+///
+/// Used in Direction A to union over possible defensive items when back-solving
+/// the defender's defensive BSV. Without this union, the feasibility scan
+/// materializes the defender with no item (neutral), which over-estimates the
+/// minimum defensive BSV when the true defender has a bulk item (S1 soundness fix).
+///
+/// Always includes `neutral_item(mon)` (the Known item, or `Item::None`) so the
+/// "no boosting item" scenario is always in the candidate set.
+fn defensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
+    let mut items: Vec<Item> = [
+        Item::Eviolite,    // ×1.5 Def/SpDef for non-fully-evolved species
+        Item::AssaultVest, // ×1.5 SpDef (special moves only)
+    ]
+    .iter()
+    .filter(|i| !unknown_is_excluded(&mon.item, i))
+    .cloned()
+    .collect();
+    // Always include the neutral item so the no-boost scenario is covered.
+    let neutral = neutral_item(mon);
+    if !items.contains(&neutral) {
+        items.push(neutral);
+    }
+    items
+}
+
+/// Abilities that can reduce incoming damage for the **defender**.
+///
+/// Parallel to `offensive_damage_abilities` but for the defensive side.
+/// Always includes `neutral_ability(mon)` so the no-boost scenario is covered.
+fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
+    let mut abilities: Vec<Ability> = [
+        Ability::Filter,      // ×0.75 on super-effective hits
+        Ability::SolidRock,   // ×0.75 on super-effective hits
+        Ability::PrismArmor,  // ×0.75 on super-effective hits (pierces Mold Breaker)
+        Ability::Multiscale,  // ×0.5 at full HP
+        Ability::ShadowShield, // ×0.5 at full HP (Lunala only)
+        Ability::ThickFat,    // ×0.5 to Fire and Ice moves
+        Ability::FurCoat,     // ×0.5 to Physical moves
+        Ability::IceScales,   // ×0.5 to Special moves
+        Ability::Heatproof,   // ×0.5 to Fire moves
+        Ability::Fluffy,      // ×0.5 to contact moves (but ×2 to Fire — oracle handles both)
+        Ability::PunkRock,    // ×0.5 to sound-based moves received
+        Ability::WaterBubble, // ×0.5 to Fire moves received
+    ]
+    .iter()
+    .filter(|a| !unknown_is_excluded(&mon.possible_abilities, a))
+    .cloned()
+    .collect();
+    let neutral = neutral_ability(mon);
+    if !abilities.contains(&neutral) {
+        abilities.push(neutral);
+    }
+    abilities
+}
+
 /// Direction B: we are the target, HP is exact, bound the ATTACKER's offensive BSV.
 #[allow(clippy::too_many_arguments)]
 fn pass3_direction_b(
@@ -3656,9 +3750,22 @@ fn pass3_direction_a(
         consider_crit: true,
         damage_rolls: 16,
     };
-    let targets_mult = 1.0_f64; // Direction A: single-target only for this pass
+    // Spread multiplier: ×0.75 in doubles when the move targets all adjacent foes.
+    // Mirroring Direction B (pass3_direction_b:3198-3207); omitting this caused the
+    // back-solved defensive BSV to be off by 1/0.75 for spread moves in doubles (S2).
+    let targets_mult = if state.active_per_side > 1
+        && matches!(
+            move_data.target,
+            crate::state::dex_data::MoveTarget::AllAdjacent
+                | crate::state::dex_data::MoveTarget::AllAdjacentFoes
+        )
+    {
+        0.75_f64
+    } else {
+        1.0_f64
+    };
 
-    // ── Unconditional tightening: union over (nat, hp_candidate, def_bsv) ────
+    // ── Unconditional tightening: union over (nat, hp_candidate, def_bsv, def_item, def_ability) ────
     let mut global_bsv_lo: Option<u16> = None;
     let mut global_bsv_hi: Option<u16> = None;
     let mut global_stat_lo: Option<u16> = None;
@@ -3681,6 +3788,12 @@ fn pass3_direction_a(
         vec![defender_unk.minStats[5]]
     };
 
+    // S1 soundness fix: union over defender's possible (item, ability) pairs so we
+    // never raise min_pre_nature_stat above the truth for a bulk-item/resistance-ability
+    // defender.  Mirrors how Direction B already unions over offensive items/abilities.
+    let def_items = defensive_damage_items(&defender_unk);
+    let def_abilities = defensive_damage_abilities(&defender_unk);
+
     // We sample from the defender's possible HP range (step by 4 for speed).
     for hp_cand in (hp_lo..=hp_hi).step_by(4.max(1) as usize) {
         // Convert percent delta to raw damage interval for this candidate max HP.
@@ -3702,48 +3815,77 @@ fn pass3_direction_a(
                     def_stats[si] = (bsv as f64 * *nat_mod as f64).floor() as u16;
                 }
 
-                // Scan speed endpoints for speed-dependent-BP moves (Gyro Ball /
-                // Electro Ball): feasible if any speed in the defender's range yields
-                // a matching outcome (sound over-approximation across the speed range).
-                defender_speed_endpoints.iter().any(|&def_spe| {
-                    let mut spd_stats = def_stats;
-                    spd_stats[5] = def_spe;
-                    let def_ps = materialize_pokemon(
-                        &defender_unk,
-                        spd_stats,
-                        neutral_item(&defender_unk),
-                        neutral_ability(&defender_unk),
-                    );
-                    let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
-                        vec![atk_ps.clone()]
-                    } else {
-                        vec![def_ps.clone()]
+                // Union over all not-excluded (defensive item, defensive ability) pairs.
+                // A BSV is feasible if ANY (item, ability) combination could produce the
+                // observed damage band — ensures we never raise min_pre_nature_stat above
+                // the truth when the true defender has a damage-reducing item or ability.
+                for def_item in &def_items {
+                    // Pre-bake the defensive item's stat multiplier into the stats override.
+                    // AssaultVest (×1.5 SpD, Special moves only) and Eviolite (×1.5 Def+SpD)
+                    // work as stat multipliers, but the oracle's `effective_stat` only handles
+                    // offensive items (Choice Band/Specs).  Folding the mult into the stat
+                    // override makes the oracle see the correct effective defensive stat
+                    // without any changes to the oracle itself.
+                    let item_stat_mult: f64 = match def_item {
+                        Item::AssaultVest
+                            if matches!(move_data.category, MoveCategory::Special) =>
+                        {
+                            1.5
+                        }
+                        Item::Eviolite => 1.5, // ×1.5 to both Def and SpD (conservative)
+                        _ => 1.0,
                     };
-                    let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
-                        vec![def_ps.clone()]
-                    } else {
-                        vec![atk_ps.clone()]
-                    };
-                    let battle = materialize_battle(state, p1_active, p2_active);
+                    let mut item_baked_def_stats = def_stats;
+                    if si > 0 && item_stat_mult != 1.0 {
+                        item_baked_def_stats[si] =
+                            (item_baked_def_stats[si] as f64 * item_stat_mult).floor() as u16;
+                    }
+                    for def_ability in &def_abilities {
+                        let feasible = defender_speed_endpoints.iter().any(|&def_spe| {
+                            let mut spd_stats = item_baked_def_stats; // item mult pre-baked
+                            spd_stats[5] = def_spe;
+                            let def_ps = materialize_pokemon(
+                                &defender_unk,
+                                spd_stats,
+                                def_item.clone(),
+                                def_ability.clone(),
+                            );
+                            let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
+                                vec![atk_ps.clone()]
+                            } else {
+                                vec![def_ps.clone()]
+                            };
+                            let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
+                                vec![def_ps.clone()]
+                            } else {
+                                vec![atk_ps.clone()]
+                            };
+                            let battle = materialize_battle(state, p1_active, p2_active);
 
-                    let outcomes = calculate_damage_outcomes_for_target_with_options(
-                        &battle,
-                        &atk_ps,
-                        &def_ps,
-                        user_slot.clone(),
-                        target_slot.clone(),
-                        move_data,
-                        oracle_config,
-                        targets_mult,
-                        1.0,
-                        bp_override,
-                        None,
-                    );
-                    // Any outcome with damage in [d_lo, d_hi] and matching crit.
-                    outcomes
-                        .iter()
-                        .any(|(dmg, crit, _)| *dmg >= d_lo && *dmg <= d_hi && *crit == is_crit)
-                })
+                            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                                &battle,
+                                &atk_ps,
+                                &def_ps,
+                                user_slot.clone(),
+                                target_slot.clone(),
+                                move_data,
+                                oracle_config,
+                                targets_mult,
+                                1.0,
+                                bp_override,
+                                None,
+                            );
+                            // Any outcome with damage in [d_lo, d_hi] and matching crit.
+                            outcomes
+                                .iter()
+                                .any(|(dmg, crit, _)| *dmg >= d_lo && *dmg <= d_hi && *crit == is_crit)
+                        });
+                        if feasible {
+                            return true;
+                        }
+                    }
+                }
+                false
             };
 
             let mut found_lo_local: Option<u16> = None;
@@ -3788,10 +3930,10 @@ fn pass3_direction_a(
             }
         }
     }
-    // Direction A predicates: nature-conditional BSV clauses mirroring Direction B,
-    // but using defender's booster/nerf set (Eviolite/Assault Vest not modelled).
-    // For v1, we rely on the unconditional tightening above; predicates follow the
-    // same pattern but are omitted here to keep scope manageable.
+    // Direction A predicates (I1 — deferred): nature-conditional BSV clauses mirroring
+    // Direction B are not yet emitted here; the unconditional tightening above is the
+    // primary narrowing mechanism. Predicate emission can follow the same pattern as
+    // Direction B once the unconditional path is stable.
 }
 
 // ── Pass 4: Speed ordering → Spe bounds ──────────────────────────────────────
@@ -4054,6 +4196,25 @@ fn pass4_speed_from_order(
                         item: slow_item,
                     });
                 }
+            }
+        }
+
+        // (5b) Custap Berry on the fast mon: activates at ≤25% HP and forces the holder
+        //      to move first in its priority bracket regardless of speed. Include as an
+        //      escape disjunct when the fast mon might be at ≤25% HP (S3 soundness fix).
+        if let Some(fast_m) = fast_mon {
+            let custap_possible = match &fast_m.hp {
+                PokemonHP::Percent(p) => *p <= 25,
+                PokemonHP::Number(n) => {
+                    let max_hp = fast_m.maxStats[0].max(1) as u32;
+                    (*n as u32).saturating_mul(100) / max_hp <= 25
+                }
+            };
+            if custap_possible && !unknown_is_excluded(&fast_m.item, &Item::CustapBerry) {
+                clause.push(Statement::HasItem {
+                    mon_idx: fast_idx,
+                    item: Item::CustapBerry,
+                });
             }
         }
 
