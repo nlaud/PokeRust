@@ -32,11 +32,12 @@ use crate::information::unknowns::{
     PokemonHP, Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
     UnknownTeamPreviewState,
 };
-use crate::simulator::helpers::base_damage_formula;
+use crate::simulator::helpers::{base_damage_formula, move_has_flag};
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
-    AbilityData, AccuracyType, MoveCategory, MoveData, PokemonData, PokemonStat, PokemonType,
-    PseudoWeather, SideCondition, SlotCondition, Status, Terrain, VolatileStatus, Weather,
+    AbilityData, AccuracyType, MoveCategory, MoveData, MoveFlag, PokemonData, PokemonStat,
+    PokemonType, PseudoWeather, SideCondition, SlotCondition, Status, Terrain, VolatileStatus,
+    Weather,
 };
 use crate::state::pokemon::{Nature, VolatileStatusState, calc_hp, calc_stat, nature_stat_modifiers};
 
@@ -263,7 +264,7 @@ fn unknown_set_known<T: PartialEq + Clone + std::fmt::Debug>(
 }
 
 /// `true` if `val` is definitely excluded (not possible).
-fn unknown_is_excluded<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
+pub fn unknown_is_excluded<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
     match u {
         Unknown::Known(v) => v != val,
         Unknown::Not(excluded) => excluded.contains(val),
@@ -603,6 +604,13 @@ fn apply_information_battle(
 
     // ── Pass 6: BCP to fixpoint ────────────────────────────────────────────────
     run_bcp(state);
+
+    // ── Pass 4 re-derivation: if BCP forced a priority ability to Known, re-run
+    // speed ordering with the tighter bracket so speed bounds are updated.
+    // One re-run is sufficient; duplicate clauses are harmless (BCP handles them).
+    pass4_speed_from_order(state, events, move_dex, ability_dex);
+    while propagate_speed_comparisons(state) {}
+    run_bcp(state);
 }
 
 /// Context threaded through the recursive event walk.
@@ -678,6 +686,10 @@ fn process_battle_event(
     // Pass 2/3 — item and stat inference keyed on the full MoveUsed + reactions.
     if matches!(event.kind, EventKind::MoveUsed { .. }) {
         pass2_item_from_move(state, event, ctx);
+        pass2_contact_absence(state, event, ctx);
+        pass2_prankster_immunity(state, event, ctx);
+        pass2_powder_immunity(state, event, ctx);
+        pass2_guaranteed_status_absence(state, event, ctx);
         pass3_damage_to_stats(state, event, ctx);
     }
 
@@ -718,6 +730,8 @@ fn pass1_apply_event(
             // Visible EOT effects (damage chip, heals, etc.) are in reactions and will be
             // processed by the recursive descent. This arm triggers internal bookkeeping.
             apply_end_of_turn(state);
+            pass_eot_heal(state, event, ctx);
+            pass_eot_sand_immunity(state, event, ctx);
         }
 
         EventKind::MoveUsed {
@@ -874,6 +888,8 @@ fn pass1_apply_event(
                         mon.consumed_item = Some(item.clone());
                     } else {
                         mon.item_lost = true;
+                        // Preserve the named item revealed by Knock Off / Thief / Fling.
+                        mon.removed_item = Some(item.clone());
                     }
                     mon.item = Unknown::Known(Item::None);
                 }
@@ -883,11 +899,25 @@ fn pass1_apply_event(
         EventKind::AbilityRevealed { slot, ability } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    unknown_set_known(
-                        &mut mon.possible_abilities,
-                        ability.clone(),
-                        &format!("mon#{idx} ability"),
+                    // Narrow-vs-overwrite: if the revealed ability is already
+                    // in the candidate set (or the set is wide `Not`), narrow.
+                    // If it is outside a `Possibly` set, a live ability-change
+                    // (Trace, Skill Swap, Mummy, etc.) occurred — overwrite the
+                    // live ability to `Known` without treating it as a
+                    // contradiction. `possible_original_abilities` is untouched.
+                    let outside_possibly = matches!(
+                        &mon.possible_abilities,
+                        Unknown::Possibly(v) if !v.contains(ability)
                     );
+                    if outside_possibly {
+                        mon.possible_abilities = Unknown::Known(ability.clone());
+                    } else {
+                        unknown_set_known(
+                            &mut mon.possible_abilities,
+                            ability.clone(),
+                            &format!("mon#{idx} ability"),
+                        );
+                    }
                 }
             }
         }
@@ -964,9 +994,18 @@ fn pass1_apply_event(
                         &format!("mon#{idx} mega"),
                     );
                     mon.is_mega = true;
-                    // Update types from dex.
+                    // Update types and ability set from the mega species dex entry.
                     if let Some(data) = ctx.dex.get(into) {
                         mon.possible_types = Unknown::Known(data.types.clone());
+                        // Mega abilities are fixed per mega species — recompute both
+                        // original and live ability to the mega's slot set.
+                        let mega_abilities = if data.abilities.is_empty() {
+                            Unknown::Not(Vec::new())
+                        } else {
+                            Unknown::Possibly(data.abilities.clone())
+                        };
+                        mon.possible_original_abilities = mega_abilities.clone();
+                        mon.possible_abilities = mega_abilities;
                     }
                 }
                 match slot.player {
@@ -1028,6 +1067,15 @@ fn pass1_apply_event(
                     );
                     if let Some(data) = ctx.dex.get(into) {
                         mon.possible_types = Unknown::Known(data.types.clone());
+                        // Forme-change abilities are fixed per forme — recompute ability
+                        // sets to the new forme's slot set.
+                        let forme_abilities = if data.abilities.is_empty() {
+                            Unknown::Not(Vec::new())
+                        } else {
+                            Unknown::Possibly(data.abilities.clone())
+                        };
+                        mon.possible_original_abilities = forme_abilities.clone();
+                        mon.possible_abilities = forme_abilities;
                     }
                 }
             }
@@ -1364,6 +1412,9 @@ fn apply_switch_out_reset(state: &mut UnknownBattleState, slot: &FieldSlot) {
         mon.last_used_move = None;
         // Rage Fist hit counter resets (Champions rules).
         mon.times_hit = 0;
+        // Live ability resets to the innate ability set on switch-out.
+        // Trace / Skill Swap / Mummy / etc. do not persist across a switch.
+        mon.possible_abilities = mon.possible_original_abilities.clone();
     }
 }
 
@@ -1997,6 +2048,738 @@ fn pass2_item_from_move(
     }
 
     let _ = targets; // suppress unused warning
+}
+
+// ── Pass 2b: Contact-reaction absence inference ───────────────────────────────
+
+/// Infer the *absence* of always-on contact-reactive items/abilities on the
+/// defender when a contact move hit but produced no such reaction in its nested
+/// event tree.
+///
+/// **Rocky Helmet** (1/6 chip to attacker) and **Rough Skin / Iron Barbs** (1/8
+/// chip to attacker) are unconditional on contact — they always produce an
+/// `ItemRevealed` / `AbilityRevealed` nested under the `DamageDealt` reaction.
+/// If no such reveal appeared and no attacker-side escape is possible, we can
+/// definitively exclude those from the defender.
+///
+/// Presence of these items/abilities is handled by the nested-reveal convention
+/// (Pass 1 `ItemRevealed`/`AbilityRevealed`) and needs no inference here.
+fn pass2_contact_absence(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+) {
+    let EventKind::MoveUsed { user, targets, move_used } = &event.kind else {
+        return;
+    };
+    let Some(move_data) = ctx.move_dex.get(move_used) else {
+        return;
+    };
+
+    // Only contact moves trigger contact reactions.
+    if !move_has_flag(move_data, &MoveFlag::Contact) {
+        return;
+    }
+
+    // --- Attacker-side escape checks (if any apply, skip — sound: wider) ---
+    let attacker_idx = mon_idx_for_active_slot(state, user);
+    let attacker_escapes = {
+        let am = attacker_idx.and_then(|i| get_mon_by_idx(state, i));
+        // Long Reach (attacker ability) makes the move non-contact.
+        let might_be_long_reach = am.map_or(false, |m| {
+            !unknown_is_excluded(&m.possible_abilities, &Ability::LongReach)
+        });
+        // Protective Pads (attacker item) prevents contact-triggered effects.
+        let might_have_pads = am.map_or(false, |m| {
+            !unknown_is_excluded(&m.item, &Item::ProtectivePads)
+        });
+        // Magic Guard prevents Rocky Helmet chip to the attacker, but NOT Rough
+        // Skin/Iron Barbs chip.  We track Magic Guard only for the Helmet check.
+        let might_have_magic_guard = am.map_or(false, |m| {
+            !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
+        });
+        (might_be_long_reach, might_have_pads, might_have_magic_guard)
+    };
+    let (long_reach_possible, pads_possible, magic_guard_possible) = attacker_escapes;
+
+    // If either Long Reach or Protective Pads is possible, no contact reaction is
+    // guaranteed — skip all exclusions (sound).
+    if long_reach_possible || pads_possible {
+        return;
+    }
+
+    for target in targets {
+        let Some(target_idx) = mon_idx_for_active_slot(state, target) else {
+            continue;
+        };
+
+        // Was the hit actually landed? (Check that a DamageDealt reaction exists for
+        // the defender — if the move missed / was blocked, no contact reaction fires.)
+        let hit_landed = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
+        });
+        if !hit_landed {
+            continue;
+        }
+
+        // Did a Rocky Helmet reveal appear? (nested under DamageDealt or directly.)
+        let helmet_revealed = reaction_contains_item_reveal(event, target, &Item::RockyHelmet);
+
+        // Did a Rough Skin / Iron Barbs reveal appear?
+        let rough_skin_revealed =
+            reaction_contains_ability_reveal(event, target, &Ability::RoughSkin);
+        let iron_barbs_revealed =
+            reaction_contains_ability_reveal(event, target, &Ability::IronBarbs);
+
+        let Some(mon) = get_mon_mut_by_idx(state, target_idx) else {
+            continue;
+        };
+
+        // Rocky Helmet: Magic Guard on the attacker prevents the chip, so Helmet
+        // absence is only certain when Magic Guard is also excluded.
+        if !helmet_revealed && !magic_guard_possible {
+            unknown_exclude(&mut mon.item, &Item::RockyHelmet, "no-helmet-chip");
+        }
+
+        // Rough Skin / Iron Barbs: Magic Guard does NOT prevent these (they deal
+        // damage directly), so absence is unconditional once contact/pads are checked.
+        if !rough_skin_revealed {
+            unknown_exclude(
+                &mut mon.possible_abilities,
+                &Ability::RoughSkin,
+                "no-rough-skin-chip",
+            );
+        }
+        if !iron_barbs_revealed {
+            unknown_exclude(
+                &mut mon.possible_abilities,
+                &Ability::IronBarbs,
+                "no-iron-barbs-chip",
+            );
+        }
+    }
+}
+
+/// Recursively scan a `MoveUsed` event (and its nested reactions) for an
+/// `ItemRevealed` event naming `item` on the given `slot`.
+fn reaction_contains_item_reveal(
+    event: &InformationEvent,
+    slot: &FieldSlot,
+    item: &Item,
+) -> bool {
+    for r in &event.reactions {
+        if matches!(&r.kind, EventKind::ItemRevealed { slot: s, item: i } if s == slot && i == item)
+        {
+            return true;
+        }
+        if reaction_contains_item_reveal(r, slot, item) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Recursively scan for an `AbilityRevealed` event naming `ability` on `slot`.
+fn reaction_contains_ability_reveal(
+    event: &InformationEvent,
+    slot: &FieldSlot,
+    ability: &Ability,
+) -> bool {
+    for r in &event.reactions {
+        if matches!(&r.kind, EventKind::AbilityRevealed { slot: s, ability: a } if s == slot && a == ability)
+        {
+            return true;
+        }
+        if reaction_contains_ability_reveal(r, slot, ability) {
+            return true;
+        }
+    }
+    false
+}
+
+// ── Pass 2c: Prankster-immunity reveal ────────────────────────────────────────
+
+/// If the opponent used a **Status-category** move that targeted one of our
+/// Pokémon and the reaction includes `Immune`/`MoveFailed`/`Blocked` — while the
+/// target is Dark-type and the move is Status-category — the Dark-type immunity
+/// to Prankster-boosted moves is the only sound explanation.  Emit
+/// `[HasAbility(Prankster)]` on the user; BCP will force it to `Known`.
+///
+/// Sound: we only infer when the normal move would have applied (no other immunity
+/// reason), so the Dark immunity implies the priority boost which implies Prankster.
+fn pass2_prankster_immunity(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+) {
+    let EventKind::MoveUsed { user, targets, move_used } = &event.kind else {
+        return;
+    };
+    let Some(move_data) = ctx.move_dex.get(move_used) else {
+        return;
+    };
+    // Only Status-category moves get the Prankster +1.
+    if move_data.category != MoveCategory::Status {
+        return;
+    }
+
+    let Some(user_idx) = mon_idx_for_active_slot(state, user) else {
+        return;
+    };
+    let user_mon = get_mon_by_idx(state, user_idx);
+
+    // Already know the ability — no need to infer.
+    if user_mon.map_or(false, |m| matches!(&m.possible_abilities, Unknown::Known(_))) {
+        return;
+    }
+    // Prankster already excluded — no clause needed.
+    if user_mon.map_or(false, |m| {
+        unknown_is_excluded(&m.possible_abilities, &Ability::Prankster)
+    }) {
+        return;
+    }
+
+    for target in targets {
+        // Check if this target is Dark-type (known types on our side).
+        let target_idx = mon_idx_for_active_slot(state, target);
+        let is_dark = target_idx
+            .and_then(|i| get_mon_by_idx(state, i))
+            .map(|m| matches!(&m.possible_types, Unknown::Known(ts) if ts.contains(&PokemonType::Dark)))
+            .unwrap_or(false);
+        if !is_dark {
+            continue;
+        }
+
+        // Check that the reaction includes Immune/MoveFailed/Blocked for this target.
+        let failed_on_target = event.reactions.iter().any(|r| {
+            matches!(
+                &r.kind,
+                EventKind::Immune { target: t } | EventKind::MoveFailed { slot: t } | EventKind::Blocked { target: t }
+                if t == target
+            )
+        });
+        if !failed_on_target {
+            continue;
+        }
+
+        // Emit a unit clause (or near-unit after BCP) — Prankster is the only explanation.
+        state.predicates.push(vec![Statement::HasAbility {
+            mon_idx: user_idx,
+            ability: Ability::Prankster,
+        }]);
+        // Only need to emit once per user (the clause is user-specific).
+        return;
+    }
+}
+
+// ── Pass 2d: Powder-move immunity reveal ──────────────────────────────────────
+
+/// When a move with `MoveFlag::Powder` targets a **non-Grass** Pokémon and
+/// results in `Immune`/`MoveFailed`/`Blocked`, the only non-type-immunity
+/// explanation is Safety Goggles or Overcoat on the target.
+fn pass2_powder_immunity(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+) {
+    let EventKind::MoveUsed { targets, move_used, .. } = &event.kind else {
+        return;
+    };
+    let Some(move_data) = ctx.move_dex.get(move_used) else {
+        return;
+    };
+    if !move_has_flag(move_data, &MoveFlag::Powder) {
+        return;
+    }
+
+    for target in targets {
+        let Some(target_idx) = mon_idx_for_active_slot(state, target) else {
+            continue;
+        };
+        let target_mon = get_mon_by_idx(state, target_idx);
+
+        // Grass types are inherently immune — no item/ability inference.
+        let is_grass = target_mon
+            .map(|m| matches!(&m.possible_types, Unknown::Known(ts) if ts.contains(&PokemonType::Grass)))
+            .unwrap_or(false);
+        if is_grass {
+            continue;
+        }
+
+        // Did the move fail/be immune on this target?
+        let failed = event.reactions.iter().any(|r| {
+            matches!(
+                &r.kind,
+                EventKind::Immune { target: t } | EventKind::MoveFailed { slot: t } | EventKind::Blocked { target: t }
+                if t == target
+            )
+        });
+        if !failed {
+            continue;
+        }
+
+        let tm = get_mon_by_idx(state, target_idx);
+        let mut clause: Vec<Statement> = Vec::new();
+        let legal_ok = |item: &Item| {
+            ctx.config.legal_items.as_ref().map_or(true, |l| l.contains(item))
+        };
+        if legal_ok(&Item::SafetyGoggles)
+            && tm.map_or(true, |m| !unknown_is_excluded(&m.item, &Item::SafetyGoggles))
+        {
+            clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::SafetyGoggles });
+        }
+        if tm.map_or(true, |m| !unknown_is_excluded(&m.possible_abilities, &Ability::Overcoat)) {
+            clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Overcoat });
+        }
+        if !clause.is_empty() {
+            state.predicates.push(clause);
+        }
+    }
+}
+
+// ── Pass 2e: Guaranteed-status absence reveals ────────────────────────────────
+
+/// When a move **hit** the target (a `DamageDealt` or a Status-category move with
+/// no `Missed` reaction) and carries a **guaranteed status** (`chance == 100`,
+/// `effect.status == Some(s)`, empty `random_choices`) yet produces **no**
+/// `StatusInflicted{target}`, emit a disjunction of the unknown status-prevention
+/// abilities/items on the target.
+///
+/// Only fires when all *decidable* preventers have been ruled out (type immunity,
+/// already-statused, Substitute, Safeguard, terrain).
+fn pass2_guaranteed_status_absence(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+) {
+    let EventKind::MoveUsed { user: _, targets, move_used } = &event.kind else {
+        return;
+    };
+    let Some(move_data) = ctx.move_dex.get(move_used) else {
+        return;
+    };
+
+    // Find all guaranteed statuses in this move's secondaries.
+    // A "guaranteed status secondary" has chance==100, one status, and no random choices.
+    let is_damaging = matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special);
+    let guaranteed_statuses: Vec<(Status, bool)> = move_data
+        .secondaries
+        .iter()
+        .filter(|s| {
+            s.chance == 100
+                && s.effect.status.is_some()
+                && s.random_choices.is_empty()
+        })
+        .map(|s| (s.effect.status.clone().unwrap(), is_damaging))
+        .collect();
+
+    if guaranteed_statuses.is_empty() {
+        return;
+    }
+
+    for target in targets {
+        let Some(target_idx) = mon_idx_for_active_slot(state, target) else {
+            continue;
+        };
+
+        // Did the move actually hit? (Missed / Blocked / Immune = no status applies.)
+        let hit = if is_damaging {
+            event.reactions.iter().any(|r| {
+                matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
+            })
+        } else {
+            // Status-category moves: no `Missed` and no `MoveFailed`/`Immune`.
+            !event.reactions.iter().any(|r| {
+                matches!(
+                    &r.kind,
+                    EventKind::Missed { target: t }
+                    | EventKind::Immune { target: t }
+                    | EventKind::MoveFailed { slot: t }
+                    | EventKind::Blocked { target: t }
+                    if t == target
+                )
+            })
+        };
+        if !hit {
+            continue;
+        }
+
+        // Was a status inflicted (on this target)?
+        let status_inflicted = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::StatusInflicted { target: t, .. } if t == target)
+        });
+        if status_inflicted {
+            continue; // Status did land — nothing to infer.
+        }
+
+        // Extract all data from target_mon into owned copies so we can later
+        // push to state.predicates without a live immutable borrow of state.
+        let (already_statused, has_sub, known_types, tm_item, tm_abilities) = {
+            let tm = get_mon_by_idx(state, target_idx);
+            let already_statused = tm.map_or(false, |m| m.status.is_some());
+            let has_sub = tm.map_or(false, |m| {
+                m.volatiles.iter().any(|v| matches!(
+                    v,
+                    VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)
+                    | VolatileStatusState::MoveStatus(VolatileStatus::Substitute(_), _)
+                ))
+            });
+            let known_types = tm.and_then(|m| {
+                if let Unknown::Known(ts) = &m.possible_types { Some(ts.clone()) } else { None }
+            });
+            let tm_item = tm.map(|m| m.item.clone());
+            let tm_abilities = tm.map(|m| m.possible_abilities.clone());
+            (already_statused, has_sub, known_types, tm_item, tm_abilities)
+        };
+
+        // Already statused prevents the secondary from applying.
+        if already_statused {
+            continue;
+        }
+
+        // Has Substitute?
+        if has_sub {
+            continue;
+        }
+
+        // SafeGuard on the target's side?
+        let has_safeguard = {
+            let is_p2 = mon_is_p2(state, target_idx);
+            if is_p2 {
+                state.p2_side_conditions.contains(&SideCondition::SafeGuard)
+            } else {
+                state.p1_side_conditions.contains(&SideCondition::SafeGuard)
+            }
+        };
+        if has_safeguard {
+            continue;
+        }
+
+        // LeafGuard only prevents status under harsh sun — snapshot weather now.
+        let is_sun = matches!(state.weather, Some(Weather::Sun) | Some(Weather::ExtremeSunlight));
+
+        let mut pending_clauses: Vec<Vec<Statement>> = Vec::new();
+
+        for (status, from_secondary) in &guaranteed_statuses {
+            // Type-immune check (known types only — absent knowledge is not immunity).
+            let type_immune = match status {
+                Status::Burn => known_types.as_ref().map_or(false, |ts| ts.contains(&PokemonType::Fire)),
+                Status::Paralysis => known_types.as_ref().map_or(false, |ts| {
+                    ts.contains(&PokemonType::Electric) || ts.contains(&PokemonType::Ground)
+                }),
+                Status::Poison | Status::ToxicPoison(_) => known_types.as_ref().map_or(false, |ts| {
+                    ts.contains(&PokemonType::Poison) || ts.contains(&PokemonType::Steel)
+                }),
+                Status::Frozen(_) => known_types.as_ref().map_or(false, |ts| ts.contains(&PokemonType::Ice)),
+                Status::Sleep(_) => false, // No blanket type immunity to sleep
+            };
+            if type_immune {
+                continue;
+            }
+
+            // Terrain immunity (treat all mons as grounded for sound approximation).
+            // Misty Terrain: mons immune to all status.
+            // Electric Terrain: mons immune to sleep.
+            let terrain_immune = match status {
+                Status::Sleep(_) => state.terrain == Some(Terrain::MistyTerrain)
+                    || state.terrain == Some(Terrain::ElectricTerrain),
+                _ => state.terrain == Some(Terrain::MistyTerrain),
+            };
+            if terrain_immune {
+                continue;
+            }
+
+            let mut clause: Vec<Statement> = Vec::new();
+
+            // Covert Cloak: blocks secondary effects of damaging moves.
+            let legal_ok = |item: &Item| {
+                ctx.config.legal_items.as_ref().map_or(true, |l| l.contains(item))
+            };
+            let item_excluded_cc = tm_item.as_ref()
+                .map_or(false, |it| unknown_is_excluded(it, &Item::CovertCloak));
+            if *from_secondary && legal_ok(&Item::CovertCloak) && !item_excluded_cc {
+                clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::CovertCloak });
+            }
+
+            // Per-status prevention abilities.
+            let preventer_abilities: Vec<Ability> = match status {
+                Status::Burn => vec![
+                    Ability::WaterVeil,
+                    Ability::WaterBubble,
+                    Ability::ThermalExchange,
+                    Ability::Comatose,
+                    Ability::PurifyingSalt,
+                    Ability::ShieldsDown,
+                    Ability::LeafGuard,
+                    Ability::FlowerVeil,
+                ],
+                Status::Paralysis => vec![
+                    Ability::Limber,
+                    Ability::Comatose,
+                    Ability::PurifyingSalt,
+                    Ability::ShieldsDown,
+                    Ability::LeafGuard,
+                    Ability::FlowerVeil,
+                ],
+                Status::Poison | Status::ToxicPoison(_) => vec![
+                    Ability::Immunity,
+                    Ability::PastelVeil,
+                    Ability::Comatose,
+                    Ability::PurifyingSalt,
+                    Ability::ShieldsDown,
+                    Ability::FlowerVeil,
+                ],
+                Status::Sleep(_) => vec![
+                    Ability::Insomnia,
+                    Ability::VitalSpirit,
+                    Ability::SweetVeil,
+                    Ability::Comatose,
+                    Ability::PurifyingSalt,
+                    Ability::ShieldsDown,
+                    Ability::LeafGuard,
+                    Ability::FlowerVeil,
+                ],
+                Status::Frozen(_) => vec![
+                    Ability::MagmaArmor,
+                    Ability::Comatose,
+                    Ability::PurifyingSalt,
+                    Ability::ShieldsDown,
+                ],
+            };
+
+            for ab in &preventer_abilities {
+                if *ab == Ability::LeafGuard && !is_sun {
+                    continue;
+                }
+                let ab_excluded = tm_abilities.as_ref()
+                    .map_or(false, |pa| unknown_is_excluded(pa, ab));
+                if !ab_excluded {
+                    clause.push(Statement::HasAbility { mon_idx: target_idx, ability: ab.clone() });
+                }
+            }
+
+            if !clause.is_empty() {
+                pending_clauses.push(clause);
+            }
+        }
+
+        for clause in pending_clauses {
+            state.predicates.push(clause);
+        }
+    }
+}
+
+// ── Pass 2f: EOT healing reveals (Leftovers / Black Sludge) ──────────────────
+
+/// When an opponent's Pokémon heals at end-of-turn and the cause is not
+/// attributable to a known source (Aqua Ring, Ingrain, Grassy Terrain, Wish,
+/// or Leech Seed draining our mon), infer Leftovers (or Leftovers ∨ Black
+/// Sludge for Poison types).
+fn pass_eot_heal(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent, // must be EndOfTurn
+    ctx: &BattleContext,
+) {
+    // Collect (target_idx, target FieldSlot) for all opponent heals in top-level reactions.
+    // Gather data into owned values first to avoid holding state borrows during push.
+    let legal_ok = |item: &Item| {
+        ctx.config.legal_items.as_ref().map_or(true, |l| l.contains(item))
+    };
+
+    // If our own active mon has LeechSeed, the opponent may be getting a Leech Seed heal.
+    // This is a conservative skip — if uncertain, don't infer Leftovers.
+    let our_mon_is_seeded = state.p1_active_mons.iter().any(|m| {
+        m.volatiles.iter().any(|v| {
+            matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::LeechSeed, _))
+        })
+    });
+
+    let is_grassy = state.terrain == Some(Terrain::GrassyTerrain);
+
+    let mut pending_clauses: Vec<Vec<Statement>> = Vec::new();
+
+    for reaction in &event.reactions {
+        let EventKind::Healed { target, .. } = &reaction.kind else {
+            continue;
+        };
+        // Only infer from opponent heals (p2 from our perspective).
+        if target.player != crate::state::battle::Player::P2 {
+            continue;
+        }
+
+        let Some(target_idx) = mon_idx_for_active_slot(state, target) else {
+            continue;
+        };
+
+        // Extract needed state into owned copies before any mutable borrow.
+        let (tm_item, tm_abilities, known_types, has_aqua_ring, has_ingrain, has_wish) = {
+            let tm = get_mon_by_idx(state, target_idx);
+            let tm_item = tm.map(|m| m.item.clone());
+            let tm_abilities = tm.map(|m| m.possible_abilities.clone());
+            let known_types = tm.and_then(|m| {
+                if let Unknown::Known(ts) = &m.possible_types { Some(ts.clone()) } else { None }
+            });
+            let has_aqua_ring = tm.map_or(false, |m| {
+                m.volatiles.iter().any(|v| {
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::AquaRing, _))
+                })
+            });
+            let has_ingrain = tm.map_or(false, |m| {
+                m.volatiles.iter().any(|v| {
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, _))
+                })
+            });
+            let has_wish = state
+                .p2_slot_conditions
+                .get(target.slot_index as usize)
+                .map_or(false, |conds| {
+                    conds.iter().any(|c| matches!(c, SlotCondition::Wish { .. }))
+                });
+            (tm_item, tm_abilities, known_types, has_aqua_ring, has_ingrain, has_wish)
+        };
+
+        // Skip if a decidable EOT-heal source explains the heal.
+        if has_aqua_ring || has_ingrain || is_grassy || has_wish || our_mon_is_seeded {
+            continue;
+        }
+
+        // Skip if the item is already known.
+        if tm_item.as_ref().map_or(false, |it| matches!(it, Unknown::Known(_))) {
+            continue;
+        }
+
+        let is_poison = known_types
+            .as_ref()
+            .map_or(false, |ts| ts.contains(&PokemonType::Poison));
+
+        let mut clause: Vec<Statement> = Vec::new();
+
+        if legal_ok(&Item::Leftovers)
+            && tm_item
+                .as_ref()
+                .map_or(true, |it| !unknown_is_excluded(it, &Item::Leftovers))
+        {
+            clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::Leftovers });
+        }
+        // Black Sludge heals Poison-types at the same rate; add to the disjunction.
+        if is_poison
+            && legal_ok(&Item::BlackSludge)
+            && tm_item
+                .as_ref()
+                .map_or(true, |it| !unknown_is_excluded(it, &Item::BlackSludge))
+            && tm_abilities
+                .as_ref()
+                .map_or(true, |_| true) // BlackSludge is unconditional on Poison types
+        {
+            clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::BlackSludge });
+        }
+
+        if !clause.is_empty() {
+            pending_clauses.push(clause);
+        }
+    }
+
+    for clause in pending_clauses {
+        state.predicates.push(clause);
+    }
+}
+
+// ── Pass 2g: Sandstorm EOT chip absence → immunity reveal ─────────────────────
+
+/// When Sandstorm is active and an opponent's non-Rock/Ground/Steel Pokémon takes
+/// **no** EOT sand chip, emit a disjunction of the abilities/items that grant
+/// sand immunity.
+fn pass_eot_sand_immunity(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent, // must be EndOfTurn
+    ctx: &BattleContext,
+) {
+    if !matches!(state.weather, Some(Weather::Sandstorm)) {
+        return;
+    }
+
+    let legal_ok = |item: &Item| {
+        ctx.config.legal_items.as_ref().map_or(true, |l| l.contains(item))
+    };
+
+    // p2 active mons start after all p1 segments.
+    let p2_active_start = state.p1_active_mons.len()
+        + state.p1_known_back_mons.len()
+        + state.p1_possible_back_mons.len();
+
+    let p2_active_count = state.p2_active_mons.len();
+
+    let mut pending_clauses: Vec<Vec<Statement>> = Vec::new();
+
+    for slot_i in 0..p2_active_count {
+        let mon_idx = p2_active_start + slot_i;
+        let field_slot = FieldSlot {
+            player: Player::P2,
+            slot_index: slot_i as u8,
+        };
+
+        // Extract data into owned values to avoid borrow conflicts.
+        let (known_types, tm_item, tm_abilities) = {
+            let tm = get_mon_by_idx(state, mon_idx);
+            let known_types = tm.and_then(|m| {
+                if let Unknown::Known(ts) = &m.possible_types { Some(ts.clone()) } else { None }
+            });
+            let tm_item = tm.map(|m| m.item.clone());
+            let tm_abilities = tm.map(|m| m.possible_abilities.clone());
+            (known_types, tm_item, tm_abilities)
+        };
+
+        // Rock, Ground, Steel types are innately immune — no inference.
+        let innately_immune = known_types.as_ref().map_or(false, |ts| {
+            ts.contains(&PokemonType::Rock)
+                || ts.contains(&PokemonType::Ground)
+                || ts.contains(&PokemonType::Steel)
+        });
+        if innately_immune {
+            continue;
+        }
+
+        // Did the mon take an EOT sand chip?
+        let took_sand_chip = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == &field_slot)
+        });
+        if took_sand_chip {
+            continue;
+        }
+
+        let mut clause: Vec<Statement> = Vec::new();
+
+        if legal_ok(&Item::SafetyGoggles)
+            && tm_item
+                .as_ref()
+                .map_or(true, |it| !unknown_is_excluded(it, &Item::SafetyGoggles))
+        {
+            clause.push(Statement::HasItem { mon_idx, item: Item::SafetyGoggles });
+        }
+
+        for ab in &[
+            Ability::SandVeil,
+            Ability::SandRush,
+            Ability::SandForce,
+            Ability::Overcoat,
+            Ability::MagicGuard,
+        ] {
+            let excluded = tm_abilities
+                .as_ref()
+                .map_or(false, |pa| unknown_is_excluded(pa, ab));
+            if !excluded {
+                clause.push(Statement::HasAbility { mon_idx, ability: ab.clone() });
+            }
+        }
+
+        if !clause.is_empty() {
+            pending_clauses.push(clause);
+        }
+    }
+
+    for clause in pending_clauses {
+        state.predicates.push(clause);
+    }
 }
 
 // ── Pass 3: Damage → stat bounds ──────────────────────────────────────────────
@@ -3022,9 +3805,9 @@ fn mon_is_p2(state: &UnknownBattleState, mon_idx: usize) -> bool {
 }
 
 /// Returns the effective move priority for `move_used`, folding in field-conditional
-/// boosts that are deterministically known from state (currently: Grassy Glide +1 on
-/// Grassy Terrain).  Does NOT fold in ability-based boosts (Prankster/Gale Wings/Triage);
-/// those are tracked as disjunct escape clauses instead.
+/// boosts that are deterministically known from state (Grassy Glide +1 on
+/// Grassy Terrain).  Does NOT fold in ability-based boosts (Prankster/Gale Wings/
+/// Triage); those are folded in by callers that have access to move data and user state.
 fn effective_move_priority(
     move_used: &PokemonMove,
     base_priority: i8,
@@ -3036,6 +3819,29 @@ fn effective_move_priority(
         base_priority + 1
     } else {
         base_priority
+    }
+}
+
+/// Adjust a move's effective priority by any **Known** priority-lifting ability on the user.
+/// Only fires when the ability is `Known(X)` — `Possibly` leaves the escape disjunct path.
+fn fold_known_ability_priority(
+    move_data: &MoveData,
+    base_prio: i8,
+    user_mon: &crate::information::unknowns::UnknownPokemonState,
+) -> i8 {
+    let Unknown::Known(ab) = &user_mon.possible_abilities else {
+        return base_prio;
+    };
+    match ab {
+        Ability::Prankster if move_data.category == MoveCategory::Status => base_prio + 1,
+        Ability::GaleWings
+            if move_data.pokemon_type == PokemonType::Flying
+                && matches!(user_mon.hp, PokemonHP::Percent(100)) =>
+        {
+            base_prio + 1
+        }
+        Ability::Triage if move_data.heal_fraction != [0, 0] => base_prio + 3,
+        _ => base_prio,
     }
 }
 
@@ -3061,8 +3867,12 @@ fn pass4_speed_from_order(
         } = &event.kind
         {
             let base_prio = move_dex.get(move_used).map(|md| md.priority).unwrap_or(0);
-            let eff_prio = effective_move_priority(move_used, base_prio, state);
+            let mut eff_prio = effective_move_priority(move_used, base_prio, state);
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
+                // Fold in Known priority-lifting abilities to get the tightest bracket.
+                if let (Some(mon), Some(md)) = (get_mon_by_idx(state, idx), move_dex.get(move_used)) {
+                    eff_prio = fold_known_ability_priority(md, eff_prio, mon);
+                }
                 move_order.push((user.clone(), eff_prio, idx, move_used.clone()));
             }
         }
@@ -3074,8 +3884,69 @@ fn pass4_speed_from_order(
         let (_, p0, idx0, mv0) = &window[0];
         let (_, p1, idx1, _mv1) = &window[1];
 
-        // Different effective priority brackets — no speed inference possible.
+        // Different effective priority brackets.
+        // If the first mover has a *lower* effective priority than the second (p0 < p1),
+        // the observation is only explicable by a priority-lifting ability on the first
+        // mover (Prankster, Gale Wings, Triage) or by a random first-mover effect.
+        // Emit a disjunction for these; if it collapses to a unit clause BCP will force
+        // the ability.  If p0 > p1, normal priority ordering — no inference possible.
         if p0 != p1 {
+            if *p0 < *p1 {
+                // Earlier mover had lower declared priority — must have a lifter.
+                let fast_idx = *idx0;
+                let fast_mon = get_mon_by_idx(state, fast_idx);
+                if let (Some(fast_m), Some(fast_md)) =
+                    (fast_mon, move_dex.get(mv0))
+                {
+                    let mut clause: Vec<Statement> = Vec::new();
+                    // Prankster: +1 to Status-category moves.
+                    if fast_md.category == MoveCategory::Status
+                        && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Prankster)
+                    {
+                        clause.push(Statement::HasAbility {
+                            mon_idx: fast_idx,
+                            ability: Ability::Prankster,
+                        });
+                    }
+                    // Gale Wings: +1 to Flying-type moves at full HP.
+                    let fast_at_full_hp = matches!(fast_m.hp, PokemonHP::Percent(100));
+                    if fast_md.pokemon_type == PokemonType::Flying
+                        && fast_at_full_hp
+                        && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::GaleWings)
+                    {
+                        clause.push(Statement::HasAbility {
+                            mon_idx: fast_idx,
+                            ability: Ability::GaleWings,
+                        });
+                    }
+                    // Triage: +3 to draining/healing moves.
+                    if fast_md.heal_fraction != [0, 0]
+                        && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Triage)
+                    {
+                        clause.push(Statement::HasAbility {
+                            mon_idx: fast_idx,
+                            ability: Ability::Triage,
+                        });
+                    }
+                    // Quick Claw / Quick Draw (random first-mover escapes).
+                    if !unknown_is_excluded(&fast_m.item, &Item::QuickClaw) {
+                        clause.push(Statement::HasItem {
+                            mon_idx: fast_idx,
+                            item: Item::QuickClaw,
+                        });
+                    }
+                    if !unknown_is_excluded(&fast_m.possible_abilities, &Ability::QuickDraw) {
+                        clause.push(Statement::HasAbility {
+                            mon_idx: fast_idx,
+                            ability: Ability::QuickDraw,
+                        });
+                    }
+                    if !clause.is_empty() {
+                        state.predicates.push(clause);
+                    }
+                }
+            }
+            // p0 > p1: normal priority ordering, no inference.
             continue;
         }
 

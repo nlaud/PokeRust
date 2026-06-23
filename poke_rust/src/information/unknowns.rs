@@ -51,6 +51,9 @@ pub struct UnknownPokemonState {
     /// field, and no replacement item has been gained since. Powers Unburden's ×2 Speed.
     /// Cleared on switch-out and whenever an item is gained.
     pub item_lost: bool,
+    /// Item revealed when it was taken or knocked off (Knock Off, Thief loser side, Fling).
+    /// Not set for consumed items (use `consumed_item`) or Trick/Switcheroo (use `item`).
+    pub removed_item: Option<Item>,
 
     // ── Per-turn event flags (cleared in end_turn Phase 5 and on switch-out) ────────
     /// Took any damage this turn — direct hits, recoil, confusion self-hits, etc.
@@ -255,7 +258,7 @@ pub struct UnknownBattleState {
 ///
 /// Use `mon_idx_for_slot()` and `get_mon_by_idx()` / `get_mon_mut_by_idx()`
 /// (defined in `information::inference`) to resolve indices.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Not(Box<Statement>),
     HasItem {
@@ -382,6 +385,7 @@ impl UnknownPokemonState {
             consumed_item: mon.consumed_item.clone(),
             cud_chew_pending: mon.cud_chew_pending.clone(),
             item_lost: mon.item_lost,
+            removed_item: None,
             damaged_this_turn: mon.damaged_this_turn,
             damaged_by_this_turn: mon.damaged_by_this_turn.clone(),
             last_physical_damage_taken: PokemonHP::Number(mon.last_physical_damage_taken),
@@ -528,6 +532,7 @@ impl UnknownPokemonState {
             consumed_item: None,
             cud_chew_pending: None,
             item_lost: false,
+            removed_item: None,
             damaged_this_turn: false,
             damaged_by_this_turn: Vec::new(),
             last_physical_damage_taken: PokemonHP::Percent(0),
@@ -553,8 +558,16 @@ impl UnknownPokemonState {
             boosts: [0; 7],
             status: None,
             volatiles: Vec::new(),
-            possible_original_abilities: Unknown::Not(Vec::new()),
-            possible_abilities: Unknown::Not(Vec::new()),
+            possible_original_abilities: if data.map_or(false, |d| !d.abilities.is_empty()) {
+                Unknown::Possibly(data.unwrap().abilities.clone())
+            } else {
+                Unknown::Not(Vec::new())
+            },
+            possible_abilities: if data.map_or(false, |d| !d.abilities.is_empty()) {
+                Unknown::Possibly(data.unwrap().abilities.clone())
+            } else {
+                Unknown::Not(Vec::new())
+            },
             possible_genders,
             possible_weight_hg: Unknown::Known(weight_hg),
             possible_tera_type: Unknown::Not(Vec::new()),

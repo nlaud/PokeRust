@@ -20,7 +20,7 @@ use crate::state::dex_data::{
 };
 use crate::information::inference::{
     apply_information, get_mon_by_idx, mon_idx_for_active_slot, pass5_back_solve,
-    InferenceConfig, EV_LATTICE,
+    unknown_is_excluded, InferenceConfig, EV_LATTICE,
 };
 use crate::information::information::{EventKind, InformationEvent, SwitchState};
 use crate::information::unknowns::{
@@ -608,6 +608,7 @@ fn garchomp_dex() -> HashMap<Species, PokemonData> {
         base_stats:    [108, 130, 95, 80, 85, 102], // HP Atk Def SpA SpD Spe
         weight:        950, // 95.0 kg
         primary_ability: Some(Ability::SandVeil),
+        abilities:     vec![Ability::SandVeil, Ability::RoughSkin],
         base_species:  None,
         forme:         None,
         required_item: None,
@@ -1573,4 +1574,302 @@ fn test_ev_cap_no_tightening_when_evs_low() {
         assert!(mon.maxEvs[i] <= 252, "maxEV must never exceed 252 (got {} for stat {})", mon.maxEvs[i], i);
         assert!(mon.minEvs[i] <= mon.maxEvs[i], "EV bounds inverted for stat {}", i);
     }
+}
+
+// ── Phase 1: Ability inference by species ────────────────────────────────────
+
+/// A known-species opponent's `possible_abilities` should be `Possibly([slot set])`
+/// rather than the default `Not([])`.
+#[test]
+fn test_ability_narrowed_by_species() {
+    let mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    // Garchomp's dex entry in the test has [SandVeil, RoughSkin].
+    assert!(
+        matches!(&mon.possible_abilities, Unknown::Possibly(v) if v.contains(&Ability::SandVeil)),
+        "SandVeil should be possible for Garchomp"
+    );
+    assert!(
+        matches!(&mon.possible_abilities, Unknown::Possibly(v) if v.contains(&Ability::RoughSkin)),
+        "RoughSkin should be possible for Garchomp"
+    );
+    // An ability not in the slot set should be excluded.
+    use crate::information::inference::unknown_is_excluded;
+    let excluded = unknown_is_excluded(&mon.possible_abilities, &Ability::Levitate);
+    assert!(excluded, "Levitate should be excluded for Garchomp");
+}
+
+/// A revealed ability within the species' set should narrow `possible_abilities` to `Known`.
+#[test]
+fn test_ability_revealed_within_set_narrows_to_known() {
+    let mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let state = battle_with_p2(vec![mon]);
+    let result = apply(
+        state,
+        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::SandVeil })],
+    );
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::SandVeil),
+        "Revealed ability within set should collapse to Known"
+    );
+}
+
+/// A revealed ability OUTSIDE the species' set (e.g. Trace copying an ability) should
+/// overwrite `possible_abilities` to `Known` without panicking.
+#[test]
+fn test_ability_revealed_outside_set_overwrites_to_known() {
+    let mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let state = battle_with_p2(vec![mon]);
+    // Levitate is not in Garchomp's slot set — simulates a Trace/Mummy/etc.
+    let result = apply(
+        state,
+        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Levitate })],
+    );
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::Levitate),
+        "Foreign ability reveal should overwrite to Known without contradiction"
+    );
+    // Original abilities field should remain unset (we don't touch possible_original_abilities here)
+}
+
+// ── Phase 2: Contact-reaction absence ────────────────────────────────────────
+
+fn contact_physical_move(name: PokemonMove, bp: u16) -> MoveData {
+    use crate::state::dex_data::MoveFlag;
+    let mut md = normal_physical_move(name, bp);
+    md.flags.push(MoveFlag::Contact);
+    md
+}
+
+/// Contact hit with NO Rocky Helmet reaction and the attacker has no escapes:
+/// Rocky Helmet should be excluded from the defender.
+#[test]
+fn test_contact_absence_excludes_rocky_helmet() {
+    let p1_mon = {
+        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        // Our mon: item Known(None) — no Protective Pads; ability Known(SandVeil) — no LongReach
+        m.item = Unknown::Known(Item::None);
+        m.possible_abilities = Unknown::Known(Ability::SandVeil);
+        m
+    };
+    let p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, contact_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Earthquake, targets: vec![p2(0)] },
+            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(50) })],
+            // No ItemRevealed{RockyHelmet} — helmet is absent.
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    assert!(
+        is_item_excluded(&result.p2_active_mons[0], &Item::RockyHelmet),
+        "Rocky Helmet should be excluded when no helmet reaction occurred"
+    );
+}
+
+// ── Phase 3: Powder-move immunity ────────────────────────────────────────────
+
+fn powder_status_move(name: PokemonMove) -> MoveData {
+    use crate::state::dex_data::MoveFlag;
+    let mut md = poke_status_move(name);
+    md.flags.push(MoveFlag::Powder);
+    md
+}
+
+/// A powder move failing on a non-Grass target should reveal SafetyGoggles or Overcoat.
+#[test]
+fn test_powder_immunity_reveals_safety_goggles_or_overcoat() {
+    // p2 is a Normal-type (not Grass) — powder immunity must come from item/ability.
+    // Use unknown_mon() (empty dex → Not([]) abilities) so BCP doesn't prune Overcoat
+    // and the 2-element disjunction stays intact in predicates.
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::PowderSnow, powder_status_move(PokemonMove::PowderSnow));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::PowderSnow, targets: vec![p2(0)] },
+            vec![event(EventKind::Immune { target: p2(0) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    let pred = &result.predicates;
+    // Clause should contain BOTH SafetyGoggles and Overcoat as a 2-element disjunction
+    // (mon_idx 0: battle_with_p2 has empty p1_active, so p2(0) is flat index 0).
+    let has_sg_and_overcoat = pred.iter().any(|clause| {
+        clause.contains(&Statement::HasItem { mon_idx: 0, item: Item::SafetyGoggles })
+            && clause.contains(&Statement::HasAbility { mon_idx: 0, ability: Ability::Overcoat })
+    });
+    assert!(has_sg_and_overcoat, "Should emit [SafetyGoggles ∨ Overcoat] clause on powder immunity");
+}
+
+// ── Phase 3: Prankster-immunity from Dark-type bounce ────────────────────────
+
+/// When a status move from the opponent fails against our Known Dark-type mon,
+/// the only explanation is Prankster priority bouncing off the Dark-type immunity.
+#[test]
+fn test_prankster_immunity_from_dark_type_bounce() {
+    let mut p1_mon = {
+        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        m.possible_types = Unknown::Known(vec![PokemonType::Dark]);
+        m
+    };
+    // Use unknown_mon_species (empty dex → Not([]) abilities) so BCP can force Prankster
+    // without hitting a contradiction on the Garchomp species set (SandVeil/RoughSkin only).
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::WillOWisp, poke_status_move(PokemonMove::WillOWisp));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::WillOWisp, targets: vec![p1(0)] },
+            vec![event(EventKind::Immune { target: p1(0) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // BCP forces the unit clause [Prankster] directly onto the mon.
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::Prankster),
+        "BCP should force Prankster Known when status move fails on Dark-type"
+    );
+}
+
+// ── Phase 4: EOT healing reveals ─────────────────────────────────────────────
+
+/// An unexplained EOT heal on a non-Poison opponent should emit [Leftovers].
+#[test]
+fn test_eot_heal_reveals_leftovers() {
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
+    p2_mon.hp = PokemonHP::Percent(94); // not full — heal is visible
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let result = apply(
+        state,
+        vec![event_with(
+            EventKind::EndOfTurn,
+            vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(100) })],
+        )],
+    );
+
+    // The unit clause [HasItem(Leftovers)] is forced by BCP → item becomes Known(Leftovers).
+    assert_eq!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::Leftovers),
+        "BCP should force Leftovers Known for unexplained EOT heal"
+    );
+    // BlackSludge must not be the forced item for a non-Poison type.
+    assert_ne!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::BlackSludge),
+        "Black Sludge should NOT be forced for non-Poison type"
+    );
+}
+
+/// An unexplained EOT heal on a Poison-type opponent should emit [Leftovers ∨ BlackSludge].
+#[test]
+fn test_eot_heal_poison_type_includes_black_sludge() {
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Poison]);
+    p2_mon.hp = PokemonHP::Percent(90);
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let result = apply(
+        state,
+        vec![event_with(
+            EventKind::EndOfTurn,
+            vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(100) })],
+        )],
+    );
+
+    let has_joint_clause = result.predicates.iter().any(|clause| {
+        clause.contains(&Statement::HasItem { mon_idx: 0, item: Item::Leftovers })
+            && clause.contains(&Statement::HasItem { mon_idx: 0, item: Item::BlackSludge })
+    });
+    assert!(has_joint_clause, "Poison-type EOT heal should emit [Leftovers ∨ BlackSludge]");
+}
+
+// ── Phase 5: Guaranteed-status absence ───────────────────────────────────────
+
+fn guaranteed_burn_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
+    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
+    let mut md = normal_physical_move(name, bp);
+    md.secondaries = vec![PokemonSecondaryEffect {
+        chance: 100,
+        effect: HitEffect {
+            status: Some(Status::Burn),
+            ..Default::default()
+        },
+        random_choices: vec![],
+    }];
+    md
+}
+
+/// A guaranteed-burn move that hits but produces no StatusInflicted on a non-Fire target
+/// with no decidable preventers should emit a burn-preventer disjunction.
+#[test]
+fn test_guaranteed_status_absence_emits_preventer_clause() {
+    // Use empty dex so possible_abilities = Not([]) — keeps all prevention abilities in the
+    // predicate clause (Garchomp's Possibly([SandVeil,RoughSkin]) would prune them all via BCP).
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    // Dragon/Ground — not Fire-type, not already statused, no Substitute.
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
+
+    // Our attacking mon (p1): known, no special properties.
+    let p1_mon = {
+        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        m.item = Unknown::Known(Item::None);
+        m.possible_abilities = Unknown::Known(Ability::SandVeil);
+        m
+    };
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::Ember,
+        guaranteed_burn_secondary_move(PokemonMove::Ember, 40),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Ember, targets: vec![p2(0)] },
+            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(80) })],
+            // No StatusInflicted — burn was prevented.
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // Should emit a clause containing burn-prevention abilities (WaterVeil, WaterBubble, etc.)
+    let has_preventer_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::WaterVeil, .. }
+            | Statement::HasAbility { ability: Ability::WaterBubble, .. }
+            | Statement::HasAbility { ability: Ability::ThermalExchange, .. }
+            | Statement::HasItem { item: Item::CovertCloak, .. }))
+    });
+    assert!(has_preventer_clause, "Should emit burn-preventer clause when guaranteed burn doesn't land");
 }

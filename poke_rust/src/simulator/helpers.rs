@@ -5368,6 +5368,26 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
     }
 }
 
+/// Returns the Showdown `onSwitchInPriority` for an ability.
+/// Abilities not listed here default to 0.
+/// Higher values activate first; Trick Room reverses only the speed tiebreak within a bracket.
+pub fn ability_switch_in_priority(ability: &crate::data::ability::Ability) -> i8 {
+    use crate::data::ability::Ability;
+    match ability {
+        Ability::NeutralizingGas | Ability::TeraShift => 2,
+        Ability::AsOneGlastrier | Ability::AsOneSpectrier | Ability::Klutz | Ability::Unnerve => 1,
+        Ability::Mimicry | Ability::Schooling | Ability::ShieldsDown => -1,
+        Ability::Costar
+        | Ability::FlowerGift
+        | Ability::Forecast
+        | Ability::Hospitality
+        | Ability::IceFace
+        | Ability::Protosynthesis
+        | Ability::QuarkDrive => -2,
+        _ => 0,
+    }
+}
+
 pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     // Borrow scope: extract the info we need before taking a mutable borrow.
     let (is_fainted, is_replacement_turn) = match get_pokemon_at_slot(state, slot) {

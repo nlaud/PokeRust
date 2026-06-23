@@ -6392,37 +6392,47 @@ fn perform_self_switch(
 fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[FieldSlot]) -> Vec<(BattleState, f64)> {
     if slots.is_empty() { return vec![(base_state.clone(), 1.0)]; }
 
-    // Build groups by effective speed
+    // Build (slot, switch_in_priority, effective_speed) triples.
     let trick = simulator_helpers::trick_room_is_active(base_state);
-    let mut slot_speeds: Vec<(FieldSlot, f32)> = Vec::new();
+    let mut slot_keys: Vec<(FieldSlot, i8, f32)> = Vec::new();
     for slot in slots {
         if let Some(mon) = simulator_helpers::get_pokemon_at_slot(base_state, *slot) {
-            slot_speeds.push((*slot, simulator_helpers::effective_speed_for_slot(base_state, *slot, mon)));
+            let sw_prio = simulator_helpers::ability_switch_in_priority(&mon.ability);
+            let speed = simulator_helpers::effective_speed_for_slot(base_state, *slot, mon);
+            slot_keys.push((*slot, sw_prio, speed));
         }
     }
-    // Sort speeds in descending (normal) or ascending (trick room) order
-    slot_speeds.sort_by(|a, b| {
-        if (a.1 - b.1).abs() < 0.01 { std::cmp::Ordering::Equal }
-        else if trick { a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal) }
-        else { b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal) }
+    // Primary sort: switch_in_priority descending (higher activates first).
+    // Secondary sort: speed descending (normal) or ascending (Trick Room).
+    // Trick Room reverses only the speed tiebreak, not the priority bracket.
+    slot_keys.sort_by(|a, b| {
+        if a.1 != b.1 {
+            return b.1.cmp(&a.1); // higher priority first
+        }
+        if (a.2 - b.2).abs() < 0.01 { std::cmp::Ordering::Equal }
+        else if trick { a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal) }
+        else { b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) }
     });
 
-    // Group by equal speeds
+    // Group by equal (switch_in_priority, speed) key — ties within a group are random.
     let mut groups: Vec<Vec<FieldSlot>> = Vec::new();
     let mut current_group: Vec<FieldSlot> = Vec::new();
+    let mut last_prio: Option<i8> = None;
     let mut last_speed: Option<f32> = None;
-    for (slot, sp) in slot_speeds {
-        if let Some(ls) = last_speed {
-            if (sp - ls).abs() < 0.01 {
-                current_group.push(slot);
-            } else {
+    for (slot, prio, sp) in slot_keys {
+        let same_group = match (last_prio, last_speed) {
+            (Some(lp), Some(ls)) => lp == prio && (sp - ls).abs() < 0.01,
+            _ => false,
+        };
+        if same_group {
+            current_group.push(slot);
+        } else {
+            if !current_group.is_empty() {
                 groups.push(current_group.clone());
                 current_group.clear();
-                current_group.push(slot);
-                last_speed = Some(sp);
             }
-        } else {
             current_group.push(slot);
+            last_prio = Some(prio);
             last_speed = Some(sp);
         }
     }

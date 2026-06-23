@@ -441,6 +441,11 @@ pub struct PokemonData {
     pub base_stats: [u16; 6],
     pub weight: u16,
     pub primary_ability: Option<Ability>,
+    /// All ability slots (slot 0, slot 1, Hidden) deduplicated.  Empty when no
+    /// ability data was found in the dex.  Used by the inference engine to
+    /// initialise `possible_abilities` to `Possibly(abilities)` instead of the
+    /// widest `Not([])`.
+    pub abilities: Vec<Ability>,
     pub base_species: Option<Species>,
     pub forme: Option<Species>,
     pub required_item: Option<String>,
@@ -1015,6 +1020,44 @@ fn parse_primary_ability_from_text(text: &str) -> Option<Ability> {
     extract_first_quoted_value(text).map(|s| Ability::from_str(&s))
 }
 
+/// Extract all three ability slots (0, 1, H) from an `abilities: { … }` inline
+/// object, returning them deduplicated.  Handles both quoted and bare key forms.
+///
+/// The Showdown dex encodes the block on a single line, e.g.:
+///   `abilities: { 0: "Overgrow", H: "Chlorophyll" }`
+/// We scan for each of the three slot keys and extract the first quoted value
+/// after each one.
+fn parse_all_abilities_from_text(text: &str) -> Vec<Ability> {
+    let mut abilities: Vec<Ability> = Vec::new();
+
+    // Slot keys to look for, in order.  We try the quoted form first because
+    // bare "0:" would also match "10:" or "100:" if we're not careful.
+    // For slot 1, the bare form "1:" must not be preceded by a digit so that
+    // we don't match " H: ".  We rely on the quoted form taking priority.
+    let slot_keys: &[&[&str]] = &[
+        &["\"0\":", "0:"],  // primary
+        &["\"1\":", " 1:"], // secondary (space-prefixed bare form avoids "10:")
+        &["\"H\":", " H:"], // hidden  (space-prefixed to avoid matching e.g. "pH:")
+    ];
+
+    for keys in slot_keys {
+        'key_search: for key in *keys {
+            if let Some(pos) = text.find(key) {
+                let rest = &text[pos + key.len()..];
+                if let Some(ab_str) = extract_first_quoted_value(rest) {
+                    let ab = Ability::from_str(&ab_str);
+                    if !abilities.contains(&ab) {
+                        abilities.push(ab);
+                    }
+                    break 'key_search; // found this slot; move to the next slot
+                }
+            }
+        }
+    }
+
+    abilities
+}
+
 /// Split file content into top-level entry blocks.
 /// Returns Vec of (key, block_lines) where block_lines are the lines inside the braces.
 fn split_entries(content: &str) -> Vec<(String, Vec<String>)> {
@@ -1178,6 +1221,7 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
     let mut base_stats = [0u16; 6];
     let mut weight: u16 = 0;
     let mut primary_ability: Option<Ability> = None;
+    let mut all_abilities: Vec<Ability> = Vec::new();
     let mut base_species: Option<Species> = None;
     let mut forme: Option<Species> = None;
     let mut required_item: Option<String> = None;
@@ -1242,6 +1286,7 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
             }
         } else if trimmed.starts_with("abilities:") {
             primary_ability = parse_primary_ability_from_text(trimmed);
+            all_abilities = parse_all_abilities_from_text(trimmed);
         } else if trimmed.starts_with("baseSpecies:") {
             if let Some(val) = extract_quoted(trimmed, "baseSpecies") {
                 base_species = Some(Species::from_str(&val));
@@ -1311,6 +1356,7 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
             base_stats,
             weight,
             primary_ability,
+            abilities: all_abilities,
             base_species,
             forme,
             required_item,
@@ -1865,6 +1911,9 @@ pub struct AbilityData {
     /// Whether this ability modifies move priority (`onModifyPriority`). Only Gale Wings,
     /// Prankster, and Triage have this property.
     pub modifies_priority: bool,
+    /// Showdown `onSwitchInPriority` field (default 0).  Switch-in ability activation
+    /// order is `(on_switch_in_priority desc, speed desc/asc under Trick Room)`.
+    pub on_switch_in_priority: i8,
 }
 
 fn parse_ability_entry(lines: &[String]) -> Option<(Ability, AbilityData)> {
@@ -1873,6 +1922,7 @@ fn parse_ability_entry(lines: &[String]) -> Option<(Ability, AbilityData)> {
     let mut num: i16 = 0;
     let mut has_on_start = false;
     let mut modifies_priority = false;
+    let mut on_switch_in_priority: i8 = 0;
     let mut depth: i32 = 0;
 
     for line in lines {
@@ -1911,6 +1961,14 @@ fn parse_ability_entry(lines: &[String]) -> Option<(Ability, AbilityData)> {
                 if let Ok(v) = rest.parse::<i16>() {
                     num = v;
                 }
+            } else if trimmed.starts_with("onSwitchInPriority:") {
+                let rest = trimmed
+                    .trim_start_matches("onSwitchInPriority:")
+                    .trim()
+                    .trim_end_matches(',');
+                if let Ok(v) = rest.parse::<i8>() {
+                    on_switch_in_priority = v;
+                }
             }
         }
     }
@@ -1921,7 +1979,7 @@ fn parse_ability_entry(lines: &[String]) -> Option<(Ability, AbilityData)> {
     let ability = Ability::from_str(&name);
     Some((
         ability,
-        AbilityData { name, rating, num, has_on_start, modifies_priority },
+        AbilityData { name, rating, num, has_on_start, modifies_priority, on_switch_in_priority },
     ))
 }
 

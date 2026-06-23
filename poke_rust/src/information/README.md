@@ -223,20 +223,64 @@ This pass updates `Unknown<T>` fields directly from what is explicitly stated in
 Contradictions (e.g., `ItemRevealed` for a mon whose `item` is already `Known` to
 something else) cause an immediate panic via `inference_contradiction!`.
 
+#### Ability tracking — `possible_original_abilities` and `possible_abilities`
+
+Every `UnknownPokemonState` carries two ability fields:
+
+- `possible_original_abilities` — the mon's **innate** ability (one of the species' slot
+  set from `dex[species].abilities`). Changes only on mega-evolution or forme change.
+- `possible_abilities` — the **live** ability (may differ mid-battle after Trace, Mummy,
+  Skill Swap, etc.; resets to `possible_original_abilities` on switch-out).
+
+On first sight, both are initialised from `dex[species].abilities`:
+- Non-empty dex entry: both become `Possibly([slot0, slot1, slotH])` (deduplicated).
+- No dex data: both remain `Not([])` (no narrowing — unknown species, unknown ability).
+
+**Transitions handled in Pass 1:**
+- `AbilityRevealed` where the revealed ability is **in** the current candidate set →
+  `unknown_set_known` (narrow to `Known`). If it is **outside** the set, a live
+  ability-change occurred (Trace copied a foreign ability, Mummy, etc.) → overwrite
+  `possible_abilities = Known(ability)`; `possible_original_abilities` is unchanged.
+- `Switch` / `SimultaneousSwitch` of a previously seen mon → reset
+  `possible_abilities := possible_original_abilities` (Trace/Skill-Swap effects don't
+  persist across a switch).
+- `MegaEvolution` / `FormeChange` → recompute **both** fields from the new species'
+  ability set (mega/forme abilities are typically fixed singletons in the dex).
+
+Because `unknown_is_excluded` treats anything outside a `Possibly` set as excluded,
+narrowing abilities on first sight immediately prunes all impossible literals from
+every BCP clause in later passes.
+
 ---
 
-### Pass 2 — Item Presence/Absence from Behaviour
+### Pass 2 — Item / Ability Presence and Absence from Behaviour
 
-**Where:** `process_battle_event`, after processing each `MoveUsed` block.
+**Where:** `process_battle_event`, after processing each `MoveUsed` block or
+`EndOfTurn` event. Each helper function is named `pass2_*` or `pass_eot_*`.
 
 This pass emits CNF clauses from observable side-effects, covering cases where the
-item itself is not directly named but its presence or absence is deducible:
+item or ability itself is not directly named but its presence or absence is deducible.
 
-**Life Orb / Rocky Helmet / recoil presence:**
-- If a `DamageDealt { target == user }` reaction appears under a `MoveUsed` (self-damage
-  at the recoil fraction of the damage dealt), add `HasItem(LifeOrb)` to the clause.
-- If no self-damage appears for a recoil-capable move, add a clause that implies no
-  recoil item was active at the time.
+#### Presence clauses (item/ability confirmed by side-effect)
+
+Reactive items and abilities are modelled with the **nested-reveal convention**: the
+item or ability that caused a reaction is always emitted as an `ItemRevealed` /
+`AbilityRevealed` event *nested inside* the move event that triggered it, not as a
+bare effect. Pass 1 therefore pins presence directly; Pass 2 handles only absence.
+
+**Life Orb recoil presence:**
+- If a `DamageDealt { target == user }` reaction appears under a `MoveUsed` at the
+  Life-Orb recoil fraction of the damage dealt, add `HasItem(LifeOrb)` to the clause.
+
+#### Absence clauses
+
+**Contact-reaction absence (Rocky Helmet / Rough Skin / Iron Barbs):**
+- After a contact move (`MoveFlag::Contact`) hits the defender and produces no
+  `ItemRevealed{RockyHelmet}` or `AbilityRevealed{RoughSkin|IronBarbs}` in the
+  reaction tree, those three are excluded on the defender via `unknown_exclude` —
+  **unless** any escape is possible: the attacker has Long Reach (bypasses contact
+  reactions), Magic Guard (negates chip), or holds Protective Pads. Probabilistic
+  contact reactions (Static, Flame Body, Poison Point) are never excluded on absence.
 
 **Choice item (multi-move → excluded):**
 - If a Pokémon uses two different moves in consecutive turns, it cannot have a Choice
@@ -246,6 +290,53 @@ item itself is not directly named but its presence or absence is deducible:
 - If a move with `AccuracyType::Percent(100)` misses and neither the user's accuracy
   stage is lowered nor the target's evasion is raised, emit:
   `[HasItem(BrightPowder), HasItem(LaxIncense)]` as a disjunctive clause.
+
+**Powder-move immunity (non-Grass target):**
+- A powder-flagged move (`MoveFlag::Powder`) that produces `Immune`/`Blocked` on a
+  target with no known Grass type emits
+  `[HasItem(SafetyGoggles) ∨ HasAbility(Overcoat)]` on the target.
+
+**Guaranteed-status absence (`pass2_guaranteed_status_absence`):**
+- A move whose secondary effect has `chance == 100` and `status == Some(s)` that
+  hits the target (a `DamageDealt` is present, no `Missed`/`Blocked`) but produces no
+  `StatusInflicted` emits a disjunction of unknown preventers for status `s` on the
+  target. Decidable preventers (type immunity, already statused, Substitute, Safeguard,
+  terrain) are ruled out first; only unknown preventers appear in the clause.
+  `HasItem(CovertCloak)` is added only for secondary effects on damaging moves.
+  After Pass 1 narrows abilities to the species set, BCP typically collapses this
+  clause quickly.
+
+**Prankster-immunity (`pass2_prankster_immunity`):**
+- A status-category move targeting one of our **Known Dark-type** mons that produces
+  `Immune`/`MoveFailed`/`Blocked` emits `[HasAbility(Prankster)]` on the user — a
+  unit clause that BCP immediately forces to `Known(Prankster)`.
+
+---
+
+### End-of-Turn Inference
+
+Two helpers fire during the `EndOfTurn` event walk (`pass_eot_heal`,
+`pass_eot_sand_immunity`).
+
+**Leftovers / Black Sludge (`pass_eot_heal`):**
+An opponent mon's HP increases at end-of-turn with no attributable cause (Aqua Ring,
+Ingrain, Grassy Terrain, Wish, Leech Seed — all decidable from volatiles and field
+state) emits:
+- `[HasItem(Leftovers)]` for non-Poison-type targets.
+- `[HasItem(Leftovers) ∨ HasItem(BlackSludge)]` for Poison-type targets.
+
+The clause is gated on the item not already being `Known(None)` or consumed, and on
+the mon's item not already being excluded for these values.
+
+**Sandstorm chip absence (`pass_eot_sand_immunity`):**
+When Sandstorm is active and an opponent mon that is not Rock / Ground / Steel takes
+no EOT chip damage, emit:
+```
+[HasItem(SafetyGoggles), HasAbility(SandVeil), HasAbility(SandRush),
+ HasAbility(SandForce), HasAbility(Overcoat), HasAbility(MagicGuard)]
+```
+Literals already excluded from the mon's `possible_abilities` or `item` are omitted
+before emitting (BCP would prune them anyway, but skipping them avoids spurious clauses).
 
 ---
 
@@ -351,8 +442,16 @@ events in the same **effective priority bracket**:
 #### Effective priority
 
 Priority is normally the move's `MoveData::priority`. Grassy Glide gets +1 when
-Grassy Terrain is active (deterministic, folded directly). Priority-lifting abilities
-(Prankster, Gale Wings, Triage) are *not* folded in — they become escape disjuncts.
+Grassy Terrain is active (deterministic, folded directly).
+
+When a mon's `possible_abilities` is already `Known`, `fold_known_ability_priority`
+folds the ability into the effective priority bracket before comparing moves:
+- `Known(Prankster)` + Status-category move → base priority + 1
+- `Known(GaleWings)` + Flying-type move + mon at full HP → base priority + 1
+- `Known(Triage)` + move with `heal_fraction ≠ [0,0]` → base priority + 3
+
+When the ability is **not** yet Known, these priority-lifting abilities become escape
+disjuncts in the emitted clause (see "Emitted clause" below).
 
 #### Trick Room
 
@@ -408,6 +507,14 @@ The clause for each pair is:
 Items/abilities that have been excluded from the mon's sets are not added to the
 clause. A unit clause (after BCP removes false literals) forces the `SpeedComparison`
 to be treated as unconditional.
+
+#### Post-BCP re-derivation
+
+After the main BCP loop runs, if BCP forced a priority-lifting ability to `Known`
+(e.g., a `[Prankster]` unit clause from `pass2_prankster_immunity` was just
+resolved), Pass 4 and `propagate_speed_comparisons` are re-run once more with the
+updated ability knowledge. This tightens speed bounds that were previously left loose
+because the priority escape was still present.
 
 #### `propagate_speed_comparisons`
 
