@@ -1514,6 +1514,7 @@ fn test_ev_cap_tightens_remaining_stats() {
         force_max_ivs: true,
         level: 50,
         legal_items: None,
+        allow_repeat_items: false,
         learnset_dex: HashMap::new(),
         ev_total_cap: Some(510),
     };
@@ -1563,6 +1564,7 @@ fn test_ev_cap_no_tightening_when_evs_low() {
         force_max_ivs: true,
         level: 50,
         legal_items: None,
+        allow_repeat_items: false,
         learnset_dex: HashMap::new(),
         ev_total_cap: Some(510),
     };
@@ -2828,5 +2830,190 @@ fn test_i2_no_air_balloon_clause_when_types_unknown() {
     assert!(
         !has_air_balloon_clause,
         "Must NOT emit AirBalloon clause when possible_types is unknown (could be Flying)"
+    );
+}
+
+// ── Item clause (allow_repeat_items) ─────────────────────────────────────────
+
+/// Build a battle with one P1 active mon, one P2 active mon, and one P2 known-back mon.
+///
+/// mon_idx layout:
+///   0 = p1_active[0]
+///   1 = p2_active[0]   (P2 active; teammates: [2])
+///   2 = p2_known_back[0]
+fn battle_1v1_with_known_back(
+    p1_active: UnknownPokemonState,
+    p2_active: UnknownPokemonState,
+    p2_back: UnknownPokemonState,
+) -> UnknownBattleState {
+    UnknownBattleState {
+        active_per_side: 1,
+        back_mons_per_side: 5,
+        p1_active_mons: vec![p1_active],
+        p2_active_mons: vec![p2_active],
+        p1_known_back_mons: vec![],
+        p2_known_back_mons: vec![p2_back],
+        p1_possible_back_mons: vec![],
+        p2_possible_back_mons: vec![],
+        turn_number: 1,
+        turn_started: false,
+        turn_ended: false,
+        p1_has_tera: false,
+        p2_has_tera: false,
+        p1_has_mega: false,
+        p2_has_mega: false,
+        weather: None,
+        weather_turns: None,
+        pseudo_weathers: vec![],
+        pseudo_weather_turns: vec![],
+        terrain: None,
+        terrain_turns: None,
+        p1_side_conditions: vec![],
+        p1_side_condition_turns: vec![],
+        p2_side_conditions: vec![],
+        p2_side_condition_turns: vec![],
+        p1_slot_conditions: vec![vec![]],
+        p2_slot_conditions: vec![vec![]],
+        self_switch_pending: None,
+        items_consumed_this_turn: vec![],
+        last_move_on_field: None,
+        sub_damage_dealt: 0,
+        round_used_this_turn: false,
+        predicates: vec![],
+    }
+}
+
+/// Item clause: revealing the active opponent's item excludes it from the back mon.
+#[test]
+fn test_item_clause_excludes_revealed_item_from_teammate() {
+    let p1_mon = unknown_mon();
+    let p2_active = unknown_mon_species(Species::Garchomp);
+    let p2_back = unknown_mon_species(Species::Corviknight);
+    let state = battle_1v1_with_known_back(p1_mon, p2_active, p2_back);
+
+    // Default config: allow_repeat_items = false (item clause on).
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+        HashMap::new(),
+        HashMap::new(),
+        InferenceConfig::default(),
+    );
+
+    // Active mon (idx 1) must now be Known(Leftovers).
+    let active = get_mon_by_idx(&result, 1).unwrap();
+    assert!(
+        matches!(&active.item, Unknown::Known(Item::Leftovers)),
+        "Active mon should be Known(Leftovers), got {:?}",
+        active.item
+    );
+    // Back mon (idx 2) must have Leftovers excluded.
+    let back = get_mon_by_idx(&result, 2).unwrap();
+    assert!(
+        is_item_excluded(back, &Item::Leftovers),
+        "Back mon should have Leftovers excluded by item clause, got {:?}",
+        back.item
+    );
+}
+
+/// Item::None is exempt from the item clause — multiple mons may hold no item.
+#[test]
+fn test_item_clause_none_item_not_excluded() {
+    let p1_mon = unknown_mon();
+    let p2_active = unknown_mon_species(Species::Garchomp);
+    let p2_back = unknown_mon_species(Species::Corviknight);
+    let state = battle_1v1_with_known_back(p1_mon, p2_active, p2_back);
+
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::None })],
+        HashMap::new(),
+        HashMap::new(),
+        InferenceConfig::default(),
+    );
+
+    // Back mon must still allow Item::None (no exclusion for no-item).
+    let back = get_mon_by_idx(&result, 2).unwrap();
+    assert!(
+        !is_item_excluded(back, &Item::None),
+        "Back mon must still allow Item::None; exclusion of no-item violates the exemption"
+    );
+}
+
+/// With allow_repeat_items = true, no cross-teammate exclusion occurs.
+#[test]
+fn test_repeat_items_allowed_no_exclusion() {
+    let p1_mon = unknown_mon();
+    let p2_active = unknown_mon_species(Species::Garchomp);
+    let p2_back = unknown_mon_species(Species::Corviknight);
+    let state = battle_1v1_with_known_back(p1_mon, p2_active, p2_back);
+
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+        HashMap::new(),
+        HashMap::new(),
+        InferenceConfig { allow_repeat_items: true, ..InferenceConfig::default() },
+    );
+
+    // Back mon must still allow Leftovers (clause is off).
+    let back = get_mon_by_idx(&result, 2).unwrap();
+    assert!(
+        !is_item_excluded(back, &Item::Leftovers),
+        "Back mon must still allow Leftovers when allow_repeat_items = true"
+    );
+}
+
+/// BCP cascade: back mon pre-narrowed to Possibly([Leftovers, Sitrus]); active
+/// mon revealed as Leftovers → item clause excludes Leftovers from back →
+/// BCP collapses back mon to Known(Sitrus).
+#[test]
+fn test_item_clause_bcp_cascade() {
+    let p1_mon = unknown_mon();
+    let p2_active = unknown_mon_species(Species::Garchomp);
+    let mut p2_back = unknown_mon_species(Species::Corviknight);
+    // Pre-narrow the back mon's item to two candidates.
+    p2_back.item = Unknown::Possibly(vec![Item::Leftovers, Item::SitrusBerry]);
+    let state = battle_1v1_with_known_back(p1_mon, p2_active, p2_back);
+
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+        HashMap::new(),
+        HashMap::new(),
+        InferenceConfig::default(),
+    );
+
+    // After exclusion of Leftovers, Possibly([SitrusBerry]) → Known(SitrusBerry).
+    let back = get_mon_by_idx(&result, 2).unwrap();
+    assert!(
+        matches!(&back.item, Unknown::Known(Item::SitrusBerry)),
+        "Back mon should collapse to Known(SitrusBerry) via item-clause + BCP cascade, got {:?}",
+        back.item
+    );
+}
+
+/// ItemGained (Trick / Switcheroo) must NOT propagate item-clause exclusion
+/// to teammates, because the transferred item was not the mon's team-built item.
+#[test]
+fn test_item_gained_does_not_exclude_teammate() {
+    let p1_mon = unknown_mon();
+    let p2_active = unknown_mon_species(Species::Garchomp);
+    let p2_back = unknown_mon_species(Species::Corviknight);
+    let state = battle_1v1_with_known_back(p1_mon, p2_active, p2_back);
+
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::ItemGained { slot: p2(0), item: Item::Leftovers })],
+        HashMap::new(),
+        HashMap::new(),
+        InferenceConfig::default(),
+    );
+
+    // Back mon must still allow Leftovers; ItemGained is a transfer, not a reveal.
+    let back = get_mon_by_idx(&result, 2).unwrap();
+    assert!(
+        !is_item_excluded(back, &Item::Leftovers),
+        "ItemGained must not trigger item-clause exclusion; back mon must still allow Leftovers"
     );
 }

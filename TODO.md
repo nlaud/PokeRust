@@ -7,7 +7,6 @@
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
 ## Refactors
-- Unique Items Claude fo inference :)
 - Hidden information stuff, adding information releases to simulate_turn on a flag input (is there a better way to do this that isn't just copying the entire function?)
 - Comments Deslop
 - MAKE THE FRONTEND YIPPEE

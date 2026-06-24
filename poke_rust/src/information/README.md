@@ -739,5 +739,6 @@ Controls inference behaviour at call time:
 | `force_max_ivs` | `true` | Assume IVs = 31 (competitive norm) |
 | `level` | `50` | Level for newly observed opponent mons |
 | `legal_items` | `None` | Optional whitelist; `None` = all items possible |
+| `allow_repeat_items` | `false` | Item clause: `false` = each non-`None` item may appear at most once per team; once a teammate's item is confirmed, that item is excluded from every other roster member's lattice. `true` = no cross-teammate exclusion |
 | `learnset_dex` | `{}` | Learnset data; empty = skip learnset narrowing |
 | `ev_total_cap` | `Some(510)` | Total EV budget for cross-stat tightening |

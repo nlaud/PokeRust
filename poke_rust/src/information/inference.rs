@@ -58,6 +58,13 @@ pub struct InferenceConfig {
     /// revealed item outside the whitelist triggers a contradiction panic. `None`
     /// means all items are considered possible.
     pub legal_items: Option<HashSet<Item>>,
+    /// Whether two Pokémon on the same team may hold the same item (item clause).
+    /// When `false` (the Pokémon Champions default), the engine assumes each
+    /// non-`Item::None` item appears at most once per team: once a teammate's item
+    /// is confirmed as `X`, `X` is excluded from every other distinct teammate's
+    /// item lattice. `Item::None` (no item) is exempt and may appear on any number
+    /// of teammates. When `true`, no cross-teammate exclusion is performed.
+    pub allow_repeat_items: bool,
     /// Learnset data per species (from `showdownLearnsets.txt`). When non-empty,
     /// enables learnset-based Illusion narrowing: after an opponent move is revealed,
     /// any candidate species that cannot legally learn that move is dropped from
@@ -76,6 +83,7 @@ impl Default for InferenceConfig {
             force_max_ivs: true,
             level: 50,
             legal_items: None,
+            allow_repeat_items: false,
             learnset_dex: HashMap::new(),
             ev_total_cap: Some(510),
         }
@@ -275,6 +283,60 @@ pub fn unknown_is_excluded<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
 /// `true` if this `Unknown` is `Known` to exactly `val`.
 fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
     matches!(u, Unknown::Known(v) if v == val)
+}
+
+// ── Item-clause helpers ────────────────────────────────────────────────────────
+
+/// Return the `mon_idx` values for every Pokémon on the **same side** as
+/// `source_idx`, excluding `source_idx` itself. Used by item-clause propagation.
+///
+/// Soundness assumption: each entry in the six roster lists
+/// (`p1_active`, `p1_known_back`, `p1_possible_back`, and their p2 mirrors) is a
+/// *pairwise-distinct* physical roster member. This holds today — `possible_back`
+/// is only populated by the not-yet-built frontend and is empty in all current
+/// code paths. If future Illusion / overlapping-hypothesis modeling lets two
+/// `possible_back` entries represent the *same* physical slot, gate exclusion
+/// here so it never fires across such alternatives.
+// TODO: revisit if possible_back ever holds non-distinct Illusion hypotheses.
+fn teammate_indices(state: &UnknownBattleState, source_idx: usize) -> Vec<usize> {
+    let p1a = state.p1_active_mons.len();
+    let p1k = state.p1_known_back_mons.len();
+    let p1p = state.p1_possible_back_mons.len();
+    let p1_end = p1a + p1k + p1p;
+
+    let p2a = state.p2_active_mons.len();
+    let p2k = state.p2_known_back_mons.len();
+    let p2p = state.p2_possible_back_mons.len();
+    let p2_end = p1_end + p2a + p2k + p2p;
+
+    let (start, end) = if source_idx < p1_end {
+        (0, p1_end)
+    } else if source_idx < p2_end {
+        (p1_end, p2_end)
+    } else {
+        return vec![];
+    };
+
+    (start..end).filter(|&i| i != source_idx).collect()
+}
+
+/// Under item clause, exclude `item` from every distinct teammate of the mon at
+/// `source_idx`. No-op when `allow_repeat_items` is `true` or `item` is
+/// `Item::None` (no-item may appear on multiple mons freely).
+fn enforce_unique_item(
+    state: &mut UnknownBattleState,
+    source_idx: usize,
+    item: &Item,
+    allow_repeat_items: bool,
+) {
+    if allow_repeat_items || *item == Item::None {
+        return;
+    }
+    for idx in teammate_indices(state, source_idx) {
+        if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            unknown_exclude(&mut mon.item, item, &format!("item-clause#{idx}"));
+        }
+    }
 }
 
 // ── Public entry point ─────────────────────────────────────────────────────────
@@ -603,14 +665,14 @@ fn apply_information_battle(
     }
 
     // ── Pass 6: BCP to fixpoint ────────────────────────────────────────────────
-    run_bcp(state);
+    run_bcp(state, config.allow_repeat_items);
 
     // ── Pass 4 re-derivation: if BCP forced a priority ability to Known, re-run
     // speed ordering with the tighter bracket so speed bounds are updated.
     // One re-run is sufficient; duplicate clauses are harmless (BCP handles them).
     pass4_speed_from_order(state, events, move_dex, ability_dex);
     while propagate_speed_comparisons(state) {}
-    run_bcp(state);
+    run_bcp(state, config.allow_repeat_items);
 }
 
 /// Context threaded through the recursive event walk.
@@ -871,9 +933,15 @@ fn pass1_apply_event(
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     unknown_set_known(&mut mon.item, item.clone(), &format!("mon#{idx} item"));
                 }
+                // Item clause: a confirmed team-built item cannot be held by any
+                // other roster member on the same side.
+                enforce_unique_item(state, idx, item, ctx.config.allow_repeat_items);
             }
         }
         EventKind::ItemGained { slot, item } => {
+            // NOTE: ItemGained covers mid-battle item transfers (Trick, Switcheroo,
+            // Recycle, Pickup). These are not team-built items, so item-clause
+            // exclusion must NOT propagate to teammates here.
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(legal) = &ctx.config.legal_items {
                     if !legal.contains(item) && *item != Item::None {
@@ -5058,7 +5126,7 @@ const ALL_NATURES: &[Nature] = &[
 
 // ── Pass 6: BCP (Boolean Constraint Propagation) ─────────────────────────────
 
-fn run_bcp(state: &mut UnknownBattleState) {
+fn run_bcp(state: &mut UnknownBattleState, allow_repeat_items: bool) {
     let mut changed = true;
     while changed {
         changed = false;
@@ -5090,7 +5158,7 @@ fn run_bcp(state: &mut UnknownBattleState) {
             {
                 let lit = still_live[0].clone();
                 state.predicates.remove(i);
-                force_literal(state, &lit);
+                force_literal(state, &lit, allow_repeat_items);
                 changed = true;
                 continue;
             }
@@ -5312,12 +5380,17 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
     }
 }
 
-fn force_literal(state: &mut UnknownBattleState, lit: &Statement) {
+fn force_literal(state: &mut UnknownBattleState, lit: &Statement, allow_repeat_items: bool) {
     match lit {
         Statement::HasItem { mon_idx, item } => {
             if let Some(mon) = get_mon_mut_by_idx(state, *mon_idx) {
                 unknown_set_known(&mut mon.item, item.clone(), &format!("bcp#{mon_idx}"));
             }
+            // Item clause: BCP-committed team-built item cannot be held by any
+            // other roster member on the same side. Because run_bcp loops to
+            // fixpoint, a freshly narrowed teammate that collapses to one
+            // candidate will itself trigger enforce_unique_item on the next pass.
+            enforce_unique_item(state, *mon_idx, item, allow_repeat_items);
         }
         Statement::HasAbility { mon_idx, ability } => {
             if let Some(mon) = get_mon_mut_by_idx(state, *mon_idx) {
