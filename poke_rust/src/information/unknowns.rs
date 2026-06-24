@@ -201,14 +201,28 @@ pub struct UnknownBattleState {
 
     pub weather: Option<Weather>,
     pub weather_turns: Option<Unknown<u8>>,
+    /// `mon_idx` of the Pokémon that last set the current weather (via move or on-switch ability).
+    /// `None` when the setter is unknown or when no weather is active.
+    /// Used by I-A: when the timer collapses from `Possibly([5,8])` to `Known(3)`,
+    /// we know the setter had the corresponding rock item and emit `HasItem` as `Known`.
+    pub weather_setter_mon_idx: Option<usize>,
     pub pseudo_weathers: Vec<PseudoWeather>,
     pub pseudo_weather_turns: Vec<Unknown<u8>>,
     pub terrain: Option<Terrain>,
     pub terrain_turns: Option<Unknown<u8>>,
+    /// `mon_idx` of the Pokémon that last set the current terrain.  Same purpose as
+    /// `weather_setter_mon_idx`: reveals `TerrainExtender` when the timer collapses.
+    pub terrain_setter_mon_idx: Option<usize>,
     pub p1_side_conditions: Vec<SideCondition>,
     pub p1_side_condition_turns: Vec<Unknown<u8>>,
+    /// Parallel to `p1_side_conditions`/`p1_side_condition_turns`.
+    /// `mon_idx` of the setter for each active P1 side condition; `None` if unknown.
+    /// Used to reveal `LightClay` when a screen timer collapses from `Possibly([5,8])` to `Known(3)`.
+    pub p1_side_condition_setters: Vec<Option<usize>>,
     pub p2_side_conditions: Vec<SideCondition>,
     pub p2_side_condition_turns: Vec<Unknown<u8>>,
+    /// Parallel to `p2_side_conditions`/`p2_side_condition_turns`.
+    pub p2_side_condition_setters: Vec<Option<usize>>,
     pub p1_slot_conditions: Vec<Vec<SlotCondition>>,
     pub p2_slot_conditions: Vec<Vec<SlotCondition>>,
 

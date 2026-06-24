@@ -111,14 +111,18 @@ fn battle_with_p2(p2_active: Vec<UnknownPokemonState>) -> UnknownBattleState {
         p2_has_mega: false,
         weather: None,
         weather_turns: None,
+        weather_setter_mon_idx: None,
         pseudo_weathers: vec![],
         pseudo_weather_turns: vec![],
         terrain: None,
         terrain_turns: None,
+        terrain_setter_mon_idx: None,
         p1_side_conditions: vec![],
         p1_side_condition_turns: vec![],
+        p1_side_condition_setters: vec![],
         p2_side_conditions: vec![],
         p2_side_condition_turns: vec![],
+        p2_side_condition_setters: vec![],
         p1_slot_conditions: (0..n).map(|_| vec![]).collect(),
         p2_slot_conditions: (0..n).map(|_| vec![]).collect(),
         self_switch_pending: None,
@@ -149,14 +153,18 @@ fn battle_1v1(p1_mon: UnknownPokemonState, p2_mon: UnknownPokemonState) -> Unkno
         p2_has_mega: false,
         weather: None,
         weather_turns: None,
+        weather_setter_mon_idx: None,
         pseudo_weathers: vec![],
         pseudo_weather_turns: vec![],
         terrain: None,
         terrain_turns: None,
+        terrain_setter_mon_idx: None,
         p1_side_conditions: vec![],
         p1_side_condition_turns: vec![],
+        p1_side_condition_setters: vec![],
         p2_side_conditions: vec![],
         p2_side_condition_turns: vec![],
+        p2_side_condition_setters: vec![],
         p1_slot_conditions: vec![vec![]],
         p2_slot_conditions: vec![vec![]],
         self_switch_pending: None,
@@ -2327,10 +2335,27 @@ fn test_s6_freeze_in_sun_emits_no_clause() {
     // The freeze absence is fully explained by harsh sun.
     // `pass2_guaranteed_status_absence` must NOT emit any status-preventer clause
     // (the sun immunity is a weather blanket, not ability/item-gated).
-    // Note: `pass3` (damage→stat inference) may add EVIVStat predicates from the
-    // DamageDealt reaction, so we test for absence of ability-preventer clauses
-    // specifically, not for zero total predicates.
+    //
+    // Note: `pass3` I1 predicates from the DamageDealt reaction correctly emit
+    // EVIVStat clauses that include damage-reducer abilities (such as PurifyingSalt)
+    // as disjuncts.  These pass3 clauses are identified by containing an EVIVStat*
+    // literal; we filter them out and only check for pure pass2 status-preventer
+    // clauses (which only contain HasAbility / HasItem / Not literals).
+    let is_stat_literal = |s: &Statement| {
+        matches!(
+            s,
+            Statement::EVIVStatGE { .. }
+            | Statement::EVIVStatLE { .. }
+            | Statement::NatureBoostsStat { .. }
+            | Statement::NatureNerfsStat { .. }
+            | Statement::SpeedComparison { .. }
+        )
+    };
     let has_freeze_preventer_clause = result.predicates.iter().any(|clause| {
+        // Skip clauses that are pass3 I1 predicates (they contain EVIVStat* literals).
+        if clause.iter().any(|s| is_stat_literal(s)) {
+            return false;
+        }
         clause.iter().any(|s| matches!(
             s,
             // Any of the per-status preventer abilities for Frozen:
@@ -2864,14 +2889,18 @@ fn battle_1v1_with_known_back(
         p2_has_mega: false,
         weather: None,
         weather_turns: None,
+        weather_setter_mon_idx: None,
         pseudo_weathers: vec![],
         pseudo_weather_turns: vec![],
         terrain: None,
         terrain_turns: None,
+        terrain_setter_mon_idx: None,
         p1_side_conditions: vec![],
         p1_side_condition_turns: vec![],
+        p1_side_condition_setters: vec![],
         p2_side_conditions: vec![],
         p2_side_condition_turns: vec![],
+        p2_side_condition_setters: vec![],
         p1_slot_conditions: vec![vec![]],
         p2_slot_conditions: vec![vec![]],
         self_switch_pending: None,
@@ -2993,6 +3022,282 @@ fn test_item_clause_bcp_cascade() {
     );
 }
 
+// ── S-B: Direction-A HP sampling — EV-lattice enumeration ────────────────────
+
+/// **S-B regression test.** Direction A back-solves the defender's defensive BSV
+/// from a percent-HP observation by sampling possible max-HP candidates.  The old
+/// `step_by(4)` loop started at `hp_lo` and skipped every 4 integers, which means
+/// `hp_hi` (and values close to it) were often not sampled.  Because feasible-BSV
+/// lower-bounds are non-increasing in `hp_cand`, the highest sampled `hp_cand`
+/// determines the global minimum.  Skipping `hp_hi` can raise `min_pre_nature_stat`
+/// above the true value — an unsound exclusion.
+///
+/// **Setup:** Attacker SpA=300, 100 BP Special move.  Defender Garchomp with HP
+/// artificially pinned to `[183, 186]` (four consecutive EV-lattice HP values at
+/// level 50 with EV=0/4/12/20).  `step_by(4)` starting at 183 gives only `{183}`;
+/// the EV-lattice enumerator gives all four.
+///
+/// **Math:** With SpA=300, bp=100, SpD_stat=121:
+///   inner = floor(660000/121) = 5454; base_dmg = floor(5454/50)+2 = 111
+///   oracle_min = floor(111×0.85) = 94; oracle_max = 111
+///
+/// At `hp_cand=186`, `d_hi = ceil(50.5×186/100) = 94` → 94 ∈ [92, 94] → **feasible**.
+/// At `hp_cand=183`, `d_hi = ceil(50.5×183/100) = 93` → 94 > 93 → **infeasible**.
+///
+/// So BSV=121 is feasible only at hp≥186.  The old code (sampling only hp=183) finds
+/// `found_lo(183) ≥ 124` and raises `min_pre_nature_stat[4]` above 121, excluding the
+/// true value.  The new code samples hp=186 and keeps BSV=121 feasible.
+#[test]
+fn test_pass3_dir_a_ev_lattice_hp_does_not_exclude_true_bsv() {
+    use crate::state::pokemon::Nature;
+
+    // Attacker: SpA=300, no item/ability so oracle uses raw stats.
+    let mut p1_mon = unknown_mon_species(Species::Snorlax);
+    p1_mon.hp = PokemonHP::Number(500);
+    p1_mon.minStats = [500, 100, 100, 300, 100, 100]; // SpA = 300
+    p1_mon.maxStats = [500, 100, 100, 300, 100, 100];
+    p1_mon.item = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    // Defender: Garchomp, HP range [183, 186] (EV=0/4/12/20 at lv50, base_hp=108).
+    // SpD BSV range widened so BSV=121 is a candidate (Garchomp natural max BSV~137,
+    // but we inflate the search space to include artificially low values).
+    // With Hardy nature and no item, the oracle uses SpD_stat = BSV directly.
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp, &garchomp_dex(), 50,
+    );
+    p2_mon.hp = PokemonHP::Percent(100);
+    // Pin HP to the 4-value lattice window [183, 186].
+    p2_mon.minStats[0] = 183;
+    p2_mon.maxStats[0] = 186;
+    // Widen the SpD BSV search space to include 121 as the boundary.
+    p2_mon.min_pre_nature_stat[4] = 50;
+    p2_mon.max_pre_nature_stat[4] = 200;
+    p2_mon.minStats[4] = 50;
+    p2_mon.maxStats[4] = 200;
+    p2_mon.possible_natures = Unknown::Known(Nature::Hardy); // neutral: BSV == final stat
+    p2_mon.possible_abilities = Unknown::Known(Ability::None);
+    p2_mon.item = Unknown::Known(Item::None);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    // 100 BP Special Psychic move — Psychic-type neutral vs Dragon/Ground.
+    let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
+    psychic.category = MoveCategory::Special;
+    psychic.pokemon_type = PokemonType::Psychic;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Psychic, psychic);
+
+    // Observe 50% damage: new_hp = Percent(50) from old Percent(100) → delta_pct = 50.
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Psychic,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p2(0),
+                new_hp: PokemonHP::Percent(50), // 50% damage
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_result = &result.p2_active_mons[0];
+    // The EV-lattice fix ensures hp=186 is sampled, making BSV=121 feasible.
+    // The old step_by(4) code (sampling only hp=183) would raise min_pre_nature_stat[4]
+    // to ≥124, excluding BSV=121 (which is the truly feasible boundary value at hp=186).
+    assert!(
+        p2_result.min_pre_nature_stat[4] <= 121,
+        "BSV=121 (SpD_stat=121 at Hardy nature) must remain feasible; \
+         old step_by(4) would raise min_pre_nature_stat[4] to ≥124 (got {}). \
+         The EV-lattice fix samples hp=186, where BSV=121 is the feasible boundary.",
+        p2_result.min_pre_nature_stat[4]
+    );
+}
+
+// ── S-A: Per-effect timer model ───────────────────────────────────────────────
+
+/// Tailwind must be modelled as exactly 4 turns.
+///
+/// The old blanket `Possibly([5,8])` *excluded* 4, which is unsound: Tailwind
+/// always lasts 4 turns (Gen V+), so the true duration must be in the candidate
+/// set.
+#[test]
+fn test_tailwind_timer_is_known_4() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::SideConditionStart {
+            side: Player::P2,
+            condition: SideCondition::TailWind,
+        })],
+    );
+    assert_eq!(
+        result.p2_side_condition_turns,
+        vec![Unknown::Known(4)],
+        "Tailwind timer must be Known(4), not Possibly([5,8])"
+    );
+}
+
+/// Trick Room must be modelled as exactly 5 turns.
+#[test]
+fn test_trick_room_timer_is_known_5() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::PseudoWeatherStart {
+            effect: PseudoWeather::TrickRoom,
+        })],
+    );
+    assert_eq!(
+        result.pseudo_weather_turns,
+        vec![Unknown::Known(5)],
+        "Trick Room timer must be Known(5), not Possibly([5,8])"
+    );
+}
+
+/// Gravity must be modelled as exactly 5 turns.
+#[test]
+fn test_gravity_timer_is_known_5() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::PseudoWeatherStart {
+            effect: PseudoWeather::Gravity,
+        })],
+    );
+    assert_eq!(
+        result.pseudo_weather_turns,
+        vec![Unknown::Known(5)],
+        "Gravity timer must be Known(5)"
+    );
+}
+
+/// Screens (Reflect/LightScreen/AuroraVeil) must be modelled as Possibly([5,8])
+/// because Light Clay can extend them.
+#[test]
+fn test_reflect_timer_is_possibly_5_8() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::SideConditionStart {
+            side: Player::P2,
+            condition: SideCondition::Reflect,
+        })],
+    );
+    assert_eq!(
+        result.p2_side_condition_turns,
+        vec![Unknown::Possibly(vec![5, 8])],
+        "Reflect timer must be Possibly([5,8]) (Light Clay can extend to 8)"
+    );
+}
+
+/// QuickGuard must be modelled as exactly 1 turn.
+#[test]
+fn test_quick_guard_timer_is_known_1() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::SideConditionStart {
+            side: Player::P2,
+            condition: SideCondition::QuickGuard,
+        })],
+    );
+    assert_eq!(
+        result.p2_side_condition_turns,
+        vec![Unknown::Known(1)],
+        "QuickGuard timer must be Known(1), not Possibly([5,8])"
+    );
+}
+
+/// Entry hazards (Stealth Rock) must be modelled as Known(0) = permanent.
+#[test]
+fn test_stealth_rock_timer_is_known_0_permanent() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::SideConditionStart {
+            side: Player::P2,
+            condition: SideCondition::StealthRock,
+        })],
+    );
+    assert_eq!(
+        result.p2_side_condition_turns,
+        vec![Unknown::Known(0)],
+        "StealthRock timer must be Known(0) (permanent; no countdown)"
+    );
+}
+
+/// Standard weather (Rain) must be modelled as Possibly([5,8]).
+/// Primordial weather (HeavyRain) must be Known(0).
+#[test]
+fn test_rain_timer_is_possibly_5_8() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::WeatherChanged {
+            weather: Some(Weather::Rain),
+        })],
+    );
+    assert_eq!(
+        result.weather_turns,
+        Some(Unknown::Possibly(vec![5, 8])),
+        "Rain timer must be Possibly([5,8])"
+    );
+}
+
+#[test]
+fn test_primordial_weather_timer_is_known_0() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::WeatherChanged {
+            weather: Some(Weather::HeavyRain),
+        })],
+    );
+    assert_eq!(
+        result.weather_turns,
+        Some(Unknown::Known(0)),
+        "HeavyRain timer must be Known(0) (permanent; no countdown)"
+    );
+}
+
+/// Tailwind decrement: after 3 EndOfTurn events the timer reaches Known(1).
+/// (After one more it would reach 0 and SideConditionEnd fires in the simulator,
+/// but we test that no unsound exclusion happens before that.)
+#[test]
+fn test_tailwind_timer_decrements_correctly() {
+    let mut state = battle_with_p2(vec![unknown_mon()]);
+    // Set Tailwind.
+    state = apply(
+        state,
+        vec![event(EventKind::SideConditionStart {
+            side: Player::P2,
+            condition: SideCondition::TailWind,
+        })],
+    );
+    assert_eq!(result_p2_sc_turns(&state), vec![Unknown::Known(4)]);
+
+    // Advance 3 end-of-turn steps.
+    for expected in [3u8, 2, 1] {
+        state = apply(state, vec![event(EventKind::EndOfTurn)]);
+        let turns = &state.p2_side_condition_turns;
+        assert_eq!(
+            turns,
+            &vec![Unknown::Known(expected)],
+            "After decrement, Tailwind timer should be {expected}"
+        );
+    }
+}
+
+fn result_p2_sc_turns(state: &UnknownBattleState) -> Vec<Unknown<u8>> {
+    state.p2_side_condition_turns.clone()
+}
+
 /// ItemGained (Trick / Switcheroo) must NOT propagate item-clause exclusion
 /// to teammates, because the transferred item was not the mon's team-built item.
 #[test]
@@ -3015,5 +3320,233 @@ fn test_item_gained_does_not_exclude_teammate() {
     assert!(
         !is_item_excluded(back, &Item::Leftovers),
         "ItemGained must not trigger item-clause exclusion; back mon must still allow Leftovers"
+    );
+}
+
+// ── I-B: Pass 5 re-run after BCP ─────────────────────────────────────────────
+
+/// Regression test for I-B: Pass 5 must be re-run after the final BCP so that
+/// stat bounds tightened by BCP's `force_literal` (EVIVStatGE) are reflected in
+/// nature exclusion.
+///
+/// **Setup**: Garchomp at level 50, max IVs, base Atk=130.
+///   Observed Atk range: minStats[1]=150, maxStats[1]=170.
+///   Pre-injected unit predicate: EVIVStatGE{Atk, 156} — simulates a disjunctive
+///   clause that BCP resolved to its unit literal (all other disjuncts were proven
+///   false, e.g. by a subsequent item reveal).
+///
+/// **Math** (force_max_ivs=true, so IV=31 throughout):
+///   EV=36 → BSV = floor((2×130+31+9)×50÷100)+5 = 155; +Atk stat = floor(155×1.1)=170 ≤ 170 ✓
+///   EV=44 → BSV = 156;                              +Atk stat = floor(156×1.1)=171 > 170 ✗
+///
+/// **First Pass 5** (before BCP, min_pre_nature_stat[Atk]=135):
+///   EV=36 (BSV=155 ≥ 135): +Atk stat=170 ✓ → +Atk nature FEASIBLE → not excluded.
+///
+/// **BCP** forces EVIVStatGE{Atk, 156} → min_pre_nature_stat[Atk] raised to 156.
+///
+/// **Second Pass 5** (after BCP, min_pre_nature_stat[Atk]=156):
+///   EV=36 (BSV=155 < 156): SKIPPED.
+///   EV=44 (BSV=156): +Atk stat=171 > 170 ✗ — ALL higher EVs also infeasible.
+///   → +Atk natures EXCLUDED.
+///
+/// Without the second Pass 5 re-run, +Atk natures would survive despite the BSV
+/// floor raised by BCP, leaving a strictly weaker inference result.
+#[test]
+fn test_ib_pass5_reruns_after_bcp_narrows_nature_via_pre_nature_stat() {
+    use crate::state::dex_data::PokemonStat;
+    use crate::state::pokemon::Nature;
+
+    // Garchomp at level 50 using the real dex so min/max_pre_nature_stat are
+    // initialised correctly (min_BSV[Atk]=135, max_BSV[Atk]=182 at iv=0..31).
+    let mut mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    // Narrow the observed Atk range.  With max IVs, neutral Atk at ev=44 is 156 and
+    // at ev=36 is 155; +Atk at ev=36 gives 170 (within range) and at ev=44 gives 171
+    // (just outside maxStats=170).
+    mon.minStats[1] = 150;
+    mon.maxStats[1] = 170;
+
+    // In battle_with_p2 with no p1 mons, p2 active slot 0 → mon_idx=0.
+    let mut state = battle_with_p2(vec![mon]);
+
+    // Pre-inject the unit predicate EVIVStatGE{Atk, 156}.
+    // This simulates the result of BCP resolving a multi-literal clause to its last
+    // surviving literal — e.g. (EVIVStatGE{Atk,156} OR HasItem{ChoiceScarf}) after
+    // the item was revealed to be something other than Choice Scarf.
+    state.predicates.push(vec![Statement::EVIVStatGE {
+        mon_idx: 0,
+        stat: PokemonStat::Atk,
+        value: 156,
+    }]);
+
+    let config = InferenceConfig { force_max_ivs: true, ..InferenceConfig::default() };
+    let result = apply_with_config(state, vec![], garchomp_dex(), HashMap::new(), config);
+
+    let p2_mon = &result.p2_active_mons[0];
+
+    // +Atk natures must be excluded: at BSV≥156 their stat always exceeds maxStats=170.
+    for atk_nature in [Nature::Lonely, Nature::Adamant, Nature::Naughty, Nature::Brave] {
+        assert!(
+            unknown_is_excluded(&p2_mon.possible_natures, &atk_nature),
+            "{atk_nature:?} (+Atk ×1.1) must be excluded after second pass5 uses \
+             min_pre_nature_stat[Atk]=156 (BSV=156 → stat=171 > maxStats=170)"
+        );
+    }
+
+    // Neutral natures must remain feasible: BSV=156 (ev=44) → stat=156 ∈ [150, 170].
+    assert!(
+        !unknown_is_excluded(&p2_mon.possible_natures, &Nature::Hardy),
+        "Hardy (neutral) must remain feasible at BSV=156 → stat=156 ∈ [150,170]"
+    );
+    // -Atk natures must remain feasible: BSV=167 (ev=132) → stat=150 ∈ [150, 170].
+    assert!(
+        !unknown_is_excluded(&p2_mon.possible_natures, &Nature::Modest),
+        "Modest (-Atk ×0.9) must remain feasible at BSV=167 → stat=150 ∈ [150,170]"
+    );
+}
+
+// ── I-A: Timer collapse reveals extender item ─────────────────────────────────
+
+/// Regression test for I-A: when a `Possibly([5,8])` weather/terrain/screen timer
+/// collapses to `Known(3)` after 5 end-of-turns, the extended (8-turn) branch is
+/// the only remaining candidate.  At that point the setter's rock/extender item
+/// is **guaranteed** and must be recorded as `Known`.
+///
+/// **Setup**: Rain is set by the opponent Garchomp via a Rain Dance move.
+///   The initial timer is `Possibly([5,8])` (base 5 or extended 8 with Damp Rock).
+///
+/// **Timer evolution** through 5 `EndOfTurn` events:
+///   Start:          Possibly([5,8])
+///   After EOT 1:   Possibly([4,7])
+///   After EOT 2:   Possibly([3,6])
+///   After EOT 3:   Possibly([2,5])
+///   After EOT 4:   Possibly([1,4])
+///   After EOT 5:   Possibly → filter(n>1) → [3] → Known(3)  ← collapse!
+///
+/// The 5-turn entry (would become 0) is filtered out; only the 8-turn entry (→3)
+/// remains.  At this point rain is confirmed extended → Garchomp has `DampRock`.
+///
+/// **Without I-A**, the item remains unknown after 5 EOTs.  **With I-A**, it is
+/// forced to `Known(DampRock)` by `emit_extension_item_if_collapsed`.
+#[test]
+fn test_ia_weather_timer_collapse_reveals_damp_rock() {
+    // Opponent Garchomp at P2, slot 0.  Item fully unknown.
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    assert!(
+        matches!(p2_mon.item, Unknown::Not(ref v) if v.is_empty()),
+        "item must start fully unknown"
+    );
+
+    // Build a simple 1v1 state: p1 is empty; p2 has Garchomp.
+    // (We use battle_with_p2 so p2 mon_idx = 0.)
+    let state = battle_with_p2(vec![p2_mon]);
+
+    // Build a minimal Rain Dance move entry.
+    let rain_dance = MoveData {
+        name: PokemonMove::RainDance,
+        base_power: 0,
+        accuracy: AccuracyType::Percent(100),
+        target: MoveTarget::Normal,
+        secondaries: vec![],
+        self_secondaries: vec![],
+        pp: 5,
+        category: MoveCategory::Status,
+        pokemon_type: PokemonType::Water,
+        priority: 0,
+        flags: vec![],
+        ohko: false,
+        thaws_target: false,
+        heal_fraction: [0, 0],
+        force_switch: false,
+        self_switch: SelfSwitchType::None,
+        self_boost: [0; 7],
+        self_destruct: SelfDestructType::None,
+        breaks_protect: false,
+        recoil_fraction: [0, 0],
+        drain_fraction: [0, 0],
+        mind_blown_recoil: false,
+        struggle_recoil: false,
+        crit_ratio: 1,
+        foul_play: false,
+        ignore_ability: false,
+        ignore_defense_boosts: false,
+        ignore_evasion: false,
+        ignore_immunity: vec![],
+        multihit_range: [1, 1],
+        multihit_accuracy: false,
+        sleep_usable: false,
+        has_crash_damage: false,
+        damage_override: DamageOverride::None,
+        stalling_move: false,
+        override_offensive_stat: None,
+        override_defensive_stat: None,
+    };
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::RainDance, rain_dance);
+
+    // Turn 1: Garchomp (P2 slot 0) uses Rain Dance.
+    // The WeatherChanged reaction sets weather_turns = Possibly([5,8]) and records
+    // weather_setter_mon_idx = mon_idx of p2(0) = 0.
+    let rain_dance_turn = vec![event_with(
+        EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::RainDance,
+            targets: vec![],
+        },
+        vec![event(EventKind::WeatherChanged { weather: Some(Weather::Rain) })],
+    )];
+
+    let mut cur_state = apply_ex(state, rain_dance_turn, HashMap::new(), move_dex);
+
+    // Verify the timer starts as Possibly([5,8]).
+    assert_eq!(
+        cur_state.weather_turns,
+        Some(Unknown::Possibly(vec![5, 8])),
+        "weather_turns must start as Possibly([5,8])"
+    );
+    assert_eq!(cur_state.weather, Some(Weather::Rain));
+    assert_eq!(
+        cur_state.weather_setter_mon_idx, Some(0),
+        "setter must be mon_idx=0 (Garchomp at p2 slot 0)"
+    );
+    // Item still unknown after the move.
+    assert!(
+        matches!(cur_state.p2_active_mons[0].item, Unknown::Not(ref v) if v.is_empty()),
+        "item must still be unknown after Rain Dance"
+    );
+
+    // Advance 4 EndOfTurn events — timer should decrement but NOT collapse yet.
+    for expected_after in [
+        Unknown::Possibly(vec![4, 7]),
+        Unknown::Possibly(vec![3, 6]),
+        Unknown::Possibly(vec![2, 5]),
+        Unknown::Possibly(vec![1, 4]),
+    ] {
+        cur_state = apply_ex(cur_state, vec![event(EventKind::EndOfTurn)], HashMap::new(), HashMap::new());
+        assert_eq!(
+            cur_state.weather_turns,
+            Some(expected_after.clone()),
+            "weather_turns after decrement should be {:?}", expected_after
+        );
+        // Item still unknown — collapse has not happened yet.
+        assert!(
+            matches!(cur_state.p2_active_mons[0].item, Unknown::Not(ref v) if v.is_empty()),
+            "item must remain unknown before the 5th EOT"
+        );
+    }
+
+    // 5th EndOfTurn — timer collapses: Possibly([1,4]) → filter(n>1) → [3] → Known(3).
+    cur_state = apply_ex(cur_state, vec![event(EventKind::EndOfTurn)], HashMap::new(), HashMap::new());
+    assert_eq!(
+        cur_state.weather_turns,
+        Some(Unknown::Known(3)),
+        "weather_turns must collapse to Known(3) after the 5th EOT"
+    );
+
+    // I-A: DampRock must now be revealed as Known on Garchomp.
+    assert_eq!(
+        cur_state.p2_active_mons[0].item,
+        Unknown::Known(Item::DampRock),
+        "Damp Rock must be revealed as Known after the 5th EOT confirms the 8-turn branch"
     );
 }

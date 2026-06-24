@@ -618,6 +618,28 @@ fn process_team_preview_event(
 
 // ── Battle path ───────────────────────────────────────────────────────────────
 
+/// Run `pass5_back_solve` on every mon in `state` whose species is fully known.
+/// This is a pure information-gain step: it converts tightened `min/max_pre_nature_stat`
+/// bounds into narrower `minEvs/maxEvs` and excluded natures.  Safe to call multiple
+/// times — bounds are monotone so it always converges.
+fn run_pass5_all_mons(
+    state: &mut UnknownBattleState,
+    config: &InferenceConfig,
+    dex: &HashMap<Species, PokemonData>,
+) {
+    let total = mons_count_battle(state);
+    for idx in 0..total {
+        let has_known_species = get_mon_by_idx(state, idx)
+            .map(|m| matches!(m.possible_species, Unknown::Known(_)))
+            .unwrap_or(false);
+        if has_known_species {
+            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                pass5_back_solve(mon, config, dex);
+            }
+        }
+    }
+}
+
 fn apply_information_battle(
     state: &mut UnknownBattleState,
     events: &[InformationEvent],
@@ -641,37 +663,30 @@ fn apply_information_battle(
         ability_dex,
         config,
         move_context: None,
+        switch_slot: None,
     };
     for event in events {
         process_battle_event(state, event, &mut ctx);
     }
 
-    // ── Pass 5: back-solve EV/IV/nature from tightened stat bounds ────────────
-    // Run on all mons whose species is unambiguous (Known).
-    let total = mons_count_battle(state);
-    for idx in 0..total {
-        // Only run pass5 for mons with a known species (need base stats).
-        let has_known_species = get_mon_by_idx(state, idx)
-            .map(|m| matches!(m.possible_species, Unknown::Known(_)))
-            .unwrap_or(false);
-        if has_known_species {
-            // Extract the mon, run pass5, put it back.
-            // (Can't borrow mutably via get_mon_mut while dex is also borrowed.)
-            // Use a clone-modify-reassign pattern.
-            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                pass5_back_solve(mon, config, dex);
-            }
-        }
-    }
+    // ── Pass 5 (first): back-solve EV/IV/nature from tightened stat bounds ───
+    run_pass5_all_mons(state, config, dex);
 
     // ── Pass 6: BCP to fixpoint ────────────────────────────────────────────────
     run_bcp(state, config.allow_repeat_items);
 
     // ── Pass 4 re-derivation: if BCP forced a priority ability to Known, re-run
     // speed ordering with the tighter bracket so speed bounds are updated.
-    // One re-run is sufficient; duplicate clauses are harmless (BCP handles them).
+    // One re-run is sufficient; duplicate clauses are now guarded against.
     pass4_speed_from_order(state, events, move_dex, ability_dex);
     while propagate_speed_comparisons(state) {}
+    run_bcp(state, config.allow_repeat_items);
+
+    // ── Pass 5 (second): re-run after BCP so that stat bounds tightened by
+    // force_literal (e.g. from a SpeedComparison clause resolving to Known) are
+    // reflected in EV/IV/nature narrowing.  BCP is re-run once more to propagate
+    // any newly excluded natures.  Bounds are monotone → guaranteed to terminate.
+    run_pass5_all_mons(state, config, dex);
     run_bcp(state, config.allow_repeat_items);
 }
 
@@ -683,6 +698,10 @@ struct BattleContext<'a> {
     config: &'a InferenceConfig,
     /// The nearest enclosing `MoveUsed`, for nested-reaction analysis.
     move_context: Option<MoveContext>,
+    /// The nearest enclosing single-mon `Switch`, set while processing that event's
+    /// reactions.  Used by `WeatherChanged` / `TerrainChanged` handlers to attribute
+    /// ability-triggered field effects (Drizzle, Drought, etc.) to the switching mon.
+    switch_slot: Option<FieldSlot>,
 }
 
 #[derive(Clone)]
@@ -704,6 +723,7 @@ fn process_battle_event(
     ctx: &mut BattleContext,
 ) {
     let prev_move_ctx = ctx.move_context.clone();
+    let prev_switch_slot = ctx.switch_slot.clone();
 
     // Detect crit in the reaction list for the MoveContext.
     let is_crit = event
@@ -735,6 +755,15 @@ fn process_battle_event(
             pre_hit_hp,
             observed_damage: Vec::new(),
         });
+        // Clear switch_slot: we're now in a move context, not a switch context.
+        ctx.switch_slot = None;
+    }
+
+    // For a single-mon switch, record the slot so that field-effect reactions
+    // (WeatherChanged / TerrainChanged from Drizzle / Electric Surge, etc.)
+    // can attribute the effect to the switching mon.
+    if let EventKind::Switch(sw) = &event.kind {
+        ctx.switch_slot = Some(sw.slot.clone());
     }
 
     // Pass 1 — direct facts.
@@ -757,6 +786,7 @@ fn process_battle_event(
     }
 
     ctx.move_context = prev_move_ctx;
+    ctx.switch_slot = prev_switch_slot;
 }
 
 // ── Pass 1: Direct/structural facts ──────────────────────────────────────────
@@ -1174,18 +1204,37 @@ fn pass1_apply_event(
 
         EventKind::WeatherChanged { weather } => {
             state.weather = weather.clone();
-            state.weather_turns = weather.as_ref().map(|_| Unknown::Possibly(vec![5, 8]));
+            state.weather_turns = weather.as_ref().map(|w| weather_timer(w));
+            // I-A: record the setter so the rock item can be revealed when the timer
+            // collapses from Possibly([5,8]) to Known(3) after 5 end-of-turns.
+            state.weather_setter_mon_idx = if let Some(mctx) = &ctx.move_context {
+                // Move-triggered weather (Rain Dance, Sunny Day, …) — setter is move user.
+                mon_idx_for_active_slot(state, &mctx.user_slot)
+            } else if let Some(sw_slot) = &ctx.switch_slot {
+                // Ability-triggered weather on single-mon switch-in (Drizzle, Drought, …).
+                mon_idx_for_active_slot(state, sw_slot)
+            } else {
+                None // SimultaneousSwitch or other; setter unknown.
+            };
         }
         EventKind::TerrainChanged { terrain } => {
             state.terrain = terrain.clone();
-            state.terrain_turns = terrain.as_ref().map(|_| Unknown::Possibly(vec![5, 8]));
+            state.terrain_turns = terrain.as_ref().map(|t| terrain_timer(t));
+            // I-A: record the setter for TerrainExtender reveal on timer collapse.
+            state.terrain_setter_mon_idx = if let Some(mctx) = &ctx.move_context {
+                mon_idx_for_active_slot(state, &mctx.user_slot)
+            } else if let Some(sw_slot) = &ctx.switch_slot {
+                mon_idx_for_active_slot(state, sw_slot)
+            } else {
+                None
+            };
         }
         EventKind::PseudoWeatherStart { effect } => {
             if !state.pseudo_weathers.contains(effect) {
                 state.pseudo_weathers.push(effect.clone());
                 state
                     .pseudo_weather_turns
-                    .push(Unknown::Possibly(vec![5, 8]));
+                    .push(pseudo_weather_timer(effect));
             }
         }
         EventKind::PseudoWeatherEnd { effect } => {
@@ -1195,35 +1244,50 @@ fn pass1_apply_event(
             }
         }
         EventKind::SideConditionStart { side, condition } => {
-            let (conditions, turns) = match side {
+            // Determine the setter mon_idx for I-A screen reveals.
+            let setter_idx = if let Some(mctx) = &ctx.move_context {
+                // Screens are only set by moves; move_context is always available here.
+                mon_idx_for_active_slot(state, &mctx.user_slot)
+            } else {
+                None
+            };
+            let (conditions, turns, setters) = match side {
                 Player::P1 => (
                     &mut state.p1_side_conditions,
                     &mut state.p1_side_condition_turns,
+                    &mut state.p1_side_condition_setters,
                 ),
                 Player::P2 => (
                     &mut state.p2_side_conditions,
                     &mut state.p2_side_condition_turns,
+                    &mut state.p2_side_condition_setters,
                 ),
             };
             if !conditions.contains(condition) {
                 conditions.push(condition.clone());
-                turns.push(Unknown::Possibly(vec![5, 8]));
+                turns.push(side_condition_timer(condition));
+                setters.push(setter_idx);
             }
         }
         EventKind::SideConditionEnd { side, condition } => {
-            let (conditions, turns) = match side {
+            let (conditions, turns, setters) = match side {
                 Player::P1 => (
                     &mut state.p1_side_conditions,
                     &mut state.p1_side_condition_turns,
+                    &mut state.p1_side_condition_setters,
                 ),
                 Player::P2 => (
                     &mut state.p2_side_conditions,
                     &mut state.p2_side_condition_turns,
+                    &mut state.p2_side_condition_setters,
                 ),
             };
             if let Some(pos) = conditions.iter().position(|c| c == condition) {
                 conditions.remove(pos);
                 turns.remove(pos);
+                if pos < setters.len() {
+                    setters.remove(pos);
+                }
             }
         }
         EventKind::SlotConditionStart { slot, condition } => {
@@ -1680,28 +1744,131 @@ fn unknown_ability_might_be_suppressed(state: &UnknownBattleState, slot: &FieldS
 ///
 /// Visible EOT effects (weather chip, heal, etc.) are handled by the event walk
 /// visiting `EndOfTurn::reactions`; this function handles the invisible internal state.
+/// Return the item that extends a weather effect beyond its base 5-turn duration.
+/// Used by I-A to reveal the rock item when the weather timer confirms the 8-turn branch.
+fn weather_extension_item(weather: &Weather) -> Option<Item> {
+    match weather {
+        Weather::Rain => Some(Item::DampRock),
+        Weather::Sun => Some(Item::HeatRock),
+        Weather::Sandstorm => Some(Item::SmoothRock),
+        Weather::Snow => Some(Item::IcyRock),
+        // Primordial weathers: timer is Known(0) sentinel; never emitted.
+        Weather::HeavyRain | Weather::ExtremeSunlight | Weather::StrongWinds => None,
+    }
+}
+
+/// Return the item that extends a terrain effect beyond its base 5-turn duration.
+fn terrain_extension_item(_terrain: &Terrain) -> Item {
+    Item::TerrainExtender
+}
+
+/// Return the item that extends a screen beyond its base 5-turn duration.
+fn screen_extension_item(sc: &SideCondition) -> Option<Item> {
+    match sc {
+        SideCondition::Reflect | SideCondition::LightScreen | SideCondition::AuroraVeil => {
+            Some(Item::LightClay)
+        }
+        _ => None,
+    }
+}
+
+/// Emit `HasItem{mon_idx, item}` as a `Known` fact when a timer has just
+/// collapsed from `Possibly` to `Known(n > 0)`, confirming the extended duration.
+/// This is a pure narrowing (soundness: only fires when the longer branch is
+/// the ONLY remaining candidate) and is always guaranteed information.
+fn emit_extension_item_if_collapsed(
+    state: &mut UnknownBattleState,
+    was_possibly: bool,
+    setter_idx: Option<usize>,
+    item: Item,
+) {
+    if !was_possibly {
+        return; // Not a collapse; timer was already Known or was Never decremented.
+    }
+    // After decrement, if a Possibly collapsed to Known it will now be Known(n).
+    // We don't re-check the value here — the caller verifies n > 0.
+    if let Some(idx) = setter_idx {
+        if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            unknown_set_known(&mut mon.item, item, "ia-extension-item");
+        }
+    }
+}
+
 fn apply_end_of_turn(state: &mut UnknownBattleState) {
-    // ── Decrement field timers ────────────────────────────────────────────────
+    // ── Decrement field timers and detect Possibly→Known collapses (I-A) ─────
+
+    // Weather
+    let weather_was_possibly = matches!(&state.weather_turns, Some(Unknown::Possibly(_)));
+    let weather_setter = state.weather_setter_mon_idx;
+    let weather_type_snap = state.weather.clone();
     decrement_unknown_turns(&mut state.weather_turns, &mut state.weather);
+    if weather_was_possibly {
+        if let Some(Unknown::Known(n)) = &state.weather_turns {
+            if *n > 0 {
+                // Extended duration confirmed (8-turn branch survived the 5-turn filter).
+                if let Some(weather) = &weather_type_snap {
+                    if let Some(rock) = weather_extension_item(weather) {
+                        emit_extension_item_if_collapsed(state, true, weather_setter, rock);
+                    }
+                }
+            }
+        }
+    }
+
+    // Terrain
+    let terrain_was_possibly = matches!(&state.terrain_turns, Some(Unknown::Possibly(_)));
+    let terrain_setter = state.terrain_setter_mon_idx;
     decrement_unknown_turns(&mut state.terrain_turns, &mut state.terrain);
+    if terrain_was_possibly {
+        if let Some(Unknown::Known(n)) = &state.terrain_turns {
+            if *n > 0 {
+                emit_extension_item_if_collapsed(
+                    state,
+                    true,
+                    terrain_setter,
+                    terrain_extension_item(&Terrain::ElectricTerrain), // any Terrain gives TerrainExtender
+                );
+            }
+        }
+    }
+
     for t in state.pseudo_weather_turns.iter_mut() {
         decrement_unknown_turns_raw(t);
     }
     // Remove expired pseudo-weathers (those whose turn set collapsed to empty).
     // (We don't know which pseudo-weather expired — leave for event-driven clearing.)
-    for (sc_turns, _sc) in state
-        .p1_side_condition_turns
-        .iter_mut()
-        .zip(state.p1_side_conditions.iter())
-    {
-        decrement_unknown_turns_raw(sc_turns);
+
+    // P1 side conditions
+    for i in 0..state.p1_side_conditions.len() {
+        let was_possibly = matches!(&state.p1_side_condition_turns[i], Unknown::Possibly(_));
+        decrement_unknown_turns_raw(&mut state.p1_side_condition_turns[i]);
+        if was_possibly {
+            if let Unknown::Known(n) = &state.p1_side_condition_turns[i] {
+                if *n > 0 {
+                    let sc = state.p1_side_conditions[i].clone();
+                    if let Some(clay) = screen_extension_item(&sc) {
+                        let setter = state.p1_side_condition_setters.get(i).copied().flatten();
+                        emit_extension_item_if_collapsed(state, true, setter, clay);
+                    }
+                }
+            }
+        }
     }
-    for (sc_turns, _sc) in state
-        .p2_side_condition_turns
-        .iter_mut()
-        .zip(state.p2_side_conditions.iter())
-    {
-        decrement_unknown_turns_raw(sc_turns);
+    // P2 side conditions
+    for i in 0..state.p2_side_conditions.len() {
+        let was_possibly = matches!(&state.p2_side_condition_turns[i], Unknown::Possibly(_));
+        decrement_unknown_turns_raw(&mut state.p2_side_condition_turns[i]);
+        if was_possibly {
+            if let Unknown::Known(n) = &state.p2_side_condition_turns[i] {
+                if *n > 0 {
+                    let sc = state.p2_side_conditions[i].clone();
+                    if let Some(clay) = screen_extension_item(&sc) {
+                        let setter = state.p2_side_condition_setters.get(i).copied().flatten();
+                        emit_extension_item_if_collapsed(state, true, setter, clay);
+                    }
+                }
+            }
+        }
     }
 
     // Also decrement the `turns` field inside any turn-count predicate.
@@ -1780,6 +1947,83 @@ fn decrement_unknown_turns<T>(turns_opt: &mut Option<Unknown<u8>>, field: &mut O
         // If the Possibly set is now empty, all possibilities say the effect has expired.
         // We leave clearing `field` to the event-driven path (WeatherChanged / SideConditionEnd)
         // so that we don't accidentally clear weather that persisted (8-turn case).
+    }
+}
+
+// ── Per-effect timer models ───────────────────────────────────────────────────
+//
+// Soundness requirement: the candidate set must be a *superset* of every true
+// duration the game can produce.  Where an item can extend the duration (weather
+// rocks, Light Clay, Terrain Extender) we use `Possibly([5,8])`; where the
+// duration is fixed by mechanic (not by item), we use `Known(n)`.
+//
+// `Known(0)` is the "permanent / no countdown" sentinel used for primordial
+// weathers and entry hazards.  `decrement_unknown_turns_raw` is a no-op on 0,
+// and the predicate machinery never emits turn-count clauses for these effects.
+//
+// Durations confirmed against Bulbapedia (newest-generation behaviour):
+//   Tailwind=4 (Gen V+), Screens=5/8 (Light Clay), Tricks/Gravity/WR=5,
+//   Safeguard/Mist/Lucky Chant=5, one-turn guards=1, FairyLock/IonDeluge=1,
+//   Mud/Water Sport=5, MagicDeluge(Magic Room)=5.
+
+/// Timer model for a newly-set weather effect.
+fn weather_timer(w: &Weather) -> Unknown<u8> {
+    match w {
+        // Standard weathers: base 5; Heat/Damp/Smooth/Icy Rock extends to 8.
+        Weather::Rain | Weather::Sun | Weather::Sandstorm | Weather::Snow => {
+            Unknown::Possibly(vec![5, 8])
+        }
+        // Primordial weathers (from Abilities): never tick down.
+        Weather::HeavyRain | Weather::ExtremeSunlight | Weather::StrongWinds => {
+            Unknown::Known(0)
+        }
+    }
+}
+
+/// Timer model for a newly-set terrain effect.
+fn terrain_timer(_t: &Terrain) -> Unknown<u8> {
+    // All terrains: base 5; Terrain Extender extends to 8.
+    Unknown::Possibly(vec![5, 8])
+}
+
+/// Timer model for a newly-active pseudo-weather effect.
+fn pseudo_weather_timer(pw: &PseudoWeather) -> Unknown<u8> {
+    match pw {
+        // All 5-turn pseudo-weathers (no item extension exists).
+        PseudoWeather::TrickRoom
+        | PseudoWeather::Gravity
+        | PseudoWeather::WonderRoom
+        | PseudoWeather::MudSport
+        | PseudoWeather::WaterSport
+        | PseudoWeather::MagicDeluge => Unknown::Known(5),
+        // One-turn effects.
+        PseudoWeather::FairyLock | PseudoWeather::IonDeluge => Unknown::Known(1),
+    }
+}
+
+/// Timer model for a newly-active side condition.
+fn side_condition_timer(sc: &SideCondition) -> Unknown<u8> {
+    match sc {
+        // Screens: base 5; Light Clay extends to 8.
+        SideCondition::Reflect
+        | SideCondition::LightScreen
+        | SideCondition::AuroraVeil => Unknown::Possibly(vec![5, 8]),
+        // Tailwind: exactly 4 turns (Gen V+).  Formerly Possibly([5,8]) — UNSOUND.
+        SideCondition::TailWind => Unknown::Known(4),
+        // Fixed 5-turn side conditions.
+        SideCondition::SafeGuard
+        | SideCondition::Mist
+        | SideCondition::LuckyChant => Unknown::Known(5),
+        // One-turn protections (expire at end of the turn they are used).
+        SideCondition::QuickGuard
+        | SideCondition::WideGuard
+        | SideCondition::CraftyShield
+        | SideCondition::MatBlock => Unknown::Known(1),
+        // Entry hazards: permanent until cleared (no countdown).
+        SideCondition::Spikes(_)
+        | SideCondition::StealthRock
+        | SideCondition::StickyWeb(_)
+        | SideCondition::ToxicSpikes(_) => Unknown::Known(0),
     }
 }
 
@@ -3465,12 +3709,42 @@ fn neutral_ability(mon: &UnknownPokemonState) -> Ability {
 /// materializes the defender with no item (neutral), which over-estimates the
 /// minimum defensive BSV when the true defender has a bulk item (S1 soundness fix).
 ///
+/// **Completeness is a soundness invariant, not an optimisation.**  If a reducer
+/// item is omitted, the feasibility scan never materializes the defender with it,
+/// so the "lower BSV + reducer" scenario is excluded and `min_pre_nature_stat`
+/// may be raised above the true value — an unsound exclusion.
+///
 /// Always includes `neutral_item(mon)` (the Known item, or `Item::None`) so the
-/// "no boosting item" scenario is always in the candidate set.
+/// "no-boosting item" scenario is always in the candidate set.  Type-resist
+/// berries that do not apply (wrong type / not super-effective) produce no change
+/// in the oracle output, so including them is safe — the oracle gates on
+/// `resist_berry_triggers`.
 fn defensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
     let mut items: Vec<Item> = [
         Item::Eviolite,    // ×1.5 Def/SpDef for non-fully-evolved species
         Item::AssaultVest, // ×1.5 SpDef (special moves only)
+        // Type-resist berries: each halves damage from one super-effective type.
+        // Chilan Berry is Normal-type resist (any Normal hit, not just SE).
+        // The damage oracle gates activation on type effectiveness, so including
+        // all berries is safe for non-matching move types.
+        Item::OccaBerry,   // Fire SE
+        Item::PasshoBerry, // Water SE
+        Item::WacanBerry,  // Electric SE
+        Item::RindoBerry,  // Grass SE
+        Item::YacheBerry,  // Ice SE
+        Item::ChopleBerry, // Fighting SE
+        Item::KebiaBerry,  // Poison SE
+        Item::ShucaBerry,  // Ground SE
+        Item::CobaBerry,   // Flying SE
+        Item::PayapaBerry, // Psychic SE
+        Item::TangaBerry,  // Bug SE
+        Item::ChartiBerry, // Rock SE
+        Item::KasibBerry,  // Ghost SE
+        Item::HabanBerry,  // Dragon SE
+        Item::ColburBerry, // Dark SE
+        Item::BabiriBerry, // Steel SE
+        Item::RoseliBerry, // Fairy SE
+        Item::ChilanBerry, // Normal (any Normal hit)
     ]
     .iter()
     .filter(|i| !unknown_is_excluded(&mon.item, i))
@@ -3488,20 +3762,26 @@ fn defensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
 ///
 /// Parallel to `offensive_damage_abilities` but for the defensive side.
 /// Always includes `neutral_ability(mon)` so the no-boost scenario is covered.
+///
+/// **Completeness is a soundness invariant.**  Any reducer the damage oracle
+/// implements but this list omits will cause `min_pre_nature_stat` to be raised
+/// above the true value for defenders that could have that ability.
 fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
     let mut abilities: Vec<Ability> = [
-        Ability::Filter,      // ×0.75 on super-effective hits
-        Ability::SolidRock,   // ×0.75 on super-effective hits
-        Ability::PrismArmor,  // ×0.75 on super-effective hits (pierces Mold Breaker)
-        Ability::Multiscale,  // ×0.5 at full HP
+        Ability::Filter,       // ×0.75 on super-effective hits
+        Ability::SolidRock,    // ×0.75 on super-effective hits
+        Ability::PrismArmor,   // ×0.75 on super-effective hits (pierces Mold Breaker)
+        Ability::Multiscale,   // ×0.5 at full HP
         Ability::ShadowShield, // ×0.5 at full HP (Lunala only)
-        Ability::ThickFat,    // ×0.5 to Fire and Ice moves
-        Ability::FurCoat,     // ×0.5 to Physical moves
-        Ability::IceScales,   // ×0.5 to Special moves
-        Ability::Heatproof,   // ×0.5 to Fire moves
-        Ability::Fluffy,      // ×0.5 to contact moves (but ×2 to Fire — oracle handles both)
-        Ability::PunkRock,    // ×0.5 to sound-based moves received
-        Ability::WaterBubble, // ×0.5 to Fire moves received
+        Ability::TeraShell,    // all moves → not-very-effective (≈×0.5) at full HP
+        Ability::PurifyingSalt, // ×0.5 to Ghost-type moves
+        Ability::ThickFat,     // ×0.5 to Fire and Ice moves
+        Ability::FurCoat,      // ×0.5 to Physical moves
+        Ability::IceScales,    // ×0.5 to Special moves
+        Ability::Heatproof,    // ×0.5 to Fire moves
+        Ability::Fluffy,       // ×0.5 to contact moves (but ×2 to Fire — oracle handles both)
+        Ability::PunkRock,     // ×0.5 to sound-based moves received
+        Ability::WaterBubble,  // ×0.5 to Fire moves received
     ]
     .iter()
     .filter(|a| !unknown_is_excluded(&mon.possible_abilities, a))
@@ -3512,6 +3792,56 @@ fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
         abilities.push(neutral);
     }
     abilities
+}
+
+/// Enumerate the distinct max-HP values the defender could have, given the
+/// known species base stat, the defender's current IV/EV constraints, and the
+/// current `[minStats[0], maxStats[0]]` window.
+///
+/// **Soundness rationale (S-B fix):** Direction A samples the defender's possible
+/// max-HP values to back-solve the defensive BSV from a percent-HP observation.
+/// The true max-HP is exactly one value in `[hp_lo, hp_hi]`.  Iterating only a
+/// stride-4 subset can skip achievable values whose feasible BSV interval extends
+/// past the sampled union, causing `min_pre_nature_stat` to be raised above the
+/// true value (unsound exclusion).  Iterating the exact EV-lattice HP values
+/// eliminates that gap while remaining fast (at most 33 × max_ivs iterations).
+///
+/// When `config.force_max_ivs` is true the IV is fixed at 31; otherwise all 32
+/// IVs are tried.  The returned list is sorted and deduplicated.
+fn achievable_defender_hp_values(
+    base_hp: u16,
+    level: u8,
+    config: &InferenceConfig,
+    mon: &UnknownPokemonState,
+) -> Vec<u16> {
+    let hp_lo = mon.minStats[0];
+    let hp_hi = mon.maxStats[0];
+    let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.minIvs[0] };
+    let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.maxIvs[0] };
+
+    let mut vals: Vec<u16> = Vec::with_capacity(33);
+    for iv in iv_lo..=iv_hi {
+        for &ev in &EV_LATTICE {
+            // Also respect the EV bounds tracked on the mon.
+            if ev < mon.minEvs[0] || ev > mon.maxEvs[0] {
+                continue;
+            }
+            let hp = calc_hp(base_hp, iv, ev, level);
+            if hp >= hp_lo && hp <= hp_hi && !vals.contains(&hp) {
+                vals.push(hp);
+            }
+        }
+    }
+    if vals.is_empty() {
+        // Fallback: should not happen if minStats/maxStats are consistent, but
+        // be sound by including both endpoints.
+        vals.push(hp_lo);
+        if hp_hi != hp_lo {
+            vals.push(hp_hi);
+        }
+    }
+    vals.sort_unstable();
+    vals
 }
 
 /// Direction B: we are the target, HP is exact, bound the ATTACKER's offensive BSV.
@@ -4196,8 +4526,14 @@ fn pass3_direction_a(
         })
         .collect();
 
-    // We sample from the defender's possible HP range (step by 4 for speed).
-    for hp_cand in (hp_lo..=hp_hi).step_by(4.max(1) as usize) {
+    // Enumerate exactly the achievable HP values for this defender (S-B soundness fix).
+    // A stride-4 sample can skip achievable HP values whose feasible-BSV interval
+    // lies outside the sampled union, causing min_pre_nature_stat to be raised
+    // above the true value (unsound exclusion).  Using the EV-lattice enumeration
+    // ensures every realistically achievable HP is covered.
+    let hp_candidates =
+        achievable_defender_hp_values(base_stats[0], level, ctx.config, &defender_unk);
+    for hp_cand in hp_candidates {
         // Convert percent delta to raw damage interval for this candidate max HP.
         // Convention: Percent(p) = round(current_hp * 100 / max_hp), so:
         //   p = round(hp * 100 / max_hp)  →  hp = round(p * max_hp / 100)
@@ -4832,7 +5168,12 @@ fn pass4_speed_from_order(
         }
 
         // Emit: unit clause → unconditional bound; multi-entry → disjunction.
-        state.predicates.push(clause);
+        // Guard against duplicate clauses that arise when pass4 is re-run after BCP.
+        // Duplicates are logically harmless but cause BCP to re-scan redundant work
+        // on every fixpoint iteration.
+        if !state.predicates.contains(&clause) {
+            state.predicates.push(clause);
+        }
     }
 }
 
@@ -5017,17 +5358,15 @@ pub fn pass5_back_solve(
             }
         }
 
-        if impossible_natures
-            .iter()
-            .enumerate()
-            .filter(|(ni, _)| !{
-                // re-filter to only candidate natures
-                false
-            })
-            .all(|(ni, _)| impossible_natures[ni])
-        {
-            // all remaining candidates are impossible for this stat — panic only
-            // if ALL candidates (not just the ones already impossible) fail.
+        // Soundness assertion: if every candidate nature is infeasible for this
+        // stat, we have a contradiction — the observed stat range cannot be
+        // produced by any nature.  This fires only if inference itself has
+        // over-narrowed (a bug), never for valid opponent data.
+        if impossible_natures.iter().all(|&b| b) {
+            panic!(
+                "pass5: every candidate nature is infeasible for stat {stat_i} \
+                 (minStat={s_min}, maxStat={s_max}) — inference over-narrowed"
+            );
         }
 
         if let Some(lo) = global_min_ev {
