@@ -302,7 +302,18 @@ bare effect. Pass 1 therefore pins presence directly; Pass 2 handles only absenc
   `StatusInflicted` emits a disjunction of unknown preventers for status `s` on the
   target. Decidable preventers (type immunity, already statused, Substitute, Safeguard,
   terrain) are ruled out first; only unknown preventers appear in the clause.
-  `HasItem(CovertCloak)` is added only for secondary effects on damaging moves.
+  `HasItem(CovertCloak)` and `HasAbility(ShieldDust)` are added only for secondary
+  effects on damaging moves (`*from_secondary`). Ground-type paralysis immunity is
+  gated to Electric-type moves only (Ground cannot be paralysed by Body Slam but can
+  by Thunder Wave). If harsh sunlight is active and the status is Freeze, the clause
+  is skipped entirely — Freeze is impossible in sun regardless of any ability.
+  The ability lists are exhaustive per status:
+  - **Burn**: Water Veil, Water Bubble, Thermal Exchange, Leaf Guard (sun-gated)
+  - **Paralysis**: Limber, Leaf Guard (sun-gated)
+  - **Poison**: Immunity, Pastel Veil, Leaf Guard (sun-gated), Flower Veil (Grass-target)
+  - **Sleep**: Insomnia, Vital Spirit, Sweet Veil, Leaf Guard (sun-gated)
+  - **Freeze**: Magma Armor, Leaf Guard (sun-gated), Flower Veil (Grass-target)
+
   After Pass 1 narrows abilities to the species set, BCP typically collapses this
   clause quickly.
 
@@ -310,6 +321,14 @@ bare effect. Pass 1 therefore pins presence directly; Pass 2 handles only absenc
 - A status-category move targeting one of our **Known Dark-type** mons that produces
   `Immune`/`MoveFailed`/`Blocked` emits `[HasAbility(Prankster)]` on the user — a
   unit clause that BCP immediately forces to `Known(Prankster)`.
+
+**Ground-move immunity (`pass2_ground_immune_clause`):**
+- A Ground-type damaging move that produces `Immune` on an opponent mon whose types
+  are `Known` and do not include Flying, and the mon has no MagnetRise/Telekinesis
+  volatile, emits:
+  `[HasItem(AirBalloon) ∨ HasAbility(Levitate) ∨ HasAbility(Eelevate) ∨ HasAbility(EarthEater)]`
+  BCP typically resolves this to `Known(AirBalloon)` once the species ability set is
+  narrowed (most species cannot have Levitate, Eelevate, or EarthEater).
 
 ---
 
@@ -327,6 +346,14 @@ state) emits:
 
 The clause is gated on the item not already being `Known(None)` or consumed, and on
 the mon's item not already being excluded for these values.
+
+**Flame Orb / Toxic Orb (`pass_eot_self_status`):**
+When an `EndOfTurn` event contains a `StatusInflicted{Burn}` or
+`StatusInflicted{ToxicPoison}` reaction targeting an opponent mon that had no prior
+status and whose item is not already `Known`, the item is forced to `Known(FlameOrb)`
+or `Known(ToxicOrb)` respectively. These are the only sources of self-status
+infliction at end-of-turn; there is no other EoT self-burn or self-toxic-poison
+mechanism in the game.
 
 **Sandstorm chip absence (`pass_eot_sand_immunity`):**
 When Sandstorm is active and an opponent mon that is not Rock / Ground / Steel takes
@@ -382,6 +409,15 @@ calls; the union of their feasible BSV ranges is taken (sound: wider). CNF claus
 `[HasItem(ChoiceBand) ∨ EVIVStatGE(…)]` are emitted for conditional tightening that
 BCP can later resolve.
 
+**Binary-search optimisation (`find_feasible_bsv_range_b`):**
+Damage is monotone in the attacking BSV (higher Atk ⟹ strictly non-decreasing
+damage), so the feasible set for any fixed (item, ability) combo is a *contiguous
+interval*. `find_feasible_bsv_range_b` binary-searches for the bracket endpoints
+(`max_roll(bsv) ≥ exact_damage` for the low end; `min_roll(bsv) ≤ exact_damage`
+for the high end), then refines inward with a short linear walk to the first
+exactly-feasible BSV. This reduces oracle calls per combo from O(range) to
+O(log range) + constant, with correctness guaranteed by the monotonicity invariant.
+
 #### Direction A — you attack the opponent (percent HP seen)
 
 When `target.hp` is `PokemonHP::Percent`, the damage is only known as a display
@@ -399,6 +435,19 @@ falls in `[damage_lo, damage_hi]`. The HP loop steps in increments of 4 across
 The unconditional union over all candidate (HP, nature class, BSV) triples gives
 `global_bsv_lo` and `global_bsv_hi`, which are written back to `min_pre_nature_stat`
 and `max_pre_nature_stat`.
+
+**Direction A CNF predicates (nature-conditional tightening):**
+For each nature class κ, Pass 3 also computes the feasible defensive-BSV interval
+under **neutral gear** (no reducer item/ability) and emits conditional CNF clauses:
+```
+[not-κ] ∨ EVIVStatGE{bsv_lo_neutral} ∨ ⋁ HasItem(reducer) ∨ ⋁ HasAbility(reducer)
+[not-κ] ∨ EVIVStatLE{bsv_hi_neutral} ∨ ⋁ HasItem(reducer) ∨ ⋁ HasAbility(reducer)
+```
+where reducers are defensive damage-reducing items and abilities (Eviolite, Assault
+Vest, Multiscale, Filter/Solid Rock/Prism Armor, Thick Fat, Fur Coat, Ice Scales,
+Fluffy, etc.). When BCP excludes all reducer alternatives and pins the nature, the
+bound is forced to `min_pre_nature_stat`/`max_pre_nature_stat` directly. This
+mirrors the conditional tightening Direction B already performs for offensive boosters.
 
 #### Multi-hit handling
 

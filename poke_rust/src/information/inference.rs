@@ -690,6 +690,7 @@ fn process_battle_event(
         pass2_prankster_immunity(state, event, ctx);
         pass2_powder_immunity(state, event, ctx);
         pass2_guaranteed_status_absence(state, event, ctx);
+        pass2_ground_immune_clause(state, event, ctx);
         pass3_damage_to_stats(state, event, ctx);
     }
 
@@ -732,6 +733,7 @@ fn pass1_apply_event(
             apply_end_of_turn(state);
             pass_eot_heal(state, event, ctx);
             pass_eot_sand_immunity(state, event, ctx);
+            pass_eot_self_status(state, event, ctx);
         }
 
         EventKind::MoveUsed {
@@ -2503,7 +2505,12 @@ fn pass2_guaranteed_status_absence(
             let type_immune = match status {
                 Status::Burn => known_types.as_ref().map_or(false, |ts| ts.contains(&PokemonType::Fire)),
                 Status::Paralysis => known_types.as_ref().map_or(false, |ts| {
-                    ts.contains(&PokemonType::Electric) || ts.contains(&PokemonType::Ground)
+                    // Electric-type: unconditional paralysis immunity (Gen VI+).
+                    // Ground-type: only immune to Electric-type paralysis moves (Thunder Wave,
+                    // Nuzzle, Zap Cannon); Body Slam etc. CAN paralyze Ground-types.
+                    ts.contains(&PokemonType::Electric)
+                        || (ts.contains(&PokemonType::Ground)
+                            && move_data.pokemon_type == PokemonType::Electric)
                 }),
                 Status::Poison | Status::ToxicPoison(_) => known_types.as_ref().map_or(false, |ts| {
                     ts.contains(&PokemonType::Poison) || ts.contains(&PokemonType::Steel)
@@ -2527,6 +2534,14 @@ fn pass2_guaranteed_status_absence(
                 continue;
             }
 
+            // Freeze in harsh sunlight: blanket immunity regardless of ability or type.
+            // "Pokémon cannot be frozen when harsh sunlight is active." — Bulbapedia.
+            // The absence is fully explained by weather, so emitting an ability clause
+            // would be unsound (it could force-exclude a valid item/ability config).
+            if matches!(status, Status::Frozen(_)) && is_sun {
+                continue;
+            }
+
             let mut clause: Vec<Statement> = Vec::new();
 
             // Covert Cloak: blocks secondary effects of damaging moves.
@@ -2537,6 +2552,21 @@ fn pass2_guaranteed_status_absence(
                 .map_or(false, |it| unknown_is_excluded(it, &Item::CovertCloak));
             if *from_secondary && legal_ok(&Item::CovertCloak) && !item_excluded_cc {
                 clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::CovertCloak });
+            }
+
+            // Shield Dust: blocks the additional effects of damaging moves (same scope as
+            // Covert Cloak — secondary effects of damaging moves only).  Shield Dust is
+            // an Ignorable ability (Mold Breaker bypasses), but including it as a disjunct
+            // is sound regardless.
+            if *from_secondary {
+                let sd_excluded = tm_abilities.as_ref()
+                    .map_or(false, |pa| unknown_is_excluded(pa, &Ability::ShieldDust));
+                if !sd_excluded {
+                    clause.push(Statement::HasAbility {
+                        mon_idx: target_idx,
+                        ability: Ability::ShieldDust,
+                    });
+                }
             }
 
             // Per-status prevention abilities.
@@ -2565,6 +2595,7 @@ fn pass2_guaranteed_status_absence(
                     Ability::Comatose,
                     Ability::PurifyingSalt,
                     Ability::ShieldsDown,
+                    Ability::LeafGuard, // all non-volatile statuses under harsh sun
                     Ability::FlowerVeil,
                 ],
                 Status::Sleep(_) => vec![
@@ -2582,6 +2613,8 @@ fn pass2_guaranteed_status_absence(
                     Ability::Comatose,
                     Ability::PurifyingSalt,
                     Ability::ShieldsDown,
+                    Ability::LeafGuard, // all non-volatile statuses under harsh sun
+                    Ability::FlowerVeil, // all non-volatile statuses for Grass-type holders
                 ],
             };
 
@@ -2808,6 +2841,226 @@ fn pass_eot_sand_immunity(
             if !excluded {
                 clause.push(Statement::HasAbility { mon_idx, ability: ab.clone() });
             }
+        }
+
+        if !clause.is_empty() {
+            pending_clauses.push(clause);
+        }
+    }
+
+    for clause in pending_clauses {
+        state.predicates.push(clause);
+    }
+}
+
+// ── I2: EOT self-status orb reveal ────────────────────────────────────────────
+
+/// When a Pokémon gets a **new** non-volatile status from an `EndOfTurn` event
+/// (i.e. no prior status) and the only EOT source for that status is a held item,
+/// reveal the item as `Known`:
+///
+/// * `StatusInflicted{Burn}` at EOT → `Known(FlameOrb)` — the only held item that
+///   self-inflicts Burn at end of turn.
+/// * `StatusInflicted{ToxicPoison}` at EOT → `Known(ToxicOrb)` — the only held
+///   item that self-inflicts bad poison at end of turn.
+///
+/// Soundness guards:
+///   1. The mon must have had **no status** before this EOT (status set by pass1
+///      during recursive descent runs after this pass, so `mon.status` is pre-EOT).
+///   2. Only infer for P2 mons (opponent — P1 item is already known).
+///   3. Skip if the item is already `Known` (nothing to infer).
+///   4. Skip if the inferred item is already excluded from the item's possibility set.
+fn pass_eot_self_status(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent, // must be EndOfTurn
+    ctx: &BattleContext,
+) {
+    let legal_ok = |item: &Item| {
+        ctx.config.legal_items.as_ref().map_or(true, |l| l.contains(item))
+    };
+
+    for reaction in &event.reactions {
+        let (target_slot, status) = match &reaction.kind {
+            EventKind::StatusInflicted { target, status } => (target, status),
+            _ => continue,
+        };
+
+        // Only infer for opponents (P2).
+        if target_slot.player != crate::state::battle::Player::P2 {
+            continue;
+        }
+
+        let Some(target_idx) = mon_idx_for_active_slot(state, target_slot) else {
+            continue;
+        };
+
+        // Extract needed state before any mutable borrow.
+        let (mon_item, had_prior_status) = {
+            let mon = get_mon_by_idx(state, target_idx);
+            let item = mon.map(|m| m.item.clone()).unwrap_or(Unknown::Not(Vec::new()));
+            // pass1 hasn't processed this StatusInflicted yet (recursive descent runs
+            // after this pass for EndOfTurn reactions), so mon.status is the pre-EOT value.
+            let had_status = mon.map_or(false, |m| m.status.is_some());
+            (item, had_status)
+        };
+
+        // Guard: no pre-existing status (orbs only apply when the holder is healthy).
+        if had_prior_status {
+            continue;
+        }
+
+        // Guard: item already known — nothing to infer.
+        if matches!(mon_item, Unknown::Known(_)) {
+            continue;
+        }
+
+        let infer_item = match status {
+            Status::Burn => Item::FlameOrb,
+            Status::ToxicPoison(_) => Item::ToxicOrb,
+            _ => continue, // Paralysis, Sleep, Freeze, plain Poison not caused by orbs.
+        };
+
+        if !legal_ok(&infer_item) {
+            continue;
+        }
+        // Guard: the inferred item is not already excluded.
+        if unknown_is_excluded(&mon_item, &infer_item) {
+            continue;
+        }
+
+        if let Some(mon) = get_mon_mut_by_idx(state, target_idx) {
+            unknown_set_known(
+                &mut mon.item,
+                infer_item,
+                &format!("mon#{target_idx} eot-orb"),
+            );
+        }
+    }
+}
+
+// ── I2: Ground-type immunity clause ───────────────────────────────────────────
+
+/// When a Ground-type damaging move results in `Immune` on a P2 mon whose types
+/// are **fully known** and do not include Flying, the immunity must come from a
+/// held item or ability.  Emit a disjunctive CNF clause so BCP can force the
+/// exact explanation once other facts narrow the candidate set:
+///
+///   `HasItem(AirBalloon) ∨ HasAbility(Levitate) ∨ HasAbility(Eelevate) ∨ HasAbility(EarthEater)`
+///
+/// Soundness guards:
+///   * Only fire when types are `Known` and exclude Flying (unknown types → could
+///     be Flying → not safe to emit this clause).
+///   * Skip if the mon has Magnet Rise or Telekinesis volatile (Ground immunity
+///     explained by field effect — no item/ability clause needed).
+///   * Exclude disjuncts already impossible (item excluded / ability excluded).
+fn pass2_ground_immune_clause(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+) {
+    let EventKind::MoveUsed { targets, move_used, .. } = &event.kind else {
+        return;
+    };
+    let Some(move_data) = ctx.move_dex.get(move_used) else {
+        return;
+    };
+    // Only Ground-type damaging moves.
+    if move_data.pokemon_type != PokemonType::Ground {
+        return;
+    }
+    if move_data.category == MoveCategory::Status {
+        return;
+    }
+
+    let mut pending_clauses: Vec<Vec<Statement>> = Vec::new();
+
+    for target in targets {
+        // Only infer from opponent (P2) immunity.
+        if target.player != crate::state::battle::Player::P2 {
+            continue;
+        }
+
+        // Did the move actually result in Immune for this target?
+        let immune_on_target = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::Immune { target: t } if t == target)
+        });
+        if !immune_on_target {
+            continue;
+        }
+
+        let Some(target_idx) = mon_idx_for_active_slot(state, target) else {
+            continue;
+        };
+
+        let (known_types, tm_item, tm_abilities, has_magnet_rise, has_telekinesis) = {
+            let tm = get_mon_by_idx(state, target_idx);
+            let known_types = tm.and_then(|m| {
+                if let Unknown::Known(ts) = &m.possible_types { Some(ts.clone()) } else { None }
+            });
+            let tm_item = tm.map(|m| m.item.clone());
+            let tm_abilities = tm.map(|m| m.possible_abilities.clone());
+            let has_magnet_rise = tm.map_or(false, |m| {
+                m.volatiles.iter().any(|v| {
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, _))
+                })
+            });
+            let has_telekinesis = tm.map_or(false, |m| {
+                m.volatiles.iter().any(|v| {
+                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Telekinesis, _))
+                })
+            });
+            (known_types, tm_item, tm_abilities, has_magnet_rise, has_telekinesis)
+        };
+
+        // Guard: types must be fully known.
+        let Some(types) = known_types else { continue };
+
+        // Guard: if Flying type is already in the type set, the immunity is explained.
+        if types.contains(&PokemonType::Flying) {
+            continue;
+        }
+
+        // Guard: Magnet Rise / Telekinesis volatiles explain the immunity.
+        if has_magnet_rise || has_telekinesis {
+            continue;
+        }
+
+        // Build the disjunctive clause: each candidate that is not already excluded.
+        let mut clause: Vec<Statement> = Vec::new();
+
+        // Air Balloon item.
+        let ab_excluded = tm_item
+            .as_ref()
+            .map_or(false, |it| unknown_is_excluded(it, &Item::AirBalloon));
+        if !ab_excluded {
+            clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::AirBalloon });
+        }
+
+        // Levitate ability.
+        let lev_excluded = tm_abilities
+            .as_ref()
+            .map_or(false, |ab| unknown_is_excluded(ab, &Ability::Levitate));
+        if !lev_excluded {
+            clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Levitate });
+        }
+
+        // Eelevate ability (custom ability with Levitate effect).
+        let eel_excluded = tm_abilities
+            .as_ref()
+            .map_or(false, |ab| unknown_is_excluded(ab, &Ability::Eelevate));
+        if !eel_excluded {
+            clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Eelevate });
+        }
+
+        // Earth Eater ability (absorbs Ground-type moves).
+        let ee_excluded = tm_abilities
+            .as_ref()
+            .map_or(false, |ab| unknown_is_excluded(ab, &Ability::EarthEater));
+        if !ee_excluded {
+            clause.push(Statement::HasAbility {
+                mon_idx: target_idx,
+                ability: Ability::EarthEater,
+            });
         }
 
         if !clause.is_empty() {
@@ -3614,51 +3867,111 @@ fn find_feasible_bsv_range_b(
         materialize_pokemon(&unk_copy, stats, item.clone(), ability.clone())
     };
 
+    // Build oracle outcomes for a single (bsv, spe_override) pair.
+    let run_oracle = |bsv: u16, spe: u16| -> Vec<(u16, bool, f64)> {
+        let atk_ps = make_atk(bsv, spe);
+        let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
+            vec![atk_ps.clone()]
+        } else {
+            vec![target_ps.clone()]
+        };
+        let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
+            vec![target_ps.clone()]
+        } else {
+            vec![atk_ps.clone()]
+        };
+        let battle = materialize_battle(state, p1_active, p2_active);
+        calculate_damage_outcomes_for_target_with_options(
+            &battle,
+            &atk_ps,
+            &target_ps,
+            user_slot.clone(),
+            target_slot.clone(),
+            move_data,
+            *oracle_config,
+            targets_mult,
+            1.0,
+            bp_override,
+            None,
+        )
+    };
+
     // A BSV is feasible if the oracle produces `exact_damage` with correct crit for
     // *any* speed endpoint (sound union over the speed range).
     let can_produce = |bsv: u16| -> bool {
         speed_endpoints.iter().any(|&spe| {
-            let atk_ps = make_atk(bsv, spe);
-            let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
-                vec![atk_ps.clone()]
-            } else {
-                vec![target_ps.clone()]
-            };
-            let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
-                vec![target_ps.clone()]
-            } else {
-                vec![atk_ps.clone()]
-            };
-            let battle = materialize_battle(state, p1_active, p2_active);
-            let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle,
-                &atk_ps,
-                &target_ps,
-                user_slot.clone(),
-                target_slot.clone(),
-                move_data,
-                *oracle_config,
-                targets_mult,
-                1.0, // invulnerability_multiplier
-                bp_override,
-                None,
-            );
-            outcomes
+            run_oracle(bsv, spe)
                 .iter()
                 .any(|(dmg, crit, _)| *dmg == exact_damage && *crit == is_crit)
         })
     };
 
-    // Linear scan over the BSV range.
-    let mut found_lo: Option<u16> = None;
-    let mut found_hi: Option<u16> = None;
-    for bsv in bsv_lo..=bsv_hi {
-        if can_produce(bsv) {
-            found_lo = Some(found_lo.unwrap_or(bsv));
-            found_hi = Some(bsv);
+    // (min, max) damage for outcomes matching the crit flag, unioned over speed endpoints.
+    // Monotone: attacker offense ↑ as bsv ↑, so min_dmg and max_dmg are non-decreasing.
+    let roll_band = |bsv: u16| -> (Option<u16>, Option<u16>) {
+        let mut lo: Option<u16> = None;
+        let mut hi: Option<u16> = None;
+        for &spe in &speed_endpoints {
+            for (dmg, crit, _) in run_oracle(bsv, spe) {
+                if crit == is_crit {
+                    lo = Some(lo.map_or(dmg, |m: u16| m.min(dmg)));
+                    hi = Some(hi.map_or(dmg, |m: u16| m.max(dmg)));
+                }
+            }
         }
+        (lo, hi)
+    };
+
+    // Binary-search for the outer bracket of the feasible BSV interval, exploiting
+    // the monotone damage property (higher offensive BSV → more damage).
+    //
+    // Feasibility: min_roll(bsv) ≤ exact_damage ≤ max_roll(bsv).
+    // • bsv_bracket_lo = smallest bsv where max_roll(bsv) ≥ exact_damage   (non-decreasing)
+    // • bsv_bracket_hi = largest  bsv where min_roll(bsv) ≤ exact_damage   (non-decreasing)
+    // These are sound outer brackets: true found_lo ≥ bsv_bracket_lo,
+    //                                  true found_hi ≤ bsv_bracket_hi.
+    //
+    // A short linear walk from each bracket endpoint finds the exact feasible endpoints,
+    // preserving full precision at O(log N + ε) oracle calls vs the former O(N) linear scan.
+    let bsv_bracket_lo: Option<u16> = {
+        let (mut lo, mut hi) = (bsv_lo as i32, bsv_hi as i32);
+        let mut found = None;
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            if roll_band(mid as u16).1.map_or(false, |m| m >= exact_damage) {
+                found = Some(mid as u16);
+                hi = mid - 1;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        found
+    };
+    let bsv_bracket_hi: Option<u16> = {
+        let (mut lo, mut hi) = (bsv_lo as i32, bsv_hi as i32);
+        let mut found = None;
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            if roll_band(mid as u16).0.map_or(false, |m| m <= exact_damage) {
+                found = Some(mid as u16);
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        found
+    };
+
+    match (bsv_bracket_lo, bsv_bracket_hi) {
+        (Some(bl), Some(bh)) if bl <= bh => {
+            // Refine: linear walk from each bracket to the first actually-feasible BSV.
+            // In practice this is ≤ 1-2 steps since the band bracket is tight.
+            let found_lo = (bl..=bh).find(|&b| can_produce(b));
+            let found_hi = (bl..=bh).rev().find(|&b| can_produce(b));
+            (found_lo, found_hi)
+        }
+        _ => (None, None),
     }
-    (found_lo, found_hi)
 }
 
 /// Direction A: we attacked the opponent, HP is a percent interval,
@@ -3766,6 +4079,7 @@ fn pass3_direction_a(
     };
 
     // ── Unconditional tightening: union over (nat, hp_candidate, def_bsv, def_item, def_ability) ────
+    // Also accumulates per-nature-class neutral-gear bounds used by I1 predicate emission.
     let mut global_bsv_lo: Option<u16> = None;
     let mut global_bsv_hi: Option<u16> = None;
     let mut global_stat_lo: Option<u16> = None;
@@ -3794,6 +4108,26 @@ fn pass3_direction_a(
     let def_items = defensive_damage_items(&defender_unk);
     let def_abilities = defensive_damage_abilities(&defender_unk);
 
+    let neutral_def_item = neutral_item(&defender_unk);
+    let neutral_def_ability = neutral_ability(&defender_unk);
+
+    // Per-nature-class neutral-gear BSV bounds, accumulated across hp_cand hypotheses.
+    // Used by the I1 CNF predicate emission after the main loops.
+    struct NatureClassResultA {
+        mod_f32: f32,
+        is_boost: bool,
+        is_nerf: bool,
+        bsv_lo_neutral: Option<u16>, // min over hp_cands (widest/most-conservative)
+        bsv_hi_neutral: Option<u16>, // max over hp_cands
+    }
+    let mut per_class_a: Vec<NatureClassResultA> = nature_classes
+        .iter()
+        .map(|&(m, b, n)| NatureClassResultA {
+            mod_f32: m, is_boost: b, is_nerf: n,
+            bsv_lo_neutral: None, bsv_hi_neutral: None,
+        })
+        .collect();
+
     // We sample from the defender's possible HP range (step by 4 for speed).
     for hp_cand in (hp_lo..=hp_hi).step_by(4.max(1) as usize) {
         // Convert percent delta to raw damage interval for this candidate max HP.
@@ -3805,100 +4139,152 @@ fn pass3_direction_a(
         let d_lo = ((delta_pct as f64 - 0.5) * hp_c / 100.0).floor().max(1.0) as u16;
         let d_hi = ((delta_pct as f64 + 0.5) * hp_c / 100.0).ceil().min(hp_c) as u16;
 
-        for (nat_mod, is_boost, is_nerf) in &nature_classes {
-            let can_produce_def_bsv = |bsv: u16| -> bool {
+        for (class_idx, (nat_mod, _is_boost, _is_nerf)) in nature_classes.iter().enumerate() {
+            // Build and run the damage oracle for a fixed (bsv, def_item, def_ability, speed).
+            // Pre-bakes defensive item stat multiplier (AV ×1.5 SpD, Eviolite ×1.5 Def+SpD)
+            // since the oracle's effective_stat only handles offensive items.
+            let run_def_oracle = |bsv: u16, def_item: &Item, def_ability: &Ability, def_spe: u16| {
+                let item_stat_mult: f64 = match def_item {
+                    Item::AssaultVest
+                        if matches!(move_data.category, MoveCategory::Special) => 1.5,
+                    Item::Eviolite => 1.5,
+                    _ => 1.0,
+                };
                 let mut def_stats = defender_unk.minStats;
-                def_stats[0] = hp_cand; // set candidate HP
+                def_stats[0] = hp_cand;
                 if si == 0 {
                     def_stats[0] = bsv;
                 } else {
-                    def_stats[si] = (bsv as f64 * *nat_mod as f64).floor() as u16;
-                }
-
-                // Union over all not-excluded (defensive item, defensive ability) pairs.
-                // A BSV is feasible if ANY (item, ability) combination could produce the
-                // observed damage band — ensures we never raise min_pre_nature_stat above
-                // the truth when the true defender has a damage-reducing item or ability.
-                for def_item in &def_items {
-                    // Pre-bake the defensive item's stat multiplier into the stats override.
-                    // AssaultVest (×1.5 SpD, Special moves only) and Eviolite (×1.5 Def+SpD)
-                    // work as stat multipliers, but the oracle's `effective_stat` only handles
-                    // offensive items (Choice Band/Specs).  Folding the mult into the stat
-                    // override makes the oracle see the correct effective defensive stat
-                    // without any changes to the oracle itself.
-                    let item_stat_mult: f64 = match def_item {
-                        Item::AssaultVest
-                            if matches!(move_data.category, MoveCategory::Special) =>
-                        {
-                            1.5
-                        }
-                        Item::Eviolite => 1.5, // ×1.5 to both Def and SpD (conservative)
-                        _ => 1.0,
+                    let raw = (bsv as f64 * *nat_mod as f64).floor() as u16;
+                    def_stats[si] = if item_stat_mult != 1.0 {
+                        (raw as f64 * item_stat_mult).floor() as u16
+                    } else {
+                        raw
                     };
-                    let mut item_baked_def_stats = def_stats;
-                    if si > 0 && item_stat_mult != 1.0 {
-                        item_baked_def_stats[si] =
-                            (item_baked_def_stats[si] as f64 * item_stat_mult).floor() as u16;
-                    }
-                    for def_ability in &def_abilities {
-                        let feasible = defender_speed_endpoints.iter().any(|&def_spe| {
-                            let mut spd_stats = item_baked_def_stats; // item mult pre-baked
-                            spd_stats[5] = def_spe;
-                            let def_ps = materialize_pokemon(
-                                &defender_unk,
-                                spd_stats,
-                                def_item.clone(),
-                                def_ability.clone(),
-                            );
-                            let p1_active = if user_slot.player == crate::state::battle::Player::P1 {
-                                vec![atk_ps.clone()]
-                            } else {
-                                vec![def_ps.clone()]
-                            };
-                            let p2_active = if user_slot.player == crate::state::battle::Player::P1 {
-                                vec![def_ps.clone()]
-                            } else {
-                                vec![atk_ps.clone()]
-                            };
-                            let battle = materialize_battle(state, p1_active, p2_active);
-
-                            let outcomes = calculate_damage_outcomes_for_target_with_options(
-                                &battle,
-                                &atk_ps,
-                                &def_ps,
-                                user_slot.clone(),
-                                target_slot.clone(),
-                                move_data,
-                                oracle_config,
-                                targets_mult,
-                                1.0,
-                                bp_override,
-                                None,
-                            );
-                            // Any outcome with damage in [d_lo, d_hi] and matching crit.
-                            outcomes
-                                .iter()
-                                .any(|(dmg, crit, _)| *dmg >= d_lo && *dmg <= d_hi && *crit == is_crit)
-                        });
-                        if feasible {
-                            return true;
-                        }
-                    }
                 }
-                false
+                def_stats[5] = def_spe;
+                let def_ps = materialize_pokemon(
+                    &defender_unk, def_stats, def_item.clone(), def_ability.clone(),
+                );
+                let (p1_active, p2_active) =
+                    if user_slot.player == crate::state::battle::Player::P1 {
+                        (vec![atk_ps.clone()], vec![def_ps.clone()])
+                    } else {
+                        (vec![def_ps.clone()], vec![atk_ps.clone()])
+                    };
+                let battle = materialize_battle(state, p1_active, p2_active);
+                calculate_damage_outcomes_for_target_with_options(
+                    &battle, &atk_ps, &def_ps,
+                    user_slot.clone(), target_slot.clone(),
+                    move_data, oracle_config, targets_mult, 1.0, bp_override, None,
+                )
             };
 
+            // Binary-search for the feasible BSV interval for one fixed (def_item, def_ability).
+            //
+            // Monotone property: higher defensive BSV → more defense → less damage.
+            // So min_roll and max_roll (damage) are both non-increasing in bsv.
+            //
+            // Feasibility: max_roll(bsv) ≥ d_lo  AND  min_roll(bsv) ≤ d_hi
+            //   • bsv_bracket_lo = smallest bsv where min_roll ≤ d_hi   [F→T as bsv↑]
+            //   • bsv_bracket_hi = largest  bsv where max_roll ≥ d_lo   [T→F as bsv↑]
+            // These are sound outer brackets; a short linear walk from each bracket finds
+            // the exact endpoints.
+            let binary_search_def_combo =
+                |def_item: &Item, def_ability: &Ability| -> (Option<u16>, Option<u16>)
+            {
+                // (min_dmg, max_dmg) for crit-matched outcomes, unioned over speed endpoints.
+                let roll_band = |bsv: u16| -> (Option<u16>, Option<u16>)  {
+                    let mut lo: Option<u16> = None;
+                    let mut hi: Option<u16> = None;
+                    for &def_spe in &defender_speed_endpoints {
+                        for (dmg, crit, _) in run_def_oracle(bsv, def_item, def_ability, def_spe) {
+                            if crit == is_crit {
+                                lo = Some(lo.map_or(dmg, |m: u16| m.min(dmg)));
+                                hi = Some(hi.map_or(dmg, |m: u16| m.max(dmg)));
+                            }
+                        }
+                    }
+                    (lo, hi)
+                };
+
+                let can_produce = |bsv: u16| -> bool {
+                    defender_speed_endpoints.iter().any(|&def_spe| {
+                        run_def_oracle(bsv, def_item, def_ability, def_spe)
+                            .iter()
+                            .any(|(dmg, crit, _)| *dmg >= d_lo && *dmg <= d_hi && *crit == is_crit)
+                    })
+                };
+
+                let bsv_bracket_lo: Option<u16> = {
+                    let (mut lo, mut hi) = (bsv_lo as i32, bsv_hi as i32);
+                    let mut found = None;
+                    while lo <= hi {
+                        let mid = (lo + hi) / 2;
+                        if roll_band(mid as u16).0.map_or(false, |m| m <= d_hi) {
+                            found = Some(mid as u16);
+                            hi = mid - 1;
+                        } else {
+                            lo = mid + 1;
+                        }
+                    }
+                    found
+                };
+                let bsv_bracket_hi: Option<u16> = {
+                    let (mut lo, mut hi) = (bsv_lo as i32, bsv_hi as i32);
+                    let mut found = None;
+                    while lo <= hi {
+                        let mid = (lo + hi) / 2;
+                        if roll_band(mid as u16).1.map_or(false, |m| m >= d_lo) {
+                            found = Some(mid as u16);
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    found
+                };
+
+                match (bsv_bracket_lo, bsv_bracket_hi) {
+                    (Some(bl), Some(bh)) if bl <= bh => {
+                        let found_lo = (bl..=bh).find(|&b| can_produce(b));
+                        let found_hi = (bl..=bh).rev().find(|&b| can_produce(b));
+                        (found_lo, found_hi)
+                    }
+                    _ => (None, None),
+                }
+            };
+
+            // Neutral-gear bounds (for I1 predicate emission): union across hp_cands.
+            // min(bsv_lo) gives the widest/most-conservative lower bound across all HP hypotheses.
+            let (neutral_lo, neutral_hi) =
+                binary_search_def_combo(&neutral_def_item, &neutral_def_ability);
+            {
+                let cr = &mut per_class_a[class_idx];
+                if let Some(lo) = neutral_lo {
+                    cr.bsv_lo_neutral = Some(cr.bsv_lo_neutral.map_or(lo, |g: u16| g.min(lo)));
+                }
+                if let Some(hi) = neutral_hi {
+                    cr.bsv_hi_neutral = Some(cr.bsv_hi_neutral.map_or(hi, |g: u16| g.max(hi)));
+                }
+            }
+
+            // Full union over all (def_item, def_ability) combos for unconditional tightening.
             let mut found_lo_local: Option<u16> = None;
             let mut found_hi_local: Option<u16> = None;
-            for bsv in bsv_lo..=bsv_hi {
-                if can_produce_def_bsv(bsv) {
-                    found_lo_local = Some(found_lo_local.unwrap_or(bsv));
-                    found_hi_local = Some(bsv);
+            for def_item in &def_items {
+                for def_ability in &def_abilities {
+                    let (lo, hi) = binary_search_def_combo(def_item, def_ability);
+                    if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
+                        found_lo_local = Some(found_lo_local.map_or(lo_v, |g: u16| g.min(lo_v)));
+                        found_hi_local = Some(found_hi_local.map_or(hi_v, |g: u16| g.max(hi_v)));
+                    }
                 }
             }
             if let (Some(lo_v), Some(hi_v)) = (found_lo_local, found_hi_local) {
-                let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
-                let final_hi = (hi_v as f64 * *nat_mod as f64).floor() as u16;
+                let nat_mod = nature_classes[class_idx].0;
+                let final_lo = (lo_v as f64 * nat_mod as f64).floor() as u16;
+                let final_hi = (hi_v as f64 * nat_mod as f64).floor() as u16;
                 global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
                 global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
                 global_stat_lo = Some(global_stat_lo.map_or(final_lo, |g| g.min(final_lo)));
@@ -3930,10 +4316,104 @@ fn pass3_direction_a(
             }
         }
     }
-    // Direction A predicates (I1 — deferred): nature-conditional BSV clauses mirroring
-    // Direction B are not yet emitted here; the unconditional tightening above is the
-    // primary narrowing mechanism. Predicate emission can follow the same pattern as
-    // Direction B once the unconditional path is stable.
+
+    // ── I1: Conditional CNF predicates (Direction A) ─────────────────────────
+    // For each nature class κ, emit:
+    //   LOWER: [not-κ guards] ∨ EVIVStatGE{bsv_lo_neutral} ∨ ⋁ reducer_items ∨ ⋁ reducer_abilities
+    //   UPPER: [not-κ guards] ∨ EVIVStatLE{bsv_hi_neutral} ∨ ⋁ reducer_items ∨ ⋁ reducer_abilities
+    //
+    // Reducers (Eviolite, AV, Multiscale, …) allow a *lower* raw BSV to produce the
+    // same observed damage, so they must appear as disjuncts in the lower-bound clause.
+    // The upper bound is also unconditionally valid (reducers lower the feasible stat,
+    // never raising it), but including reducer disjuncts mirrors Direction B's structure.
+    // Only emitted when the bound is strictly tighter than the current tracked min/max.
+
+    // Reducer literals: items/abilities that can lower the effective stat (exclude neutral).
+    let reducer_items: Vec<Item> = def_items
+        .iter()
+        .filter(|i| **i != neutral_def_item)
+        .cloned()
+        .collect();
+    let reducer_abilities: Vec<Ability> = def_abilities
+        .iter()
+        .filter(|a| **a != neutral_def_ability)
+        .cloned()
+        .collect();
+
+    let current_pre_min = defender_unk.min_pre_nature_stat[si];
+    let current_pre_max = defender_unk.max_pre_nature_stat[si];
+
+    for cr in &per_class_a {
+        let not_kappa_guards: Vec<Statement> = match (cr.is_boost, cr.is_nerf) {
+            (true, _) => vec![Statement::Not(Box::new(Statement::NatureBoostsStat {
+                mon_idx: target_idx,
+                stat: def_stat.clone(),
+            }))],
+            (_, true) => vec![Statement::Not(Box::new(Statement::NatureNerfsStat {
+                mon_idx: target_idx,
+                stat: def_stat.clone(),
+            }))],
+            (false, false) => vec![
+                Statement::NatureBoostsStat { mon_idx: target_idx, stat: def_stat.clone() },
+                Statement::NatureNerfsStat { mon_idx: target_idx, stat: def_stat.clone() },
+            ],
+        };
+
+        let reducer_literals: Vec<Statement> = reducer_items
+            .iter()
+            .map(|i| Statement::HasItem { mon_idx: target_idx, item: i.clone() })
+            .chain(reducer_abilities.iter().map(|a| Statement::HasAbility {
+                mon_idx: target_idx,
+                ability: a.clone(),
+            }))
+            .collect();
+
+        // Lower bound: EVIVStatGE{bsv_lo_neutral} — BSV must be at least this unless a reducer
+        // is present (which could allow a lower raw BSV to explain the observed damage).
+        if let Some(lo) = cr.bsv_lo_neutral {
+            if lo > current_pre_min {
+                let mut clause = not_kappa_guards.clone();
+                clause.push(Statement::EVIVStatGE {
+                    mon_idx: target_idx,
+                    stat: def_stat.clone(),
+                    value: lo,
+                });
+                clause.extend(reducer_literals.clone());
+                if clause.len() > not_kappa_guards.len() + 1 {
+                    state.predicates.push(clause);
+                } else {
+                    // No reducers possible — force directly.
+                    if let Some(mon) = get_mon_mut_by_idx(state, target_idx) {
+                        if lo > mon.min_pre_nature_stat[si] {
+                            mon.min_pre_nature_stat[si] = lo;
+                        }
+                    }
+                }
+            }
+        }
+        // Upper bound: EVIVStatLE{bsv_hi_neutral} — BSV must be at most this
+        // (reducers only lower the effective defensive stat, never raise it above neutral).
+        if let Some(hi) = cr.bsv_hi_neutral {
+            if hi < current_pre_max {
+                let mut clause = not_kappa_guards.clone();
+                clause.push(Statement::EVIVStatLE {
+                    mon_idx: target_idx,
+                    stat: def_stat.clone(),
+                    value: hi,
+                });
+                clause.extend(reducer_literals.clone());
+                if clause.len() > not_kappa_guards.len() + 1 {
+                    state.predicates.push(clause);
+                } else {
+                    if let Some(mon) = get_mon_mut_by_idx(state, target_idx) {
+                        if hi < mon.max_pre_nature_stat[si] {
+                            mon.max_pre_nature_stat[si] = hi;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Pass 4: Speed ordering → Spe bounds ──────────────────────────────────────

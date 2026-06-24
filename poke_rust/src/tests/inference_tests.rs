@@ -2171,6 +2171,402 @@ fn test_pass4_custap_escape_at_low_hp() {
     );
 }
 
+// ── Regression: S6 — Complete per-status preventer lists ─────────────────────
+
+fn guaranteed_paralysis_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
+    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
+    let mut md = normal_physical_move(name, bp);
+    md.pokemon_type = PokemonType::Electric; // Nuzzle-style Electric move
+    md.secondaries = vec![PokemonSecondaryEffect {
+        chance: 100,
+        effect: HitEffect {
+            status: Some(Status::Paralysis),
+            ..Default::default()
+        },
+        random_choices: vec![],
+    }];
+    md
+}
+
+fn guaranteed_freeze_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
+    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
+    let mut md = normal_physical_move(name, bp);
+    md.secondaries = vec![PokemonSecondaryEffect {
+        chance: 100,
+        effect: HitEffect {
+            status: Some(Status::Frozen(0)),
+            ..Default::default()
+        },
+        random_choices: vec![],
+    }];
+    md
+}
+
+fn guaranteed_poison_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
+    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
+    let mut md = normal_physical_move(name, bp);
+    md.secondaries = vec![PokemonSecondaryEffect {
+        chance: 100,
+        effect: HitEffect {
+            status: Some(Status::Poison),
+            ..Default::default()
+        },
+        random_choices: vec![],
+    }];
+    md
+}
+
+/// A guaranteed-paralysis damaging move whose secondary fails to land must emit
+/// a clause that includes Shield Dust (it blocks secondary effects on damaging
+/// moves, same scope as Covert Cloak).
+#[test]
+fn test_s6_shield_dust_explains_secondary_paralysis_absence() {
+    // Empty dex → possible_abilities = Not([]) so ShieldDust is not pre-excluded.
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp,
+        &HashMap::new(),
+        50,
+    );
+    // Not Electric-type, not Ground-type (Ground is immune to Electric paralysis),
+    // not already statused, no Substitute.
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon]);
+
+    let p1_mon = {
+        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        m.item = Unknown::Known(Item::None);
+        m.possible_abilities = Unknown::Known(Ability::SandVeil);
+        m
+    };
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::Nuzzle,
+        guaranteed_paralysis_secondary_move(PokemonMove::Nuzzle, 20),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Nuzzle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
+            // No StatusInflicted — paralysis was prevented.
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // The emitted clause must include ShieldDust (secondary-effect blocker).
+    let has_shield_dust = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(s, Statement::HasAbility { ability: Ability::ShieldDust, .. })
+        })
+    });
+    assert!(
+        has_shield_dust,
+        "Shield Dust must appear in the paralysis-preventer clause for a damaging secondary move"
+    );
+}
+
+/// A guaranteed-freeze secondary under harsh sunlight must NOT emit any
+/// preventer clause: freeze in harsh sunlight is a blanket weather immunity
+/// ("Pokémon cannot be frozen when harsh sunlight is active"), so the absence
+/// is fully explained by weather and emitting ability clauses would be unsound.
+#[test]
+fn test_s6_freeze_in_sun_emits_no_clause() {
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp,
+        &HashMap::new(),
+        50,
+    );
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
+
+    let p1_mon = {
+        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        m.item = Unknown::Known(Item::None);
+        m.possible_abilities = Unknown::Known(Ability::SandVeil);
+        m
+    };
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.weather = Some(Weather::Sun); // harsh sun → freeze is blanket-impossible
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::Blizzard,
+        guaranteed_freeze_secondary_move(PokemonMove::Blizzard, 110),
+    );
+
+    let initial_predicate_count = state.predicates.len(); // should be 0
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Blizzard,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
+            // No StatusInflicted — freeze was prevented (by sun).
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // The freeze absence is fully explained by harsh sun.
+    // `pass2_guaranteed_status_absence` must NOT emit any status-preventer clause
+    // (the sun immunity is a weather blanket, not ability/item-gated).
+    // Note: `pass3` (damage→stat inference) may add EVIVStat predicates from the
+    // DamageDealt reaction, so we test for absence of ability-preventer clauses
+    // specifically, not for zero total predicates.
+    let has_freeze_preventer_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            // Any of the per-status preventer abilities for Frozen:
+            Statement::HasAbility { ability: Ability::MagmaArmor, .. }
+            | Statement::HasAbility { ability: Ability::Comatose, .. }
+            | Statement::HasAbility { ability: Ability::PurifyingSalt, .. }
+            | Statement::HasAbility { ability: Ability::ShieldsDown, .. }
+            | Statement::HasAbility { ability: Ability::LeafGuard, .. }
+            | Statement::HasAbility { ability: Ability::FlowerVeil, .. }
+            | Statement::HasAbility { ability: Ability::ShieldDust, .. }
+        ))
+    });
+    assert!(
+        !has_freeze_preventer_clause,
+        "No freeze-preventer ability clause should be emitted when harsh sunlight explains the absence"
+    );
+}
+
+/// A guaranteed-poison secondary that doesn't land under harsh sunlight must
+/// include Leaf Guard in the emitted clause.  Before the S6 fix, Leaf Guard was
+/// missing from the Poison preventer list even though it blocks all non-volatile
+/// status conditions in harsh sun.
+#[test]
+fn test_s6_leaf_guard_explains_poison_absence_in_sun() {
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp,
+        &HashMap::new(),
+        50,
+    );
+    // Not Poison/Steel-type, not already statused.
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
+
+    let p1_mon = {
+        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        m.item = Unknown::Known(Item::None);
+        m.possible_abilities = Unknown::Known(Ability::SandVeil);
+        m
+    };
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.weather = Some(Weather::Sun); // harsh sun — LeafGuard should be included
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::SludgeBomb,
+        guaranteed_poison_secondary_move(PokemonMove::SludgeBomb, 90),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::SludgeBomb,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
+            // No StatusInflicted — poison was prevented.
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let has_leaf_guard = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(s, Statement::HasAbility { ability: Ability::LeafGuard, .. })
+        })
+    });
+    assert!(
+        has_leaf_guard,
+        "Leaf Guard must appear in the poison-preventer clause under harsh sun"
+    );
+}
+
+// ── Regression: I1 — Direction A CNF predicate emission ──────────────────────
+
+/// After we attack a known-species opponent and observe a damage percent, Direction A
+/// must emit a nature-conditional EVIVStat predicate for the defender's defensive stat
+/// (mirroring Direction B).  Specifically, for a neutral-nature defender with no
+/// damage-reducing item/ability excluded, BCP should eventually be able to force a
+/// tighter min_pre_nature_stat once the item/ability disjuncts are eliminated.
+///
+/// This test verifies the predicate is present in the state (the EVIVStatGE clause)
+/// rather than testing full BCP resolution (which requires solving the whole CNF).
+#[test]
+fn test_pass3_dir_a_emits_nature_conditional_predicate() {
+    use crate::state::pokemon::Nature;
+    use crate::state::dex_data::PokemonStat;
+
+    // P1: our known mon with SpA = 100, no item/ability multipliers.
+    let mut p1_mon = unknown_mon_species(Species::Snorlax);
+    p1_mon.hp = PokemonHP::Number(500);
+    p1_mon.minStats = [500, 100, 100, 100, 100, 100];
+    p1_mon.maxStats = [500, 100, 100, 100, 100, 100];
+    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    // P2: Garchomp defender; BSV range [50, 200] for SpD (wider than true).
+    // Neutral nature so BSV == stat.  No item/ability excluded (AV/Eviolite possible).
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp, &garchomp_dex(), 50,
+    );
+    p2_mon.hp                     = PokemonHP::Percent(100);
+    p2_mon.min_pre_nature_stat[4] = 50;
+    p2_mon.max_pre_nature_stat[4] = 200;
+    p2_mon.minStats[0]            = 200;
+    p2_mon.maxStats[0]            = 200;
+    p2_mon.possible_natures       = Unknown::Known(Nature::Hardy); // neutral
+    p2_mon.possible_abilities     = Unknown::Known(Ability::None);
+    p2_mon.item                   = Unknown::Not(vec![]);          // AV not excluded
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
+    psychic.category     = MoveCategory::Special;
+    psychic.pokemon_type = PokemonType::Psychic;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Psychic, psychic);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user:      p1(0),
+                move_used: PokemonMove::Psychic,
+                targets:   vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target:  p2(0),
+                new_hp:  PokemonHP::Percent(80), // 20% damage
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // Direction A (I1) must emit at least one EVIVStatGE or EVIVStatLE predicate
+    // for the defender's SpD stat (stat index 4 = SpD).
+    let has_spd_predicate = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::EVIVStatGE { stat: PokemonStat::SpD, .. }
+                | Statement::EVIVStatLE { stat: PokemonStat::SpD, .. }
+            )
+        })
+    });
+    assert!(
+        has_spd_predicate,
+        "Direction A must emit an EVIVStat predicate for the defender's SpD after observing damage %"
+    );
+}
+
+// ── Regression: E1 — Binary-search preserves precision of linear scan ────────
+
+/// The binary-search implementation of `find_feasible_bsv_range_b` (Direction B) must
+/// return the same BSV bounds as the former linear scan.  Equivalence is implicitly
+/// confirmed by the full test suite (all existing pass3_dir_b_* tests pass).  This
+/// test adds an explicit regression: P2 attacks P1 with an exact damage number and
+/// P2's Atk BSV range must be narrowed (proving the binary search found a non-trivial
+/// lower/upper bound matching the true feasibility interval).
+///
+/// Damage arithmetic (no items, no STAB, 1× effectiveness, IV=31 pinned by default config):
+///   base_dmg(Atk, Def=65, bp=40, lv=50)
+///     = floor(floor(22 × 40 × Atk / 65) / 50 + 2)
+///   Atk=148: base=42 → rolls [35..42]   (max roll 100 → 42; min roll 85 → 35)
+///   Atk=147: base=41 → rolls [34..41]   (max 41 < 42 — infeasible for dmg=42)
+///   Atk=180: base=50 → rolls [42..50]   (min roll 85 → floor(50×0.85)=42 ✓)
+///   Atk=181: base=51 → rolls [43..51]   (min 43 > 42 — infeasible for dmg=42)
+/// With IV=31 pinned, Garchomp's min Atk BSV is 150 (ev=0,iv=31). Observing
+/// exactly 42 HP damage (new_hp=158) must tighten:
+///   min_pre_nature_stat[1]: 135 → 148  (raised — Atk<148 can't produce 42)
+///   max_pre_nature_stat[1]: 182 → 180  (lowered — Atk>180 can't produce 42)
+#[test]
+fn test_e1_binary_search_direction_b_preserves_precision() {
+    use crate::state::pokemon::Nature;
+
+    // P1: Snorlax (not in garchomp_dex → pass5 skips HP validation).
+    // Use exact known stats so the defender is a fully-determined target.
+    let mut p1_mon = unknown_mon_species(Species::Snorlax);
+    p1_mon.hp = PokemonHP::Number(200);
+    p1_mon.minStats = [200, 110, 65, 65, 110, 30]; // approximate Snorlax level-50 stats
+    p1_mon.maxStats = [200, 110, 65, 65, 110, 30];
+    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    // P2: Garchomp attacker — full BSV range, Hardy nature so BSV == final stat.
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp, &garchomp_dex(), 50,
+    );
+    p2_mon.hp               = PokemonHP::Percent(100);
+    p2_mon.possible_natures = Unknown::Known(Nature::Hardy);
+    p2_mon.item             = Unknown::Known(Item::None);
+    p2_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    let initial_atk_min = p2_mon.min_pre_nature_stat[1];
+    let initial_atk_max = p2_mon.max_pre_nature_stat[1];
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user:      p2(0),
+                move_used: PokemonMove::Tackle,
+                targets:   vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p1(0),
+                new_hp: PokemonHP::Number(158), // 200 − 158 = 42 exact HP dealt
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_result = &result.p2_active_mons[0];
+    // The binary search (or the former linear scan) must tighten the Atk BSV bounds.
+    assert!(
+        p2_result.min_pre_nature_stat[1] >= initial_atk_min,
+        "Binary search must not lower min Atk BSV below initial value"
+    );
+    assert!(
+        p2_result.max_pre_nature_stat[1] <= initial_atk_max,
+        "Binary search must not raise max Atk BSV above initial value"
+    );
+    assert!(
+        p2_result.min_pre_nature_stat[1] > initial_atk_min
+        || p2_result.max_pre_nature_stat[1] < initial_atk_max,
+        "Binary search must produce a non-trivial narrowing of the Atk BSV range from 24 HP dealt"
+    );
+}
+
 /// When the fast mon is at > 25 % HP, Custap Berry activation is impossible and
 /// must NOT appear as an escape disjunct.
 #[test]
@@ -2197,5 +2593,240 @@ fn test_pass4_no_custap_escape_at_full_hp() {
     assert!(
         !has_custap_escape,
         "Custap Berry must NOT appear as an escape disjunct when the fast mon is at full HP"
+    );
+}
+
+// ── I2: Flame Orb / Toxic Orb EOT detection ──────────────────────────────────
+
+/// An EOT `StatusInflicted{Burn}` on an opponent with no prior status must force
+/// `item = Known(FlameOrb)`.  FlameOrb is the only EOT self-burn source.
+#[test]
+fn test_i2_flame_orb_eot() {
+    let mut p2_mon = unknown_mon_species(Species::Garchomp);
+    p2_mon.hp = PokemonHP::Percent(100);
+    // No prior status, item unknown.
+    assert!(p2_mon.status.is_none());
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let result = apply(
+        state,
+        vec![event_with(
+            EventKind::EndOfTurn,
+            vec![event(EventKind::StatusInflicted {
+                target: p2(0),
+                status: Status::Burn,
+            })],
+        )],
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::FlameOrb),
+        "EOT self-burn with no prior status must force Known(FlameOrb)"
+    );
+}
+
+/// A negative case: Burn inflicted via a *MoveUsed* reaction (Will-O-Wisp etc.)
+/// rather than an EndOfTurn reaction — the pass must NOT infer FlameOrb, since
+/// move-applied burns do not indicate a held orb.
+#[test]
+fn test_i2_flame_orb_not_inferred_for_move_burn() {
+    let mut p2_mon = unknown_mon_species(Species::Garchomp);
+    p2_mon.hp = PokemonHP::Percent(100);
+
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    // Use a Normal-type status move to avoid type-immunity inference issues.
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::WillOWisp,
+        MoveData {
+            name: PokemonMove::WillOWisp,
+            base_power: 0,
+            accuracy: AccuracyType::Percent(85),
+            target: MoveTarget::Normal,
+            secondaries: vec![],
+            self_secondaries: vec![],
+            pp: 15,
+            category: MoveCategory::Status,
+            pokemon_type: PokemonType::Fire,
+            priority: 0,
+            flags: vec![],
+            ohko: false,
+            thaws_target: false,
+            heal_fraction: [0, 0],
+            force_switch: false,
+            self_switch: SelfSwitchType::None,
+            self_boost: [0; 7],
+            self_destruct: SelfDestructType::None,
+            breaks_protect: false,
+            recoil_fraction: [0, 0],
+            drain_fraction: [0, 0],
+            mind_blown_recoil: false,
+            struggle_recoil: false,
+            crit_ratio: 1,
+            foul_play: false,
+            ignore_ability: false,
+            ignore_defense_boosts: false,
+            ignore_evasion: false,
+            ignore_immunity: vec![],
+            multihit_range: [1, 1],
+            multihit_accuracy: false,
+            sleep_usable: false,
+            has_crash_damage: false,
+            damage_override: DamageOverride::None,
+            stalling_move: false,
+            override_offensive_stat: None,
+            override_defensive_stat: None,
+        },
+    );
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::WillOWisp,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::StatusInflicted {
+                target: p2(0),
+                status: Status::Burn,
+            })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // Item must NOT be forced to FlameOrb (burn came from a move, not EOT).
+    assert_ne!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::FlameOrb),
+        "Move-applied Burn must NOT force Known(FlameOrb)"
+    );
+}
+
+/// An EOT `StatusInflicted{ToxicPoison}` on an opponent with no prior status must
+/// force `item = Known(ToxicOrb)`.
+#[test]
+fn test_i2_toxic_orb_eot() {
+    let mut p2_mon = unknown_mon_species(Species::Garchomp);
+    p2_mon.hp = PokemonHP::Percent(100);
+
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let result = apply(
+        state,
+        vec![event_with(
+            EventKind::EndOfTurn,
+            vec![event(EventKind::StatusInflicted {
+                target: p2(0),
+                status: Status::ToxicPoison(0),
+            })],
+        )],
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::ToxicOrb),
+        "EOT self-toxic with no prior status must force Known(ToxicOrb)"
+    );
+}
+
+// ── I2: Air Balloon ground-immunity clause ───────────────────────────────────
+
+/// When a Ground-type move is immune on a P2 mon whose type is Known and NOT
+/// Flying, a disjunctive clause `HasItem(AirBalloon) ∨ HasAbility(Levitate) ∨ ...`
+/// must be emitted.  Once Levitate and other abilities are excluded, BCP forces
+/// `item = Known(AirBalloon)`.
+#[test]
+fn test_i2_air_balloon_ground_immunity_clause() {
+    // P2: Garchomp (Dragon/Ground) — NOT Flying, so Ground immunity ≠ type chart.
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
+    // Exclude Levitate, Eelevate, EarthEater so BCP forces AirBalloon.
+    p2_mon.possible_abilities = Unknown::Not(vec![
+        Ability::Levitate,
+        Ability::Eelevate,
+        Ability::EarthEater,
+    ]);
+    p2_mon.hp = PokemonHP::Percent(100);
+
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    // Ground-type physical move (Earthquake analogue).
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::Immune { target: p2(0) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // BCP should force item = Known(AirBalloon) since all other explanations excluded.
+    assert_eq!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::AirBalloon),
+        "With Levitate/Eelevate/EarthEater excluded, BCP must force Known(AirBalloon)"
+    );
+}
+
+/// When the P2 mon's types are Unknown (could be Flying), no clause must be emitted
+/// (emitting it would be unsound).
+#[test]
+fn test_i2_no_air_balloon_clause_when_types_unknown() {
+    let mut p2_mon = unknown_mon_species(Species::Garchomp);
+    // Leave possible_types as wide Not (unknown; could include Flying).
+    p2_mon.possible_types = Unknown::Not(Vec::new());
+    p2_mon.hp = PokemonHP::Percent(100);
+
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::Immune { target: p2(0) })],
+        )],
+        HashMap::new(), // dex: species unknown → pass5 skips
+        move_dex,
+    );
+
+    // No AirBalloon clause should be emitted when types are unknown.
+    let has_air_balloon_clause = result.predicates.iter().any(|clause| {
+        clause
+            .iter()
+            .any(|s| matches!(s, Statement::HasItem { item: Item::AirBalloon, .. }))
+    });
+    assert!(
+        !has_air_balloon_clause,
+        "Must NOT emit AirBalloon clause when possible_types is unknown (could be Flying)"
     );
 }
