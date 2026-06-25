@@ -61,15 +61,30 @@ pub fn materialize_pokemon(
         _ => None,
     };
 
-    // Current HP: for Multiscale / Flail BP, use max HP (stats[0]) as a
-    // conservative approximation. Pass 3 skips Flail/Reversal/Counter/etc.,
-    // so the only HP-sensitive check that matters is Multiscale (active at
-    // full HP). If current hp is Percent(100) we assume full HP; otherwise
-    // we conservatively assume partial HP, which disables Multiscale.
+    // Current HP: for Multiscale / ShadowShield / TeraShell / Flail BP, use max HP
+    // (stats[0]) when the Pokémon is known to be at 100 %.  For any other percent, we
+    // substitute `max_hp × 0.5`.
+    //
+    // **Invariant**: the ×0.5 sentinel is the only full-HP-gated reducers are
+    // Multiscale, ShadowShield, and TeraShell (all check `hp == stats[0]`).  A value
+    // of `max_hp × 0.5` is strictly less than `max_hp`, so all three gates evaluate to
+    // "not full HP" and the reducers deactivate.  This is correct for any
+    // `PokemonHP::Percent(p)` with `p ≠ 100`; the exact fraction does not matter — it
+    // only needs to be `< max_hp`.
+    //
+    // **No double-count with the defensive-ability union**: `defensive_damage_abilities`
+    // in inference.rs includes Multiscale / ShadowShield / TeraShell and iterates them
+    // unconditionally (they are HP-gated, never pruned by E-B).  For a full-HP defender
+    // (`Percent(100)`) those abilities are active in the oracle and therefore considered
+    // in the union.  For partial-HP defenders (`Percent(p ≠ 100)`) the ×0.5 sentinel
+    // ensures they evaluate to *inactive* in the oracle, so no incorrect reduction is
+    // applied and the union correctly contributes nothing for those entries.
     let hp = match &unk.hp {
         PokemonHP::Number(n) => *n,
         PokemonHP::Percent(100) => stats_override[0],
-        PokemonHP::Percent(_) => (stats_override[0] as f64 * 0.5) as u16, // partial, disables Multiscale
+        // Any non-100 % → partial HP sentinel: strictly < max_hp, disabling all
+        // full-HP-gated reducers (Multiscale, ShadowShield, TeraShell).
+        PokemonHP::Percent(_) => (stats_override[0] as f64 * 0.5) as u16,
     };
 
     // last_*_damage_taken: used by Counter/Mirror Coat/Metal Burst, which Pass 3
@@ -193,10 +208,22 @@ pub fn materialize_battle(
     p1_active: Vec<PokemonState>,
     p2_active: Vec<PokemonState>,
 ) -> BattleState {
-    // Convert Unknown<u8> turn counters to concrete u8 (use mid-range when unknown).
+    // Convert Unknown<u8> turn counters to concrete u8.
+    //
+    // **Invariant — timer fallback is damage-irrelevant**: the damage oracle reads
+    // whether an effect is *active* (weather ≠ None, terrain ≠ None, screen present in
+    // side_conditions) — it does not branch on the remaining turn count.  Substituting 3
+    // for an unknown timer is therefore safe for all oracle calls; no damage formula
+    // inspects the timer value directly.
+    //
+    // **Invariant — Known(0) is the permanent-effect sentinel** (introduced by the S-A
+    // per-effect timer model for primordial weather and entry hazards): these use
+    // `Known(0)` to signal "present forever".  The `Known(t) => *t` arm MUST remain
+    // first so that `Known(0)` passes through to `0` and is never folded into `_ => 3`.
+    // A future refactor must not reorder or merge these arms.
     let weather_turns: Option<u8> = unk.weather_turns.as_ref().map(|wu| match wu {
-        Unknown::Known(t) => *t,
-        _ => 3, // conservative mid-value; doesn't affect damage calculation
+        Unknown::Known(t) => *t,      // preserves Known(0) permanent-effect sentinel
+        _ => 3,                       // arbitrary; does not affect oracle output
     });
     let terrain_turns: Option<u8> = unk.terrain_turns.as_ref().map(|tu| match tu {
         Unknown::Known(t) => *t,

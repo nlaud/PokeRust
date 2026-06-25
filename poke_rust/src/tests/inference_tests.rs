@@ -3550,3 +3550,344 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
         "Damp Rock must be revealed as Known after the 5th EOT confirms the 8-turn branch"
     );
 }
+
+// ── S-C: allowlist completeness cross-validation ──────────────────────────────
+//
+// For every ability and item known to the simulator, this test runs the damage oracle
+// with and without that modifier and asserts that any which changes the oracle output
+// IS in the corresponding `defensive_damage_*` / `offensive_damage_*` allowlist.
+//
+// Covered by this test (oracle-handled modifiers):
+//   - All type-resist berries (Occa…Roseli + ChilanBerry) via 18+ type-SE probes
+//   - FurCoat, IceScales, Heatproof, WaterBubble-def, ThickFat, Fluffy, PunkRock-def
+//   - Filter, SolidRock, PrismArmor (SE probes)
+//   - Multiscale, ShadowShield, TeraShell (full-HP probe)
+//   - PurifyingSalt (Ghost probe)
+//   - ChoiceBand/Specs, LifeOrb, ExpertBelt, MuscleBand, WiseGlasses, type-boosting items
+//   - HugePower, PurePower, Hustle, Adaptability, Technician, ToughClaws,
+//     IronFist, StrongJaw, Sharpness, MegaLauncher, WaterBubble-off, PunkRock-off
+//
+// Known limitations (not caught by oracle — verified manually):
+//   - Item::AssaultVest: baked into stat manually in pass3_direction_a's run_def_oracle
+//   - Item::Eviolite:    same manual bake; excluded from the probe via `manual_bake_items`
+//   - Item::LightBall, Item::Metronome: species-specific / streak-dependent (false negatives)
+//   - Abilities requiring field state (SandForce/SolarPower/Guts/Reckless): not triggered
+//     in default probe state
+#[test]
+fn test_sc_allowlist_completeness_cross_validation() {
+    use crate::information::inference::{
+        defensive_damage_abilities, defensive_damage_items,
+        offensive_damage_abilities, offensive_damage_items,
+    };
+    use crate::information::materialize::{materialize_battle, materialize_pokemon};
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
+    use crate::simulator::DamageConfig;
+    use crate::state::dex_data::{parse_ability_dex, parse_item_ids, MoveFlag};
+
+    // Load every known ability and item from the Showdown data files.
+    let all_abilities: Vec<Ability> =
+        parse_ability_dex("../pokemon_info/showdownAbilities.txt")
+            .into_keys()
+            .collect();
+    let all_items: Vec<Item> = parse_item_ids("../pokemon_info/showdownItems.txt");
+
+    // Single roll, no crit: produces one deterministic (damage, false, 1.0) outcome.
+    let oracle_config = DamageConfig { consider_crit: false, damage_rolls: 1 };
+
+    // Fixed stats (lv50 rough values): attacker hits hard, defender has moderate bulk.
+    let atk_stats: [u16; 6] = [150, 150, 80, 150, 80, 100];
+    let def_stats: [u16; 6] = [200, 80, 115, 80, 115, 80];
+
+    // Open mon: item=Not([]), ability=Not([]) — nothing excluded, so all allowlist entries
+    // pass the `unknown_is_excluded` filter. Types are overridden per probe below.
+    let open_mon = || unknown_mon_species(Species::Garchomp);
+
+    // Blank battle state template (no weather/terrain/screens — clean field).
+    let blank_battle_unk = battle_with_p2(vec![open_mon()]);
+
+    // Compare oracle outputs ignoring probability weights.
+    let damage_differs = |a: &Vec<(u16, bool, f64)>, b: &Vec<(u16, bool, f64)>| -> bool {
+        let sig = |v: &Vec<(u16, bool, f64)>| -> Vec<(u16, bool)> {
+            let mut s: Vec<(u16, bool)> = v.iter().map(|&(d, c, _)| (d, c)).collect();
+            s.sort_unstable();
+            s.dedup();
+            s
+        };
+        sig(a) != sig(b)
+    };
+
+    // Probes: each captures a different type/category/flag combination.
+    // def_types chosen so the move is super-effective (2×+) — needed for
+    // Filter/SolidRock/PrismArmor and the type-resist berries to trigger.
+    // Attacker types = move type so STAB-dependent abilities (Adaptability) are detected.
+    #[derive(Clone)]
+    struct Probe {
+        name: &'static str,
+        move_type: PokemonType,
+        move_cat: MoveCategory,
+        move_bp: u16,
+        move_flags: Vec<MoveFlag>,
+        def_types: Vec<PokemonType>,
+        def_full_hp: bool, // true → Multiscale/ShadowShield/TeraShell fire
+    }
+    let probes = vec![
+        // Physical contact Normal: FurCoat, ToughClaws, Fluffy-contact, ChilanBerry.
+        Probe { name: "phys-normal-contact", move_type: PokemonType::Normal, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![MoveFlag::Contact], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        // Physical punch Normal: IronFist.
+        Probe { name: "phys-normal-punch", move_type: PokemonType::Normal, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![MoveFlag::Contact, MoveFlag::Punch], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        // Physical slicing Normal: Sharpness.
+        Probe { name: "phys-normal-slicing", move_type: PokemonType::Normal, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![MoveFlag::Slicing], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        // Physical low-BP Normal: Technician (≤60 BP).
+        Probe { name: "phys-normal-lowbp", move_type: PokemonType::Normal, move_cat: MoveCategory::Physical, move_bp: 40, move_flags: vec![MoveFlag::Contact], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        // Special Fire vs Grass: OccaBerry, Heatproof, WaterBubble-def, ThickFat, IceScales, Filter.
+        Probe { name: "spec-fire-vs-grass", move_type: PokemonType::Fire, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Grass], def_full_hp: false },
+        // Special Fire pulse vs Grass: MegaLauncher bonus on top of fire coverage.
+        Probe { name: "spec-fire-pulse-vs-grass", move_type: PokemonType::Fire, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![MoveFlag::Pulse], def_types: vec![PokemonType::Grass], def_full_hp: false },
+        // Special Ice vs Dragon: YacheBerry, ThickFat-ice, IceScales, Filter.
+        Probe { name: "spec-ice-vs-dragon", move_type: PokemonType::Ice, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Dragon], def_full_hp: false },
+        // Special Psychic Sound vs Fighting: PayapaBerry, PunkRock-def, IceScales, Filter.
+        Probe { name: "spec-psychic-sound-vs-fighting", move_type: PokemonType::Psychic, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![MoveFlag::Sound], def_types: vec![PokemonType::Fighting], def_full_hp: false },
+        // Special Ghost vs Ghost: KasibBerry, PurifyingSalt, Filter.
+        Probe { name: "spec-ghost-vs-ghost", move_type: PokemonType::Ghost, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Ghost], def_full_hp: false },
+        // Special Water vs Rock: PasshoBerry, Filter.
+        Probe { name: "spec-water-vs-rock", move_type: PokemonType::Water, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Rock], def_full_hp: false },
+        // Special Electric vs Water: WacanBerry, Filter.
+        Probe { name: "spec-electric-vs-water", move_type: PokemonType::Electric, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Water], def_full_hp: false },
+        // Special Grass vs Water: RindoBerry, Filter.
+        Probe { name: "spec-grass-vs-water", move_type: PokemonType::Grass, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Water], def_full_hp: false },
+        // Physical Fighting vs Rock: ChopleBerry, Filter.
+        Probe { name: "phys-fighting-vs-rock", move_type: PokemonType::Fighting, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Rock], def_full_hp: false },
+        // Special Poison vs Fairy: KebiaBerry, Filter.
+        Probe { name: "spec-poison-vs-fairy", move_type: PokemonType::Poison, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Fairy], def_full_hp: false },
+        // Physical Ground vs Rock: ShucaBerry, Filter.
+        Probe { name: "phys-ground-vs-rock", move_type: PokemonType::Ground, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Rock], def_full_hp: false },
+        // Physical Flying vs Fighting: CobaBerry, Filter.
+        Probe { name: "phys-flying-vs-fighting", move_type: PokemonType::Flying, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Fighting], def_full_hp: false },
+        // Special Bug vs Psychic: TangaBerry, Filter.
+        Probe { name: "spec-bug-vs-psychic", move_type: PokemonType::Bug, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Psychic], def_full_hp: false },
+        // Physical Rock vs Ice: ChartiBerry, Filter.
+        Probe { name: "phys-rock-vs-ice", move_type: PokemonType::Rock, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Ice], def_full_hp: false },
+        // Physical Dragon contact, full HP: HabanBerry, Multiscale, ShadowShield, TeraShell.
+        Probe { name: "phys-dragon-contact-fullhp", move_type: PokemonType::Dragon, move_cat: MoveCategory::Physical, move_bp: 90, move_flags: vec![MoveFlag::Contact], def_types: vec![PokemonType::Dragon], def_full_hp: true },
+        // Special Dark vs Psychic: ColburBerry, Filter.
+        Probe { name: "spec-dark-vs-psychic", move_type: PokemonType::Dark, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Psychic], def_full_hp: false },
+        // Special Dark bite vs Psychic: StrongJaw.
+        Probe { name: "spec-dark-bite-vs-psychic", move_type: PokemonType::Dark, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![MoveFlag::Bite], def_types: vec![PokemonType::Psychic], def_full_hp: false },
+        // Special Steel vs Ice: BabiriBerry, Filter.
+        Probe { name: "spec-steel-vs-ice", move_type: PokemonType::Steel, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Ice], def_full_hp: false },
+        // Special Fairy vs Dragon: RoseliBerry, Filter.
+        Probe { name: "spec-fairy-vs-dragon", move_type: PokemonType::Fairy, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Dragon], def_full_hp: false },
+        // Special Water neutral: WaterBubble offensive (×2 to Water moves on attacker).
+        Probe { name: "spec-water-neutral", move_type: PokemonType::Water, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Normal], def_full_hp: false },
+    ];
+
+    // Open mon for allowlist queries (no exclusions → full lists returned).
+    let allowlist_mon = open_mon();
+    let listed_def_items = defensive_damage_items(&allowlist_mon);
+    let listed_def_abilities = defensive_damage_abilities(&allowlist_mon);
+    let listed_atk_items = offensive_damage_items(&allowlist_mon);
+    let listed_atk_abilities = offensive_damage_abilities(&allowlist_mon);
+
+    // Items baked manually into the stat by pass3_direction_a (not via oracle item handling).
+    // These cannot be detected via oracle output comparison; they are verified by code review.
+    let manual_bake_items = [Item::AssaultVest, Item::Eviolite];
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for probe in &probes {
+        // Build the probe move.
+        let mut move_data = normal_physical_move(PokemonMove::Tackle, probe.move_bp);
+        move_data.category = probe.move_cat;
+        move_data.pokemon_type = probe.move_type.clone();
+        move_data.flags = probe.move_flags.clone();
+
+        // Attacker type = move type so STAB-dependent abilities (Adaptability) are detected.
+        let mut atk_unk = open_mon();
+        atk_unk.possible_types = Unknown::Known(vec![probe.move_type.clone()]);
+
+        // Defender type = probe.def_types (ensures move is SE for berry/Filter probes).
+        let mut def_unk = open_mon();
+        def_unk.possible_types = Unknown::Known(probe.def_types.clone());
+        def_unk.hp = if probe.def_full_hp {
+            PokemonHP::Percent(100)
+        } else {
+            PokemonHP::Percent(60)
+        };
+
+        // Baseline: both sides hold Item::None and Ability::None.
+        let atk_base = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
+        let def_base = materialize_pokemon(&def_unk, def_stats, Item::None, Ability::None);
+        let battle_base = materialize_battle(&blank_battle_unk, vec![atk_base.clone()], vec![def_base.clone()]);
+        let baseline = calculate_damage_outcomes_for_target_with_options(
+            &battle_base, &atk_base, &def_base,
+            p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+        );
+
+        // ── Defensive items ──
+        for item in &all_items {
+            if manual_bake_items.contains(item) {
+                continue; // handled manually in pass3_direction_a; oracle won't see them
+            }
+            let def_with = materialize_pokemon(&def_unk, def_stats, item.clone(), Ability::None);
+            let battle = materialize_battle(&blank_battle_unk, vec![atk_base.clone()], vec![def_with.clone()]);
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle, &atk_base, &def_with,
+                p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            if damage_differs(&outcomes, &baseline) && !listed_def_items.contains(item) {
+                failures.push(format!(
+                    "[DEF-ITEM] {:?} changes damage on probe '{}' but is NOT in defensive_damage_items",
+                    item, probe.name
+                ));
+            }
+        }
+
+        // ── Defensive abilities ──
+        for ability in &all_abilities {
+            let def_with = materialize_pokemon(&def_unk, def_stats, Item::None, ability.clone());
+            let battle = materialize_battle(&blank_battle_unk, vec![atk_base.clone()], vec![def_with.clone()]);
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle, &atk_base, &def_with,
+                p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            if damage_differs(&outcomes, &baseline) && !listed_def_abilities.contains(ability) {
+                failures.push(format!(
+                    "[DEF-ABILITY] {:?} changes damage on probe '{}' but is NOT in defensive_damage_abilities",
+                    ability, probe.name
+                ));
+            }
+        }
+
+        // ── Offensive items ──
+        for item in &all_items {
+            let atk_with = materialize_pokemon(&atk_unk, atk_stats, item.clone(), Ability::None);
+            let battle = materialize_battle(&blank_battle_unk, vec![atk_with.clone()], vec![def_base.clone()]);
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle, &atk_with, &def_base,
+                p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            if damage_differs(&outcomes, &baseline) && !listed_atk_items.contains(item) {
+                failures.push(format!(
+                    "[ATK-ITEM] {:?} changes damage on probe '{}' but is NOT in offensive_damage_items",
+                    item, probe.name
+                ));
+            }
+        }
+
+        // ── Offensive abilities ──
+        for ability in &all_abilities {
+            let atk_with = materialize_pokemon(&atk_unk, atk_stats, Item::None, ability.clone());
+            let battle = materialize_battle(&blank_battle_unk, vec![atk_with.clone()], vec![def_base.clone()]);
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle, &atk_with, &def_base,
+                p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(ability) {
+                failures.push(format!(
+                    "[ATK-ABILITY] {:?} changes damage on probe '{}' but is NOT in offensive_damage_abilities",
+                    ability, probe.name
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} allowlist completeness failure(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+// ── L-B: materialize.rs heuristic invariants ─────────────────────────────────
+//
+// Regression test for the two documented approximations in materialize.rs:
+//
+// 1. HP×0.5 sentinel: a defender at PokemonHP::Percent(p≠100) is materialized
+//    with `hp = max_hp × 0.5`.  This must be strictly < max_hp so all
+//    full-HP-gated reducers (Multiscale, ShadowShield, TeraShell) deactivate.
+//    Verified by asserting Multiscale halves damage at Percent(100) but not at
+//    Percent(50), and that the damage ratio is ≈ 0.5.
+//
+// 2. Known(0) timer sentinel: the S-A per-effect timer model stores Known(0) for
+//    permanent effects (primordial weather, entry hazards).  materialize_battle
+//    must pass Known(0) through as 0, never folding it into the `_ => 3` fallback.
+//    Verified by asserting `weather_turns == Some(0)` after materialization.
+#[test]
+fn test_lb_multiscale_hp_gate_and_timer_sentinel() {
+    use crate::information::materialize::{materialize_battle, materialize_pokemon};
+    use crate::information::unknowns::Unknown;
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
+    use crate::simulator::DamageConfig;
+    use crate::state::dex_data::Weather;
+
+    let oracle_config = DamageConfig { consider_crit: false, damage_rolls: 1 };
+    let atk_stats: [u16; 6] = [200, 250, 100, 100, 100, 100];
+    let def_stats: [u16; 6] = [300, 80, 100, 80, 100, 80];
+
+    // Attacker: physical, Normal type (STAB).
+    let mut atk_unk = unknown_mon_species(Species::Garchomp);
+    atk_unk.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    let atk_ps = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
+
+    // Move: 80-BP Physical contact Normal.
+    let move_data = normal_physical_move(PokemonMove::Tackle, 80);
+
+    // Defender template: known Dragon/Flying so Normal is SE (×1.0, not immune).
+    // Actually Normal vs Dragon is neutral; use Normal vs Normal for simplicity.
+    let mut def_unk = unknown_mon_species(Species::Garchomp);
+    def_unk.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+
+    // ── Full HP: Multiscale should fire (×0.5 to incoming damage). ────────────
+    let mut def_full = def_unk.clone();
+    def_full.hp = PokemonHP::Percent(100);
+    let def_ps_full = materialize_pokemon(&def_full, def_stats, Item::None, Ability::Multiscale);
+
+    // ── Partial HP: Multiscale must NOT fire. ─────────────────────────────────
+    let mut def_part = def_unk.clone();
+    def_part.hp = PokemonHP::Percent(50);
+    let def_ps_part = materialize_pokemon(&def_part, def_stats, Item::None, Ability::Multiscale);
+
+    let blank_unk = battle_with_p2(vec![def_unk.clone()]);
+    let battle_full = materialize_battle(&blank_unk, vec![atk_ps.clone()], vec![def_ps_full.clone()]);
+    let battle_part = materialize_battle(&blank_unk, vec![atk_ps.clone()], vec![def_ps_part.clone()]);
+
+    let out_full = calculate_damage_outcomes_for_target_with_options(
+        &battle_full, &atk_ps, &def_ps_full, p1(0), p2(0),
+        &move_data, oracle_config, 1.0, 1.0, None, None,
+    );
+    let out_part = calculate_damage_outcomes_for_target_with_options(
+        &battle_part, &atk_ps, &def_ps_part, p1(0), p2(0),
+        &move_data, oracle_config, 1.0, 1.0, None, None,
+    );
+
+    assert!(!out_full.is_empty() && !out_part.is_empty(), "oracle must produce results");
+
+    let dmg_full = out_full[0].0 as f64;
+    let dmg_part = out_part[0].0 as f64;
+
+    // Multiscale ×0.5 must reduce damage at full HP.
+    assert!(
+        dmg_full < dmg_part,
+        "Multiscale must fire at full HP (damage must be less than at partial HP): \
+         full={dmg_full}, partial={dmg_part}"
+    );
+    // Ratio must be ≈ 0.5 (within ±5 % to account for integer floor rounding).
+    let ratio = dmg_full / dmg_part;
+    assert!(
+        (0.45..=0.55).contains(&ratio),
+        "Multiscale ×0.5 expected; got damage ratio {ratio:.3} \
+         (full_hp={dmg_full}, partial_hp={dmg_part})"
+    );
+
+    // ── Part 2: Known(0) timer materializes to 0 (not 3). ────────────────────
+    let mut unk_perm = blank_unk.clone();
+    unk_perm.weather = Some(Weather::Sun);
+    unk_perm.weather_turns = Some(Unknown::Known(0)); // permanent-effect sentinel
+    let concrete = materialize_battle(&unk_perm, vec![atk_ps.clone()], vec![def_ps_full.clone()]);
+    assert_eq!(
+        concrete.weather_turns,
+        Some(0),
+        "Known(0) weather timer must pass through as 0 (permanent-effect sentinel), not fold into 3"
+    );
+}

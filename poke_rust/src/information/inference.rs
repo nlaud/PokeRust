@@ -32,7 +32,7 @@ use crate::information::unknowns::{
     PokemonHP, Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
     UnknownTeamPreviewState,
 };
-use crate::simulator::helpers::{base_damage_formula, move_has_flag};
+use crate::simulator::helpers::{base_damage_formula, move_has_flag, single_type_effectiveness};
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
     AbilityData, AccuracyType, MoveCategory, MoveData, MoveFlag, PokemonData, PokemonStat,
@@ -3602,7 +3602,7 @@ fn is_speed_dependent_bp(move_used: &PokemonMove) -> bool {
 
 /// Items that can boost offensive damage for a given attacker mon.
 /// We enumerate these to build the booster disjuncts in CNF clauses.
-fn offensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
+pub(crate) fn offensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
     // Damage-relevant items (subset whose presence/absence matters for Pass 3).
     // Metronome streak is handled separately (by varying consecutive_move_count).
     [
@@ -3629,6 +3629,7 @@ fn offensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
         Item::MiracleSeed,
         Item::DragonFang,
         Item::FairyFeather,
+        Item::SilverPowder, // ×1.2 to Bug-type moves
         Item::Metronome,
         Item::LightBall, // Pikachu only
     ]
@@ -3639,7 +3640,7 @@ fn offensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
 }
 
 /// Abilities that can boost offensive damage.
-fn offensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
+pub(crate) fn offensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
     [
         Ability::HugePower,
         Ability::PurePower,
@@ -3678,6 +3679,18 @@ fn offensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
         Ability::Normalize,
         Ability::Dragonize,
         Ability::Eelevate,
+        // Analytic: ×1.3 when moving last. In oracle calls the action_queue is empty,
+        // so attacker_is_last_mover always returns true → Analytic always fires.
+        Ability::Analytic,
+        // FairyAura: field ability, ×5448/4096 to all Fairy moves when any active mon
+        // holds it. The attacker holding FairyAura boosts its own Fairy-type moves.
+        Ability::FairyAura,
+        // MegaSol: holder perceives Sun weather. Weakens Water moves (×0.5) and boosts
+        // Fire (×1.5), so oracle output differs from baseline for those move types.
+        Ability::MegaSol,
+        // LiquidVoice: converts Sound-based moves to Water type, changing STAB and
+        // type-effectiveness calculations and thus oracle output.
+        Ability::LiquidVoice,
     ]
     .iter()
     .filter(|a| !unknown_is_excluded(&mon.possible_abilities, a))
@@ -3702,6 +3715,91 @@ fn neutral_ability(mon: &UnknownPokemonState) -> Ability {
     }
 }
 
+// ── E-B helpers: prune provably-inert modifiers ─────────────────────────────
+//
+// These three functions support the E-B optimisation: given a specific move's
+// category, type, and flags, they let callers drop defensive/offensive list
+// entries that cannot possibly change the oracle's damage output.
+//
+// **Soundness contract**: each prune rule must be conservative.  When in doubt
+// — e.g. the defender's types are unknown, so we can't check SE — keep the
+// entry.  The S-C cross-validation test (`test_sc_allowlist_completeness_cross_
+// validation`) will catch any rule that is too aggressive.
+
+/// Infer the effective move type for pruning purposes without a full BattleState.
+///
+/// Handles the main type-converting attacker abilities (LiquidVoice, -ate family).
+/// Ignores rare volatile-based changes (Electrify) — conservative, never prunes too much.
+fn pruning_move_type(atk_ability: &Ability, move_data: &MoveData) -> PokemonType {
+    if *atk_ability == Ability::LiquidVoice && move_has_flag(move_data, &MoveFlag::Sound) {
+        return PokemonType::Water;
+    }
+    if matches!(move_data.pokemon_type, PokemonType::Normal) {
+        let converted = match atk_ability {
+            Ability::Aerilate    => Some(PokemonType::Flying),
+            Ability::Pixilate    => Some(PokemonType::Fairy),
+            Ability::Refrigerate => Some(PokemonType::Ice),
+            Ability::Dragonize   => Some(PokemonType::Dragon),
+            Ability::Galvanize   => Some(PokemonType::Electric),
+            _ => None,
+        };
+        if let Some(t) = converted {
+            return t;
+        }
+    }
+    move_data.pokemon_type.clone()
+}
+
+/// Returns the type a type-resist berry absorbs, or `None` for non-berry items.
+fn type_resist_berry_type(item: &Item) -> Option<PokemonType> {
+    match item {
+        Item::OccaBerry   => Some(PokemonType::Fire),
+        Item::PasshoBerry => Some(PokemonType::Water),
+        Item::WacanBerry  => Some(PokemonType::Electric),
+        Item::RindoBerry  => Some(PokemonType::Grass),
+        Item::YacheBerry  => Some(PokemonType::Ice),
+        Item::ChopleBerry => Some(PokemonType::Fighting),
+        Item::KebiaBerry  => Some(PokemonType::Poison),
+        Item::ShucaBerry  => Some(PokemonType::Ground),
+        Item::CobaBerry   => Some(PokemonType::Flying),
+        Item::PayapaBerry => Some(PokemonType::Psychic),
+        Item::TangaBerry  => Some(PokemonType::Bug),
+        Item::ChartiBerry => Some(PokemonType::Rock),
+        Item::KasibBerry  => Some(PokemonType::Ghost),
+        Item::HabanBerry  => Some(PokemonType::Dragon),
+        Item::ColburBerry => Some(PokemonType::Dark),
+        Item::BabiriBerry => Some(PokemonType::Steel),
+        Item::RoseliBerry => Some(PokemonType::Fairy),
+        Item::ChilanBerry => Some(PokemonType::Normal),
+        _ => None,
+    }
+}
+
+/// Returns the type amplified by a type-specific offensive item, or `None`.
+fn type_boosting_item_type(item: &Item) -> Option<PokemonType> {
+    match item {
+        Item::Charcoal     => Some(PokemonType::Fire),
+        Item::MysticWater  => Some(PokemonType::Water),
+        Item::SharpBeak    => Some(PokemonType::Flying),
+        Item::TwistedSpoon => Some(PokemonType::Psychic),
+        Item::BlackGlasses => Some(PokemonType::Dark),
+        Item::PoisonBarb   => Some(PokemonType::Poison),
+        Item::SoftSand     => Some(PokemonType::Ground),
+        Item::HardStone    => Some(PokemonType::Rock),
+        Item::Magnet       => Some(PokemonType::Electric),
+        Item::MetalCoat    => Some(PokemonType::Steel),
+        Item::NeverMeltIce => Some(PokemonType::Ice),
+        Item::SilkScarf    => Some(PokemonType::Normal),
+        Item::BlackBelt    => Some(PokemonType::Fighting),
+        Item::SpellTag     => Some(PokemonType::Ghost),
+        Item::MiracleSeed  => Some(PokemonType::Grass),
+        Item::DragonFang   => Some(PokemonType::Dragon),
+        Item::FairyFeather => Some(PokemonType::Fairy),
+        Item::SilverPowder => Some(PokemonType::Bug),
+        _ => None,
+    }
+}
+
 /// Items that can reduce incoming damage for the **defender**.
 ///
 /// Used in Direction A to union over possible defensive items when back-solving
@@ -3719,7 +3817,7 @@ fn neutral_ability(mon: &UnknownPokemonState) -> Ability {
 /// berries that do not apply (wrong type / not super-effective) produce no change
 /// in the oracle output, so including them is safe — the oracle gates on
 /// `resist_berry_triggers`.
-fn defensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
+pub(crate) fn defensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
     let mut items: Vec<Item> = [
         Item::Eviolite,    // ×1.5 Def/SpDef for non-fully-evolved species
         Item::AssaultVest, // ×1.5 SpDef (special moves only)
@@ -3766,7 +3864,7 @@ fn defensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
 /// **Completeness is a soundness invariant.**  Any reducer the damage oracle
 /// implements but this list omits will cause `min_pre_nature_stat` to be raised
 /// above the true value for defenders that could have that ability.
-fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
+pub(crate) fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
     let mut abilities: Vec<Ability> = [
         Ability::Filter,       // ×0.75 on super-effective hits
         Ability::SolidRock,    // ×0.75 on super-effective hits
@@ -3782,6 +3880,14 @@ fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
         Ability::Fluffy,       // ×0.5 to contact moves (but ×2 to Fire — oracle handles both)
         Ability::PunkRock,     // ×0.5 to sound-based moves received
         Ability::WaterBubble,  // ×0.5 to Fire moves received
+        // FairyAura: field ability, ×5448/4096 to all Fairy moves for ALL Pokémon on
+        // field. When the DEFENDER holds FairyAura, incoming Fairy moves are boosted →
+        // a lower defensive BSV + FairyAura can explain the same observed Fairy damage,
+        // so omitting it would raise min_pre_nature_stat unsoundly.
+        Ability::FairyAura,
+        // DrySkin: ×1.25 multiplier on received Fire damage. When the defender has
+        // DrySkin, the same Fire damage can be explained by a lower defensive BSV.
+        Ability::DrySkin,
     ]
     .iter()
     .filter(|a| !unknown_is_excluded(&mon.possible_abilities, a))
@@ -3930,8 +4036,51 @@ fn pass3_direction_b(
     }
 
     // Booster sets for predicate emission.
-    let booster_items = offensive_damage_items(&attacker_unk);
-    let booster_abilities = offensive_damage_abilities(&attacker_unk);
+    // E-B optimisation: prune entries provably inert for this move.
+    // The attacker is the OPPONENT (unknown ability), so we use `move_data.pokemon_type`
+    // as a conservative effective type — this is sound because all type-converting
+    // abilities (LiquidVoice, -ate) are themselves already in `booster_abilities` and
+    // therefore in the oracle run; non-type-converting entries use the raw type.
+    let eff_type_b = move_data.pokemon_type.clone();
+    let booster_items = {
+        let mut items = offensive_damage_items(&attacker_unk);
+        items.retain(|item| {
+            match item {
+                Item::MuscleBand  => matches!(move_data.category, MoveCategory::Physical),
+                Item::WiseGlasses => matches!(move_data.category, MoveCategory::Special),
+                _ => {
+                    if let Some(boost_type) = type_boosting_item_type(item) {
+                        return boost_type == eff_type_b;
+                    }
+                    true
+                }
+            }
+        });
+        items
+    };
+    let booster_abilities = {
+        let mut abilities = offensive_damage_abilities(&attacker_unk);
+        abilities.retain(|ability| {
+            match ability {
+                Ability::IronFist     => move_has_flag(move_data, &MoveFlag::Punch),
+                Ability::StrongJaw    => move_has_flag(move_data, &MoveFlag::Bite),
+                Ability::Sharpness    => move_has_flag(move_data, &MoveFlag::Slicing),
+                Ability::MegaLauncher => move_has_flag(move_data, &MoveFlag::Pulse),
+                Ability::ToughClaws   => move_has_flag(move_data, &MoveFlag::Contact),
+                Ability::WaterBubble  => matches!(eff_type_b, PokemonType::Water),
+                Ability::FairyAura    => matches!(eff_type_b, PokemonType::Fairy),
+                Ability::LiquidVoice  => move_has_flag(move_data, &MoveFlag::Sound),
+                // MegaSol: perceives Sun → affects Fire (×1.5) and Water (×0.5) only.
+                Ability::MegaSol => matches!(eff_type_b, PokemonType::Fire | PokemonType::Water),
+                // Analytic: always fires (empty action_queue) → never prune.
+                // Type-converting abilities (-ate, Normalize): keep for Normal moves to allow
+                // conversion; for non-Normal we conservatively keep them too because an -ate
+                // attacker with an -ate ability may have a different oracle type (soundness).
+                _ => true,
+            }
+        });
+        abilities
+    };
 
     // Oracle config: always use all 16 rolls regardless of CLI setting.
     let oracle_config = DamageConfig {
@@ -4503,8 +4652,68 @@ fn pass3_direction_a(
     // S1 soundness fix: union over defender's possible (item, ability) pairs so we
     // never raise min_pre_nature_stat above the truth for a bulk-item/resistance-ability
     // defender.  Mirrors how Direction B already unions over offensive items/abilities.
-    let def_items = defensive_damage_items(&defender_unk);
-    let def_abilities = defensive_damage_abilities(&defender_unk);
+    //
+    // E-B optimisation: prune entries that are provably inert for this specific move
+    // (wrong type, wrong category, wrong flag).  Sound: each rule keeps the entry
+    // whenever there is any doubt.
+    // atk_ability was moved into materialize_pokemon; read from atk_ps which holds the same value.
+    let eff_move_type = pruning_move_type(&atk_ps.ability, move_data);
+    let def_items = {
+        let mut items = defensive_damage_items(&defender_unk);
+        items.retain(|item| {
+            // AssaultVest: stat-bake handled in run_def_oracle (×1.5 SpD Special only).
+            // For Physical moves it contributes nothing — identical to neutral item run.
+            if *item == Item::AssaultVest
+                && matches!(move_data.category, MoveCategory::Physical) {
+                return false;
+            }
+            // Type-resist berries only trigger when the berry's type matches the move.
+            if let Some(berry_type) = type_resist_berry_type(item) {
+                return berry_type == eff_move_type;
+            }
+            true
+        });
+        items
+    };
+    let def_abilities = {
+        let mut abilities = defensive_damage_abilities(&defender_unk);
+        abilities.retain(|ability| {
+            match ability {
+                // Category-gated.
+                Ability::IceScales => matches!(move_data.category, MoveCategory::Special),
+                Ability::FurCoat   => matches!(move_data.category, MoveCategory::Physical),
+                // Type-gated.
+                Ability::Heatproof    => matches!(eff_move_type, PokemonType::Fire),
+                Ability::WaterBubble  => matches!(eff_move_type, PokemonType::Fire),
+                Ability::ThickFat     => matches!(eff_move_type, PokemonType::Fire | PokemonType::Ice),
+                Ability::PurifyingSalt => matches!(eff_move_type, PokemonType::Ghost),
+                Ability::FairyAura    => matches!(eff_move_type, PokemonType::Fairy),
+                Ability::DrySkin      => matches!(eff_move_type, PokemonType::Fire),
+                // Flag-gated.
+                Ability::PunkRock => move_has_flag(move_data, &MoveFlag::Sound),
+                // Fluffy: ×0.5 to contact, ×2 to Fire — prune only if neither.
+                Ability::Fluffy => {
+                    move_has_flag(move_data, &MoveFlag::Contact)
+                        || matches!(eff_move_type, PokemonType::Fire)
+                }
+                // SE-gated (Filter/SolidRock/PrismArmor: ×0.75 on SE hits only).
+                // Prune if we can confirm the move is not SE; keep when types unknown.
+                Ability::Filter | Ability::SolidRock | Ability::PrismArmor => {
+                    if let Unknown::Known(def_types) = &defender_unk.possible_types {
+                        let eff = def_types.iter().fold(1.0_f64, |acc, t| {
+                            acc * single_type_effectiveness(&eff_move_type, t)
+                        });
+                        eff > 1.0 // keep only when SE
+                    } else {
+                        true // unknown types → keep
+                    }
+                }
+                // HP-gated (Multiscale/ShadowShield/TeraShell) or always-relevant: never prune.
+                _ => true,
+            }
+        });
+        abilities
+    };
 
     let neutral_def_item = neutral_item(&defender_unk);
     let neutral_def_ability = neutral_ability(&defender_unk);

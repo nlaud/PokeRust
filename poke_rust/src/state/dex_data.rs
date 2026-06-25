@@ -2002,6 +2002,29 @@ pub fn parse_ability_dex(file_path: &str) -> HashMap<Ability, AbilityData> {
     result
 }
 
+/// Parse `showdownItems.txt` and return every `Item` whose top-level key maps to a
+/// known `Item` variant (unknown keys are silently skipped).  Reuses `split_entries`.
+///
+/// Used by the S-C cross-validation test to enumerate the full simulator item universe
+/// without hand-maintaining a companion list.
+pub fn parse_item_ids(file_path: &str) -> Vec<crate::data::item::Item> {
+    use crate::data::item::Item;
+    let content = match fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    split_entries(&content)
+        .into_iter()
+        .filter_map(|(key, _)| {
+            let item = Item::from_str(&key);
+            match item {
+                Item::Unknown(_) => None,
+                i => Some(i),
+            }
+        })
+        .collect()
+}
+
 /// Parse `showdownLearnsets.txt` into a `HashMap<Species, HashSet<PokemonMove>>`.
 ///
 /// Each entry has the form:
