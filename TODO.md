@@ -6,6 +6,9 @@
 - Anticipation — signal if opponents have SE or OHKO moves (message-only; no battle-state change in a full-information sim)
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
+## Unimplemented Abilities (damage calculator)
+- Dark Aura — field ability, ×5448/4096 to all Dark-type moves (symmetric to Fairy Aura which is implemented). Currently an enum variant only; no effect in helpers.rs. Also need to add to offensive_damage_abilities and defensive_damage_abilities (inference/inference.rs) once the damage calc is wired up.
+
 ## Refactors
 - Hidden information stuff, adding information releases to simulate_turn on a flag input (is there a better way to do this that isn't just copying the entire function?)
 - Comments Deslop

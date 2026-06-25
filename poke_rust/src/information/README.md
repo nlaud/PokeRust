@@ -429,12 +429,42 @@ damage_hi =  ceil((δ + 0.5) × H / 100)   (clamped to ≤ H)
 ```
 
 The oracle then scans the defender's BSV range: a BSV `v` is feasible if any outcome
-falls in `[damage_lo, damage_hi]`. The HP loop steps in increments of 4 across
-`[minStats[0], maxStats[0]]`.
+falls in `[damage_lo, damage_hi]`.
 
-The unconditional union over all candidate (HP, nature class, BSV) triples gives
-`global_bsv_lo` and `global_bsv_hi`, which are written back to `min_pre_nature_stat`
-and `max_pre_nature_stat`.
+**HP candidate enumeration (`achievable_defender_hp_values`):**
+Rather than stepping in strides of 4, Direction A enumerates exactly the HP values
+that are achievable by the defender's species given its IV/EV bounds and the stat-points
+lattice. This eliminates the unsound exclusion of BSVs whose achievable HP values happen
+to fall at off-stride positions.
+
+The unconditional union over all candidate (HP, nature class, BSV, def-item, def-ability)
+tuples gives `global_bsv_lo` and `global_bsv_hi`, which are written back to
+`min_pre_nature_stat` and `max_pre_nature_stat`.
+
+**Defensive item/ability union (soundness invariant):**
+Direction A iterates over `defensive_damage_items(defender)` and
+`defensive_damage_abilities(defender)` — complete allowlists of every modifier the
+damage oracle implements on the defender's side. Completeness is a **soundness
+invariant**: any reducer omitted from the lists causes `min_pre_nature_stat` to be
+raised above the true value for defenders that could have that modifier (unsound
+exclusion). The allowlists include:
+- All 18 type-resist berries (Occa … Roseli + ChilanBerry)
+- Eviolite, AssaultVest (stat multipliers, baked into stats before the oracle call)
+- Multiscale, ShadowShield, TeraShell (full-HP-gated ×0.5)
+- Filter, SolidRock, PrismArmor (×0.75 on super-effective hits)
+- ThickFat, FurCoat, IceScales, Heatproof, WaterBubble, PurifyingSalt, DrySkin,
+  FairyAura, Fluffy, PunkRock (type/category/flag-specific reductions)
+
+A self-checking test (`test_sc_allowlist_completeness_cross_validation`) verifies
+completeness: it runs the oracle for every ability/item the simulator knows and asserts
+that any which changes damage output is in the corresponding list.
+
+**E-B pruning (performance):**
+Before iterating `def_items` × `def_abilities`, Direction A prunes entries that are
+provably inert for the specific move (e.g., IceScales when the move is Physical;
+type-resist berries whose type ≠ effective move type; PunkRock when the move has no
+Sound flag). Every prune rule is conservative — it only drops entries that cannot
+possibly change the oracle's output — so soundness is preserved.
 
 **Direction A CNF predicates (nature-conditional tightening):**
 For each nature class κ, Pass 3 also computes the feasible defensive-BSV interval
@@ -443,11 +473,9 @@ under **neutral gear** (no reducer item/ability) and emits conditional CNF claus
 [not-κ] ∨ EVIVStatGE{bsv_lo_neutral} ∨ ⋁ HasItem(reducer) ∨ ⋁ HasAbility(reducer)
 [not-κ] ∨ EVIVStatLE{bsv_hi_neutral} ∨ ⋁ HasItem(reducer) ∨ ⋁ HasAbility(reducer)
 ```
-where reducers are defensive damage-reducing items and abilities (Eviolite, Assault
-Vest, Multiscale, Filter/Solid Rock/Prism Armor, Thick Fat, Fur Coat, Ice Scales,
-Fluffy, etc.). When BCP excludes all reducer alternatives and pins the nature, the
-bound is forced to `min_pre_nature_stat`/`max_pre_nature_stat` directly. This
-mirrors the conditional tightening Direction B already performs for offensive boosters.
+where reducers are drawn from the full `defensive_damage_items` / `defensive_damage_abilities`
+allowlists. When BCP excludes all reducer alternatives and pins the nature, the bound is
+forced to `min_pre_nature_stat`/`max_pre_nature_stat` directly.
 
 #### Multi-hit handling
 
@@ -704,14 +732,22 @@ The damage oracle (`calculate_damage_outcomes_for_target_with_options`) takes co
 - Overrides the entire stats array with `stats_override` (the candidate BSV
   after applying the nature modifier)
 - Sets `weight_hg` from `possible_weight_hg` — required for Low Kick / Heavy Slam BP
-- HP is taken as exact if `Number`; if `Percent(100)` it's set to `stats_override[0]`
-  (max HP); any other percent is conservatively halved (disabling Multiscale)
+- **HP heuristic**: `Percent(100)` → `stats_override[0]` (max HP, enables Multiscale /
+  ShadowShield / TeraShell); any other percent → `max_hp × 0.5`. The ×0.5 value is
+  strictly less than max HP, so all three full-HP-gated reducers evaluate to "inactive"
+  in the oracle. No double-count with the defensive allowlist union: those abilities are
+  always enumerated by `defensive_damage_abilities`, but when HP is not 100% they
+  contribute nothing because the oracle gates them.
 
 `materialize_battle(unk, p1_active, p2_active) -> BattleState`
 - Copies all field effects (weather, terrain, side conditions, pseudo-weathers, slot
   conditions) from `unk` to the concrete `BattleState`
-- Unknown timer values (`Unknown::Known(t)` vs generic) resolve to a mid-range
-  default of 3 turns, which does not affect damage calculation
+- **Timer heuristic**: `Unknown::Known(t) => t` (exact); unknown timers → 3 turns.
+  Timer values are **damage-irrelevant** — the oracle checks whether an effect is
+  *present* (weather ≠ None, screen in side_conditions), not its remaining duration.
+  `Known(0)` is the permanent-effect sentinel used for primordial weather and entry
+  hazards; the `Known(t)` arm must remain first to prevent 0 from folding into the
+  `_ => 3` fallback.
 
 ---
 
