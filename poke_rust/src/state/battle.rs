@@ -5,6 +5,7 @@ use crate::state::dex_data::{
     PokemonData, PseudoWeather, SelfSwitchType, SideCondition, SlotCondition, Terrain, Weather,
 };
 use crate::state::pokemon::PokemonState;
+use crate::information::information::InformationEvent;
 use std::collections::HashMap;
 
 fn humanize_identifier(value: impl AsRef<str>) -> String {
@@ -166,6 +167,16 @@ pub struct BattleState {
     /// Set to true after the first Round resolves this turn; causes subsequent Rounds
     /// to deal doubled base power. Cleared at end of turn. Excluded from PartialEq/Hash.
     pub round_used_this_turn: bool,
+
+    /// Flat push-stream of events observed this turn. Wrapped into causal `reactions`
+    /// trees by `execute_action` and `step_action_queue` using the split_off trick.
+    /// Excluded from `PartialEq`/`Hash` so internal coalescing is unchanged.
+    pub pending_events: Vec<InformationEvent>,
+
+    /// When `Some(p)`, events are recorded from player `p`'s perspective.
+    /// `None` = no collection (zero-overhead path).
+    /// Excluded from `PartialEq`/`Hash`.
+    pub event_observer: Option<Player>,
 }
 
 /// Format a single Pokémon's state as a multi-line string for display.
@@ -628,7 +639,8 @@ impl PartialEq for BattleState {
             && self.p2_slot_conditions == other.p2_slot_conditions
             && self.self_switch_pending == other.self_switch_pending
             && self.items_consumed_this_turn == other.items_consumed_this_turn
-        // last_move_on_field, sub_damage_dealt, round_used_this_turn intentionally excluded
+        // last_move_on_field, sub_damage_dealt, round_used_this_turn,
+        // pending_events, event_observer intentionally excluded
     }
 }
 
@@ -663,6 +675,7 @@ impl std::hash::Hash for BattleState {
         self.p2_slot_conditions.hash(state);
         self.self_switch_pending.hash(state);
         self.items_consumed_this_turn.hash(state);
-        // last_move_on_field, sub_damage_dealt, round_used_this_turn intentionally excluded
+        // last_move_on_field, sub_damage_dealt, round_used_this_turn,
+        // pending_events, event_observer intentionally excluded
     }
 }

@@ -290,5 +290,7 @@ pub fn materialize_battle(
         last_move_on_field: None,
         sub_damage_dealt: 0,
         round_used_this_turn: unk.round_used_this_turn,
+        pending_events: vec![],
+        event_observer: None,
     }
 }

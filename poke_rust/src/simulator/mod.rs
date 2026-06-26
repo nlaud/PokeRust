@@ -14,6 +14,8 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
+use crate::information::information::{EventKind, InformationEvent, SwitchState as InfoSwitchState};
+use crate::information::unknowns::PokemonHP;
 pub mod helpers;
 use self::helpers as simulator_helpers;
 
@@ -5923,6 +5925,12 @@ fn execute_action(
                     // berries eaten deep inside damage application fire Unburden /
                     // Pickup-pool / Symbiosis reactions.
                     let item_snapshot = simulator_helpers::snapshot_active_items(&state);
+                    // Record where this move's sub-events begin in the pending stream so
+                    // the MoveUsed wrapper can adopt them as `reactions` via split_off.
+                    let move_start_len = state.pending_events.len();
+                    let move_user = m.user_slot;
+                    let move_name = m.move_name.clone();
+                    let move_targets: Vec<FieldSlot> = m.target_slot.map_or_else(Vec::new, |s| vec![s]);
                     possible_damage_outcomes_for_move(&state, &m, move_data, config, move_dex, pokemon_dex, false)
                         .into_iter()
                         .map(|(mut st, p)| {
@@ -5930,6 +5938,18 @@ fn execute_action(
                                 simulator_helpers::process_item_loss_events(bs, &item_snapshot);
                                 // Weather / ability-altering moves may change Castform's form.
                                 simulator_helpers::update_forecast_forms(bs);
+                                // Wrap all events emitted during this move as reactions of MoveUsed.
+                                if bs.event_observer.is_some() {
+                                    let reactions = bs.pending_events.split_off(move_start_len);
+                                    bs.pending_events.push(InformationEvent {
+                                        kind: EventKind::MoveUsed {
+                                            user: move_user,
+                                            move_used: move_name.clone(),
+                                            targets: move_targets.clone(),
+                                        },
+                                        reactions,
+                                    });
+                                }
                             }
                             (st, p)
                         })
@@ -5947,6 +5967,28 @@ fn execute_action(
                     .unwrap_or_else(|| format!("{:?} slot {}", s.user_slot.player, s.user_slot.slot_index + 1));
                 println!("{}", format!("Executed Switch: new active at slot {} is {}", s.user_slot.slot_index + 1, user).bright_green());
             }
+            // Emit Switch event.
+            if let Some(observer) = state.event_observer {
+                if let Some(mon) = simulator_helpers::get_pokemon_at_slot(&state, s.user_slot) {
+                    let hp = if s.user_slot.player == observer {
+                        PokemonHP::Number(mon.hp)
+                    } else {
+                        PokemonHP::Percent(simulator_helpers::hp_to_percent(mon.hp, mon.stats[0]))
+                    };
+                    let switch_state = InfoSwitchState {
+                        slot: s.user_slot,
+                        species: mon.species.clone(),
+                        level: mon.level,
+                        hp,
+                        status: mon.status.clone(),
+                        tera_type: Some(mon.tera_type.clone()),
+                    };
+                    state.pending_events.push(InformationEvent {
+                        kind: EventKind::Switch(switch_state),
+                        reactions: vec![],
+                    });
+                }
+            }
             vec![(MatchState::BattleState(state), 1.0)]
         }
         Action::MegaAction(m) => {
@@ -5959,6 +6001,11 @@ fn execute_action(
                 // (weather/terrain setters, Intimidate) the same way a Pokémon gaining an
                 // ability mid-battle does.
                 simulator_helpers::process_pokemon_gain_ability(&mut state, m.user_slot);
+                // Emit MegaEvolution event.
+                if let Some(mega_mon) = simulator_helpers::get_pokemon_at_slot(&state, m.user_slot) {
+                    let mega_species = mega_mon.species.clone();
+                    simulator_helpers::emit(&mut state, EventKind::MegaEvolution { slot: m.user_slot, into: mega_species });
+                }
             }
             vec![(MatchState::BattleState(state), 1.0)]
         }
@@ -5967,6 +6014,12 @@ fn execute_action(
             let mons = match t.user_slot.player { Player::P1 => &mut state.p1_active_mons, Player::P2 => &mut state.p2_active_mons };
             if let Some(mon) = mons.get_mut(slot_idx) { mon.is_tera = true; }
             match t.user_slot.player { Player::P1 => state.p1_has_tera = false, Player::P2 => state.p2_has_tera = false }
+            // Emit Terastallization event.
+            if let Some(mon) = simulator_helpers::get_pokemon_at_slot(&state, t.user_slot) {
+                let slot = t.user_slot;
+                let tera_type = mon.tera_type.clone();
+                simulator_helpers::emit(&mut state, EventKind::Terastallization { slot, tera_type });
+            }
             vec![(MatchState::BattleState(state), 1.0)]
         }
     }
@@ -5984,6 +6037,8 @@ fn step_action_queue(
     // end_turn now returns Vec<(BattleState, f64)> because probabilistic abilities
     // (Shed Skin, Healer, Moody, Harvest) can branch the outcome tree.
     if next_state.action_queue.is_empty() {
+        // Record where this end-of-turn's sub-events begin so EndOfTurn can adopt them.
+        let eot_start_len = next_state.pending_events.len();
         let eot_branches = simulator_helpers::end_turn(&mut next_state, move_dex, config);
         let mut result: Vec<(MatchState, f64)> = Vec::with_capacity(eot_branches.len());
         for (mut bs, prob) in eot_branches {
@@ -5996,6 +6051,14 @@ fn step_action_queue(
                 } else {
                     bs.turn_started = false;
                     bs.turn_ended = false;
+                }
+                // Wrap all end-of-turn events as reactions of the EndOfTurn node.
+                if bs.event_observer.is_some() {
+                    let reactions = bs.pending_events.split_off(eot_start_len);
+                    bs.pending_events.push(InformationEvent {
+                        kind: EventKind::EndOfTurn,
+                        reactions,
+                    });
                 }
                 result.push((MatchState::BattleState(bs), prob));
             }
@@ -6043,7 +6106,8 @@ pub fn simulate_turn(
     pokemon_dex: &HashMap<Species, PokemonData>,
     consider_crit: bool,
     damage_rolls: u8,
-) -> Vec<(MatchState, f64)> {
+    observer: Option<Player>,
+) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
     let config = DamageConfig { consider_crit, damage_rolls };
 
     // Populate the action queue; may branch due to speed-tied send-outs
@@ -6171,6 +6235,17 @@ pub fn simulate_turn(
         simulator_helpers::coalesce_branches(aggregated)
     }
 
+    // Set event_observer on each initial branch so all clones during expansion carry it.
+    let initial_branches: Vec<(MatchState, f64)> = initial_branches
+        .into_iter()
+        .map(|(mut st, prob)| {
+            if let MatchState::BattleState(ref mut bs) = st {
+                bs.event_observer = observer;
+            }
+            (st, prob)
+        })
+        .collect();
+
     let all_results: Vec<(MatchState, f64)> = initial_branches
         .into_iter()
         .flat_map(|(init_state, init_prob)| {
@@ -6180,7 +6255,30 @@ pub fn simulate_turn(
         })
         .collect();
 
-    simulator_helpers::coalesce_branches(all_results)
+    // Internal coalesce uses MatchState (excludes pending_events) — same as before.
+    let all_results = simulator_helpers::coalesce_branches(all_results);
+
+    // Lift to 3-tuple: drain pending_events from each BattleState.
+    if observer.is_none() {
+        return all_results.into_iter().map(|(st, p)| (st, None, p)).collect();
+    }
+
+    // Event-aware coalesce: branches with identical state but divergent event histories
+    // (e.g. Crit vs no-Crit on a 0-damage hit) must NOT merge.
+    let triples: Vec<((MatchState, Option<Vec<InformationEvent>>), f64)> = all_results
+        .into_iter()
+        .map(|(mut st, p)| {
+            let events = match &mut st {
+                MatchState::BattleState(bs) => Some(std::mem::take(&mut bs.pending_events)),
+                _ => Some(vec![]),
+            };
+            ((st, events), p)
+        })
+        .collect();
+    simulator_helpers::coalesce_branches(triples)
+        .into_iter()
+        .map(|((st, ev), p)| (st, ev, p))
+        .collect()
 }
 
 /// Public validator wrapper used by interactive UI to check legality
@@ -6537,6 +6635,8 @@ fn battle_state_from_preview_branching(
         last_move_on_field: None,
         sub_damage_dealt: 0,
         round_used_this_turn: false,
+        pending_events: vec![],
+        event_observer: None,
     };
 
     // Collect all active send-out slots

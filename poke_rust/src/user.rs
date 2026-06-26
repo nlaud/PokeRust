@@ -500,18 +500,18 @@ pub fn simulate_battle(
                 let p1_cmd = PlayerCommand::TeamPreview(choose_team_preview_command(preview_state, Player::P1));
                 let p2_cmd = PlayerCommand::TeamPreview(choose_team_preview_command(preview_state, Player::P2));
 
-                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls);
+                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, None);
                 if next_states.is_empty() {
                     state = state.clone();
                     state_chance = 1.0;
                     continue;
                 }
 
-                let weights = next_states.iter().map(|(_, probability)| *probability).collect::<Vec<_>>();
+                let weights = next_states.iter().map(|(_, _, probability)| *probability).collect::<Vec<_>>();
                 let distribution = WeightedIndex::new(&weights).expect("At least one positive probability is required");
                 let mut rng = thread_rng();
                 let selected_index = distribution.sample(&mut rng);
-                let (next_state, probability) = next_states[selected_index].clone();
+                let (next_state, _, probability) = next_states[selected_index].clone();
                 state = next_state;
                 state_chance = probability;
             }
@@ -524,7 +524,7 @@ pub fn simulate_battle(
                 let p2_cmd = choose_battle_commands_for_player(battle_state, Player::P2, move_dex, pokemon_dex);
 
                 // At verbosity 4, print all possible outcomes before sampling
-                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls);
+                let next_states = simulator::simulate_turn(&state, &p1_cmd, &p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, None);
                 if next_states.is_empty() {
                     state = state.clone();
                     state_chance = 1.0;
@@ -533,13 +533,13 @@ pub fn simulate_battle(
 
                 // For verbosity 3, suppress damage logs temporarily, then show only the selected outcome
                 let prev_verbosity = crate::VERBOSITY.get().copied().unwrap_or(1);
-                
+
                 // Sample from outcomes
-                let weights = next_states.iter().map(|(_, probability)| *probability).collect::<Vec<_>>();
+                let weights = next_states.iter().map(|(_, _, probability)| *probability).collect::<Vec<_>>();
                 let distribution = WeightedIndex::new(&weights).expect("At least one positive probability is required");
                 let mut rng = thread_rng();
                 let selected_index = distribution.sample(&mut rng);
-                let (next_state, probability) = next_states[selected_index].clone();
+                let (next_state, _, probability) = next_states[selected_index].clone();
                 
                 // At verbosity 3, print selected outcome info; at 4+, info is already printed during simulation
                 if prev_verbosity >= 3 {

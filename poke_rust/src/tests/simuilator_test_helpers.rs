@@ -8,6 +8,7 @@ use crate::state::dex_data::{parse_move_dex, parse_pokemon_dex, VolatileStatus};
 use crate::state::pokemon::{PokemonState, VolatileStatusState};
 use crate::simulator::simulate_turn;
 use crate::simulator::helpers as simulator_helpers;
+use crate::information::information::InformationEvent;
 
 static POKEMON_DEX: OnceLock<HashMap<Species, crate::state::dex_data::PokemonData>> = OnceLock::new();
 static MOVE_DEX: OnceLock<HashMap<PokemonMove, crate::state::dex_data::MoveData>> = OnceLock::new();
@@ -61,6 +62,8 @@ pub fn battle_state_from_lists(
         last_move_on_field: None,
         sub_damage_dealt: 0,
         round_used_this_turn: false,
+        pending_events: vec![],
+        event_observer: None,
     };
 
     // Assign each side a stable, party-unique `mon_id` (active slots first, then bench).
@@ -231,7 +234,19 @@ pub fn run_single_turn(
     move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>,
     pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>,
 ) -> Vec<(MatchState, f64)> {
-    simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1)
+    simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1, None)
+        .into_iter().map(|(st, _ev, p)| (st, p)).collect()
+}
+
+pub fn run_single_turn_with_events(
+    state: &MatchState,
+    p1_cmd: &crate::state::battle::PlayerCommand,
+    p2_cmd: &crate::state::battle::PlayerCommand,
+    move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>,
+    pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>,
+    observer: Player,
+) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
+    simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1, Some(observer))
 }
 
 /// Compare two outcome vectors for permutation-equality after stripping transient tracking

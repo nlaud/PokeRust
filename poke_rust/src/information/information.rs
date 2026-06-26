@@ -52,7 +52,7 @@ use super::unknowns::PokemonHP;
 
 /// A single piece of information revealed to a player, together with any further
 /// events it caused. Reactions are ordered by their in-battle resolution sequence.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InformationEvent {
     pub kind: EventKind,
     /// Events directly caused by this event, in the order they resolve.
@@ -64,7 +64,7 @@ pub struct InformationEvent {
 /// The identity and visible state of a Pokémon as it enters the field.
 /// Used for voluntary switches and — when nested under a causing event — forced switches
 /// (Roar, Whirlwind, Dragon Tail, Red Card, etc.).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SwitchState {
     pub slot: FieldSlot,
     pub species: Species,
@@ -106,7 +106,7 @@ pub enum CantReason {
 /// Variants are grouped by Showdown protocol category:
 /// major actions, HP changes, hit qualifiers, status, stat stages,
 /// field effects, volatile effects, items, and abilities.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EventKind {
     // ── Major actions ────────────────────────────────────────────────────────
     /// A Pokémon successfully used a move.

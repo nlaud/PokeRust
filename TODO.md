@@ -6,11 +6,37 @@
 - Anticipation — signal if opponents have SE or OHKO moves (message-only; no battle-state change in a full-information sim)
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
-## Unimplemented Abilities (damage calculator)
-- Dark Aura — field ability, ×5448/4096 to all Dark-type moves (symmetric to Fairy Aura which is implemented). Currently an enum variant only; no effect in helpers.rs. Also need to add to offensive_damage_abilities and defensive_damage_abilities (inference/inference.rs) once the damage calc is wired up.
+## simulate_turn Event Emission (Phase 2)
+Phase 1 wired the top-level wrappers (MoveUsed, Switch, Mega, Tera, EndOfTurn, DamageDealt,
+Faint, Weather/Terrain/PseudoWeather/SideCondition changed). Still to emit:
+
+**Remaining Phase 1 sites (straightforward wiring):**
+- `Healed` — drain/leech callers in `apply_post_damage_move_effects`; EoT heal callers in `end_turn`
+- `SetHp` — Pain Split site
+- `StatusInflicted` / `StatusCured` — callers of `apply_status_to_pokemon`; inline `mon.status = None` cure sites (~10)
+- `BoostChanged` — callers of `apply_boosts_returning_delta` (emit one event per nonzero index of returned delta)
+- `VolatileStart` / `VolatileEnd` — callers of `apply_volatile_to_pokemon` / `remove_status_volatile`
+- `SlotConditionStart` / `SlotConditionEnd` — slot-condition write sites (`resolve_wish_slot_conditions`, etc.)
+- `ItemLost` / `ItemGained` / `ItemRevealed` — `process_item_loss_events`; Knock Off / theft sites
+- `WeatherChanged { weather: None }` / `TerrainChanged { terrain: None }` — expiry in `decrement_effect_timers`
+
+**Phase 2 (scattered qualifiers):**
+- `Crit` — `apply_single_hit_branch` (has `is_crit` + slot)
+- `HitCount` — once per move under MoveUsed wrapper; count from `multihit_hit_count_branches`
+- `Immune` / `MoveFailed` / `Blocked` / `Missed` — refactor 17 inline `last_move_failed = true` sites into a `note_move_outcome(bs, slot, outcome)` resolver so the EventKind can be emitted at the right level
+- `BoostsCleared` / `BoostsInverted` / `BoostsSwapped` / `BoostsCopied` — Haze/Clear Smog/Topsy-Turvy/Heart-Power-Guard Swap/Psych Up sites
+- `AbilityRevealed` — `process_pokemon_send_out`; Trace/Mummy/Skill Swap; Intimidate; mega ability change
+- `FormeChange` / `TypeChanged` — forme-change callers (Palafin/Aegislash/Castform); Protean/Libero/Soak
+- `Cant` — pre-move can't-act checks mapped to `CantReason`
+- `ChargingMove` / `MustRecharge` / `SingleMoveOrTurn` — two-turn charge; Hyper Beam recharge; Protect/Detect/Beak Blast
+- `PerishCount` — Perish Song tick in `end_turn`
+- `SimultaneousSwitch` — wrap `process_sendouts_in_speed_order_branching` + leads in `battle_state_from_preview_branching`
+
+**After Phase 2:** Write round-trip tests using `run_single_turn_with_events` verifying nesting,
+multi-hit, perspective (Number vs Percent), and crit-branch non-merging behaviour.
 
 ## Refactors
-- Hidden information stuff, adding information releases to simulate_turn on a flag input (is there a better way to do this that isn't just copying the entire function?)
+- Speed Investigation
 - Comments Deslop
 - MAKE THE FRONTEND YIPPEE
   - Start with Teams, Simulate, and Tracker pages

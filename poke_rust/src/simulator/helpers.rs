@@ -1,4 +1,6 @@
 use crate::state::battle::{Action, BattleState, FieldSlot, Player};
+use crate::information::information::{EventKind, InformationEvent};
+use crate::information::unknowns::PokemonHP;
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
@@ -22,6 +24,45 @@ pub fn get_verbosity() -> u8 {
 pub fn shared_multihit_damage_rolls_enabled() -> bool {
     crate::SHARED_MULTIHIT_DAMAGE_ROLLS.load(Ordering::Relaxed)
 }
+
+// ── Event collection helpers ──────────────────────────────────────────────────
+
+/// Push an `InformationEvent` onto `state.pending_events` when an observer is set.
+/// Near-zero cost when `event_observer` is `None` (one `is_some()` check, no alloc).
+#[inline]
+pub fn emit(bs: &mut BattleState, kind: EventKind) {
+    if bs.event_observer.is_some() {
+        bs.pending_events.push(InformationEvent { kind, reactions: vec![] });
+    }
+}
+
+/// Convert a raw HP value to the display percentage a real player would see.
+/// Matches Showdown's convention: 0 only at faint, 100 only at full HP,
+/// otherwise round(hp × 100 / max_hp) clamped to 1–99.
+/// Uses integer round-half-up to avoid float nondeterminism.
+#[inline]
+pub fn hp_to_percent(hp: u16, max_hp: u16) -> u8 {
+    let max = max_hp.max(1);
+    if hp == 0 { return 0; }
+    if hp >= max { return 100; }
+    let p = (hp as u32 * 100 + max as u32 / 2) / max as u32;
+    p.clamp(1, 99) as u8
+}
+
+/// Return `PokemonHP` from the observer's perspective for the given slot:
+/// - `Number(exact)` for the observer's own Pokémon
+/// - `Percent(display)` for the opponent's Pokémon
+pub fn observed_hp(bs: &BattleState, slot: FieldSlot, observer: Player) -> PokemonHP {
+    let mon = get_pokemon_at_slot(bs, slot)
+        .expect("observed_hp: no mon at slot");
+    if slot.player == observer {
+        PokemonHP::Number(mon.hp)
+    } else {
+        PokemonHP::Percent(hp_to_percent(mon.hp, mon.stats[0]))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 pub(crate) fn coalesce_branches<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)>
 where
@@ -3539,19 +3580,46 @@ pub fn apply_damage_and_check_game_over(
 
     take_damage(target_mon, damage, target_env, field_suppressed);
 
+    // Capture HP data for DamageDealt event before the borrow of target_mon ends.
+    // (NLL ends the borrow at the last *use* of target_mon, not end-of-scope.)
+    let post_hp = target_mon.hp;
+    let max_hp = target_mon.stats[0];
+    let fainted = target_mon.fainted;
+
     if damage > 0 && item_active && matches!(target_mon.item, Item::AirBalloon) {
         target_mon.item = Item::None;
     }
 
-    if target_mon.fainted {
+    if fainted {
         clear_pokemon_on_faint(target_mon);
+        // target_mon last used above; NLL allows state borrow below.
         handle_pokemon_faint(state, target_slot.player, target_slot.slot_index);
+        // Emit DamageDealt (hp=0 at faint) then Faint as a sibling.
+        if let Some(observer) = state.event_observer {
+            let new_hp = if target_slot.player == observer {
+                PokemonHP::Number(0)
+            } else {
+                PokemonHP::Percent(0)
+            };
+            emit(state, EventKind::DamageDealt { target: target_slot, new_hp });
+            emit(state, EventKind::Faint { slot: target_slot });
+        }
         if !team_has_remaining_pokemon(state, target_slot.player) {
             let winner = match target_slot.player {
                 Player::P1 => Player::P2,
                 Player::P2 => Player::P1,
             };
             return Some(crate::state::battle::MatchState::GameOverState { winner });
+        }
+    } else {
+        // Emit DamageDealt for non-faint damage.
+        if let Some(observer) = state.event_observer {
+            let new_hp = if target_slot.player == observer {
+                PokemonHP::Number(post_hp)
+            } else {
+                PokemonHP::Percent(hp_to_percent(post_hp, max_hp))
+            };
+            emit(state, EventKind::DamageDealt { target: target_slot, new_hp });
         }
     }
 
@@ -5218,8 +5286,9 @@ pub fn set_weather(state: &mut BattleState, weather: Weather, duration: u8) {
         return;
     }
 
-    state.weather = Some(weather);
+    state.weather = Some(weather.clone());
     state.weather_turns = Some(duration);
+    emit(state, EventKind::WeatherChanged { weather: Some(weather) });
 }
 
 /// Apply entry-hazard effects to the Pokémon that just entered `slot`.
@@ -6165,8 +6234,9 @@ fn handle_primal_weather_departure(state: &mut BattleState, departed_ability: &A
 
 /// Set terrain. Only one terrain can be active at a time. Provide a duration in turns (0 = permanent).
 pub fn set_terrain(state: &mut BattleState, terrain: Terrain, duration: u8) {
-    state.terrain = Some(terrain);
+    state.terrain = Some(terrain.clone());
     state.terrain_turns = Some(duration);
+    emit(state, EventKind::TerrainChanged { terrain: Some(terrain) });
 
     trigger_terrain_seed_items(state);
     update_mimicry_forms(state);
@@ -6182,8 +6252,9 @@ pub fn add_pseudo_weather(state: &mut BattleState, pseudo_weather: PseudoWeather
         return;
     }
     let is_gravity = matches!(pseudo_weather, PseudoWeather::Gravity);
-    state.pseudo_weathers.push(pseudo_weather);
+    state.pseudo_weathers.push(pseudo_weather.clone());
     state.pseudo_weather_turns.push(duration);
+    emit(state, EventKind::PseudoWeatherStart { effect: pseudo_weather });
     if is_gravity {
         on_gravity_activated(state);
     }
@@ -6233,6 +6304,7 @@ pub fn remove_pseudo_weather(state: &mut BattleState, pseudo_weather: &PseudoWea
     {
         state.pseudo_weathers.remove(pos);
         state.pseudo_weather_turns.remove(pos);
+        emit(state, EventKind::PseudoWeatherEnd { effect: pseudo_weather.clone() });
     }
 }
 
@@ -6243,53 +6315,64 @@ pub fn add_side_condition(
     condition: SideCondition,
     duration: u8,
 ) {
-    let (conditions, turns) = match player {
-        Player::P1 => (
-            &mut state.p1_side_conditions,
-            &mut state.p1_side_condition_turns,
-        ),
-        Player::P2 => (
-            &mut state.p2_side_conditions,
-            &mut state.p2_side_condition_turns,
-        ),
-    };
+    // Use a block scope so that the mutable borrows of the per-side vecs are
+    // released before calling `emit`, which also needs `&mut state`.
+    let added = {
+        let (conditions, turns) = match player {
+            Player::P1 => (
+                &mut state.p1_side_conditions,
+                &mut state.p1_side_condition_turns,
+            ),
+            Player::P2 => (
+                &mut state.p2_side_conditions,
+                &mut state.p2_side_condition_turns,
+            ),
+        };
 
-    // Layered entry hazards (Spikes, Toxic Spikes): a repeat use adds a layer up to the cap
-    // rather than failing as a duplicate.
-    let layer_cap = match condition {
-        SideCondition::Spikes(_) => Some(3u8),
-        SideCondition::ToxicSpikes(_) => Some(2u8),
-        _ => None,
-    };
-    if let Some(cap) = layer_cap {
-        if let Some(existing) = conditions
-            .iter_mut()
-            .find(|sc| std::mem::discriminant(*sc) == std::mem::discriminant(&condition))
-        {
-            if let SideCondition::Spikes(n) | SideCondition::ToxicSpikes(n) = existing {
-                *n = (*n + 1).min(cap);
+        // Layered entry hazards (Spikes, Toxic Spikes): a repeat use adds a layer up to the cap
+        // rather than failing as a duplicate.
+        let layer_cap = match condition {
+            SideCondition::Spikes(_) => Some(3u8),
+            SideCondition::ToxicSpikes(_) => Some(2u8),
+            _ => None,
+        };
+        if let Some(cap) = layer_cap {
+            if let Some(existing) = conditions
+                .iter_mut()
+                .find(|sc| std::mem::discriminant(*sc) == std::mem::discriminant(&condition))
+            {
+                if let SideCondition::Spikes(n) | SideCondition::ToxicSpikes(n) = existing {
+                    *n = (*n + 1).min(cap);
+                }
+                false // incremented existing layer — not a new entry
+            } else {
+                conditions.push(condition.clone());
+                turns.push(duration);
+                true // new entry
             }
-            return;
+        } else {
+            // Single-layer conditions: reject duplicates by discriminant.
+            if conditions
+                .iter()
+                .any(|sc| std::mem::discriminant(sc) == std::mem::discriminant(&condition))
+            {
+                false // duplicate — not added
+            } else {
+                conditions.push(condition.clone());
+                turns.push(duration);
+                true // new entry
+            }
         }
-        conditions.push(condition);
-        turns.push(duration);
-        return;
-    }
+    }; // per-side borrows dropped here
 
-    // Single-layer conditions: reject duplicates by discriminant (existing behaviour).
-    if conditions
-        .iter()
-        .any(|sc| std::mem::discriminant(sc) == std::mem::discriminant(&condition))
-    {
-        return;
+    if added {
+        emit(state, EventKind::SideConditionStart { side: player, condition });
     }
-    conditions.push(condition);
-    turns.push(duration);
 }
 
 /// Remove side condition by discriminant.
 pub fn remove_side_condition(state: &mut BattleState, player: Player, condition: &SideCondition) {
-    match player {
+    let removed = match player {
         Player::P1 => {
             if let Some(pos) = state
                 .p1_side_conditions
@@ -6298,6 +6381,9 @@ pub fn remove_side_condition(state: &mut BattleState, player: Player, condition:
             {
                 state.p1_side_conditions.remove(pos);
                 state.p1_side_condition_turns.remove(pos);
+                true
+            } else {
+                false
             }
         }
         Player::P2 => {
@@ -6308,8 +6394,14 @@ pub fn remove_side_condition(state: &mut BattleState, player: Player, condition:
             {
                 state.p2_side_conditions.remove(pos);
                 state.p2_side_condition_turns.remove(pos);
+                true
+            } else {
+                false
             }
         }
+    };
+    if removed {
+        emit(state, EventKind::SideConditionEnd { side: player, condition: condition.clone() });
     }
 }
 

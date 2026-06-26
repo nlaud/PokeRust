@@ -10,7 +10,7 @@ mod tests {
     use crate::data::species::Species;
     use crate::state::dex_data::{PseudoWeather, Status, Terrain, VolatileStatus, Weather};
     use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simulator::{simulate_turn, DamageConfig};
+    use crate::simulator::DamageConfig;
     use crate::simulator::helpers as simulator_helpers;
     use crate::simulator::helpers::coalesce_branches;
     use crate::tests::simuilator_test_helpers::{
@@ -34,6 +34,22 @@ mod tests {
         simple_attack,
         simple_attack_mega,
     };
+
+    /// Shim that preserves the pre-observer 7-parameter call signature so no test sites
+    /// need to change. Internally calls the real `simulate_turn` with `observer=None`
+    /// and strips the unused event column from the 3-tuple return.
+    fn simulate_turn(
+        state: &crate::state::battle::MatchState,
+        p1_cmd: &crate::state::battle::PlayerCommand,
+        p2_cmd: &crate::state::battle::PlayerCommand,
+        move_dex: &std::collections::HashMap<crate::data::pokemon_move::PokemonMove, crate::state::dex_data::MoveData>,
+        pokemon_dex: &std::collections::HashMap<crate::data::species::Species, crate::state::dex_data::PokemonData>,
+        consider_crit: bool,
+        damage_rolls: u8,
+    ) -> Vec<(crate::state::battle::MatchState, f64)> {
+        crate::simulator::simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, None)
+            .into_iter().map(|(st, _ev, p)| (st, p)).collect()
+    }
 
     // Sum outcome probabilities by the resulting non-volatile status on the P2 target.
     fn status_distribution(outcomes: &[(MatchState, f64)]) -> std::collections::HashMap<&'static str, f64> {
@@ -16035,11 +16051,24 @@ mod contact_reactive_abilities {
     use crate::data::species::Species;
     use crate::state::dex_data::{VolatileStatus, Weather};
     use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simulator::{get_possible_commands_for_active_slot, simulate_turn};
+    use crate::simulator::get_possible_commands_for_active_slot;
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
     };
+
+    fn simulate_turn(
+        state: &crate::state::battle::MatchState,
+        p1_cmd: &crate::state::battle::PlayerCommand,
+        p2_cmd: &crate::state::battle::PlayerCommand,
+        move_dex: &std::collections::HashMap<crate::data::pokemon_move::PokemonMove, crate::state::dex_data::MoveData>,
+        pokemon_dex: &std::collections::HashMap<crate::data::species::Species, crate::state::dex_data::PokemonData>,
+        consider_crit: bool,
+        damage_rolls: u8,
+    ) -> Vec<(crate::state::battle::MatchState, f64)> {
+        crate::simulator::simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, None)
+            .into_iter().map(|(st, _ev, p)| (st, p)).collect()
+    }
 
     fn make_mon(
         species: Species,
@@ -23381,11 +23410,11 @@ mod rampaging_moves {
             BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
             BattleCommand::Attack(AttackCommand { move_slot: 0, target: None, terastallize: false, mega_evolve: false }),
         ]);
-        let outcomes = simulator::simulate_turn(
+        let outcomes: Vec<(crate::state::battle::MatchState, f64)> = crate::simulator::simulate_turn(
             &crate::state::battle::MatchState::BattleState(state),
             &p1_cmd, &p2_cmd,
-            &mdex, &pdex, false, 1,
-        );
+            &mdex, &pdex, false, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         // Probability that foe slot 0 was hit (lost HP)
         let foe0_hit_prob: f64 = outcomes.iter()
@@ -23592,12 +23621,24 @@ mod ability_manipulation_moves {
     use crate::data::species::Species;
     use crate::state::dex_data::{Status, VolatileStatus};
     use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::simulator::simulate_turn;
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
+
+    fn simulate_turn(
+        state: &crate::state::battle::MatchState,
+        p1_cmd: &crate::state::battle::PlayerCommand,
+        p2_cmd: &crate::state::battle::PlayerCommand,
+        move_dex: &std::collections::HashMap<crate::data::pokemon_move::PokemonMove, crate::state::dex_data::MoveData>,
+        pokemon_dex: &std::collections::HashMap<crate::data::species::Species, crate::state::dex_data::PokemonData>,
+        consider_crit: bool,
+        damage_rolls: u8,
+    ) -> Vec<(crate::state::battle::MatchState, f64)> {
+        crate::simulator::simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, None)
+            .into_iter().map(|(st, _ev, p)| (st, p)).collect()
+    }
 
     fn mon(species: Species, ability: Ability, mv: PokemonMove) -> PokemonState {
         let pdex = pokemon_dex();
@@ -28349,14 +28390,14 @@ mod new_ability_tests {
         let p2cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
         let p1cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
 
-        let outcomes_sl = simulator::simulate_turn(
+        let outcomes_sl: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state_sl), &p1cmd, &p2cmd,
-            move_dex(), pokemon_dex(), true, 1,
-        );
-        let outcomes_no = simulator::simulate_turn(
+            move_dex(), pokemon_dex(), true, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
+        let outcomes_no: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state_no), &p1cmd, &p2cmd,
-            move_dex(), pokemon_dex(), true, 1,
-        );
+            move_dex(), pokemon_dex(), true, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         let crit_prob = |outcomes: &[(MatchState, f64)]| -> f64 {
             let mut dist: Vec<(u16, f64)> = damage_distribution(outcomes, 1000)
@@ -30420,10 +30461,10 @@ mod doubles_faint_redirection {
             targeted_attack(0, None), // foe1 splashes
         ]);
 
-        let outcomes = simulator::simulate_turn(
+        let outcomes: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state),
-            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1,
-        );
+            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         assert!(!outcomes.is_empty(), "must produce at least one outcome");
 
@@ -30487,10 +30528,10 @@ mod doubles_faint_redirection {
         ]);
 
         // Should not panic; the move simply fizzles (no valid redirect target).
-        let outcomes = simulator::simulate_turn(
+        let outcomes: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state),
-            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1,
-        );
+            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         let total_prob: f64 = outcomes.iter().map(|(_, p)| p).sum();
         assert!(
@@ -30534,10 +30575,10 @@ mod doubles_faint_redirection {
             targeted_attack(0, None),
             targeted_attack(0, None),
         ]);
-        let out_two = simulator::simulate_turn(
+        let out_two: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state_two),
-            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1,
-        );
+            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
         // Average damage dealt to foe slot 0 across all outcome branches
         let avg_dmg_two: f64 = out_two.iter().map(|(s, p)| {
             let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => initial_hp };
@@ -30553,10 +30594,10 @@ mod doubles_faint_redirection {
             vec![attacker, ally], vec![],
             vec![foe_alive, foe1_fainted], vec![],
         );
-        let out_one = simulator::simulate_turn(
+        let out_one: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state_one),
-            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1,
-        );
+            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
         let avg_dmg_one: f64 = out_one.iter().map(|(s, p)| {
             let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => initial_hp };
             (initial_hp.saturating_sub(hp) as f64) * p
@@ -31478,12 +31519,12 @@ mod new_moves {
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
         // Use simulate_turn with consider_crit=true and 1 damage roll so branches are crit/no-crit only.
-        let outcomes_chant = crate::simulator::simulate_turn(
-            &MatchState::BattleState(state_chant), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1,
-        );
-        let outcomes_none = crate::simulator::simulate_turn(
-            &MatchState::BattleState(state_none), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1,
-        );
+        let outcomes_chant: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
+            &MatchState::BattleState(state_chant), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
+        let outcomes_none: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
+            &MatchState::BattleState(state_none), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1, None,
+        ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         // With Lucky Chant: only 1 branch (no crits possible).
         // Without: Slash's high crit ratio produces a crit branch + a non-crit branch.
