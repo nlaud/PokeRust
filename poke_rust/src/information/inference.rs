@@ -537,6 +537,10 @@ fn process_team_preview_event(
             }
         }
 
+        // Team-wide status cure (Heal Bell / Aromatherapy) — no-op in team preview
+        // (no status is tracked before the battle begins).
+        EventKind::TeamStatusCured { .. } => {}
+
         // ── Forme / type changes (entry abilities like Schooling) ─────────────
         EventKind::FormeChange { slot, into, .. } => {
             if let Some(mon) =
@@ -949,6 +953,33 @@ fn pass1_apply_event(
             }
         }
 
+        // Heal Bell / Aromatherapy: cure the entire side including benched mons.
+        EventKind::TeamStatusCured { side } => {
+            let total = mons_count_battle(state);
+            // p1 occupies mon_idx 0..p1_active+p1_known_back+p1_possible_back;
+            // p2 occupies the rest.  Use get_mon_mut_by_idx to iterate without caring
+            // about the exact segment boundaries.
+            let (start, end) = match side {
+                Player::P1 => {
+                    let p1_count = state.p1_active_mons.len()
+                        + state.p1_known_back_mons.len()
+                        + state.p1_possible_back_mons.len();
+                    (0, p1_count)
+                }
+                Player::P2 => {
+                    let p1_count = state.p1_active_mons.len()
+                        + state.p1_known_back_mons.len()
+                        + state.p1_possible_back_mons.len();
+                    (p1_count, total)
+                }
+            };
+            for idx in start..end {
+                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    mon.status = None;
+                }
+            }
+        }
+
         EventKind::ItemRevealed { slot, item } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(legal) = &ctx.config.legal_items {
@@ -1309,7 +1340,15 @@ fn pass1_apply_event(
             };
             let i = slot.slot_index as usize;
             if let Some(sc_vec) = slot_conds.get_mut(i) {
-                sc_vec.retain(|c| c != condition);
+                // Match by variant rather than full equality — conditions carry mutable data
+                // (timers, heal amounts, snapshots) that differ between Start and End events.
+                // For FutureMove, additionally gate on move_name to distinguish concurrent
+                // Future Sight / Doom Desire queued on the same slot.
+                sc_vec.retain(|c| match (c, condition) {
+                    (SlotCondition::FutureMove { move_name: a, .. },
+                     SlotCondition::FutureMove { move_name: b, .. }) => a != b,
+                    _ => std::mem::discriminant(c) != std::mem::discriminant(condition),
+                });
             }
         }
 

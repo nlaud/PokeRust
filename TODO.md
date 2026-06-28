@@ -7,20 +7,12 @@
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
 ## simulate_turn Event Emission (Phase 2)
-Phase 1 wired the top-level wrappers (MoveUsed, Switch, Mega, Tera, EndOfTurn, DamageDealt,
-Faint, Weather/Terrain/PseudoWeather/SideCondition changed). Still to emit:
+Phase 1 ✅ complete — all top-level wrappers and leaf sites wired (WeatherChanged, BoostChanged,
+ItemLost/Gained/Revealed, StatusInflicted/Cured, VolatileStart/End, SlotConditionStart/End,
+Healed, SetHp; including Rest sleep+heal, Smack Down MagnetRise/Telekinesis, berry-cure
+status/confusion, Mental Herb volatiles + ItemLost, Fling Mental Herb).
 
-**Remaining Phase 1 sites (straightforward wiring):**
-- `Healed` — drain/leech callers in `apply_post_damage_move_effects`; EoT heal callers in `end_turn`
-- `SetHp` — Pain Split site
-- `StatusInflicted` / `StatusCured` — callers of `apply_status_to_pokemon`; inline `mon.status = None` cure sites (~10)
-- `BoostChanged` — callers of `apply_boosts_returning_delta` (emit one event per nonzero index of returned delta)
-- `VolatileStart` / `VolatileEnd` — callers of `apply_volatile_to_pokemon` / `remove_status_volatile`
-- `SlotConditionStart` / `SlotConditionEnd` — slot-condition write sites (`resolve_wish_slot_conditions`, etc.)
-- `ItemLost` / `ItemGained` / `ItemRevealed` — `process_item_loss_events`; Knock Off / theft sites
-- `WeatherChanged { weather: None }` / `TerrainChanged { terrain: None }` — expiry in `decrement_effect_timers`
-
-**Phase 2 (scattered qualifiers):**
+**Phase 2 — scattered qualifiers still to emit:**
 - `Crit` — `apply_single_hit_branch` (has `is_crit` + slot)
 - `HitCount` — once per move under MoveUsed wrapper; count from `multihit_hit_count_branches`
 - `Immune` / `MoveFailed` / `Blocked` / `Missed` — refactor 17 inline `last_move_failed = true` sites into a `note_move_outcome(bs, slot, outcome)` resolver so the EventKind can be emitted at the right level

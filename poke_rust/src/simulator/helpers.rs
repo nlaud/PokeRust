@@ -36,6 +36,43 @@ pub fn emit(bs: &mut BattleState, kind: EventKind) {
     }
 }
 
+/// Run `f`; any events it emits into `bs.pending_events` become the `reactions` of a
+/// parent node whose `kind` is `parent`.  The parent is pushed **after** its children
+/// (split off from the pending tail), preserving causal ordering.
+///
+/// Near-zero cost when `event_observer` is `None` — `f` is still called but no
+/// allocation or split occurs.
+pub fn with_reactions<R>(
+    bs: &mut BattleState,
+    parent: EventKind,
+    f: impl FnOnce(&mut BattleState) -> R,
+) -> R {
+    if bs.event_observer.is_none() {
+        return f(bs);
+    }
+    let start = bs.pending_events.len();
+    let result = f(bs);
+    let reactions = bs.pending_events.split_off(start);
+    bs.pending_events.push(InformationEvent { kind: parent, reactions });
+    result
+}
+
+/// Emit `Healed` events for a batch collected during a loop where the mutable `iter_mut`
+/// borrow prevented inline emission.  Each tuple is `(slot, post-heal hp, max hp)`.
+/// No-ops when `event_observer` is `None`.
+pub fn emit_healed_batch(bs: &mut BattleState, batch: &[(FieldSlot, u16, u16)]) {
+    if let Some(observer) = bs.event_observer {
+        for &(slot, hp, max_hp) in batch {
+            let new_hp = if slot.player == observer {
+                PokemonHP::Number(hp)
+            } else {
+                PokemonHP::Percent(hp_to_percent(hp, max_hp))
+            };
+            emit(bs, EventKind::Healed { target: slot, new_hp });
+        }
+    }
+}
+
 /// Convert a raw HP value to the display percentage a real player would see.
 /// Matches Showdown's convention: 0 only at faint, 100 only at full HP,
 /// otherwise round(hp × 100 / max_hp) clamped to 1–99.
@@ -59,6 +96,40 @@ pub fn observed_hp(bs: &BattleState, slot: FieldSlot, observer: Player) -> Pokem
         PokemonHP::Number(mon.hp)
     } else {
         PokemonHP::Percent(hp_to_percent(mon.hp, mon.stats[0]))
+    }
+}
+
+/// Observable effects from a berry-cure helper (`try_consume_status_cure_berry` or
+/// `apply_eaten_berry_effects`) that callers must emit as `InformationEvent`s after
+/// releasing the `&mut PokemonState` borrow.
+pub(crate) struct BerryCure {
+    /// Status that was cured (captured before `mon.status` was cleared).
+    pub status_cured: Option<Status>,
+    /// Whether `VolatileStatus::Confusion` was cured.
+    pub confusion_cured: bool,
+    /// Berry item consumed by `try_consume_status_cure_berry` (which clears `mon.item`
+    /// itself).  `None` when the caller already manages the held-item slot (e.g.
+    /// `force_eat_held_berry` emits `ItemLost` before calling the helper).
+    pub item_consumed: Option<Item>,
+}
+
+impl BerryCure {
+    pub(crate) fn none() -> Self {
+        Self { status_cured: None, confusion_cured: false, item_consumed: None }
+    }
+}
+
+/// Emit the `InformationEvent`s captured in a [`BerryCure`] for the given slot.
+/// No-ops when `event_observer` is `None` (inherits the `emit` gate).
+pub(crate) fn emit_berry_cure(bs: &mut BattleState, slot: FieldSlot, cure: &BerryCure) {
+    if let Some(ref status) = cure.status_cured {
+        emit(bs, EventKind::StatusCured { target: slot, status: status.clone() });
+    }
+    if cure.confusion_cured {
+        emit(bs, EventKind::VolatileEnd { target: slot, volatile: VolatileStatus::Confusion });
+    }
+    if let Some(ref item) = cure.item_consumed {
+        emit(bs, EventKind::ItemLost { slot, item: item.clone(), consumed: true });
     }
 }
 
@@ -2237,9 +2308,10 @@ pub(crate) fn on_berry_eaten(mon: &mut PokemonState, _eaten: &Item, env: &BerryE
     }
 }
 
-pub(crate) fn try_consume_status_cure_berry(mon: &mut PokemonState, env: &BerryEnv) {
+pub(crate) fn try_consume_status_cure_berry(mon: &mut PokemonState, env: &BerryEnv) -> BerryCure {
+    let mut cure = BerryCure::none();
     if env.suppressed {
-        return;
+        return cure;
     }
     let cures_status = matches!(
         (&mon.item, &mon.status),
@@ -2256,22 +2328,27 @@ pub(crate) fn try_consume_status_cure_berry(mon: &mut PokemonState, env: &BerryE
     let cures_confusion =
         is_confused(mon) && matches!(mon.item, Item::PersimBerry | Item::LumBerry);
     if cures_status {
+        cure.status_cured = mon.status.clone();
         mon.status = None;
     }
     if cures_confusion {
+        cure.confusion_cured = true;
         remove_status_volatile(mon, &VolatileStatus::Confusion);
     }
     if cures_status || cures_confusion {
+        cure.item_consumed = Some(mon.item.clone());
         mon.consumed_item = Some(mon.item.clone());
         mon.item = Item::None;
     }
+    cure
 }
 
 /// Call this whenever a Pokémon gains or re-enables a held item (e.g. Trick/Switcheroo,
 /// Magic Room lifting). Triggers any immediate item effects such as status-cure berries.
-/// Future item-gain moves (Recycle, Symbiosis, Pickup) should route through here too.
-pub(crate) fn on_item_obtained_or_enabled(mon: &mut PokemonState, env: &BerryEnv) {
-    try_consume_status_cure_berry(mon, env);
+/// Returns a [`BerryCure`] that the caller must emit after releasing the
+/// `&mut PokemonState` borrow.
+pub(crate) fn on_item_obtained_or_enabled(mon: &mut PokemonState, env: &BerryEnv) -> BerryCure {
+    try_consume_status_cure_berry(mon, env)
 }
 
 /// The canonical `(2L/5+2)*BP*Atk/Def/50+2` formula with floor after each step.
@@ -3031,7 +3108,9 @@ pub fn has_status_volatile(mon: &PokemonState, volatile: &VolatileStatus) -> boo
     })
 }
 
-pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus) {
+/// Remove the given volatile from `mon`'s list (by discriminant, ignoring payload).
+/// Returns `true` if a matching volatile was found and removed; `false` if nothing changed.
+pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus) -> bool {
     if let Some(pos) = mon.volatiles.iter().position(|v| match (v, volatile) {
         (
             VolatileStatusState::TurnStatus(vst, _) | VolatileStatusState::MoveStatus(vst, _),
@@ -3040,6 +3119,9 @@ pub fn remove_status_volatile(mon: &mut PokemonState, volatile: &VolatileStatus)
         _ => false,
     }) {
         mon.volatiles.remove(pos);
+        true
+    } else {
+        false
     }
 }
 
@@ -3410,9 +3492,13 @@ pub(crate) fn try_consume_white_herb(mon: &mut PokemonState, items_suppressed: b
 /// volatile statuses (Attract, Taunt, Encore, Torment, Heal Block, Disable), curing all
 /// that are present. Called from `apply_volatile_to_pokemon` after each push, so it fires
 /// from all sources (move effects on target or attacker, Cursed Body, etc.).
-pub(crate) fn try_consume_mental_herb(mon: &mut PokemonState, items_suppressed: bool) {
+/// Returns the volatile statuses that were removed by Mental Herb consumption
+/// (empty if the herb did not fire). Callers must emit `VolatileEnd` events
+/// and `ItemLost{MentalHerb}` for each non-empty return after releasing the
+/// `&mut PokemonState` borrow.
+pub(crate) fn try_consume_mental_herb(mon: &mut PokemonState, items_suppressed: bool) -> Vec<VolatileStatus> {
     if items_suppressed || klutz_disables_item(mon) || mon.item != Item::MentalHerb {
-        return;
+        return Vec::new();
     }
     let mental_volatiles = [
         VolatileStatus::Attract,
@@ -3422,16 +3508,17 @@ pub(crate) fn try_consume_mental_herb(mon: &mut PokemonState, items_suppressed: 
         VolatileStatus::HealBlock,
         VolatileStatus::Disable(PokemonMove::Struggle),
     ];
-    let mut any_removed = false;
+    let mut removed: Vec<VolatileStatus> = Vec::new();
     for v in &mental_volatiles {
         if has_status_volatile(mon, v) {
             remove_status_volatile(mon, v);
-            any_removed = true;
+            removed.push(v.clone());
         }
     }
-    if any_removed {
+    if !removed.is_empty() {
         mon.item = Item::None;
     }
+    removed
 }
 
 /// Returns the set of `(damage_to_apply, consume_item, probability)` outcomes for a direct
@@ -3883,12 +3970,18 @@ pub(crate) fn process_item_loss_events(
             m.item_lost = true;
         }
         // Popped Air Balloons are destroyed, not used — Pickup cannot retrieve them.
-        if *prev_item != Item::AirBalloon {
+        let is_consumed = *prev_item != Item::AirBalloon;
+        if is_consumed {
             state
                 .items_consumed_this_turn
                 .push((*slot, prev_item.clone()));
         }
-        try_symbiosis_pass(state, *slot);
+        // Emit ItemLost; Symbiosis pass (if any) emits nested reactions inside.
+        with_reactions(
+            state,
+            EventKind::ItemLost { slot: *slot, item: prev_item.clone(), consumed: is_consumed },
+            |bs| try_symbiosis_pass(bs, *slot),
+        );
     }
 }
 
@@ -3927,13 +4020,21 @@ fn try_symbiosis_pass(state: &mut BattleState, receiver_slot: FieldSlot) {
         }
         None => return,
     };
+    // Donor lost their item; emit before giving it to the receiver.
+    emit(state, EventKind::ItemLost { slot: donor_slot, item: item.clone(), consumed: false });
     let env = berry_env(state, receiver_slot);
-    if let Some(r) = get_pokemon_at_slot_mut(state, receiver_slot) {
+    let item_copy = item.clone();
+    let cure = if let Some(r) = get_pokemon_at_slot_mut(state, receiver_slot) {
         r.item = item;
         r.item_lost = false;
         // A freshly received berry may activate immediately (e.g. status-cure berries).
-        on_item_obtained_or_enabled(r, &env);
-    }
+        on_item_obtained_or_enabled(r, &env)
+    } else {
+        BerryCure::none()
+    };
+    // Receiver gained the item.
+    emit(state, EventKind::ItemGained { slot: receiver_slot, item: item_copy });
+    emit_berry_cure(state, receiver_slot, &cure);
 }
 
 /// Items that can never change holder or be removed mid-battle (Knock Off, Trick,
@@ -4013,11 +4114,18 @@ pub(crate) fn try_steal_item(
         None => return false,
     };
     let env = berry_env(state, thief_slot);
-    if let Some(t) = get_pokemon_at_slot_mut(state, thief_slot) {
-        t.item = item;
+    let item_copy = item.clone();
+    let cure = if let Some(t) = get_pokemon_at_slot_mut(state, thief_slot) {
+        t.item = item_copy.clone();
         t.item_lost = false; // gaining an item ends a previous Unburden boost
-        on_item_obtained_or_enabled(t, &env);
-    }
+        on_item_obtained_or_enabled(t, &env)
+    } else {
+        BerryCure::none()
+    };
+    // Loss and gain are both direct results of the move — emit as siblings.
+    emit(state, EventKind::ItemLost { slot: victim_slot, item, consumed: false });
+    emit(state, EventKind::ItemGained { slot: thief_slot, item: item_copy });
+    emit_berry_cure(state, thief_slot, &cure);
     true
 }
 
@@ -4026,24 +4134,25 @@ pub(crate) fn try_steal_item(
 /// recovered by Recycle). Respects Sticky Hold and untransferable/locked items.
 /// Returns `true` if an item was removed.
 pub(crate) fn try_remove_item(state: &mut BattleState, slot: FieldSlot) -> bool {
-    let blocked = match get_pokemon_at_slot(state, slot) {
+    // Capture the item while checking whether removal is legal.
+    let item_to_remove = match get_pokemon_at_slot(state, slot) {
         Some(v) => {
-            v.item == Item::None
+            let blocked = v.item == Item::None
                 || item_cannot_be_transferred(&v.item, v)
                 // Sticky Hold keeps the item (the holder must still be on the field).
                 || (!v.fainted
                     && v.ability == Ability::StickyHold
-                    && !pokemon_ability_is_suppressed(state, v))
+                    && !pokemon_ability_is_suppressed(state, v));
+            if blocked { None } else { Some(v.item.clone()) }
         }
-        None => true,
+        None => None,
     };
-    if blocked {
-        return false;
-    }
+    let Some(item) = item_to_remove else { return false; };
     if let Some(v) = get_pokemon_at_slot_mut(state, slot) {
         v.item = Item::None;
         v.item_lost = true; // item removal triggers Unburden
     }
+    emit(state, EventKind::ItemLost { slot, item, consumed: false });
     true
 }
 
@@ -4083,20 +4192,39 @@ pub(crate) fn try_swap_items(
     }
     let user_env = berry_env(state, user_slot);
     let target_env = berry_env(state, target_slot);
-    if let Some(u) = get_pokemon_at_slot_mut(state, user_slot) {
+    let user_cure = if let Some(u) = get_pokemon_at_slot_mut(state, user_slot) {
         u.item = target_item.clone();
         u.item_lost = target_item == Item::None; // gaining an item clears Unburden; losing one sets it
         if target_item != Item::None {
-            on_item_obtained_or_enabled(u, &user_env);
+            on_item_obtained_or_enabled(u, &user_env)
+        } else {
+            BerryCure::none()
         }
-    }
-    if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
+    } else {
+        BerryCure::none()
+    };
+    let target_cure = if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
         t.item = user_item.clone();
         t.item_lost = user_item == Item::None;
         if user_item != Item::None {
-            on_item_obtained_or_enabled(t, &target_env);
+            on_item_obtained_or_enabled(t, &target_env)
+        } else {
+            BerryCure::none()
         }
+    } else {
+        BerryCure::none()
+    };
+    // Emit the swap as four sibling events: each side loses then gains.
+    if user_item != Item::None {
+        emit(state, EventKind::ItemLost { slot: user_slot, item: user_item.clone(), consumed: false });
+        emit(state, EventKind::ItemGained { slot: target_slot, item: user_item });
     }
+    if target_item != Item::None {
+        emit(state, EventKind::ItemLost { slot: target_slot, item: target_item.clone(), consumed: false });
+        emit(state, EventKind::ItemGained { slot: user_slot, item: target_item });
+    }
+    emit_berry_cure(state, user_slot, &user_cure);
+    emit_berry_cure(state, target_slot, &target_cure);
     true
 }
 
@@ -4111,13 +4239,17 @@ pub(crate) fn recover_consumed_item(state: &mut BattleState, slot: FieldSlot) ->
         _ => return false,
     };
     let env = berry_env(state, slot);
-    if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
-        m.item = item;
+    let cure = if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+        m.item = item.clone();
         m.consumed_item = None;
         m.item_lost = false;
         // A restored item may activate immediately (e.g. a status-cure berry).
-        on_item_obtained_or_enabled(m, &env);
-    }
+        on_item_obtained_or_enabled(m, &env)
+    } else {
+        BerryCure::none()
+    };
+    emit(state, EventKind::ItemGained { slot, item });
+    emit_berry_cure(state, slot, &cure);
     true
 }
 
@@ -4125,9 +4257,10 @@ pub(crate) fn recover_consumed_item(state: &mut BattleState, slot: FieldSlot) ->
 /// berries, Cheek Pouch / Cud Chew) and record it as the consumed item. Does NOT touch
 /// `mon.item` — callers manage the held-item slot. Used by Teatime, Bug Bite / Pluck and
 /// Fling (berry thrown at the target).
-pub(crate) fn apply_eaten_berry_effects(mon: &mut PokemonState, berry: &Item, env: &BerryEnv) {
+pub(crate) fn apply_eaten_berry_effects(mon: &mut PokemonState, berry: &Item, env: &BerryEnv) -> BerryCure {
+    let mut cure = BerryCure::none();
     if env.suppressed {
-        return;
+        return cure;
     }
     // Status-cure / confusion-cure berries (Lum, Cheri, Persim, …) act only if the
     // matching condition is present; mirrors try_consume_status_cure_berry minus the
@@ -4146,9 +4279,11 @@ pub(crate) fn apply_eaten_berry_effects(mon: &mut PokemonState, berry: &Item, en
     );
     let cures_confusion = is_confused(mon) && matches!(berry, Item::PersimBerry | Item::LumBerry);
     if cures_status {
+        cure.status_cured = mon.status.clone();
         mon.status = None;
     }
     if cures_confusion {
+        cure.confusion_cured = true;
         remove_status_volatile(mon, &VolatileStatus::Confusion);
     }
     // HP / stat / Focus Energy berries.
@@ -4156,6 +4291,7 @@ pub(crate) fn apply_eaten_berry_effects(mon: &mut PokemonState, berry: &Item, en
     // Cheek Pouch healing and Cud Chew arming.
     on_berry_eaten(mon, berry, env);
     mon.consumed_item = Some(berry.clone());
+    cure
 }
 
 /// Force the Pokémon at `slot` to eat its own held Berry (Teatime). `ignore_unnerve`
@@ -4185,9 +4321,15 @@ pub(crate) fn force_eat_held_berry(
         m.item = Item::None;
         m.item_lost = true;
     }
-    if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
-        apply_eaten_berry_effects(m, &berry, &env);
-    }
+    // item_lost = true bypasses the snapshot mechanism; emit directly.
+    emit(state, EventKind::ItemLost { slot, item: berry.clone(), consumed: true });
+    let cure = if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+        apply_eaten_berry_effects(m, &berry, &env)
+    } else {
+        BerryCure::none()
+    };
+    // Emit status/confusion cure events now that the mutable borrow has ended.
+    emit_berry_cure(state, slot, &cure);
     true
 }
 
@@ -4220,9 +4362,16 @@ pub(crate) fn try_eat_targets_berry(
         h.item = Item::None;
         h.item_lost = true;
     }
-    if let Some(eater) = get_pokemon_at_slot_mut(state, eater_slot) {
-        apply_eaten_berry_effects(eater, &berry, &env);
-    }
+    // item_lost = true bypasses the snapshot; emit directly. consumed=false because
+    // the holder did not consume it — it was taken by the attacker.
+    emit(state, EventKind::ItemLost { slot: holder_slot, item: berry.clone(), consumed: false });
+    let cure = if let Some(eater) = get_pokemon_at_slot_mut(state, eater_slot) {
+        apply_eaten_berry_effects(eater, &berry, &env)
+    } else {
+        BerryCure::none()
+    };
+    // Emit status/confusion cure events for the eater now that the mutable borrow has ended.
+    emit_berry_cure(state, eater_slot, &cure);
     true
 }
 
@@ -4243,9 +4392,13 @@ pub(crate) fn apply_fling_effect(
         if env.suppressed {
             return;
         }
-        if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
-            apply_eaten_berry_effects(t, item, &env);
-        }
+        let cure = if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
+            apply_eaten_berry_effects(t, item, &env)
+        } else {
+            BerryCure::none()
+        };
+        // Emit status/confusion cure events for the target now that the borrow has ended.
+        emit_berry_cure(state, target_slot, &cure);
         return; // a flung berry produces no other rider
     }
 
@@ -4278,10 +4431,22 @@ pub(crate) fn apply_fling_effect(
                 VolatileStatus::HealBlock,
                 VolatileStatus::Disable(PokemonMove::Struggle),
             ];
+            // Capture which volatiles were actually present before removing them so we
+            // can emit VolatileEnd events after the mutable borrow ends.
+            let mut removed: Vec<VolatileStatus> = Vec::new();
             if let Some(t) = get_pokemon_at_slot_mut(state, target_slot) {
                 for v in &mental {
-                    remove_status_volatile(t, v);
+                    if has_status_volatile(t, v) {
+                        removed.push(v.clone());
+                        remove_status_volatile(t, v);
+                    }
                 }
+            }
+            // Borrow ended — emit VolatileEnd for each removed volatile.
+            // (No ItemLost here: the flung Herb was already removed from the attacker
+            // earlier in Fling move processing; the target does not consume an item.)
+            for v in removed {
+                emit(state, EventKind::VolatileEnd { target: target_slot, volatile: v });
             }
             return;
         }
@@ -4552,7 +4717,12 @@ fn trigger_terrain_seed_items(state: &mut BattleState) {
         state
             .items_consumed_this_turn
             .push((slot, seed_item.clone()));
-        try_symbiosis_pass(state, slot);
+        // Emit ItemLost; Symbiosis pass (if any) emits nested reactions inside.
+        with_reactions(
+            state,
+            EventKind::ItemLost { slot, item: seed_item.clone(), consumed: true },
+            |bs| try_symbiosis_pass(bs, slot),
+        );
     }
 }
 
@@ -5429,8 +5599,11 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
                 // mutate the entrant, so hand it a snapshot (the established pattern in this module).
                 let snapshot = state.clone();
                 let sun_blocks_freeze = weather_is_sunlight(&snapshot);
-                if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
-                    apply_status_to_pokemon(&snapshot, sun_blocks_freeze, false, m, &status);
+                let tspikes_applied = if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+                    apply_status_to_pokemon(&snapshot, sun_blocks_freeze, false, m, &status)
+                } else { false };
+                if tspikes_applied {
+                    emit(state, EventKind::StatusInflicted { target: slot, status: status.clone() });
                 }
             }
         }
@@ -5522,9 +5695,9 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
                 .unwrap_or(false),
         };
         if has_healing_wish {
-            let (max_hp, current_hp, has_status) = match get_pokemon_at_slot(state, slot) {
-                Some(mon) => (mon.stats[0].max(1), mon.hp, mon.status.is_some()),
-                None => (0, 0, false),
+            let (max_hp, current_hp, has_status, old_status) = match get_pokemon_at_slot(state, slot) {
+                Some(mon) => (mon.stats[0].max(1), mon.hp, mon.status.is_some(), mon.status.clone()),
+                None => (0, 0, false, None),
             };
             let needs_heal = current_hp < max_hp || has_status;
             if needs_heal {
@@ -5533,14 +5706,39 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
                     mon.status = None;
                 }
                 // Remove the HealingWish condition from this slot.
-                let conds = match slot.player {
-                    crate::state::battle::Player::P1 => &mut state.p1_slot_conditions,
-                    crate::state::battle::Player::P2 => &mut state.p2_slot_conditions,
-                };
-                if let Some(slot_conds) = conds.get_mut(slot_idx) {
-                    slot_conds
-                        .retain(|sc| !matches!(sc, crate::state::dex_data::SlotCondition::HealingWish));
-                }
+                {
+                    let conds = match slot.player {
+                        crate::state::battle::Player::P1 => &mut state.p1_slot_conditions,
+                        crate::state::battle::Player::P2 => &mut state.p2_slot_conditions,
+                    };
+                    if let Some(slot_conds) = conds.get_mut(slot_idx) {
+                        slot_conds
+                            .retain(|sc| !matches!(sc, crate::state::dex_data::SlotCondition::HealingWish));
+                    }
+                } // conds borrow ends here — state is free for emit
+                // Emit SlotConditionEnd with Healed / StatusCured nested as reactions.
+                with_reactions(
+                    state,
+                    EventKind::SlotConditionEnd {
+                        slot,
+                        condition: crate::state::dex_data::SlotCondition::HealingWish,
+                    },
+                    |bs| {
+                        if let Some(observer) = bs.event_observer {
+                            if current_hp < max_hp {
+                                let new_hp = if slot.player == observer {
+                                    PokemonHP::Number(max_hp)
+                                } else {
+                                    PokemonHP::Percent(hp_to_percent(max_hp, max_hp))
+                                };
+                                emit(bs, EventKind::Healed { target: slot, new_hp });
+                            }
+                            if let Some(ref status) = old_status {
+                                emit(bs, EventKind::StatusCured { target: slot, status: status.clone() });
+                            }
+                        }
+                    },
+                );
             }
             // If the entrant is already full HP with no status, leave the condition in place.
         }
@@ -6446,13 +6644,24 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
         }))
         .collect();
 
+    let mut syrup_bomb_deltas: Vec<(Player, usize, [i8; 7])> = Vec::new();
     for (player, idx) in syrup_slots {
         let mons = match player {
             Player::P1 => &mut state.p1_active_mons,
             Player::P2 => &mut state.p2_active_mons,
         };
-        if let Some(mon) = mons.get_mut(idx) {
-            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, -1, 0, 0], items_suppressed, false);
+        let delta = if let Some(mon) = mons.get_mut(idx) {
+            apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, -1, 0, 0], items_suppressed, false)
+        } else { [0; 7] };
+        syrup_bomb_deltas.push((player, idx, delta));
+    }
+    // Emit BoostChanged for SyrupBomb speed drops (mons borrows have ended).
+    for (player, idx, delta) in syrup_bomb_deltas {
+        let slot = FieldSlot { player, slot_index: idx as u8 };
+        for (boost_idx, &stages) in delta.iter().enumerate() {
+            if stages != 0 {
+                emit(state, EventKind::BoostChanged { target: slot, boost_idx, stages });
+            }
         }
     }
 
@@ -6493,20 +6702,29 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
 
     if !yawn_slots.is_empty() {
         let state_snapshot = state.clone();
+        // Collect (slot) where Yawn actually applied sleep, to emit StatusInflicted after loop.
+        let mut yawn_inflicted: Vec<FieldSlot> = Vec::new();
         for (player, idx) in yawn_slots {
             let mons = match player {
                 Player::P1 => &mut state.p1_active_mons,
                 Player::P2 => &mut state.p2_active_mons,
             };
             if let Some(mon) = mons.get_mut(idx) {
-                apply_status_to_pokemon(
+                let applied = apply_status_to_pokemon(
                     &state_snapshot,
                     sun_blocks_freeze,
                     false,
                     mon,
                     &crate::state::dex_data::Status::Sleep(0),
                 );
+                if applied {
+                    yawn_inflicted.push(FieldSlot { player, slot_index: idx as u8 });
+                }
             }
+        }
+        // Emit StatusInflicted after the mutable loop borrows are released.
+        for slot in yawn_inflicted {
+            emit(state, EventKind::StatusInflicted { target: slot, status: Status::Sleep(0) });
         }
     }
 
@@ -6567,17 +6785,24 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
     }
 }
 
-fn decrement_volatile_statuses(mons: &mut [PokemonState]) {
-    for mon in mons {
+/// Decrement all TurnStatus volatile counters for `mons`. Volatiles whose counter
+/// reaches 0 are dropped (expired). Returns `(mon_index, VolatileStatus)` pairs for
+/// each expired volatile so the caller can emit `VolatileEnd` events.
+fn decrement_volatile_statuses(mons: &mut [PokemonState]) -> Vec<(usize, VolatileStatus)> {
+    let mut expired: Vec<(usize, VolatileStatus)> = Vec::new();
+    for (mon_idx, mon) in mons.iter_mut().enumerate() {
         let mut kept = Vec::with_capacity(mon.volatiles.len());
 
         for volatile in mon.volatiles.drain(..) {
             match volatile {
                 VolatileStatusState::TurnStatus(effect, turns) => {
                     if turns == 0 {
-                        kept.push(VolatileStatusState::TurnStatus(effect, 0));
+                        kept.push(VolatileStatusState::TurnStatus(effect, 0)); // permanent
                     } else if turns > 1 {
                         kept.push(VolatileStatusState::TurnStatus(effect, turns - 1));
+                    } else {
+                        // turns == 1 → expires this tick
+                        expired.push((mon_idx, effect));
                     }
                 }
                 other_volatile => kept.push(other_volatile),
@@ -6586,6 +6811,7 @@ fn decrement_volatile_statuses(mons: &mut [PokemonState]) {
 
         mon.volatiles = kept;
     }
+    expired
 }
 
 pub fn decrement_move_statuses(mon: &mut PokemonState) {
@@ -6622,6 +6848,7 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
         } else if *turns == 1 {
             state.weather = None;
             state.weather_turns = None;
+            emit(state, EventKind::WeatherChanged { weather: None });
         }
     }
 
@@ -6631,6 +6858,7 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
         } else if *turns == 1 {
             state.terrain = None;
             state.terrain_turns = None;
+            emit(state, EventKind::TerrainChanged { terrain: None });
         }
     }
 
@@ -6642,15 +6870,27 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
         // ability_active is unknown here (no per-slot state); use simple env so
         // Cheek Pouch / Cud Chew don't fire on Magic Room expiry (corner case).
         let env = BerryEnv::simple(false);
-        for mon in state
-            .p1_active_mons
-            .iter_mut()
-            .chain(state.p2_active_mons.iter_mut())
-        {
-            if klutz_disables_item(mon) {
-                continue;
+        // Collect cures from each side before borrowing state for emit (can't hold
+        // iter_mut and &mut state simultaneously).
+        let mut item_enable_cures: Vec<(FieldSlot, BerryCure)> = Vec::new();
+        for (idx, mon) in state.p1_active_mons.iter_mut().enumerate() {
+            if !klutz_disables_item(mon) {
+                item_enable_cures.push((
+                    FieldSlot { player: Player::P1, slot_index: idx as u8 },
+                    on_item_obtained_or_enabled(mon, &env),
+                ));
             }
-            on_item_obtained_or_enabled(mon, &env);
+        }
+        for (idx, mon) in state.p2_active_mons.iter_mut().enumerate() {
+            if !klutz_disables_item(mon) {
+                item_enable_cures.push((
+                    FieldSlot { player: Player::P2, slot_index: idx as u8 },
+                    on_item_obtained_or_enabled(mon, &env),
+                ));
+            }
+        }
+        for (slot, cure) in &item_enable_cures {
+            emit_berry_cure(state, *slot, cure);
         }
     }
 
@@ -6667,10 +6907,18 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
     apply_volatile_eot_effects(state);
 
     // Volatile status duration 0 means permanent, so preserve it. (Back mons cannot have volatiles)
-    decrement_volatile_statuses(&mut state.p1_active_mons);
+    let p1_expired = decrement_volatile_statuses(&mut state.p1_active_mons);
     //decrement_volatile_statuses(&mut state.p1_back_mons);
-    decrement_volatile_statuses(&mut state.p2_active_mons);
+    let p2_expired = decrement_volatile_statuses(&mut state.p2_active_mons);
     //decrement_volatile_statuses(&mut state.p2_back_mons);
+
+    // Emit VolatileEnd for each expired TurnStatus volatile (borrows of active_mons have ended).
+    for (slot_idx, vs) in p1_expired {
+        emit(state, EventKind::VolatileEnd { target: FieldSlot { player: Player::P1, slot_index: slot_idx as u8 }, volatile: vs });
+    }
+    for (slot_idx, vs) in p2_expired {
+        emit(state, EventKind::VolatileEnd { target: FieldSlot { player: Player::P2, slot_index: slot_idx as u8 }, volatile: vs });
+    }
 
     // timers decremented; other end-of-turn effects handled by `end_turn`
 }
@@ -6733,53 +6981,77 @@ pub fn end_turn(
     // the per-turn event flags (Assurance / Avalanche / Lash Out / Burning Jealousy),
     // and empty the per-turn consumed-item pool (Pickup has already run in Phase 4).
     for (bs, _) in branches.iter_mut() {
-        for mon in bs
-            .p1_active_mons
-            .iter_mut()
-            .chain(bs.p2_active_mons.iter_mut())
-        {
-            mon.entered_this_turn = false;
-            // U-turn/Volt Switch mid-turn entries set first_turn_on_field_pending so EOT skips
-            // clearing first_move_on_field once, preserving it to their actual first turn.
-            if mon.first_turn_on_field_pending {
-                mon.first_turn_on_field_pending = false;
-            } else {
-                mon.first_move_on_field = false;
+        // Collect (slot, which volatile ended) for emission after the loop borrows end.
+        let mut roost_ended: Vec<FieldSlot> = Vec::new();
+        let mut electrify_ended: Vec<FieldSlot> = Vec::new();
+        let mut encore_ended: Vec<FieldSlot> = Vec::new();
+        let n_p1 = bs.p1_active_mons.len();
+        let n_p2 = bs.p2_active_mons.len();
+        for (player, count) in [(Player::P1, n_p1), (Player::P2, n_p2)] {
+            for i in 0..count {
+                let slot = FieldSlot { player, slot_index: i as u8 };
+                let mon = match player {
+                    Player::P1 => &mut bs.p1_active_mons[i],
+                    Player::P2 => &mut bs.p2_active_mons[i],
+                };
+                mon.entered_this_turn = false;
+                // U-turn/Volt Switch mid-turn entries set first_turn_on_field_pending so EOT skips
+                // clearing first_move_on_field once, preserving it to their actual first turn.
+                if mon.first_turn_on_field_pending {
+                    mon.first_turn_on_field_pending = false;
+                } else {
+                    mon.first_move_on_field = false;
+                }
+                mon.damaged_this_turn = false;
+                mon.damaged_by_this_turn.clear();
+                mon.last_physical_damage_taken = 0;
+                mon.last_physical_attacker = None;
+                mon.last_special_damage_taken = 0;
+                mon.last_special_attacker = None;
+                mon.last_damage_taken = 0;
+                mon.last_damage_attacker = None;
+                mon.stats_raised_this_turn = false;
+                mon.stats_lowered_this_turn = false;
+                mon.switched_in_this_turn = false;
+                // Roost's Flying-type suppression only lasts the turn it is used.
+                if remove_status_volatile(mon, &VolatileStatus::Roost) {
+                    roost_ended.push(slot);
+                }
+                // Electrify only redirects the affected Pokémon's move for the current turn.
+                if remove_status_volatile(mon, &VolatileStatus::Electrify) {
+                    electrify_ended.push(slot);
+                }
+                // Encore ends immediately once its move runs out of PP.
+                let encore_move_out_of_pp = mon
+                    .volatiles
+                    .iter()
+                    .find_map(|v| match v {
+                        VolatileStatusState::MoveStatus(VolatileStatus::Encore(m), _) => {
+                            Some(m.clone())
+                        }
+                        _ => None,
+                    })
+                    .is_some_and(|m| {
+                        !mon.moves
+                            .iter()
+                            .zip(mon.move_pp.iter())
+                            .any(|(slot, pp)| slot.as_ref() == Some(&m) && *pp > 0)
+                    });
+                if encore_move_out_of_pp {
+                    remove_status_volatile(mon, &VolatileStatus::Encore(PokemonMove::Struggle));
+                    encore_ended.push(slot);
+                }
             }
-            mon.damaged_this_turn = false;
-            mon.damaged_by_this_turn.clear();
-            mon.last_physical_damage_taken = 0;
-            mon.last_physical_attacker = None;
-            mon.last_special_damage_taken = 0;
-            mon.last_special_attacker = None;
-            mon.last_damage_taken = 0;
-            mon.last_damage_attacker = None;
-            mon.stats_raised_this_turn = false;
-            mon.stats_lowered_this_turn = false;
-            mon.switched_in_this_turn = false;
-            // Roost's Flying-type suppression only lasts the turn it is used.
-            remove_status_volatile(mon, &VolatileStatus::Roost);
-            // Electrify only redirects the affected Pokémon's move for the current turn.
-            remove_status_volatile(mon, &VolatileStatus::Electrify);
-            // Encore ends immediately once its move runs out of PP.
-            let encore_move_out_of_pp = mon
-                .volatiles
-                .iter()
-                .find_map(|v| match v {
-                    VolatileStatusState::MoveStatus(VolatileStatus::Encore(m), _) => {
-                        Some(m.clone())
-                    }
-                    _ => None,
-                })
-                .is_some_and(|m| {
-                    !mon.moves
-                        .iter()
-                        .zip(mon.move_pp.iter())
-                        .any(|(slot, pp)| slot.as_ref() == Some(&m) && *pp > 0)
-                });
-            if encore_move_out_of_pp {
-                remove_status_volatile(mon, &VolatileStatus::Encore(PokemonMove::Struggle));
-            }
+        }
+        // Emit VolatileEnd for turn-scoped volatiles that expired this EOT.
+        for slot in roost_ended {
+            emit(bs, EventKind::VolatileEnd { target: slot, volatile: VolatileStatus::Roost });
+        }
+        for slot in electrify_ended {
+            emit(bs, EventKind::VolatileEnd { target: slot, volatile: VolatileStatus::Electrify });
+        }
+        for slot in encore_ended {
+            emit(bs, EventKind::VolatileEnd { target: slot, volatile: VolatileStatus::Encore(PokemonMove::Struggle) });
         }
         bs.items_consumed_this_turn.clear();
         bs.round_used_this_turn = false;
@@ -6850,20 +7122,21 @@ fn get_pseudo_weather_duration(pseudo_weather: &PseudoWeather) -> u8 {
 /// Apply a status condition to a pokemon (only if it doesn't already have one).
 /// `mold_break` is true when the source is a Mold Breaker / Turboblaze / Teravolt attacker,
 /// which suppresses ignorable abilities (SweetVeil, etc.) on the target.
+/// Returns `true` if the status was successfully applied (so callers can emit `StatusInflicted`).
 fn apply_status_to_pokemon(
     state: &BattleState,
     sun_blocks_freeze: bool,
     mold_break: bool,
     mon: &mut PokemonState,
     status: &crate::state::dex_data::Status,
-) {
+) -> bool {
     // Prevent statuses if ability blocks all non-volatile statuses
     if mon.ability == Ability::Comatose || mon.ability == Ability::PurifyingSalt {
-        return;
+        return false;
     }
 
     if mon.ability == Ability::LeafGuard && sun_blocks_freeze {
-        return;
+        return false;
     }
 
     // Sweet Veil: the holder cannot fall asleep (including self-induced sleep from Rest).
@@ -6874,17 +7147,17 @@ fn apply_status_to_pokemon(
         && !pokemon_ability_is_suppressed(state, mon)
         && mon.ability == Ability::SweetVeil
     {
-        return;
+        return false;
     }
 
     if matches!(status, Status::Frozen(_)) && sun_blocks_freeze {
-        return;
+        return false;
     }
 
     if matches!(status, Status::Sleep(_))
         && pokemon_is_on_terrain(state, mon, &Terrain::ElectricTerrain)
     {
-        return;
+        return false;
     }
 
     // Uproar: while any Pokémon on the field is making an uproar, no Pokémon can fall asleep.
@@ -6895,7 +7168,7 @@ fn apply_status_to_pokemon(
             .chain(state.p2_active_mons.iter())
             .any(|m| !m.fainted && has_status_volatile(m, &VolatileStatus::Uproar));
         if uproar_active {
-            return;
+            return false;
         }
     }
 
@@ -6909,24 +7182,24 @@ fn apply_status_to_pokemon(
             | Status::Frozen(_)
     ) && pokemon_is_on_terrain(state, mon, &Terrain::MistyTerrain)
     {
-        return;
+        return false;
     }
 
     if mon.status.is_some() {
-        return;
+        return false;
     }
 
     match status {
         Status::Burn => {
             // Fire types and certain abilities prevent burn
             if pokemon_has_type(mon, &PokemonType::Fire) {
-                return;
+                return false;
             }
             if mon.ability == Ability::WaterBubble
                 || mon.ability == Ability::WaterVeil
                 || mon.ability == Ability::ThermalExchange
             {
-                return;
+                return false;
             }
             mon.status = Some(Status::Burn);
         }
@@ -6935,10 +7208,10 @@ fn apply_status_to_pokemon(
             if pokemon_has_type(mon, &PokemonType::Poison)
                 || pokemon_has_type(mon, &PokemonType::Steel)
             {
-                return;
+                return false;
             }
             if mon.ability == Ability::Immunity {
-                return;
+                return false;
             }
             mon.status = Some(Status::Poison);
         }
@@ -6946,35 +7219,36 @@ fn apply_status_to_pokemon(
             if pokemon_has_type(mon, &PokemonType::Poison)
                 || pokemon_has_type(mon, &PokemonType::Steel)
             {
-                return;
+                return false;
             }
             if mon.ability == Ability::Immunity {
-                return;
+                return false;
             }
             mon.status = Some(Status::ToxicPoison(0));
         }
         Status::Paralysis => {
             if mon.ability == Ability::Limber || pokemon_has_type(mon, &PokemonType::Electric) {
-                return;
+                return false;
             }
             mon.status = Some(Status::Paralysis);
         }
         Status::Sleep(_) => {
             if mon.ability == Ability::Insomnia || mon.ability == Ability::VitalSpirit {
-                return;
+                return false;
             }
             mon.status = Some(Status::Sleep(0));
         }
         Status::Frozen(_) => {
             if pokemon_has_type(mon, &PokemonType::Ice) {
-                return;
+                return false;
             }
             if mon.ability == Ability::MagmaArmor || mon.ability == Ability::IceFace {
-                return;
+                return false;
             }
             mon.status = Some(Status::Frozen(0));
         }
     }
+    true
 }
 
 /// Heal `mon` by `amount` HP, clamped to max. Clears fainted flag.
@@ -7182,6 +7456,11 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
         apply_weather_residual(mon, &ctx, p2_envs[i]);
     }
 
+    // Batch-collect (slot, post-heal hp, max-hp) for Healed event emission after each
+    // iter_mut loop (the mutable slice borrow prevents inline emit; emit_healed_batch fires
+    // after the borrow is released).
+    let mut healed: Vec<(FieldSlot, u16, u16)> = Vec::new();
+
     // Grassy Terrain healing
     let terrain_snapshot = state.clone();
     if matches!(
@@ -7191,16 +7470,26 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
         for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
             if !mon.fainted && pokemon_is_grounded(&terrain_snapshot, mon) {
                 let max_hp = mon.stats[0].max(1);
+                let before = mon.hp;
                 gain_hp(mon, (max_hp as u32 / 16) as u16, p1_envs[i]);
+                if mon.hp != before {
+                    healed.push((FieldSlot { player: Player::P1, slot_index: i as u8 }, mon.hp, max_hp));
+                }
             }
         }
         for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
             if !mon.fainted && pokemon_is_grounded(&terrain_snapshot, mon) {
                 let max_hp = mon.stats[0].max(1);
+                let before = mon.hp;
                 gain_hp(mon, (max_hp as u32 / 16) as u16, p2_envs[i]);
+                if mon.hp != before {
+                    healed.push((FieldSlot { player: Player::P2, slot_index: i as u8 }, mon.hp, max_hp));
+                }
             }
         }
     }
+    emit_healed_batch(state, &healed);
+    healed.clear();
 
     // Leftovers: restore 1/16 max HP (rounded down, min 1) at end of turn.
     // Does not consume the item. Capped at max HP by gain_hp.
@@ -7213,7 +7502,11 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
             && !heal_is_blocked(mon)
         {
             let max_hp = mon.stats[0].max(1);
+            let before = mon.hp;
             gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p1_envs[i]);
+            if mon.hp != before {
+                healed.push((FieldSlot { player: Player::P1, slot_index: i as u8 }, mon.hp, max_hp));
+            }
         }
     }
     for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
@@ -7224,26 +7517,52 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
             && !heal_is_blocked(mon)
         {
             let max_hp = mon.stats[0].max(1);
+            let before = mon.hp;
             gain_hp(mon, (max_hp as u32 / 16).max(1) as u16, p2_envs[i]);
+            if mon.hp != before {
+                healed.push((FieldSlot { player: Player::P2, slot_index: i as u8 }, mon.hp, max_hp));
+            }
         }
     }
+    emit_healed_batch(state, &healed);
+    healed.clear();
 
     // Aqua Ring: restore 1/16 max HP (rounded down) at end of turn. Heal Block suppresses
     // the heal but not the volatile. Big Root boosts the amount by ≈1.3×.
     for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
+        let before = mon.hp;
         apply_aqua_ring_residual(mon, ctx.items_suppressed, p1_envs[i]);
+        if mon.hp != before {
+            healed.push((FieldSlot { player: Player::P1, slot_index: i as u8 }, mon.hp, mon.stats[0]));
+        }
     }
     for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
+        let before = mon.hp;
         apply_aqua_ring_residual(mon, ctx.items_suppressed, p2_envs[i]);
+        if mon.hp != before {
+            healed.push((FieldSlot { player: Player::P2, slot_index: i as u8 }, mon.hp, mon.stats[0]));
+        }
     }
+    emit_healed_batch(state, &healed);
+    healed.clear();
 
     // Ingrain: restore 1/16 max HP (rounded down) at end of turn, same rules as Aqua Ring.
     for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
+        let before = mon.hp;
         apply_ingrain_residual(mon, ctx.items_suppressed, p1_envs[i]);
+        if mon.hp != before {
+            healed.push((FieldSlot { player: Player::P1, slot_index: i as u8 }, mon.hp, mon.stats[0]));
+        }
     }
     for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
+        let before = mon.hp;
         apply_ingrain_residual(mon, ctx.items_suppressed, p2_envs[i]);
+        if mon.hp != before {
+            healed.push((FieldSlot { player: Player::P2, slot_index: i as u8 }, mon.hp, mon.stats[0]));
+        }
     }
+    emit_healed_batch(state, &healed);
+    healed.clear();
 
     // Leech Seed: drain 1/8 of the seeded mon's max HP to the Pokémon in the seeder's slot
     // (the opposing active mon in singles). Liquid Ooze reverses the heal into damage.
@@ -7311,6 +7630,10 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
 /// skipped if the occupant is fainted, already at full HP, or under Heal Block. Big Root does
 /// not affect Wish.
 fn resolve_wish_slot_conditions(state: &mut BattleState) {
+    // Collect resolved Wishes: (player, slot_idx, pre_hp, post_hp, max_hp).
+    // SlotConditionEnd always emits; Healed only emits when HP actually changed.
+    let mut resolved: Vec<(Player, usize, u16, u16, u16)> = Vec::new();
+
     for player in [Player::P1, Player::P2] {
         let (conds, mons) = match player {
             Player::P1 => (&mut state.p1_slot_conditions, &mut state.p1_active_mons),
@@ -7333,14 +7656,45 @@ fn resolve_wish_slot_conditions(state: &mut BattleState) {
                 true
             });
             if let Some(heal) = resolved_heal {
-                if let Some(mon) = mons.get_mut(slot_idx) {
+                // Record that this Wish condition ended at (player, slot_idx).
+                // Also apply the heal and capture pre/post HP for the Healed event.
+                let (pre_hp, post_hp, max_hp) = if let Some(mon) = mons.get_mut(slot_idx) {
+                    let pre = mon.hp;
+                    let max = mon.stats[0];
                     if !mon.fainted && !heal_is_blocked(mon) {
-                        let env = BerryEnv::simple(false);
-                        gain_hp(mon, heal, env);
+                        gain_hp(mon, heal, BerryEnv::simple(false));
                     }
-                }
+                    (pre, mon.hp, max)
+                } else {
+                    (0, 0, 1)
+                };
+                resolved.push((player, slot_idx, pre_hp, post_hp, max_hp));
             }
         }
+    }
+
+    // Emit SlotConditionEnd with Healed nested as its reaction (iter_mut borrows ended).
+    for (player, slot_idx, pre_hp, post_hp, max_hp) in resolved {
+        let slot = FieldSlot { player, slot_index: slot_idx as u8 };
+        with_reactions(
+            state,
+            EventKind::SlotConditionEnd {
+                slot,
+                condition: crate::state::dex_data::SlotCondition::Wish { heal: 0, turns_remaining: 0 },
+            },
+            |bs| {
+                if post_hp != pre_hp {
+                    if let Some(observer) = bs.event_observer {
+                        let new_hp = if player == observer {
+                            PokemonHP::Number(post_hp)
+                        } else {
+                            PokemonHP::Percent(hp_to_percent(post_hp, max_hp))
+                        };
+                        emit(bs, EventKind::Healed { target: slot, new_hp });
+                    }
+                }
+            },
+        );
     }
 }
 
@@ -7403,6 +7757,28 @@ fn extract_fired_future_moves(state: &mut BattleState) -> Vec<FiredFutureMove> {
                 true
             });
         }
+    }
+    // Emit SlotConditionEnd for each fired FutureMove (retain_mut borrows have ended).
+    // Inference matches by move_name only (discriminant + name); snapshot fields are sentinels.
+    for f in &fired {
+        let slot = FieldSlot { player: f.target_player, slot_index: f.target_slot_index as u8 };
+        emit(state, EventKind::SlotConditionEnd {
+            slot,
+            condition: crate::state::dex_data::SlotCondition::FutureMove {
+                move_name: f.move_name.clone(),
+                attacker_is_p1: false,
+                attacker_slot_index: 0,
+                attacker_mon_id: 0,
+                snapshot_raw_spa: 0,
+                snapshot_spa_boost: 0,
+                snapshot_level: 1,
+                snapshot_type1: None,
+                snapshot_type2: None,
+                snapshot_ability: crate::data::ability::Ability::None,
+                snapshot_item: crate::data::item::Item::None,
+                turns_remaining: 0,
+            },
+        });
     }
     fired
 }
@@ -7604,7 +7980,22 @@ fn apply_leech_seed_residual(
         if liquid_ooze {
             take_damage(seeder, amount, seeder_env, abilities_suppressed);
         } else if !heal_is_blocked(seeder) {
+            let before = seeder.hp;
             gain_hp(seeder, amount, seeder_env);
+            let post_hp = seeder.hp;
+            let max_hp = seeder.stats[0];
+            // NLL: seeder last used above; borrow of state.{p1,p2}_active_mons ends here.
+            if post_hp != before {
+                let seeder_slot = FieldSlot { player: seeder_player, slot_index: idx as u8 };
+                if let Some(observer) = state.event_observer {
+                    let new_hp = if seeder_slot.player == observer {
+                        PokemonHP::Number(post_hp)
+                    } else {
+                        PokemonHP::Percent(hp_to_percent(post_hp, max_hp))
+                    };
+                    emit(state, EventKind::Healed { target: seeder_slot, new_hp });
+                }
+            }
         }
     }
 }
@@ -7966,14 +8357,20 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
             Ability::SpeedBoost => {
                 for (bs, _) in result.iter_mut() {
                     let items_suppressed = items_are_suppressed(bs);
-                    if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
+                    let delta = if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
                         if !mon.fainted && !mon.entered_this_turn {
                             apply_stat_boosts_to_pokemon(
                                 mon,
                                 &[0, 0, 0, 0, 1, 0, 0],
                                 items_suppressed,
                                 false,
-                            );
+                            )
+                        } else { [0; 7] }
+                    } else { [0; 7] };
+                    // Emit after the get_pokemon_at_slot_mut borrow ends.
+                    for (boost_idx, &stages) in delta.iter().enumerate() {
+                        if stages != 0 {
+                            emit(bs, EventKind::BoostChanged { target: *slot, boost_idx, stages });
                         }
                     }
                 }
@@ -8057,17 +8454,23 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                             continue;
                         }
                         let mut branch = bs.clone();
-                        if let Some(mon) = get_pokemon_at_slot_mut(&mut branch, *slot) {
-                            if let Some(i) = raise_idx {
-                                let mut delta = [0i8; 7];
-                                delta[i] = 2;
-                                apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed, false);
-                            }
-                            if let Some(j) = lower_idx {
-                                let mut delta = [0i8; 7];
-                                delta[j] = -1;
-                                apply_stat_boosts_to_pokemon(mon, &delta, items_suppressed, false);
-                            }
+                        let (raise_delta, lower_delta) = if let Some(mon) = get_pokemon_at_slot_mut(&mut branch, *slot) {
+                            let r = if let Some(i) = raise_idx {
+                                let mut d = [0i8; 7]; d[i] = 2;
+                                apply_stat_boosts_to_pokemon(mon, &d, items_suppressed, false)
+                            } else { [0i8; 7] };
+                            let l = if let Some(j) = lower_idx {
+                                let mut d = [0i8; 7]; d[j] = -1;
+                                apply_stat_boosts_to_pokemon(mon, &d, items_suppressed, false)
+                            } else { [0i8; 7] };
+                            (r, l)
+                        } else { ([0i8; 7], [0i8; 7]) };
+                        // Emit BoostChanged for each stat that actually changed (NLL: mon borrow ended).
+                        for (boost_idx, &stages) in raise_delta.iter().enumerate() {
+                            if stages != 0 { emit(&mut branch, EventKind::BoostChanged { target: *slot, boost_idx, stages }); }
+                        }
+                        for (boost_idx, &stages) in lower_delta.iter().enumerate() {
+                            if stages != 0 { emit(&mut branch, EventKind::BoostChanged { target: *slot, boost_idx, stages }); }
                         }
                         new_result.push((branch, prob * outcome_prob));
                     }
@@ -8150,11 +8553,15 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                     };
                     let (_, item) = bs.items_consumed_this_turn.remove(pos);
                     let env = berry_env(bs, *slot);
-                    if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
-                        mon.item = item;
+                    let cure = if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
+                        mon.item = item.clone();
                         mon.item_lost = false;
-                        on_item_obtained_or_enabled(mon, &env);
-                    }
+                        on_item_obtained_or_enabled(mon, &env)
+                    } else {
+                        BerryCure::none()
+                    };
+                    emit(bs, EventKind::ItemGained { slot: *slot, item });
+                    emit_berry_cure(bs, *slot, &cure);
                 }
             }
             // Cud Chew: re-apply a consumed berry's effect at the end of the turn
@@ -8295,12 +8702,16 @@ pub fn move_thaws_user_on_use(move_data: &MoveData) -> bool {
 /// Apply a volatile status to a pokemon (prevents duplicate volatiles of the same type).
 /// `attacker_mold_break` should be `true` when the source has a Mold Breaker / Turboblaze /
 /// Teravolt ability — it bypasses the Sweet Veil self-protection block on the holder.
+///
+/// Returns the list of volatile statuses removed by a Mental Herb activation (empty if none).
+/// Callers must emit `VolatileEnd` for each entry and `ItemLost{MentalHerb, consumed:true}`
+/// after releasing the `&mut PokemonState` borrow.
 fn apply_volatile_to_pokemon(
     state: &BattleState,
     mon: &mut PokemonState,
     volatile: &VolatileStatus,
     attacker_mold_break: bool,
-) {
+) -> Vec<VolatileStatus> {
     // Check if pokemon already has this volatile status
     let already_has = has_status_volatile(mon, volatile);
 
@@ -8310,14 +8721,14 @@ fn apply_volatile_to_pokemon(
             && (pokemon_has_type(mon, &PokemonType::Grass)
                 || has_status_volatile(mon, &VolatileStatus::Substitute(0)))
         {
-            return;
+            return Vec::new();
         }
 
         if matches!(volatile, VolatileStatus::Confusion)
             && !pokemon_ability_is_suppressed(state, mon)
             && mon.ability == Ability::OwnTempo
         {
-            return;
+            return Vec::new();
         }
 
         // Oblivious: blocks Taunt and Attract (Mold Breaker bypass handled in apply_effect_to_target).
@@ -8325,19 +8736,19 @@ fn apply_volatile_to_pokemon(
             && !pokemon_ability_is_suppressed(state, mon)
             && mon.ability == Ability::Oblivious
         {
-            return;
+            return Vec::new();
         }
 
         if matches!(volatile, VolatileStatus::Confusion)
             && pokemon_is_on_terrain(state, mon, &Terrain::MistyTerrain)
         {
-            return;
+            return Vec::new();
         }
 
         if matches!(volatile, VolatileStatus::Yawn)
             && pokemon_is_on_terrain(state, mon, &Terrain::ElectricTerrain)
         {
-            return;
+            return Vec::new();
         }
 
         // Sweet Veil / Insomnia / Vital Spirit: the holder cannot receive Yawn (it can never
@@ -8353,7 +8764,7 @@ fn apply_volatile_to_pokemon(
                 Ability::SweetVeil | Ability::Insomnia | Ability::VitalSpirit
             )
         {
-            return;
+            return Vec::new();
         }
 
         let is_move_status = matches!(
@@ -8389,9 +8800,11 @@ fn apply_volatile_to_pokemon(
         }
 
         // Mental Herb: immediately cure if the newly-added volatile is one it targets.
+        // Return the list of cleared volatiles so callers can emit VolatileEnd events.
         let items_suppressed = items_are_suppressed(state);
-        try_consume_mental_herb(mon, items_suppressed);
+        return try_consume_mental_herb(mon, items_suppressed);
     }
+    Vec::new()
 }
 
 /// Apply stat boosts to a pokemon. If any entry of `boosts` is negative (a stat drop was
@@ -8413,23 +8826,29 @@ pub(crate) fn highest_boostable_stat_index(mon: &PokemonState) -> usize {
     best_boost
 }
 
+/// Returns the clamped delta so callers can emit `BoostChanged` events.
 pub(crate) fn apply_stat_boost_external(
     mon: &mut PokemonState,
     boosts: &[i8; 7],
     items_suppressed: bool,
-) {
-    apply_stat_boosts_to_pokemon(mon, boosts, items_suppressed, false);
+) -> [i8; 7] {
+    apply_stat_boosts_to_pokemon(mon, boosts, items_suppressed, false)
 }
 
 /// Public thin wrapper around `apply_volatile_to_pokemon` for callers outside this module.
 /// Always passes `attacker_mold_break = false`; callers that need Mold Breaker bypass should
 /// route through `apply_effect_to_target` instead.
+///
+/// The Mental Herb return value is intentionally discarded here: all current call sites in
+/// `mod.rs` apply non-mental volatiles (PerishSong, DestinyBond, FocusEnergy, GastroAcid),
+/// so the return is always empty.  Route through `apply_effect_to_target` for volatiles
+/// that could trigger Mental Herb.
 pub(crate) fn apply_volatile_to_pokemon_pub(
     state: &BattleState,
     mon: &mut PokemonState,
     volatile: &VolatileStatus,
 ) {
-    apply_volatile_to_pokemon(state, mon, volatile, false);
+    let _ = apply_volatile_to_pokemon(state, mon, volatile, false);
 }
 
 /// Apply a stat boost delta to `mon`, clamping each stage to `[-6, 6]`.
@@ -8438,12 +8857,15 @@ pub(crate) fn apply_volatile_to_pokemon_pub(
 /// `apply_opponent_stat_drop`, which calls `try_consume_white_herb` manually *after*
 /// Defiant / Competitive have had a chance to run — ensuring a Defiant +2 that cancels
 /// the only negative stage suppresses the herb.
+/// Apply stat boosts to `mon`, respecting Contrary / Simple, and return the *actual* per-stat
+/// change after clamping.  A stat already at ±6 reports delta 0 even if the incoming value
+/// was nonzero.  Return value can be used by callers that need to emit `BoostChanged` events.
 fn apply_stat_boosts_to_pokemon(
     mon: &mut PokemonState,
     boosts: &[i8; 7],
     items_suppressed: bool,
     defer_white_herb: bool,
-) {
+) -> [i8; 7] {
     // Contrary inverts all stat changes; Simple doubles them. Suppression via
     // Neutralizing Gas cannot be checked here (no state); per-mon GastroAcid is used instead.
     let modified: [i8; 7];
@@ -8462,21 +8884,25 @@ fn apply_stat_boosts_to_pokemon(
     } else {
         boosts
     };
+    let mut delta = [0i8; 7];
     for i in 0..7 {
         let before = mon.boosts[i];
-        mon.boosts[i] = (before + boosts[i]).clamp(-6, 6);
+        let after = (before + boosts[i]).clamp(-6, 6);
+        delta[i] = after - before;
+        mon.boosts[i] = after;
         // Per-turn stat-change flags use the post-clamp delta: a stat pinned at ±6
         // doesn't count as raised/lowered (Burning Jealousy / Lash Out conditions).
-        if mon.boosts[i] > before {
+        if after > before {
             mon.stats_raised_this_turn = true;
         }
-        if mon.boosts[i] < before {
+        if after < before {
             mon.stats_lowered_this_turn = true;
         }
     }
     if !defer_white_herb && boosts.iter().any(|&b| b < 0) {
         try_consume_white_herb(mon, items_suppressed);
     }
+    delta
 }
 
 /// Apply a stat boost delta and return the *actual* per-stat change after clamping.
@@ -8650,8 +9076,11 @@ pub(crate) fn apply_opponent_stat_drop(
         }
         // Apply any positive boosts (e.g. from Decorate) directly to the holder.
         if kept != [0; 7] {
-            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &kept, items_suppressed, false);
+            let kept_delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                apply_stat_boosts_to_pokemon(mon, &kept, items_suppressed, false)
+            } else { [0i8; 7] };
+            for (boost_idx, &stages) in kept_delta.iter().enumerate() {
+                if stages != 0 { emit(state, EventKind::BoostChanged { target: target_slot, boost_idx, stages }); }
             }
         }
         return;
@@ -8675,6 +9104,12 @@ pub(crate) fn apply_opponent_stat_drop(
         };
         apply_boosts_returning_delta(mon, &filtered)
     };
+    // Emit one BoostChanged per stat that actually changed (NLL: mon borrow ended above).
+    for i in 0..7 {
+        if delta[i] != 0 {
+            emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: delta[i] });
+        }
+    }
 
     // ── 4a. Opportunist: mirror any positive raise to opponents of target_slot ──────────────
     // Covers moves that raise the TARGET's stats (e.g. Decorate, target-boosting secondaries).
@@ -8705,14 +9140,22 @@ pub(crate) fn apply_opponent_stat_drop(
             _ => None,
         };
         if let Some(idx) = reaction_idx {
-            let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) else {
-                return;
+            let def_comp_delta = {
+                let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) else {
+                    return;
+                };
+                let mut boost = [0i8; 7];
+                boost[idx] = 2 * stats_lowered;
+                // Self-boost from Defiant/Competitive — use the non-deferring path (no White Herb
+                // on a pure positive delta).
+                apply_stat_boosts_to_pokemon(mon, &boost, items_suppressed, false)
             };
-            let mut boost = [0i8; 7];
-            boost[idx] = 2 * stats_lowered;
-            // Self-boost from Defiant/Competitive — use the non-deferring path (no White Herb
-            // on a pure positive delta).
-            apply_stat_boosts_to_pokemon(mon, &boost, items_suppressed, false);
+            // Emit BoostChanged for the Defiant/Competitive self-raise (mon borrow ended).
+            for i in 0..7 {
+                if def_comp_delta[i] != 0 {
+                    emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: def_comp_delta[i] });
+                }
+            }
         }
     }
 
@@ -8805,8 +9248,11 @@ fn mirror_opportunist_raises(
             })
             .unwrap_or(false);
         if has_opportunist {
-            if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
-                apply_stat_boosts_to_pokemon(mon, &positive, items_suppressed, false);
+            let opp_delta = if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+                apply_stat_boosts_to_pokemon(mon, &positive, items_suppressed, false)
+            } else { [0i8; 7] };
+            for (boost_idx, &stages) in opp_delta.iter().enumerate() {
+                if stages != 0 { emit(state, EventKind::BoostChanged { target: slot, boost_idx, stages }); }
             }
         }
     }
@@ -8887,6 +9333,14 @@ fn apply_effect_to_target(
         None
     };
 
+    // Capture events to emit after the target_mon mutable borrow is released.
+    let mut status_inflicted: Option<Status> = None;
+    let mut volatile_started: Option<VolatileStatus> = None;
+    let mut steadfast_boost_delta = [0i8; 7];
+    let mut uproar_ended = false;
+    let mut target_berry_cure = BerryCure::none();
+    let mut target_mental_herb_cures: Vec<VolatileStatus> = Vec::new();
+
     if let Some(target_mon) = get_pokemon_at_slot_mut(state, target_slot) {
         if let Some(status) = &effect.status {
             // Sweet Veil: block sleep on the entire side (including Rest).
@@ -8911,29 +9365,33 @@ fn apply_effect_to_target(
                         match status {
                             Status::Poison => {
                                 target_mon.status = Some(Status::Poison);
+                                status_inflicted = Some(Status::Poison);
                             }
                             Status::ToxicPoison(_) => {
                                 target_mon.status = Some(Status::ToxicPoison(0));
+                                status_inflicted = Some(Status::ToxicPoison(0));
                             }
                             other => {
-                                apply_status_to_pokemon(
+                                let applied = apply_status_to_pokemon(
                                     &terrain_snapshot,
                                     sun_blocks_freeze,
                                     attacker_mold_break,
                                     target_mon,
                                     other,
                                 );
+                                if applied { status_inflicted = target_mon.status.clone(); }
                             }
                         }
                     }
                 } else {
-                    apply_status_to_pokemon(
+                    let applied = apply_status_to_pokemon(
                         &terrain_snapshot,
                         sun_blocks_freeze,
                         attacker_mold_break,
                         target_mon,
                         status,
                     );
+                    if applied { status_inflicted = target_mon.status.clone(); }
                 }
             }
         }
@@ -8979,12 +9437,17 @@ fn apply_effect_to_target(
                 && !oblivious_blocks
                 && !inner_focus_blocks_flinch
             {
-                apply_volatile_to_pokemon(
+                // Track before/after to detect newly added volatile (apply is a no-op on duplicates).
+                let had_volatile = has_status_volatile(target_mon, volatile);
+                target_mental_herb_cures = apply_volatile_to_pokemon(
                     &terrain_snapshot,
                     target_mon,
                     volatile,
                     attacker_mold_break,
                 );
+                if !had_volatile && has_status_volatile(target_mon, volatile) {
+                    volatile_started = Some(volatile.clone());
+                }
 
                 // Steadfast: +1 Speed when the holder flinches.
                 // The flinch volatile has just been pushed; fire immediately so the boost
@@ -8994,7 +9457,7 @@ fn apply_effect_to_target(
                     && target_mon.ability == Ability::Steadfast
                     && !has_status_volatile(target_mon, &VolatileStatus::GastroAcid)
                 {
-                    apply_stat_boosts_to_pokemon(
+                    steadfast_boost_delta = apply_stat_boosts_to_pokemon(
                         target_mon,
                         &[0, 0, 0, 0, 1, 0, 0],
                         items_suppressed,
@@ -9005,15 +9468,51 @@ fn apply_effect_to_target(
                 // Throat Chop: if the target was in the middle of an Uproar, it ends immediately.
                 // (The ThroatChop volatile has just been applied; the Uproar self-lock must cease.)
                 if matches!(volatile, VolatileStatus::ThroatChop) {
+                    let had_uproar = has_status_volatile(target_mon, &VolatileStatus::Uproar);
                     remove_status_volatile(target_mon, &VolatileStatus::Uproar);
+                    if had_uproar { uproar_ended = true; }
                 }
             }
         }
 
         // After both status and volatile are applied, check status-cure berries.
         // A single call handles Aspear/Cheri/etc. (status just set) and Persim/Lum (confusion just pushed).
-        try_consume_status_cure_berry(target_mon, &target_berry_env);
+        target_berry_cure = try_consume_status_cure_berry(target_mon, &target_berry_env);
     }
+
+    // Emit captured events (target_mon borrow released above; NLL safe).
+    if uproar_ended {
+        emit(state, EventKind::VolatileEnd { target: target_slot, volatile: VolatileStatus::Uproar });
+    }
+    if let Some(status) = status_inflicted {
+        emit(state, EventKind::StatusInflicted { target: target_slot, status });
+    }
+    if let Some(v) = volatile_started {
+        // Steadfast's Speed boost and Mental Herb cures nest under the VolatileStart
+        // (the volatile application caused them both).
+        with_reactions(state, EventKind::VolatileStart { target: target_slot, volatile: v }, |bs| {
+            for i in 0..7 {
+                if steadfast_boost_delta[i] != 0 {
+                    emit(bs, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: steadfast_boost_delta[i] });
+                }
+            }
+            for mv in &target_mental_herb_cures {
+                emit(bs, EventKind::VolatileEnd { target: target_slot, volatile: mv.clone() });
+            }
+            if !target_mental_herb_cures.is_empty() {
+                emit(bs, EventKind::ItemLost { slot: target_slot, item: Item::MentalHerb, consumed: true });
+            }
+        });
+    } else if steadfast_boost_delta != [0i8; 7] {
+        // Steadfast boost without newly-started flinch (shouldn't happen, but guard anyway).
+        for i in 0..7 {
+            if steadfast_boost_delta[i] != 0 {
+                emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: steadfast_boost_delta[i] });
+            }
+        }
+    }
+    // Berry-cure events (status/confusion cleared by a held berry).
+    emit_berry_cure(state, target_slot, &target_berry_cure);
 
     // Synchronize: after status is applied to the target, bounce Burn/Paralysis/Poison/Toxic
     // back at the source. The bounce goes through the normal apply_effect_to_target path so
@@ -9111,29 +9610,64 @@ fn apply_effect_to_attacker(state: &mut BattleState, attacker_slot: FieldSlot, e
     let items_suppressed = items_are_suppressed(state);
     let attacker_berry_env = berry_env(state, attacker_slot);
     let terrain_snapshot = state.clone();
+    // Capture events to emit after the attacker_mon borrow is released.
+    let mut self_status_inflicted: Option<Status> = None;
+    let mut self_volatile_started: Option<VolatileStatus> = None;
+    let mut self_boost_delta = [0i8; 7];
+    let mut self_berry_cure = BerryCure::none();
+    let mut self_mental_herb_cures: Vec<VolatileStatus> = Vec::new();
+
     if let Some(attacker_mon) = get_pokemon_at_slot_mut(state, attacker_slot) {
         if let Some(status) = &effect.status {
-            apply_status_to_pokemon(
+            let applied = apply_status_to_pokemon(
                 &terrain_snapshot,
                 sun_blocks_freeze,
                 false,
                 attacker_mon,
                 status,
             );
+            if applied { self_status_inflicted = attacker_mon.status.clone(); }
         }
 
         if let Some(volatile) = &effect.volatile_status {
-            apply_volatile_to_pokemon(&terrain_snapshot, attacker_mon, volatile, false);
+            let had = has_status_volatile(attacker_mon, volatile);
+            self_mental_herb_cures = apply_volatile_to_pokemon(&terrain_snapshot, attacker_mon, volatile, false);
+            if !had && has_status_volatile(attacker_mon, volatile) {
+                self_volatile_started = Some(volatile.clone());
+            }
         }
 
         // After both status and volatile are applied, check status-cure berries.
         // Covers self-inflicted confusion (e.g. Outrage rampaging) and self-status moves.
-        try_consume_status_cure_berry(attacker_mon, &attacker_berry_env);
+        self_berry_cure = try_consume_status_cure_berry(attacker_mon, &attacker_berry_env);
 
         if effect.boosts != [0; 7] {
-            apply_stat_boosts_to_pokemon(attacker_mon, &effect.boosts, items_suppressed, false);
+            self_boost_delta = apply_stat_boosts_to_pokemon(attacker_mon, &effect.boosts, items_suppressed, false);
         }
     }
+
+    // Emit captured events (attacker_mon borrow released; NLL safe).
+    if let Some(status) = self_status_inflicted {
+        emit(state, EventKind::StatusInflicted { target: attacker_slot, status });
+    }
+    if let Some(v) = self_volatile_started {
+        // Mental Herb cures nest under the VolatileStart (the volatile application caused them).
+        with_reactions(state, EventKind::VolatileStart { target: attacker_slot, volatile: v }, |bs| {
+            for mv in &self_mental_herb_cures {
+                emit(bs, EventKind::VolatileEnd { target: attacker_slot, volatile: mv.clone() });
+            }
+            if !self_mental_herb_cures.is_empty() {
+                emit(bs, EventKind::ItemLost { slot: attacker_slot, item: Item::MentalHerb, consumed: true });
+            }
+        });
+    }
+    for i in 0..7 {
+        if self_boost_delta[i] != 0 {
+            emit(state, EventKind::BoostChanged { target: attacker_slot, boost_idx: i, stages: self_boost_delta[i] });
+        }
+    }
+    // Berry-cure events (status/confusion cleared by a held berry).
+    emit_berry_cure(state, attacker_slot, &self_berry_cure);
 
     // Opportunist: mirror any positive self-boost the attacker just applied to opponents
     // who hold Opportunist.  Negative drops (Leaf Storm −2 SpA, etc.) are ignored.
@@ -9230,6 +9764,10 @@ fn apply_healing_move(
     let branch_sandstorm = matches!(branch_weather, Some(Weather::Sandstorm));
     let env = berry_env(bs, attacker_slot); // compute before the mutable borrow below
 
+    // Capture HP before the mutable borrow so we can compute the delta for Healed emission.
+    let pre_hp = get_pokemon_at_slot(bs, attacker_slot).map(|m| m.hp).unwrap_or(0);
+    let mut rest_slept = false;
+
     let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) else {
         return false;
     };
@@ -9253,6 +9791,7 @@ fn apply_healing_move(
             }
             attacker_mon.volatiles.clear();
             attacker_mon.status = Some(Status::Sleep(0));
+            rest_slept = true;
             let max_hp = attacker_mon.stats[0].max(1);
             let heal = max_hp.saturating_sub(attacker_mon.hp);
             gain_hp(attacker_mon, heal, env);
@@ -9280,6 +9819,18 @@ fn apply_healing_move(
             gain_hp(attacker_mon, heal, env);
         }
         _ => return false,
+    }
+    // attacker_mon borrow ends here — emit events now that &mut BattleState is free.
+    // Rest: StatusInflicted precedes Healed (sleep comes before the recovery completes).
+    if rest_slept {
+        emit(bs, EventKind::StatusInflicted { target: attacker_slot, status: Status::Sleep(0) });
+    }
+    let post_hp = get_pokemon_at_slot(bs, attacker_slot).map(|m| m.hp).unwrap_or(0);
+    if post_hp > pre_hp {
+        if let Some(observer) = bs.event_observer {
+            let new_hp = observed_hp(bs, attacker_slot, observer);
+            emit(bs, EventKind::Healed { target: attacker_slot, new_hp });
+        }
     }
     true
 }
@@ -9310,9 +9861,21 @@ fn apply_hazard_removal_move(
         PokemonMove::RapidSpin | PokemonMove::MortalSpin => {
             // Clear the user's own side and free the user from binding + Leech Seed.
             clear_entry_hazards(bs, user);
+            let had_trap = get_pokemon_at_slot(bs, attacker_slot)
+                .map(|m| has_status_volatile(m, &VolatileStatus::PartiallyTrapped(0)))
+                .unwrap_or(false);
+            let had_leech = get_pokemon_at_slot(bs, attacker_slot)
+                .map(|m| has_status_volatile(m, &VolatileStatus::LeechSeed))
+                .unwrap_or(false);
             if let Some(mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
                 remove_status_volatile(mon, &VolatileStatus::PartiallyTrapped(0));
                 remove_status_volatile(mon, &VolatileStatus::LeechSeed);
+            }
+            if had_trap {
+                emit(bs, EventKind::VolatileEnd { target: attacker_slot, volatile: VolatileStatus::PartiallyTrapped(0) });
+            }
+            if had_leech {
+                emit(bs, EventKind::VolatileEnd { target: attacker_slot, volatile: VolatileStatus::LeechSeed });
             }
         }
         PokemonMove::Defog => {
@@ -11254,7 +11817,8 @@ pub fn apply_secondary_effects(
             let state_snapshot = bs.clone();
             if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot) {
                 if !target_mon.fainted {
-                    apply_volatile_to_pokemon(
+                    // SaltCure is not a mental volatile, so the Mental Herb return is always empty.
+                    let _ = apply_volatile_to_pokemon(
                         &state_snapshot,
                         target_mon,
                         &VolatileStatus::SaltCure,

@@ -241,8 +241,12 @@ pub enum EventKind {
     StatusInflicted { target: FieldSlot, status: Status },
 
     /// A non-volatile status condition was cured (Lum Berry, Natural Cure, defrost,
-    /// Aromatherapy, Heal Bell, etc.). Cause conveyed by nesting.
+    /// single-mon cure paths, etc.). Cause conveyed by nesting.
     StatusCured { target: FieldSlot, status: Status },
+
+    /// Heal Bell / Aromatherapy cured the entire side's team (active + bench) at once.
+    /// Used because benched Pokémon have no on-field `FieldSlot` addressable identity.
+    TeamStatusCured { side: Player },
 
     // ── Stat stages ──────────────────────────────────────────────────────────
     /// A stat stage changed. `stages` is signed: positive = boost, negative = drop.
