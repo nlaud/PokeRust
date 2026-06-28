@@ -1,5 +1,5 @@
 use crate::state::battle::{Action, BattleState, FieldSlot, Player};
-use crate::information::information::{EventKind, InformationEvent};
+use crate::information::information::{CantReason, EventKind, InformationEvent};
 use crate::information::unknowns::PokemonHP;
 use crate::data::ability::Ability;
 use crate::data::item::Item;
@@ -96,6 +96,41 @@ pub fn observed_hp(bs: &BattleState, slot: FieldSlot, observer: Player) -> Pokem
         PokemonHP::Number(mon.hp)
     } else {
         PokemonHP::Percent(hp_to_percent(mon.hp, mon.stats[0]))
+    }
+}
+
+// ── Move-outcome resolver ─────────────────────────────────────────────────────
+
+/// Player-visible result of a move attempt, used by `note_move_outcome` to emit the
+/// right `EventKind` and suppress the `MoveUsed` wrapper when appropriate.
+pub enum MoveOutcome {
+    /// Pokémon could not act at all (flinch, sleep, paralysis, confusion, etc.).
+    /// Emits `Cant { slot, reason }` and sets `move_was_prevented = true` so the
+    /// `MoveUsed` wrapper is suppressed (Showdown emits `|cant|` instead of `|move|`).
+    Cant(CantReason),
+    /// The move executed but had no effect (wrong condition, streak failure, etc.).
+    /// Emits `MoveFailed { slot }` — still wrapped under `MoveUsed`.
+    Failed,
+}
+
+/// Record a move's player-visible outcome on `slot` (always the acting Pokémon).
+///
+/// - Sets `last_move_failed = true` on the slot's Pokémon (preserving Stomping Tantrum /
+///   Micle Berry / stall-counter semantics from before this refactor).
+/// - Emits the matching `EventKind` and, for `Cant`, marks `move_was_prevented = true`
+///   so `execute_action` suppresses the `MoveUsed` wrapper for that branch.
+pub fn note_move_outcome(bs: &mut BattleState, slot: FieldSlot, outcome: MoveOutcome) {
+    if let Some(mon) = get_pokemon_at_slot_mut(bs, slot) {
+        mon.last_move_failed = true;
+    }
+    match outcome {
+        MoveOutcome::Cant(reason) => {
+            bs.move_was_prevented = true;
+            emit(bs, EventKind::Cant { slot, reason });
+        }
+        MoveOutcome::Failed => {
+            emit(bs, EventKind::MoveFailed { slot });
+        }
     }
 }
 
@@ -5630,6 +5665,29 @@ pub fn ability_switch_in_priority(ability: &crate::data::ability::Ability) -> i8
     }
 }
 
+/// Returns true for abilities that produce visible events on switch-in, warranting an
+/// `AbilityRevealed` wrapper around their send-out effects.
+fn ability_has_visible_send_out_effect(ability: &Ability) -> bool {
+    matches!(ability,
+        // Stat-drop target effects
+        Ability::Intimidate
+        // Weather setters
+        | Ability::Drought | Ability::OrichalcumPulse | Ability::DesolateLand
+        | Ability::Drizzle | Ability::PrimordialSea
+        | Ability::SandStream | Ability::SnowWarning | Ability::DeltaStream
+        // Terrain setters
+        | Ability::ElectricSurge | Ability::HadronEngine
+        | Ability::GrassySurge | Ability::MistySurge | Ability::PsychicSurge
+        // Send-out-only visible effects
+        | Ability::CuriousMedicine | Ability::Hospitality | Ability::ScreenCleaner
+        | Ability::SupersweetSyrup | Ability::SupremeOverlord
+        | Ability::Trace | Ability::Imposter
+        | Ability::NeutralizingGas | Ability::TeraShift
+        | Ability::Mimicry | Ability::Unnerve | Ability::AsOneGlastrier | Ability::AsOneSpectrier
+        | Ability::Klutz
+    )
+}
+
 pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
     // Borrow scope: extract the info we need before taking a mutable borrow.
     let (is_fainted, is_replacement_turn) = match get_pokemon_at_slot(state, slot) {
@@ -5754,9 +5812,18 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
         .unwrap_or(true);
 
     if !ability_suppressed {
-        apply_entry_ability_field_effects(state, slot, &ability);
-        apply_entry_ability_target_effects(state, slot, &ability);
-        apply_send_out_only_ability_effects(state, slot, &ability);
+        if ability_has_visible_send_out_effect(&ability) {
+            let ability_event = ability.clone();
+            with_reactions(state, crate::information::information::EventKind::AbilityRevealed { slot, ability: ability_event }, |bs| {
+                apply_entry_ability_field_effects(bs, slot, &ability);
+                apply_entry_ability_target_effects(bs, slot, &ability);
+                apply_send_out_only_ability_effects(bs, slot, &ability);
+            });
+        } else {
+            apply_entry_ability_field_effects(state, slot, &ability);
+            apply_entry_ability_target_effects(state, slot, &ability);
+            apply_send_out_only_ability_effects(state, slot, &ability);
+        }
     }
 
     trigger_terrain_seed_items(state);
@@ -6014,9 +6081,20 @@ fn apply_send_out_only_ability_effects(
                     }
                     mon.ability = new_ability.clone();
                 }
-                // Fire the newly-traced ability's gain effects (Intimidate, weather, etc.).
-                apply_entry_ability_field_effects(state, slot, &new_ability);
-                apply_entry_ability_target_effects(state, slot, &new_ability);
+                // Fire the newly-traced ability's gain effects (Intimidate, weather, etc.),
+                // wrapped under AbilityRevealed for the traced ability so the player can see
+                // what was copied and observe its downstream effects.
+                if ability_has_visible_send_out_effect(&new_ability) {
+                    let ab_ev = new_ability.clone();
+                    with_reactions(state, crate::information::information::EventKind::AbilityRevealed { slot, ability: ab_ev }, |bs| {
+                        apply_entry_ability_field_effects(bs, slot, &new_ability);
+                        apply_entry_ability_target_effects(bs, slot, &new_ability);
+                    });
+                } else {
+                    emit(state, crate::information::information::EventKind::AbilityRevealed { slot, ability: new_ability.clone() });
+                    apply_entry_ability_field_effects(state, slot, &new_ability);
+                    apply_entry_ability_target_effects(state, slot, &new_ability);
+                }
             }
         }
 
@@ -6343,9 +6421,14 @@ pub fn update_forecast_forms(state: &mut BattleState) {
             _ => vec![PokemonType::Normal],
         };
         if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
-            m.species = target;
+            m.species = target.clone();
             m.types = types;
         }
+        emit(state, crate::information::information::EventKind::FormeChange {
+            slot,
+            into: target,
+            permanent: false,
+        });
     }
 }
 
@@ -6376,20 +6459,33 @@ pub fn update_mimicry_forms(state: &mut BattleState) {
 
         if let Some(t) = &new_type {
             // Terrain is active: store original types (if not already stored) and overwrite.
+            let changed = get_pokemon_at_slot(state, slot).map_or(false, |m| {
+                m.types.len() != 1 || m.types[0] != *t
+            });
             if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
                 if mon.pre_mimicry_types.is_none() {
                     mon.pre_mimicry_types = Some(mon.types.clone());
                 }
                 mon.types = vec![t.clone()];
             }
+            if changed {
+                emit(state, crate::information::information::EventKind::TypeChanged {
+                    slot,
+                    new_types: vec![t.clone()],
+                });
+            }
         } else {
             // No terrain: restore original types if we saved them.
             let saved = get_pokemon_at_slot(state, slot).and_then(|m| m.pre_mimicry_types.clone());
             if let Some(orig) = saved {
                 if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
-                    mon.types = orig;
+                    mon.types = orig.clone();
                     mon.pre_mimicry_types = None;
                 }
+                emit(state, crate::information::information::EventKind::TypeChanged {
+                    slot,
+                    new_types: orig,
+                });
             }
         }
     }
@@ -6905,6 +7001,30 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
 
     // Before decrementing, fire effects for volatiles that expire this turn.
     apply_volatile_eot_effects(state);
+
+    // Emit PerishCount for every active mon with PerishSong before the counter ticks down.
+    // turns_left = counter - 1 (what the player will see after this tick); 0 if already fainting.
+    {
+        let perish_counts: Vec<(FieldSlot, u8)> = state.p1_active_mons.iter().enumerate()
+            .filter_map(|(i, m)| {
+                m.volatiles.iter().find_map(|v| {
+                    if let VolatileStatusState::TurnStatus(VolatileStatus::PerishSong, n) = v {
+                        Some((FieldSlot { player: Player::P1, slot_index: i as u8 }, n.saturating_sub(1) as u8))
+                    } else { None }
+                })
+            })
+            .chain(state.p2_active_mons.iter().enumerate().filter_map(|(i, m)| {
+                m.volatiles.iter().find_map(|v| {
+                    if let VolatileStatusState::TurnStatus(VolatileStatus::PerishSong, n) = v {
+                        Some((FieldSlot { player: Player::P2, slot_index: i as u8 }, n.saturating_sub(1) as u8))
+                    } else { None }
+                })
+            }))
+            .collect();
+        for (slot, turns_left) in perish_counts {
+            emit(state, crate::information::information::EventKind::PerishCount { target: slot, turns_left });
+        }
+    }
 
     // Volatile status duration 0 means permanent, so preserve it. (Back mons cannot have volatiles)
     let p1_expired = decrement_volatile_statuses(&mut state.p1_active_mons);
@@ -11160,6 +11280,10 @@ pub fn apply_contact_hit_reactions(
                         }
                         atk.ability = Ability::Mummy;
                     }
+                    emit(&mut bs, crate::information::information::EventKind::AbilityRevealed {
+                        slot: attacker_slot,
+                        ability: Ability::Mummy,
+                    });
                     (bs, prob)
                 })
                 .collect()
@@ -11198,13 +11322,21 @@ pub fn apply_contact_hit_reactions(
                     }
                     if let Some(hld) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
                         if hld.original_ability.is_none() {
-                            hld.original_ability = Some(hld_ability);
+                            hld.original_ability = Some(hld_ability.clone());
                         }
-                        hld.ability = atk_ability;
+                        hld.ability = atk_ability.clone();
                     }
                     // Fire on-gain effects for both
                     process_pokemon_gain_ability(&mut bs, attacker_slot);
                     process_pokemon_gain_ability(&mut bs, holder_slot);
+                    emit(&mut bs, crate::information::information::EventKind::AbilityRevealed {
+                        slot: attacker_slot,
+                        ability: hld_ability,
+                    });
+                    emit(&mut bs, crate::information::information::EventKind::AbilityRevealed {
+                        slot: holder_slot,
+                        ability: atk_ability,
+                    });
                     (bs, prob)
                 })
                 .collect()
@@ -11837,10 +11969,16 @@ pub fn apply_secondary_effects(
             .unwrap_or(false);
         if !target_had_sub {
             for (bs, _) in branches.iter_mut() {
+                let had_nonzero = get_pokemon_at_slot(bs, target_slot)
+                    .map(|m| m.boosts.iter().any(|&b| b != 0))
+                    .unwrap_or(false);
                 if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot) {
                     if !target_mon.fainted {
                         target_mon.boosts = [0; 7];
                     }
+                }
+                if had_nonzero {
+                    emit(bs, crate::information::information::EventKind::BoostsCleared { target: target_slot });
                 }
             }
         }

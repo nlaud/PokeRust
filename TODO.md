@@ -6,26 +6,17 @@
 - Anticipation — signal if opponents have SE or OHKO moves (message-only; no battle-state change in a full-information sim)
 - Frisk — reveal an opponent's held item (message-only; no battle-state change in a full-information sim)
 
-## simulate_turn Event Emission (Phase 2)
-Phase 1 ✅ complete — all top-level wrappers and leaf sites wired (WeatherChanged, BoostChanged,
-ItemLost/Gained/Revealed, StatusInflicted/Cured, VolatileStart/End, SlotConditionStart/End,
-Healed, SetHp; including Rest sleep+heal, Smack Down MagnetRise/Telekinesis, berry-cure
-status/confusion, Mental Herb volatiles + ItemLost, Fling Mental Herb).
-
-**Phase 2 — scattered qualifiers still to emit:**
-- `Crit` — `apply_single_hit_branch` (has `is_crit` + slot)
-- `HitCount` — once per move under MoveUsed wrapper; count from `multihit_hit_count_branches`
-- `Immune` / `MoveFailed` / `Blocked` / `Missed` — refactor 17 inline `last_move_failed = true` sites into a `note_move_outcome(bs, slot, outcome)` resolver so the EventKind can be emitted at the right level
-- `BoostsCleared` / `BoostsInverted` / `BoostsSwapped` / `BoostsCopied` — Haze/Clear Smog/Topsy-Turvy/Heart-Power-Guard Swap/Psych Up sites
-- `AbilityRevealed` — `process_pokemon_send_out`; Trace/Mummy/Skill Swap; Intimidate; mega ability change
-- `FormeChange` / `TypeChanged` — forme-change callers (Palafin/Aegislash/Castform); Protean/Libero/Soak
-- `Cant` — pre-move can't-act checks mapped to `CantReason`
-- `ChargingMove` / `MustRecharge` / `SingleMoveOrTurn` — two-turn charge; Hyper Beam recharge; Protect/Detect/Beak Blast
-- `PerishCount` — Perish Song tick in `end_turn`
-- `SimultaneousSwitch` — wrap `process_sendouts_in_speed_order_branching` + leads in `battle_state_from_preview_branching`
-
-**After Phase 2:** Write round-trip tests using `run_single_turn_with_events` verifying nesting,
-multi-hit, perspective (Number vs Percent), and crit-branch non-merging behaviour.
+## simulate_turn Event Emission
+Phase 1 ✅ complete — all top-level wrappers and leaf sites wired.
+Phase 2 ✅ complete — all scattered qualifiers emitted: `Crit`, `HitCount`, `Immune`, `MoveFailed`,
+`Blocked`, `Missed`, `Cant`, `BoostsCleared/Inverted/Swapped/Copied`, `AbilityRevealed`,
+`FormeChange`, `TypeChanged`, `ChargingMove`, `MustRecharge`, `SingleMoveOrTurn`, `PerishCount`,
+`SimultaneousSwitch`.
+Phase 3 ✅ complete — six round-trip tests in `mod event_round_trip` verify nesting, multi-hit
+crit (`Crit`/`DamageDealt`/`HitCount`), `Cant` top-level placement, `Blocked` nesting, HP
+perspective (`Number` vs `Percent`), and crit-branch non-merging. Also fixed `DamageDealt`
+not being emitted for standard opponent hits (`apply_single_hit_branch` now emits after the
+`take_damage` call once the `target_mon` borrow ends).
 
 ## Refactors
 - Speed Investigation

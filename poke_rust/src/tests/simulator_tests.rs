@@ -32289,3 +32289,415 @@ mod rollout {
             "Ice Ball turn-2 / turn-1 damage ratio should be ≈2.0, got {ratio:.3}");
     }
 }
+
+// ── Phase 3 — event-emission round-trip tests ─────────────────────────────────
+//
+// These tests drive `simulate_turn` forward with `observer = Some(Player)` and
+// assert on the emitted `InformationEvent` trees. They are the first tests to
+// exercise the forward (simulator → observer) path; all prior event tests in
+// `inference_tests.rs` run the inverse (observer → inferred state) direction.
+mod event_round_trip {
+    use crate::state::battle::{FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{CantReason, EventKind, InformationEvent};
+    use crate::information::unknowns::PokemonHP;
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex,
+        run_single_turn_with_events, run_single_turn_with_events_opts, simple_attack,
+    };
+
+    // ── Local helpers ─────────────────────────────────────────────────────────
+
+    /// Find the first top-level event whose kind is `MoveUsed` by the given slot.
+    fn find_move_used<'a>(
+        events: &'a [InformationEvent],
+        user: FieldSlot,
+    ) -> Option<&'a InformationEvent> {
+        events.iter().find(|e| {
+            matches!(&e.kind, EventKind::MoveUsed { user: u, .. } if *u == user)
+        })
+    }
+
+    /// Return true if any event in `haystack` satisfies `pred` (shallow, non-recursive).
+    fn any_kind(haystack: &[InformationEvent], pred: impl Fn(&EventKind) -> bool) -> bool {
+        haystack.iter().any(|e| pred(&e.kind))
+    }
+
+    /// P1 slot 0 and P2 slot 0 FieldSlot constants.
+    fn p1s0() -> FieldSlot { FieldSlot { player: Player::P1, slot_index: 0 } }
+    fn p2s0() -> FieldSlot { FieldSlot { player: Player::P2, slot_index: 0 } }
+
+    // ── Test 1: MoveUsed wraps DamageDealt; EndOfTurn wraps Leftovers heal ────
+
+    /// Verify the two fundamental nesting contracts in one turn:
+    /// - A damaging move's `DamageDealt` is a reaction of `MoveUsed`.
+    /// - Leftovers healing at end-of-turn is a reaction of `EndOfTurn`.
+    #[test]
+    fn move_used_wraps_damage_and_eot_wraps_leftovers() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // Attacker: Shuckle — very low Attack so Snorlax won't faint.
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        // Defender: Snorlax at half HP carrying Leftovers, uses Splash.
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, Some(Item::Leftovers), None, None, None, false,
+        );
+        p2.hp = p2.stats[0] / 2; // start below full so Leftovers heals
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let mut branches = run_single_turn_with_events(
+            &state, &p1_cmd, &p2_cmd, md, pd, Player::P1,
+        );
+        assert_eq!(branches.len(), 1, "expected one deterministic branch");
+        let (_, events_opt, _) = branches.remove(0);
+        let events = events_opt.expect("observer set, events must be Some");
+
+        // MoveUsed for P1 slot 0 must have DamageDealt for P2 slot 0 as a reaction.
+        let tackle_ev = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 not found");
+        assert!(
+            any_kind(&tackle_ev.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == p2s0()
+            )),
+            "DamageDealt for P2 slot 0 missing from MoveUsed reactions;\n\
+             reactions = {:#?}", tackle_ev.reactions
+        );
+        // HP is Percent because P2 is the opponent of observer P1.
+        let damage_dealt = tackle_ev.reactions.iter().find(|e| {
+            matches!(&e.kind, EventKind::DamageDealt { target, .. } if *target == p2s0())
+        }).unwrap();
+        assert!(
+            matches!(&damage_dealt.kind, EventKind::DamageDealt { new_hp: PokemonHP::Percent(_), .. }),
+            "opponent's HP should be Percent from P1's perspective, got {:?}", damage_dealt.kind
+        );
+
+        // EndOfTurn must exist and its reactions must include Healed for P2 slot 0.
+        let eot_ev = events.iter().find(|e| matches!(e.kind, EventKind::EndOfTurn))
+            .expect("EndOfTurn event not found");
+        assert!(
+            any_kind(&eot_ev.reactions, |k| matches!(k,
+                EventKind::Healed { target, .. } if *target == p2s0()
+            )),
+            "Healed for P2 slot 0 missing from EndOfTurn reactions;\n\
+             reactions = {:#?}", eot_ev.reactions
+        );
+    }
+
+    // ── Test 2: Multi-hit move emits per-hit Crit+DamageDealt and a final HitCount ─
+
+    /// Surging Strikes (3 hits, always crits) should produce a `MoveUsed` whose
+    /// `reactions` contain three `Crit`/`DamageDealt` pairs followed by `HitCount { hits: 3 }`.
+    #[test]
+    fn multi_hit_surging_strikes_crit_and_hitcount_are_reactions() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // UrshifuRapidStrike with Surging Strikes. Ability::None to avoid side-effects.
+        let p1 = build_pokemon_state(
+            Species::UrshifuRapidStrike, pd, md, Some(50),
+            Some([Some(PokemonMove::SurgingStrikes), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        // Steelix: high Def (230 base) and Water 0.5× resist — survives 3 hits easily.
+        let p2 = build_pokemon_state(
+            Species::Steelix, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // consider_crit=true required to generate Crit events; damage_rolls=1 for
+        // determinism (Surging Strikes always crits → single branch).
+        let mut branches = run_single_turn_with_events_opts(
+            &state, &p1_cmd, &p2_cmd, md, pd, Player::P1, true, 1,
+        );
+        assert!(!branches.is_empty(), "expected at least one branch");
+        // Surging Strikes always crits → only one crit branch (prob 1.0).
+        assert_eq!(branches.len(), 1, "Surging Strikes always crits: expect 1 branch");
+        let (_, events_opt, _) = branches.remove(0);
+        let events = events_opt.expect("observer set, events must be Some");
+
+        let move_ev = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 not found");
+        let reactions = &move_ev.reactions;
+
+        let crit_count = reactions.iter()
+            .filter(|e| matches!(&e.kind, EventKind::Crit { target } if *target == p2s0()))
+            .count();
+        assert_eq!(crit_count, 3, "expected 3 Crit reactions, got {crit_count};\n\
+            reactions = {reactions:#?}");
+
+        let damage_count = reactions.iter()
+            .filter(|e| matches!(&e.kind, EventKind::DamageDealt { target, .. } if *target == p2s0()))
+            .count();
+        assert_eq!(damage_count, 3, "expected 3 DamageDealt reactions, got {damage_count};\n\
+            reactions = {reactions:#?}");
+
+        // HitCount is emitted after the per-hit loop and should be the final reaction.
+        assert!(
+            matches!(reactions.last().map(|e| &e.kind),
+                Some(EventKind::HitCount { target, hits: 3 }) if *target == p2s0()
+            ),
+            "expected HitCount {{ hits: 3 }} as last reaction, got {:?}", reactions.last()
+        );
+    }
+
+    // ── Test 3: Cant is a top-level event with no MoveUsed parent ─────────────
+
+    /// When Taunt prevents a status move, the simulator emits a top-level `Cant`
+    /// (not nested under `MoveUsed`) and suppresses the `MoveUsed` wrapper entirely.
+    #[test]
+    fn cant_is_top_level_with_no_move_used() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1 has Taunt active and tries to use Growl (a Status move).
+        let mut p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Growl), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        // Taunt is stored as MoveStatus in the simulator.
+        p1.volatiles.push(VolatileStatusState::MoveStatus(VolatileStatus::Taunt, 3));
+
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Growl
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
+
+        let mut branches = run_single_turn_with_events(
+            &state, &p1_cmd, &p2_cmd, md, pd, Player::P1,
+        );
+        assert_eq!(branches.len(), 1, "expected one deterministic branch");
+        let (_, events_opt, _) = branches.remove(0);
+        let events = events_opt.expect("observer set, events must be Some");
+
+        // There must be a top-level Cant for P1 slot 0 with reason Taunt.
+        let cant_ev = events.iter().find(|e| {
+            matches!(&e.kind, EventKind::Cant { slot, reason: CantReason::Taunt } if *slot == p1s0())
+        });
+        assert!(cant_ev.is_some(),
+            "expected top-level Cant {{ slot: P1s0, reason: Taunt }}, events = {events:#?}");
+
+        // The Cant event must NOT be wrapped under any MoveUsed parent
+        // (i.e., no top-level MoveUsed for P1 slot 0 should exist).
+        let p1_move_used = find_move_used(&events, p1s0());
+        assert!(p1_move_used.is_none(),
+            "MoveUsed for P1 slot 0 should not exist when Taunt fires, \
+             got {p1_move_used:#?}");
+
+        // Cant event itself has no reactions.
+        assert!(cant_ev.unwrap().reactions.is_empty(),
+            "Cant event should have no reactions");
+    }
+
+    // ── Test 4: Protect-blocked move nests Blocked inside MoveUsed ────────────
+
+    /// A move blocked by Protect emits `Blocked` as a **reaction** of `MoveUsed`
+    /// (not as a top-level Cant), keeping the `MoveUsed` wrapper intact.
+    #[test]
+    fn protect_blocked_move_nests_blocked() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1 attacks; P2 uses Protect (+4 priority → goes first).
+        let p1 = build_pokemon_state(
+            Species::Clefable, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Protect), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Tackle
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Protect
+
+        let mut branches = run_single_turn_with_events(
+            &state, &p1_cmd, &p2_cmd, md, pd, Player::P1,
+        );
+        assert_eq!(branches.len(), 1, "expected one deterministic branch");
+        let (_, events_opt, _) = branches.remove(0);
+        let events = events_opt.expect("observer set, events must be Some");
+
+        // P1's MoveUsed must exist (Protect block ≠ Cant; the move was attempted).
+        let tackle_ev = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 not found after Protect block");
+
+        // Blocked must appear as a reaction, not a top-level event.
+        assert!(
+            any_kind(&tackle_ev.reactions, |k| matches!(k,
+                EventKind::Blocked { target } if *target == p2s0()
+            )),
+            "Blocked for P2 slot 0 missing from MoveUsed reactions;\n\
+             reactions = {:#?}", tackle_ev.reactions
+        );
+
+        // Sanity: no top-level Cant for P1 slot 0.
+        let p1_top_level_cant = events.iter().find(|e| {
+            matches!(&e.kind, EventKind::Cant { slot, .. } if *slot == p1s0())
+        });
+        assert!(p1_top_level_cant.is_none(),
+            "a top-level Cant for P1 should NOT appear when Protect blocks (got Blocked instead)");
+    }
+
+    // ── Test 5: HP perspective — Number for own Pokémon, Percent for opponent ─
+
+    /// Running the same turn with `observer=P1` and `observer=P2` flips the
+    /// `DamageDealt.new_hp` encoding for P2's mon:
+    /// - `observer=P1`: P2 is opponent → `Percent`.
+    /// - `observer=P2`: P2 is self → `Number`.
+    #[test]
+    fn hp_perspective_number_vs_percent() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // Run once from P1's perspective.
+        let p1_events = {
+            let mut branches = run_single_turn_with_events(
+                &state, &p1_cmd, &p2_cmd, md, pd, Player::P1,
+            );
+            let (_, evs, _) = branches.remove(0);
+            evs.unwrap()
+        };
+        // Run once from P2's perspective.
+        let p2_events = {
+            let mut branches = run_single_turn_with_events(
+                &state, &p1_cmd, &p2_cmd, md, pd, Player::P2,
+            );
+            let (_, evs, _) = branches.remove(0);
+            evs.unwrap()
+        };
+
+        // Find DamageDealt for P2 slot 0 and clone its kind for each perspective.
+        fn damage_dealt_kind(events: &[InformationEvent], target: FieldSlot) -> EventKind {
+            events.iter()
+                .flat_map(|ev| std::iter::once(ev).chain(ev.reactions.iter()))
+                .find(|e| matches!(&e.kind, EventKind::DamageDealt { target: t, .. } if *t == target))
+                .map(|e| e.kind.clone())
+                .expect("DamageDealt for P2 slot 0 not found")
+        }
+
+        let p1_view = damage_dealt_kind(&p1_events, p2s0());
+        let p2_view = damage_dealt_kind(&p2_events, p2s0());
+
+        // From P1's view, P2 is the opponent → Percent.
+        assert!(
+            matches!(&p1_view, EventKind::DamageDealt { new_hp: PokemonHP::Percent(_), .. }),
+            "observer=P1 should see P2's HP as Percent, got {p1_view:?}"
+        );
+        // From P2's view, P2 is self → Number.
+        assert!(
+            matches!(&p2_view, EventKind::DamageDealt { new_hp: PokemonHP::Number(_), .. }),
+            "observer=P2 should see P2's HP as Number, got {p2_view:?}"
+        );
+    }
+
+    // ── Test 6: Crit event appears in crit branch, absent from non-crit branch ─
+
+    /// With `consider_crit=true`, the crit and non-crit branches carry different
+    /// event trees: the crit branch has `Crit` in `MoveUsed.reactions`, the
+    /// non-crit branch does not. Both branches must be present in the output.
+    #[test]
+    fn crit_event_in_crit_branch_only() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // A normal damaging matchup; crits and non-crits deal different damage so
+        // the two branches have distinct MatchStates (different HP) and are both kept.
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy),
+            None, None, Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let branches = run_single_turn_with_events_opts(
+            &state, &p1_cmd, &p2_cmd, md, pd, Player::P1, true, 1,
+        );
+        assert!(branches.len() >= 2,
+            "expect at least 2 branches (crit + non-crit) with consider_crit=true, got {}",
+            branches.len());
+
+        // Find whether each branch has a Crit reaction in P1's MoveUsed.
+        let has_crit_event = |events: &[InformationEvent]| -> bool {
+            find_move_used(events, p1s0())
+                .map(|mv| any_kind(&mv.reactions, |k| matches!(k, EventKind::Crit { .. })))
+                .unwrap_or(false)
+        };
+
+        let crit_branch_exists = branches.iter().any(|(_, evs, _)| {
+            evs.as_deref().map(has_crit_event).unwrap_or(false)
+        });
+        let no_crit_branch_exists = branches.iter().any(|(_, evs, _)| {
+            evs.as_deref().map(|e| !has_crit_event(e)).unwrap_or(false)
+        });
+
+        assert!(crit_branch_exists,
+            "a branch with Crit in MoveUsed.reactions must exist;\n\
+             branches = {:#?}", branches.iter().map(|(_, e, p)| (e, p)).collect::<Vec<_>>());
+        assert!(no_crit_branch_exists,
+            "a branch without Crit in MoveUsed.reactions must exist;\n\
+             branches = {:#?}", branches.iter().map(|(_, e, p)| (e, p)).collect::<Vec<_>>());
+    }
+}

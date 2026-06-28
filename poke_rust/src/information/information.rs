@@ -96,6 +96,7 @@ pub enum CantReason {
     SkyDrop,
     BeakBlast,
     FocusPunch, // Hurt before Focus Punch fires
+    Infatuation, // Attract — the Pokémon is infatuated and cannot act
     Other,
 }
 

@@ -168,6 +168,12 @@ pub struct BattleState {
     /// to deal doubled base power. Cleared at end of turn. Excluded from PartialEq/Hash.
     pub round_used_this_turn: bool,
 
+    /// Set to true by `note_move_outcome` when a Pokémon is prevented from acting (Cant).
+    /// Causes the `MoveUsed` wrapper in `execute_action` to be suppressed for that branch
+    /// (Showdown emits `|cant|` instead of `|move|` in this case). Reset at the start of
+    /// every `possible_damage_outcomes_for_move`. Excluded from PartialEq/Hash.
+    pub move_was_prevented: bool,
+
     /// Flat push-stream of events observed this turn. Wrapped into causal `reactions`
     /// trees by `execute_action` and `step_action_queue` using the split_off trick.
     /// Excluded from `PartialEq`/`Hash` so internal coalescing is unchanged.
@@ -640,7 +646,7 @@ impl PartialEq for BattleState {
             && self.self_switch_pending == other.self_switch_pending
             && self.items_consumed_this_turn == other.items_consumed_this_turn
         // last_move_on_field, sub_damage_dealt, round_used_this_turn,
-        // pending_events, event_observer intentionally excluded
+        // move_was_prevented, pending_events, event_observer intentionally excluded
     }
 }
 
@@ -676,6 +682,6 @@ impl std::hash::Hash for BattleState {
         self.self_switch_pending.hash(state);
         self.items_consumed_this_turn.hash(state);
         // last_move_on_field, sub_damage_dealt, round_used_this_turn,
-        // pending_events, event_observer intentionally excluded
+        // move_was_prevented, pending_events, event_observer intentionally excluded
     }
 }

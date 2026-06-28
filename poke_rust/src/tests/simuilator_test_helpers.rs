@@ -62,6 +62,7 @@ pub fn battle_state_from_lists(
         last_move_on_field: None,
         sub_damage_dealt: 0,
         round_used_this_turn: false,
+        move_was_prevented: false,
         pending_events: vec![],
         event_observer: None,
     };
@@ -247,6 +248,21 @@ pub fn run_single_turn_with_events(
     observer: Player,
 ) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
     simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1, Some(observer))
+}
+
+/// Like [`run_single_turn_with_events`] but exposes `consider_crit` and `damage_rolls`
+/// for tests that need crit branching (multi-hit crit, crit-branch non-merging, etc.).
+pub fn run_single_turn_with_events_opts(
+    state: &MatchState,
+    p1_cmd: &crate::state::battle::PlayerCommand,
+    p2_cmd: &crate::state::battle::PlayerCommand,
+    move_dex: &HashMap<PokemonMove, crate::state::dex_data::MoveData>,
+    pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>,
+    observer: Player,
+    consider_crit: bool,
+    damage_rolls: u8,
+) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
+    simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, Some(observer))
 }
 
 /// Compare two outcome vectors for permutation-equality after stripping transient tracking
