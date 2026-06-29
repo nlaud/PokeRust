@@ -234,6 +234,12 @@ pub struct PokemonState {
     /// move (from any source, including allies). Reset on switch-out or faint (Champions rules);
     /// never reset at end-of-turn while the mon remains on field.
     pub times_hit: u16,
+
+    /// When `Some(s)`, this Pokémon is currently disguised by Illusion as species `s`
+    /// (appearance only — true `species` is used for all calculations). Set on switch-in
+    /// when the ability is Illusion and a valid disguise target exists in the back.
+    /// Cleared when a direct damaging move connects, or when the ability is suppressed/changed.
+    pub illusion_disguise: Option<crate::data::species::Species>,
 }
 
 impl PartialEq for PokemonState {
@@ -296,6 +302,7 @@ impl PartialEq for PokemonState {
             && self.evs == other.evs
             && self.ivs == other.ivs
             && self.times_hit == other.times_hit
+            && self.illusion_disguise == other.illusion_disguise
     }
 }
 
@@ -359,6 +366,7 @@ impl std::hash::Hash for PokemonState {
         self.evs.hash(state);
         self.ivs.hash(state);
         self.times_hit.hash(state);
+        self.illusion_disguise.hash(state);
     }
 }
 
@@ -730,6 +738,7 @@ pub fn build_pokemon_state(
         evs,
         ivs,
         times_hit: 0,
+        illusion_disguise: None,
     }
 }
 

@@ -878,6 +878,17 @@ fn apply_single_hit_branch(
                 PokemonHP::Percent(simulator_helpers::hp_to_percent(new_hp, max_hp))
             };
             simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp });
+
+            // Illusion disguise break: any direct damaging hit (eff_damage > 0) dispels Illusion.
+            // Grab the true species before the mutable clear so they don't overlap.
+            let illusion_species: Option<Species> = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+                .and_then(|m| m.illusion_disguise.as_ref().map(|_| m.species.clone()));
+            if let Some(actual_species) = illusion_species {
+                if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, target_slot) {
+                    mon.illusion_disguise = None;
+                }
+                simulator_helpers::emit(&mut bs, EventKind::IllusionEnded { slot: target_slot, actual_species });
+            }
         }
 
         // Emit Smack Down's volatile removals now that the target_mon borrow has ended.
@@ -3929,6 +3940,9 @@ fn possible_damage_outcomes_for_move(
             if tgt.original_ability.is_none() { tgt.original_ability = Some(target_ability); }
             tgt.ability = user_ability;
         }
+        // Illusion break: either mon may have lost Illusion in the swap.
+        simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, action.user_slot);
+        simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, action.user_slot);
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, target_slot);
         simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed { slot: action.user_slot, ability: target_ability_ev });
@@ -3962,6 +3976,8 @@ fn possible_damage_outcomes_for_move(
             if user.original_ability.is_none() { user.original_ability = Some(user_ability); }
             user.ability = target_ability;
         }
+        // Illusion break: user may have lost Illusion (gained a new ability).
+        simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, action.user_slot);
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, action.user_slot);
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
@@ -4002,6 +4018,8 @@ fn possible_damage_outcomes_for_move(
             if tgt.original_ability.is_none() { tgt.original_ability = Some(target_ability); }
             tgt.ability = user_ability;
         }
+        // Illusion break: target may have lost Illusion (gained a new ability).
+        simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, target_slot);
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
@@ -4041,6 +4059,8 @@ fn possible_damage_outcomes_for_move(
             target: target_slot,
             volatile: VolatileStatus::GastroAcid,
         });
+        // Illusion break: GastroAcid suppresses the target's ability, including Illusion.
+        simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
@@ -4078,6 +4098,8 @@ fn possible_damage_outcomes_for_move(
                 tgt.status = None;
             }
         }
+        // Illusion break: target may have lost Illusion (gained Insomnia).
+        simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
@@ -4814,7 +4836,7 @@ fn possible_damage_outcomes_for_move(
                     let hit_branches = if move_data.force_switch
                         && (*damage > 0 || matches!(move_data.category, MoveCategory::Status))
                     {
-                        apply_forced_switch(hit_branches, action.user_slot, *target_slot, move_data, pokemon_dex)
+                        apply_forced_switch(hit_branches, action.user_slot, *target_slot, move_data, pokemon_dex, move_dex)
                     } else {
                         hit_branches
                     };
@@ -5752,6 +5774,7 @@ fn apply_forced_switch(
     target_slot: FieldSlot,
     move_data: &MoveData,
     pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
 ) -> Vec<(BattleState, f64)> {
     let bypasses_sub = simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::BypassSub);
     let mut out = Vec::new();
@@ -5777,7 +5800,7 @@ fn apply_forced_switch(
         for idx in bench {
             let mut clone = bs.clone();
             perform_switch_out_in(&mut clone, target_slot, idx, pokemon_dex);
-            simulator_helpers::process_pokemon_send_out(&mut clone, target_slot);
+            simulator_helpers::process_pokemon_send_out(&mut clone, target_slot, move_dex);
             // The switched-out target's still-queued action (e.g. a slower −7 move) must not run for
             // the replacement that just entered.
             clone.action_queue.retain(|a| action_user_slot(a) != target_slot);
@@ -6451,7 +6474,7 @@ fn execute_action(
         }
         Action::SwitchAction(s) => {
             perform_switch_out_in(&mut state, s.user_slot, s.switch_index, pokemon_dex);
-            simulator_helpers::process_pokemon_send_out(&mut state, s.user_slot);
+            simulator_helpers::process_pokemon_send_out(&mut state, s.user_slot, move_dex);
             if simulator_helpers::get_verbosity() >= 2 {
                 let user = simulator_helpers::get_pokemon_at_slot(&state, s.user_slot)
                     .map(|p| simulator_helpers::species_name_sim(&p.species))
@@ -6468,7 +6491,7 @@ fn execute_action(
                     };
                     let switch_state = InfoSwitchState {
                         slot: s.user_slot,
-                        species: mon.species.clone(),
+                        species: simulator_helpers::observed_species(mon, s.user_slot, observer),
                         level: mon.level,
                         hp,
                         status: mon.status.clone(),
@@ -6994,7 +7017,7 @@ fn perform_self_switch(
 }
 
 // Process a list of send-out slots in effective-speed order, branching on speed ties.
-fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[FieldSlot]) -> Vec<(BattleState, f64)> {
+fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[FieldSlot], move_dex: &HashMap<PokemonMove, MoveData>) -> Vec<(BattleState, f64)> {
     if slots.is_empty() { return vec![(base_state.clone(), 1.0)]; }
 
     // Build (slot, switch_in_priority, effective_speed) triples.
@@ -7081,7 +7104,14 @@ fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[
                 let hp = simulator_helpers::observed_hp(base_state, *slot, st.event_observer.unwrap());
                 Some(InfoSwitchState {
                     slot: *slot,
-                    species: mon.species.clone(),
+                    // Illusion disguise: base_state is pre-send-out, so illusion_disguise is not
+                    // yet set; compute the disguise species from party composition directly.
+                    species: if slot.player != st.event_observer.unwrap() {
+                        simulator_helpers::compute_illusion_disguise(base_state, *slot)
+                            .unwrap_or_else(|| mon.species.clone())
+                    } else {
+                        mon.species.clone()
+                    },
                     level: mon.level,
                     hp,
                     status: mon.status.clone(),
@@ -7094,7 +7124,7 @@ fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[
         // Wrap all send-out effects (abilities, hazards, etc.) as reactions of SimultaneousSwitch.
         simulator_helpers::with_reactions(&mut st, EventKind::SimultaneousSwitch { switches }, |bs| {
             for slot in &order {
-                simulator_helpers::process_pokemon_send_out(bs, *slot);
+                simulator_helpers::process_pokemon_send_out(bs, *slot, move_dex);
             }
         });
         results.push((st, prob));
@@ -7108,6 +7138,7 @@ fn perform_simultaneous_switches_branching(
     next_state: &BattleState,
     switches: &[(FieldSlot, usize)],
     pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
 ) -> Vec<(BattleState, f64)> {
     // First apply all swaps to a base state
     let mut base = next_state.clone();
@@ -7116,7 +7147,7 @@ fn perform_simultaneous_switches_branching(
     }
     // collect slots to process send-out effects for (the slots that were switched)
     let slots: Vec<FieldSlot> = switches.iter().map(|(s, _)| *s).collect();
-    simulator_helpers::coalesce_branches(process_sendouts_in_speed_order_branching(&base, &slots))
+    simulator_helpers::coalesce_branches(process_sendouts_in_speed_order_branching(&base, &slots, move_dex))
 }
 
 // Branching version of creating battle state from preview that respects speed-order send-outs and ties
@@ -7124,6 +7155,7 @@ fn battle_state_from_preview_branching(
     preview: &TeamPreviewState,
     p1_preview: &TeamPreviewCommand,
     p2_preview: &TeamPreviewCommand,
+    move_dex: &HashMap<PokemonMove, MoveData>,
 ) -> Vec<(MatchState, f64)> {
     let p1_active_mons: Vec<PokemonState> = p1_preview.active_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
     let p1_back_mons: Vec<PokemonState> = p1_preview.back_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
@@ -7176,7 +7208,7 @@ fn battle_state_from_preview_branching(
         slots.push(FieldSlot { player: Player::P2, slot_index: slot_idx as u8 });
     }
 
-    let branches = process_sendouts_in_speed_order_branching(&state, &slots);
+    let branches = process_sendouts_in_speed_order_branching(&state, &slots, move_dex);
     simulator_helpers::coalesce_branches(branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect())
 }
 
@@ -7192,7 +7224,7 @@ fn apply_player_commands_branching(
         MatchState::TeamPreviewState(preview) => {
             let p1_preview = match p1_cmd { PlayerCommand::TeamPreview(c) => c, _ => panic!("Expected TeamPreview command for P1"), };
             let p2_preview = match p2_cmd { PlayerCommand::TeamPreview(c) => c, _ => panic!("Expected TeamPreview command for P2"), };
-            simulator_helpers::coalesce_branches(battle_state_from_preview_branching(preview, p1_preview, p2_preview))
+            simulator_helpers::coalesce_branches(battle_state_from_preview_branching(preview, p1_preview, p2_preview, move_dex))
         }
         MatchState::BattleState(battle) => {
             if let Some(game_over_state) = game_over_state_if_battle_finished(battle) {
@@ -7234,7 +7266,7 @@ fn apply_player_commands_branching(
                     }
                 }
 
-                let branches = perform_simultaneous_switches_branching(&next_state, &queued_switches, pokemon_dex);
+                let branches = perform_simultaneous_switches_branching(&next_state, &queued_switches, pokemon_dex, move_dex);
                 return simulator_helpers::coalesce_branches(branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect());
             }
 
@@ -7256,7 +7288,7 @@ fn apply_player_commands_branching(
                 };
                 if let Some(bench_idx) = party_index {
                     perform_self_switch(&mut next_state, pending_slot, bench_idx, switch_type, pokemon_dex);
-                    simulator_helpers::process_pokemon_send_out(&mut next_state, pending_slot);
+                    simulator_helpers::process_pokemon_send_out(&mut next_state, pending_slot, move_dex);
                     next_state.self_switch_pending = None;
                 }
                 return vec![(MatchState::BattleState(next_state), 1.0)];

@@ -5688,7 +5688,68 @@ fn ability_has_visible_send_out_effect(ability: &Ability) -> bool {
     )
 }
 
-pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
+/// Compute the Illusion disguise species for a Pokémon entering battle.
+///
+/// Returns the species the Pokémon should appear as, or `None` if:
+/// - The mon's ability is not Illusion (or is suppressed).
+/// - The mon has already Transformed (Imposter/Transform).
+/// - The mon is itself the last non-fainted party member (no one to disguise as).
+///
+/// The disguise is the **last non-fainted** Pokémon in the holder's `*_back_mons`
+/// (party order), matching the game's "last conscious party member" rule.
+pub fn compute_illusion_disguise(state: &BattleState, slot: FieldSlot) -> Option<Species> {
+    let mon = get_pokemon_at_slot(state, slot)?;
+    if mon.ability != Ability::Illusion || mon.pre_transform.is_some() {
+        return None;
+    }
+    // Find the last non-fainted mon in the back. Party order: active first, bench after.
+    // Illusion picks the last non-fainted party member across the whole party.
+    let back = match slot.player {
+        Player::P1 => &state.p1_back_mons,
+        Player::P2 => &state.p2_back_mons,
+    };
+    // Scan from the end of the bench to find the last non-fainted mon.
+    back.iter().rev().find(|m| !m.fainted).map(|m| m.species.clone())
+}
+
+/// Return the species to report in a `SwitchState` event for the given slot,
+/// applying Illusion disguise from the observer's perspective.
+///
+/// - When `slot.player == observer`, the observer sees their own mon — report the true species.
+/// - Otherwise (opponent's mon), report the disguise species if Illusion is active.
+pub fn observed_species(mon: &PokemonState, slot: FieldSlot, observer: Player) -> Species {
+    if slot.player != observer {
+        if let Some(ref disguise) = mon.illusion_disguise {
+            return disguise.clone();
+        }
+    }
+    mon.species.clone()
+}
+
+/// Break the Illusion disguise of the Pokémon at `slot` if it currently has one.
+///
+/// Call this whenever the mon's ability is suppressed, changed, or replaced (GastroAcid,
+/// Mummy contact, Entrainment, Skill Swap, Worry Seed, Neutralizing Gas activation).
+/// Emits `IllusionEnded` so the inference engine learns the true species.
+pub fn maybe_break_illusion_on_ability_change(state: &mut BattleState, slot: FieldSlot) {
+    let actual_species = get_pokemon_at_slot(state, slot)
+        .and_then(|m| m.illusion_disguise.as_ref().map(|_| m.species.clone()));
+    if let Some(species) = actual_species {
+        if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+            mon.illusion_disguise = None;
+        }
+        emit(state, crate::information::information::EventKind::IllusionEnded {
+            slot,
+            actual_species: species,
+        });
+    }
+}
+
+pub fn process_pokemon_send_out(
+    state: &mut BattleState,
+    slot: FieldSlot,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) {
     // Borrow scope: extract the info we need before taking a mutable borrow.
     let (is_fainted, is_replacement_turn) = match get_pokemon_at_slot(state, slot) {
         None => return,
@@ -5811,18 +5872,29 @@ pub fn process_pokemon_send_out(state: &mut BattleState, slot: FieldSlot) {
         .map(|mon| pokemon_ability_is_suppressed(state, mon))
         .unwrap_or(true);
 
+    // Set up Illusion disguise: if the entrant has Illusion and a valid target in the back,
+    // record the disguise species on the mon. The disguise is conveyed to the observer via
+    // the Switch/SimultaneousSwitch event (the species field is perspective-gated there).
+    // We compute it even if the ability appears suppressed — suppression itself clears it later.
+    if !ability_suppressed {
+        let disguise = compute_illusion_disguise(state, slot);
+        if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
+            mon.illusion_disguise = disguise;
+        }
+    }
+
     if !ability_suppressed {
         if ability_has_visible_send_out_effect(&ability) {
             let ability_event = ability.clone();
             with_reactions(state, crate::information::information::EventKind::AbilityRevealed { slot, ability: ability_event }, |bs| {
                 apply_entry_ability_field_effects(bs, slot, &ability);
                 apply_entry_ability_target_effects(bs, slot, &ability);
-                apply_send_out_only_ability_effects(bs, slot, &ability);
+                apply_send_out_only_ability_effects(bs, slot, &ability, move_dex);
             });
         } else {
             apply_entry_ability_field_effects(state, slot, &ability);
             apply_entry_ability_target_effects(state, slot, &ability);
-            apply_send_out_only_ability_effects(state, slot, &ability);
+            apply_send_out_only_ability_effects(state, slot, &ability, move_dex);
         }
     }
 
@@ -5943,13 +6015,14 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
 }
 
 /// Apply entry abilities whose effects only make sense on switch-in (healing, stat resets,
-/// screen removal, Imposter/Trace). These are deliberately NOT shared with
-/// `apply_entry_ability_field_effects` or `apply_entry_ability_target_effects`, so they
+/// screen removal, Imposter/Trace, Frisk, Anticipation). These are deliberately NOT shared
+/// with `apply_entry_ability_field_effects` or `apply_entry_ability_target_effects`, so they
 /// will not re-fire when Neutralizing Gas lifts.
 fn apply_send_out_only_ability_effects(
     state: &mut BattleState,
     slot: FieldSlot,
     ability: &Ability,
+    move_dex: &HashMap<PokemonMove, MoveData>,
 ) {
     let own_player = slot.player;
     let opp_player = match slot.player {
@@ -6125,6 +6198,109 @@ fn apply_send_out_only_ability_effects(
         // On switch-in, immediately adopt the type matching the active terrain (if any).
         Ability::Mimicry => {
             update_mimicry_forms(state);
+        }
+
+        // ── Frisk ─────────────────────────────────────────────────────────────────
+        // Reveal every opposing active Pokémon's held item. No message if a foe holds
+        // no item (only emit ItemRevealed for item-holders). Gen VI+ behaviour: reveals
+        // ALL opposing active mons' items, left-to-right.
+        Ability::Frisk => {
+            // Collect (slot, item) pairs for foes that hold an item.
+            let opp_items: Vec<(FieldSlot, Item)> = collect_active_slots(state, opp_player, None)
+                .into_iter()
+                .filter_map(|opp_slot| {
+                    get_pokemon_at_slot(state, opp_slot).and_then(|m| {
+                        if m.item != Item::None { Some((opp_slot, m.item.clone())) } else { None }
+                    })
+                })
+                .collect();
+            if !opp_items.is_empty() {
+                with_reactions(
+                    state,
+                    crate::information::information::EventKind::AbilityRevealed {
+                        slot,
+                        ability: Ability::Frisk,
+                    },
+                    |bs| {
+                        for (opp_slot, item) in opp_items {
+                            emit(bs, crate::information::information::EventKind::ItemRevealed {
+                                slot: opp_slot,
+                                item,
+                            });
+                        }
+                    },
+                );
+            }
+        }
+
+        // ── Anticipation ─────────────────────────────────────────────────────────
+        // Shudder on switch-in if any opposing active Pokémon knows a move that is
+        // super-effective against the holder's types, or an OHKO move.
+        // Message-only: no battle-state change (full-information sim).
+        //
+        // Type rules per Bulbapedia: use the move's declared pokemon_type field.
+        // Overrides: Revelation Dance / Multi-Attack → Normal; Flying Press → Fighting;
+        // Aura Wheel → Electric; Freeze-Dry → ordinary Ice.
+        // Self-Destruct / Explosion are Normal and only trigger if SE.
+        // Does NOT account for attacker's type-changing abilities (Aerilate, etc.).
+        Ability::Anticipation => {
+            let holder_types: Vec<PokemonType> = get_pokemon_at_slot(state, slot)
+                .map(|m| m.types.clone())
+                .unwrap_or_default();
+            if holder_types.is_empty() {
+                return; // can't check without types
+            }
+
+            // Helper: Anticipation-effective type for a move (overrides per Bulbapedia).
+            let anticipation_type = |move_name: &PokemonMove, md: &MoveData| -> PokemonType {
+                match move_name {
+                    PokemonMove::RevelationDance | PokemonMove::MultiAttack => PokemonType::Normal,
+                    PokemonMove::FlyingPress => PokemonType::Fighting,
+                    PokemonMove::AuraWheel => PokemonType::Electric,
+                    // Freeze-Dry is ordinary Ice for Anticipation (ignore Water quirk)
+                    PokemonMove::FreezeDry => PokemonType::Ice,
+                    _ => md.pokemon_type.clone(),
+                }
+            };
+
+            let threat_found = collect_active_slots(state, opp_player, None)
+                .into_iter()
+                .any(|opp_slot| {
+                    get_pokemon_at_slot(state, opp_slot).map_or(false, |foe| {
+                        foe.moves.iter().any(|mv_opt| {
+                            let Some(mv_name) = mv_opt else { return false; };
+                            let Some(md) = move_dex.get(mv_name) else { return false; };
+                            // Skip status-category moves.
+                            if md.category == MoveCategory::Status {
+                                return false;
+                            }
+                            // OHKO moves always trigger.
+                            if md.ohko {
+                                return true;
+                            }
+                            // Check super-effective: product of per-type multipliers > 1.
+                            let eff_type = anticipation_type(mv_name, md);
+                            let effectiveness: f64 = holder_types
+                                .iter()
+                                .map(|dt| single_type_effectiveness(&eff_type, dt))
+                                .product();
+                            effectiveness > 1.0
+                        })
+                    })
+                });
+
+            if threat_found {
+                with_reactions(
+                    state,
+                    crate::information::information::EventKind::AnticipationShudder { slot },
+                    |bs| {
+                        emit(bs, crate::information::information::EventKind::AbilityRevealed {
+                            slot,
+                            ability: Ability::Anticipation,
+                        });
+                    },
+                );
+            }
         }
 
         _ => {}
@@ -6308,14 +6484,24 @@ pub fn handle_pokemon_faint(state: &mut BattleState, player: Player, slot_index:
 /// extreme weather they were maintaining ends. Called when a Pokémon enters the field
 /// (which may bring Neutralizing Gas with it).
 fn handle_gas_primal_weather_suppression(state: &mut BattleState) {
-    if abilities_are_suppressed(state)
-        && matches!(
-            state.weather,
-            Some(Weather::ExtremeSunlight | Weather::HeavyRain | Weather::StrongWinds)
-        )
-    {
+    if !abilities_are_suppressed(state) {
+        return;
+    }
+    // End primal weather if the source ability is now suppressed.
+    if matches!(
+        state.weather,
+        Some(Weather::ExtremeSunlight | Weather::HeavyRain | Weather::StrongWinds)
+    ) {
         state.weather = None;
         state.weather_turns = None;
+    }
+    // Break any active Illusion disguises — Neutralizing Gas now suppresses Illusion.
+    let all_slots: Vec<FieldSlot> = collect_active_slots(state, Player::P1, None)
+        .into_iter()
+        .chain(collect_active_slots(state, Player::P2, None))
+        .collect();
+    for slot in all_slots {
+        maybe_break_illusion_on_ability_change(state, slot);
     }
 }
 
@@ -11280,6 +11466,8 @@ pub fn apply_contact_hit_reactions(
                         }
                         atk.ability = Ability::Mummy;
                     }
+                    // Attacker lost Illusion (gained Mummy); break disguise if active.
+                    maybe_break_illusion_on_ability_change(&mut bs, attacker_slot);
                     emit(&mut bs, crate::information::information::EventKind::AbilityRevealed {
                         slot: attacker_slot,
                         ability: Ability::Mummy,
@@ -11326,6 +11514,9 @@ pub fn apply_contact_hit_reactions(
                         }
                         hld.ability = atk_ability.clone();
                     }
+                    // Break Illusion if either mon's ability changed away from Illusion.
+                    maybe_break_illusion_on_ability_change(&mut bs, attacker_slot);
+                    maybe_break_illusion_on_ability_change(&mut bs, holder_slot);
                     // Fire on-gain effects for both
                     process_pokemon_gain_ability(&mut bs, attacker_slot);
                     process_pokemon_gain_ability(&mut bs, holder_slot);

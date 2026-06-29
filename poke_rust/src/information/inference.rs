@@ -607,7 +607,9 @@ fn process_team_preview_event(
         | EventKind::VolatileStart { .. }
         | EventKind::VolatileEnd { .. }
         | EventKind::PerishCount { .. }
-        | EventKind::EndOfTurn => {
+        | EventKind::EndOfTurn
+        | EventKind::AnticipationShudder { .. }
+        | EventKind::IllusionEnded { .. } => {
             panic!(
                 "[inference] illegal event {:?} at team preview",
                 event.kind
@@ -1388,6 +1390,90 @@ fn pass1_apply_event(
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
+                }
+            }
+        }
+
+        // ── Anticipation: add KnowsThreateningMove clause for opposing active mons ──
+        // Fires when a Pokémon's Anticipation ability shudders on switch-in, meaning
+        // at least one opposing active Pokémon knows a SE or OHKO move against the holder.
+        //
+        // Observer convention: P1 is always the observer.  Useful inference requires
+        // the threatening side to be *unknown* (P2).  Therefore only act when the
+        // Anticipation holder is on P1's side (threats are P2 — unknown → useful clause).
+        // A shudder on P2's Anticipation would constrain P1 mons, which the observer
+        // already knows, so no clause is added in that case.
+        EventKind::AnticipationShudder { slot } => {
+            // Only act when the holder is on the observer's own side (P1 = observer).
+            if slot.player != Player::P1 {
+                return;
+            }
+            // Determine the holder's defensive types.
+            let holder_types: Vec<PokemonType> = if let Some(idx) =
+                mon_idx_for_active_slot(state, slot)
+            {
+                if let Some(mon) = get_mon_by_idx(state, idx) {
+                    match &mon.possible_types {
+                        Unknown::Known(types) => types.clone(),
+                        _ => return, // Can't form a useful clause without known types.
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            };
+
+            // Collect the opposing side's active mon_idxs.
+            let opp_player = match slot.player {
+                Player::P1 => Player::P2,
+                Player::P2 => Player::P1,
+            };
+            let clause: Vec<Statement> = match opp_player {
+                Player::P1 => (0..state.p1_active_mons.len())
+                    .map(|i| Statement::KnowsThreateningMove {
+                        mon_idx: i,
+                        defender_types: holder_types.clone(),
+                    })
+                    .collect(),
+                Player::P2 => {
+                    let p2_start = state.p1_active_mons.len()
+                        + state.p1_known_back_mons.len()
+                        + state.p1_possible_back_mons.len();
+                    (0..state.p2_active_mons.len())
+                        .map(|i| Statement::KnowsThreateningMove {
+                            mon_idx: p2_start + i,
+                            defender_types: holder_types.clone(),
+                        })
+                        .collect()
+                }
+            };
+            if !clause.is_empty() {
+                state.predicates.push(clause);
+            }
+        }
+
+        // ── IllusionEnded: reveal the true species when the disguise breaks ────────
+        // Unlike FormeChange, we do NOT use unknown_set_known (which contradiction-panics
+        // if the current Known value differs from the new one). Instead we directly
+        // overwrite possible_species, since the mon's apparent species was the disguise.
+        EventKind::IllusionEnded { slot, actual_species } => {
+            if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    mon.possible_species = Unknown::Known(actual_species.clone());
+                    if let Some(data) = ctx.dex.get(actual_species) {
+                        mon.possible_types = Unknown::Known(data.types.clone());
+                        // Reset ability candidates to the true species' ability set.
+                        let new_abilities = if data.abilities.is_empty() {
+                            Unknown::Not(Vec::new())
+                        } else {
+                            Unknown::Possibly(data.abilities.clone())
+                        };
+                        mon.possible_original_abilities = new_abilities.clone();
+                        mon.possible_abilities = new_abilities;
+                        // Refresh weight.
+                        mon.possible_weight_hg = Unknown::Known(data.weight);
+                    }
                 }
             }
         }
@@ -5739,9 +5825,11 @@ fn run_bcp(state: &mut UnknownBattleState, allow_repeat_items: bool) {
             }
 
             // Unit clause — force the single remaining literal.
-            // SpeedComparison is a permanent relational constraint; it cannot be
-            // "forced" into a field and must remain in predicates for propagation.
-            if still_live.len() == 1 && !matches!(still_live[0], Statement::SpeedComparison { .. })
+            // SpeedComparison and KnowsThreateningMove are permanent relational constraints;
+            // they cannot be "forced" into a field and must remain in predicates for propagation.
+            if still_live.len() == 1
+                && !matches!(still_live[0], Statement::SpeedComparison { .. })
+                && !matches!(still_live[0], Statement::KnowsThreateningMove { .. })
             {
                 let lit = still_live[0].clone();
                 state.predicates.remove(i);
@@ -5863,6 +5951,9 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
                         .map_or(true, |ct| unknown_is_excluded(ct, &(*turns as u8)))
                 })
         }
+        // KnowsThreateningMove is a persistent relational constraint — we never
+        // prune it conservatively in BCP without move_dex access.
+        Statement::KnowsThreateningMove { .. } => false,
     }
 }
 
@@ -5963,6 +6054,22 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
                 .map_or(false, |ct| {
                     matches!(ct, Unknown::Known(v) if *v == *turns as u8)
                 })
+        }
+        // KnowsThreateningMove is satisfied once a known OHKO move is on the mon.
+        // SE-based satisfaction requires move_dex (not available here); that check
+        // is intentionally omitted (conservative: clause stays until OHKO confirmed).
+        Statement::KnowsThreateningMove { mon_idx, .. } => {
+            const OHKO_MOVES: &[PokemonMove] = &[
+                PokemonMove::Fissure,
+                PokemonMove::Guillotine,
+                PokemonMove::HornDrill,
+                PokemonMove::SheerCold,
+            ];
+            get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                m.known_moves
+                    .iter()
+                    .any(|mv| mv.as_ref().map_or(false, |m| OHKO_MOVES.contains(m)))
+            })
         }
     }
 }
@@ -6077,7 +6184,8 @@ fn force_literal(state: &mut UnknownBattleState, lit: &Statement, allow_repeat_i
             }
         }
         Statement::Not(_)
-        | Statement::SpeedComparison { .. } => {} // handled by propagate_speed_comparisons
+        | Statement::SpeedComparison { .. }
+        | Statement::KnowsThreateningMove { .. } => {} // persistent relational constraints, never unit-forced
     }
 }
 

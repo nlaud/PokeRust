@@ -370,4 +370,15 @@ pub enum EventKind {
     // NOTE: Ability suppression is NOT a discrete event; it is tracked as state via
     // the GastroAcid volatile on the affected Pokémon and a field-wide NeutralizingGas scan,
     // exactly mirroring `pokemon_ability_is_suppressed` in simulator/helpers.rs.
+
+    // ── Information abilities ─────────────────────────────────────────────────
+    /// Anticipation fired on switch-in: an opposing active Pokémon has a super-effective
+    /// or OHKO move against this holder. `slot` is the Anticipation holder.
+    /// A nested `AbilityRevealed { slot, ability: Anticipation }` is always present.
+    AnticipationShudder { slot: FieldSlot },
+
+    /// An Illusion disguise was dispelled, revealing the holder's true species.
+    /// Emitted as a sibling of `DamageDealt` on the first direct-move damage hit,
+    /// or alongside ability suppression/change events.
+    IllusionEnded { slot: FieldSlot, actual_species: Species },
 }

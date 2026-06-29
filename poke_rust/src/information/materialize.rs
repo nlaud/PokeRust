@@ -195,6 +195,7 @@ pub fn materialize_pokemon(
         evs: [0u8; 6],
         ivs: [31u8; 6],
         times_hit: unk.times_hit,
+        illusion_disguise: None,
     }
 }
 

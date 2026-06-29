@@ -85,6 +85,7 @@ pub fn battle_state_from_lists(
                 player: Player::P1,
                 slot_index: slot_idx as u8,
             },
+            move_dex(),
         );
     }
 
@@ -95,6 +96,7 @@ pub fn battle_state_from_lists(
                 player: Player::P2,
                 slot_index: slot_idx as u8,
             },
+            move_dex(),
         );
     }
 

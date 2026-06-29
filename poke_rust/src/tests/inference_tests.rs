@@ -3891,3 +3891,195 @@ fn test_lb_multiscale_hp_gate_and_timer_sentinel() {
         "Known(0) weather timer must pass through as 0 (permanent-effect sentinel), not fold into 3"
     );
 }
+
+// ── Information Abilities: Frisk ──────────────────────────────────────────────
+
+/// Frisk: AbilityRevealed{Frisk} wrapping ItemRevealed collapses the foe's item to Known.
+#[test]
+fn test_frisk_reveals_item() {
+    // Observer is P1; Frisk mon is P1 slot 0 (own side); foe is P2 slot 0.
+    // Before Frisk fires, the foe's item is Unknown::Not([]) (nothing excluded).
+    let mut foe = unknown_mon();
+    foe.item = Unknown::Not(vec![]); // unknown item
+    let state = battle_1v1(unknown_mon(), foe);
+
+    // Build the event: AbilityRevealed{Frisk, p1(0)} with nested ItemRevealed{p2(0), Leftovers}.
+    let events = vec![event_with(
+        EventKind::AbilityRevealed { slot: p1(0), ability: Ability::Frisk },
+        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+    )];
+
+    let result = apply(state, events);
+    assert_eq!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::Leftovers),
+        "Frisk must collapse the foe's item to Known(Leftovers)"
+    );
+}
+
+/// Frisk reveals multiple foes (doubles): both get their items locked in.
+#[test]
+fn test_frisk_reveals_multiple_foes() {
+    let n = 2;
+    let mut foe0 = unknown_mon();
+    foe0.item = Unknown::Not(vec![]);
+    let mut foe1 = unknown_mon();
+    foe1.item = Unknown::Not(vec![]);
+    let mut state = battle_with_p2(vec![foe0, foe1]);
+    // Add a trivial P1 mon
+    state.active_per_side = 2;
+    state.p1_active_mons = vec![unknown_mon(), unknown_mon()];
+    state.p1_slot_conditions = vec![vec![], vec![]];
+
+    let events = vec![event_with(
+        EventKind::AbilityRevealed { slot: p1(0), ability: Ability::Frisk },
+        vec![
+            event(EventKind::ItemRevealed { slot: p2(0), item: Item::ChoiceBand }),
+            event(EventKind::ItemRevealed { slot: p2(1), item: Item::Leftovers }),
+        ],
+    )];
+
+    let result = apply(state, events);
+    assert_eq!(result.p2_active_mons[0].item, Unknown::Known(Item::ChoiceBand));
+    assert_eq!(result.p2_active_mons[1].item, Unknown::Known(Item::Leftovers));
+}
+
+/// Frisk with an item-less foe: no ItemRevealed inside, foe's item stays excluded (None).
+#[test]
+fn test_frisk_no_item_foe() {
+    let mut foe = unknown_mon();
+    foe.item = Unknown::Not(vec![]); // unknown — could have any item
+    let state = battle_1v1(unknown_mon(), foe);
+
+    // AbilityRevealed{Frisk} with NO inner ItemRevealed — foe has no item.
+    let events = vec![event(EventKind::AbilityRevealed {
+        slot: p1(0),
+        ability: Ability::Frisk,
+    })];
+
+    let result = apply(state, events);
+    // Inference should add Item::None to the excluded set OR not have changed (since no
+    // ItemRevealed was emitted).  The item must NOT have been collapsed to a specific item.
+    assert!(
+        !matches!(result.p2_active_mons[0].item, Unknown::Known(_)),
+        "item-less foe: Frisk alone (no ItemRevealed) must not collapse item to a Known value"
+    );
+}
+
+// ── Information Abilities: Anticipation ──────────────────────────────────────
+
+/// Anticipation: AnticipationShudder from P1 slot 0 → adds KnowsThreateningMove clause.
+/// The clause should appear in the predicate store.
+#[test]
+fn test_anticipation_adds_predicate() {
+    // P1's mon shuddered → at least one P2 active mon knows a threatening move.
+    // In singles, this is a unit clause: P2 mon 0 KnowsThreateningMove.
+    let state = battle_1v1(unknown_mon(), unknown_mon());
+
+    let events = vec![event_with(
+        EventKind::AnticipationShudder { slot: p1(0) },
+        vec![event(EventKind::AbilityRevealed { slot: p1(0), ability: Ability::Anticipation })],
+    )];
+
+    let result = apply(state, events);
+    // There must be at least one predicate clause referencing KnowsThreateningMove.
+    let has_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|lit| matches!(lit, Statement::KnowsThreateningMove { .. }))
+    });
+    assert!(has_clause, "AnticipationShudder must add a KnowsThreateningMove clause");
+}
+
+/// Anticipation on opponent's mon: shudder on P2 slot 0 gives P1 no info
+/// (the shuddering mon is on the observer's opponent's side — inference ignores it).
+#[test]
+fn test_anticipation_opponent_shudder_no_clause() {
+    // Observer is P1; AnticipationShudder on P2 slot 0 means P2's mon
+    // is the holder, and P1's active mons would be the threats.
+    // Since P1 is the observer, inference should NOT add a predicate about P1's
+    // own known mons (the observer knows its own moves already).
+    let state = battle_1v1(unknown_mon(), unknown_mon());
+
+    let events = vec![event_with(
+        EventKind::AnticipationShudder { slot: p2(0) },
+        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Anticipation })],
+    )];
+
+    let result = apply(state, events);
+    // No KnowsThreateningMove clause should be added for the observer's own mons.
+    let has_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|lit| matches!(lit, Statement::KnowsThreateningMove { .. }))
+    });
+    assert!(
+        !has_clause,
+        "AnticipationShudder on opponent's mon must not add a KnowsThreateningMove clause \
+         (observer already knows their own moves)"
+    );
+}
+
+// ── Information Abilities: Illusion ──────────────────────────────────────────
+
+/// IllusionEnded: once the disguise breaks, the mon's possible_species collapses to the
+/// true species.
+#[test]
+fn test_illusion_ended_collapses_species() {
+    // Foe (P2 slot 0) was disguised.  Inference initially shows it could be either
+    // Zoroark or the disguise species.  After IllusionEnded, it must be Known(Zoroark).
+    let mut foe = unknown_mon();
+    foe.possible_species = Unknown::Possibly(vec![Species::Zoroark, Species::Garchomp]);
+    let state = battle_1v1(unknown_mon(), foe);
+
+    let events = vec![event(EventKind::IllusionEnded {
+        slot: p2(0),
+        actual_species: Species::Zoroark,
+    })];
+
+    let result = apply(state, events);
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "IllusionEnded must collapse possible_species to Known(actual_species)"
+    );
+}
+
+/// IllusionEnded: no contradiction panic even if prior possible_species was Known(disguise).
+/// (The inference should silently overwrite, not call inference_contradiction!)
+#[test]
+fn test_illusion_ended_overwrites_known_disguise() {
+    // Inference tracked the foe as Garchomp (the disguise species it presented).
+    let mut foe = unknown_mon();
+    foe.possible_species = Unknown::Known(Species::Garchomp);
+    let state = battle_1v1(unknown_mon(), foe);
+
+    let events = vec![event(EventKind::IllusionEnded {
+        slot: p2(0),
+        actual_species: Species::Zoroark,
+    })];
+
+    // This must NOT panic.
+    let result = apply(state, events);
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "IllusionEnded must silently update species even if the disguise was previously Known"
+    );
+}
+
+/// IllusionEnded on the observer's own side: should still collapse species normally
+/// (the observer's own species is always known, but the event still processes).
+#[test]
+fn test_illusion_ended_own_side() {
+    let mut own_mon = unknown_mon();
+    own_mon.possible_species = Unknown::Possibly(vec![Species::Zoroark, Species::Absol]);
+    let state = battle_1v1(own_mon, unknown_mon());
+
+    let events = vec![event(EventKind::IllusionEnded {
+        slot: p1(0),
+        actual_species: Species::Zoroark,
+    })];
+
+    let result = apply(state, events);
+    assert_eq!(
+        result.p1_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+    );
+}

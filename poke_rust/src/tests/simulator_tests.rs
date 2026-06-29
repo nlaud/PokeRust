@@ -20185,7 +20185,7 @@ mod priority_abilities {
             let foe_atk_before = state.p2_active_mons[0].boosts[0];
 
             simulator_helpers::process_pokemon_send_out(
-                &mut state, FieldSlot { player: Player::P1, slot_index: 0 },
+                &mut state, FieldSlot { player: Player::P1, slot_index: 0 }, move_dex(),
             );
 
             assert!(state.p1_active_mons[0].fainted, "Gyarados faints to Stealth Rock");

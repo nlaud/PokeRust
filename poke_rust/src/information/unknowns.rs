@@ -342,6 +342,17 @@ pub enum Statement {
         fast_mult: u32,
         slow_mult: u32,
     },
+    /// A persistent relational constraint emitted by Anticipation:
+    /// the Pokémon at `mon_idx` knows at least one move that is super-effective
+    /// against `defender_types`, or knows an OHKO move (Fissure, Guillotine,
+    /// Horn Drill, Sheer Cold).
+    ///
+    /// Like `SpeedComparison`, this is never unit-propagated into a concrete field;
+    /// BCP only *satisfies* (drops) or *prunes* (removes literal) this clause.
+    KnowsThreateningMove {
+        mon_idx: usize,
+        defender_types: Vec<PokemonType>,
+    },
 }
 
 // ── Team-preview fog-of-war state ─────────────────────────────────────────────
