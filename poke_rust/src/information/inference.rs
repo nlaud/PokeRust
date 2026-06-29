@@ -27,7 +27,7 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::information::information::{EventKind, InformationEvent, SwitchState};
+use crate::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
 use crate::information::unknowns::{
     PokemonHP, Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
     UnknownTeamPreviewState,
@@ -670,6 +670,7 @@ fn apply_information_battle(
         config,
         move_context: None,
         switch_slot: None,
+        damaging_hits_this_turn: Vec::new(),
     };
     for event in events {
         process_battle_event(state, event, &mut ctx);
@@ -708,6 +709,11 @@ struct BattleContext<'a> {
     /// reactions.  Used by `WeatherChanged` / `TerrainChanged` handlers to attribute
     /// ability-triggered field effects (Drizzle, Drought, etc.) to the switching mon.
     switch_slot: Option<FieldSlot>,
+    /// Per-turn record of damaging hits: (attacker_slot, target_slot, move_used).
+    /// One entry per distinct (attacker, target) pair that produced a DamageDealt to a
+    /// non-self target.  Populated in the MoveUsed block; cleared at EndOfTurn.
+    /// Consulted by the Cant{Flinch} handler to attribute King's Rock / Razor Fang / Stench.
+    damaging_hits_this_turn: Vec<(FieldSlot, FieldSlot, PokemonMove)>,
 }
 
 #[derive(Clone)]
@@ -763,6 +769,24 @@ fn process_battle_event(
         });
         // Clear switch_slot: we're now in a move context, not a switch context.
         ctx.switch_slot = None;
+
+        // Accumulate damaging hits for the Cant{Flinch} deduction.
+        // One entry per distinct (attacker, target) pair — multi-hit moves are deduped.
+        // Self-damage (Life Orb recoil, crash) is excluded via `target != user`.
+        for reaction in &event.reactions {
+            if let EventKind::DamageDealt { target, .. } = &reaction.kind {
+                if target != user {
+                    let already_recorded = ctx
+                        .damaging_hits_this_turn
+                        .iter()
+                        .any(|(a, t, _)| a == user && t == target);
+                    if !already_recorded {
+                        ctx.damaging_hits_this_turn
+                            .push((user.clone(), target.clone(), move_used.clone()));
+                    }
+                }
+            }
+        }
     }
 
     // For a single-mon switch, record the slot so that field-effect reactions
@@ -789,6 +813,11 @@ fn process_battle_event(
         pass2_guaranteed_status_absence(state, event, ctx);
         pass2_ground_immune_clause(state, event, ctx);
         pass3_damage_to_stats(state, event, ctx);
+    }
+
+    // Clear per-turn damaging-hit accumulator at the boundary of each turn.
+    if matches!(event.kind, EventKind::EndOfTurn) {
+        ctx.damaging_hits_this_turn.clear();
     }
 
     ctx.move_context = prev_move_ctx;
@@ -1480,6 +1509,17 @@ fn pass1_apply_event(
 
         // Events with no direct state update in Pass 1 — all handled by
         // enclosing MoveUsed context in Passes 2/3 or by reactions.
+        // When a Pokémon fails to move due to flinch, attempt to attribute the flinch
+        // cause (King's Rock / Razor Fang / Stench) to the opposing attacker.
+        // VolatileStart{Flinch} is suppressed in the simulator so this is the only
+        // game-legal point where flinch becomes observable to the opponent.
+        EventKind::Cant {
+            reason: CantReason::Flinch,
+            slot,
+        } => {
+            pass2_flinch_holder_from_cant(state, slot, ctx);
+        }
+
         EventKind::Crit { .. }
         | EventKind::Immune { .. }
         | EventKind::Missed { .. }
@@ -2525,6 +2565,129 @@ fn pass2_item_from_move(
     }
 
     let _ = targets; // suppress unused warning
+}
+
+// ── Pass 2: Flinch-cause attribution ─────────────────────────────────────────
+
+/// When a Pokémon T fails to move due to flinch, deduce the flinch cause on the
+/// opposing attacker if attribution is unambiguous.
+///
+/// **Soundness rules:**
+/// - Only fires when T is on P1's side (attackers are P2 — the unknown side).
+/// - Only fires when exactly one opposing attacker dealt damage to T this turn.
+/// - Only fires when that attacker's move has no flinch secondary (so the move
+///   alone cannot explain the flinch; the item/ability must explain it).
+/// - Emits a disjunctive CNF clause `[KingsRock ∨ RazorFang ∨ Stench]` on the
+///   attacker, pruned by already-excluded items/abilities.  BCP resolves it to a
+///   unit fact when the other candidates are impossible.
+/// - No inference is attempted from flinch *absence* (too weak: a 10–30% roll
+///   failing is consistent with the holder having the item).
+fn pass2_flinch_holder_from_cant(
+    state: &mut UnknownBattleState,
+    t_slot: &FieldSlot,
+    ctx: &BattleContext,
+) {
+    // Only useful when T is on the observer's side (P1); attackers are then P2
+    // (unknown).  If T is P2, the attacker is P1 (known) — clause is redundant.
+    if t_slot.player != Player::P1 {
+        return;
+    }
+
+    // Walk this turn's hits to find opposing attackers that landed damage on T.
+    // We need exactly one unique attacker for unambiguous attribution.
+    let mut attacker_slot: Option<&FieldSlot> = None;
+    let mut move_used: Option<&PokemonMove> = None;
+    let mut ambiguous = false;
+
+    for (a, t, m) in &ctx.damaging_hits_this_turn {
+        if t == t_slot && a.player != t_slot.player {
+            match attacker_slot {
+                None => {
+                    attacker_slot = Some(a);
+                    move_used = Some(m);
+                }
+                Some(existing) if existing == a => {
+                    // Same attacker, different hit (e.g. multi-hit move recorded twice for
+                    // different targets — shouldn't happen after dedup, but safe).
+                }
+                Some(_) => {
+                    // Two or more distinct attackers hit T; attribution is ambiguous.
+                    ambiguous = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if ambiguous || attacker_slot.is_none() {
+        // Either ambiguous (multiple attackers) or no damaging hit recorded this turn.
+        // In the latter case the flinch came from a move secondary, which is already
+        // explained by the move; no item/ability deduction is sound.
+        return;
+    }
+
+    let attacker_slot = attacker_slot.unwrap();
+    let move_used = move_used.unwrap();
+
+    // Move-secondary gate: if the move already has a flinch secondary, the flinch is
+    // fully explained by the move itself — no item or ability deduction.
+    let Some(move_data) = ctx.move_dex.get(move_used) else {
+        return;
+    };
+    let move_already_flinches = move_data.secondaries.iter().any(|sec| {
+        sec.effect.volatile_status == Some(VolatileStatus::Flinch)
+            || sec
+                .random_choices
+                .iter()
+                .any(|c| c.volatile_status == Some(VolatileStatus::Flinch))
+    });
+    if move_already_flinches {
+        return;
+    }
+
+    // Resolve the attacker's mon_idx and build the disjunctive clause.
+    let Some(ai) = mon_idx_for_active_slot(state, attacker_slot) else {
+        return;
+    };
+
+    let legal_ok = |item: &Item| {
+        ctx.config
+            .legal_items
+            .as_ref()
+            .map_or(true, |l| l.contains(item))
+    };
+
+    let mut clause: Vec<Statement> = Vec::new();
+    if let Some(mon) = get_mon_by_idx(state, ai) {
+        // King's Rock
+        if legal_ok(&Item::KingsRock) && !unknown_is_excluded(&mon.item, &Item::KingsRock) {
+            clause.push(Statement::HasItem {
+                mon_idx: ai,
+                item: Item::KingsRock,
+            });
+        }
+        // Razor Fang (now triggers flinch in the simulator — fixed alongside this change)
+        if legal_ok(&Item::RazorFang) && !unknown_is_excluded(&mon.item, &Item::RazorFang) {
+            clause.push(Statement::HasItem {
+                mon_idx: ai,
+                item: Item::RazorFang,
+            });
+        }
+        // Stench ability (no legal_abilities gate — species possibility is the bound)
+        if !unknown_is_excluded(&mon.possible_abilities, &Ability::Stench) {
+            clause.push(Statement::HasAbility {
+                mon_idx: ai,
+                ability: Ability::Stench,
+            });
+        }
+    }
+
+    // Push only if at least one candidate survives pruning.
+    // An empty clause would be an unsatisfiable constraint (flinch impossible under the
+    // current model), which indicates a model error — skip rather than panic here.
+    if !clause.is_empty() {
+        state.predicates.push(clause);
+    }
 }
 
 // ── Pass 2b: Contact-reaction absence inference ───────────────────────────────

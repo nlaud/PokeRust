@@ -13259,6 +13259,53 @@ mod tests {
                 "King's Rock must not stack on a move that already flinches; got {flinch_prob}, expected {expected}");
         }
 
+        // ── Razor Fang tests ──────────────────────────────────────────────────
+        // Razor Fang should add a 10% flinch chance like King's Rock (same helper).
+        // This test confirms the bug fix: previously the eligibility check only
+        // tested Item::KingsRock, so Razor Fang never triggered.
+
+        #[test]
+        fn razor_fang_adds_flinch_single_hit() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mut p1 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None, Some(Ability::None), None, Some(Item::RazorFang),
+                None, None, None, false,
+            );
+            p1.stats[5] = 200; // guarantee P1 moves first
+
+            let p2 = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let initial_target_pp = p2.move_pp[0];
+
+            let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = simulate_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex, &pokemon_dex,
+                false, 1,
+            );
+
+            let flinch_prob: f64 = outcomes.iter().map(|(s, p)| {
+                if let MatchState::BattleState(bs) = s {
+                    // Flinched = target's PP unchanged (never used Splash).
+                    if bs.p2_active_mons[0].move_pp[0] == initial_target_pp { *p } else { 0.0 }
+                } else { 0.0 }
+            }).sum();
+
+            let eps = 1e-9;
+            // Tackle 100% accuracy → P(flinch) = 1.0 * 0.10 = 0.10
+            assert!((flinch_prob - 0.10).abs() < eps,
+                "Razor Fang should add 10% flinch on single-hit Tackle; got {flinch_prob}");
+        }
+
         // ── Light Ball tests ──────────────────────────────────────────────────
         // Tested via effective_stat so we don't need to compute full damage calcs.
 
@@ -32313,6 +32360,11 @@ mod event_round_trip {
 
     // ── Local helpers ─────────────────────────────────────────────────────────
 
+    /// Recursively scan an event tree for any node satisfying `pred` (depth-first).
+    fn any_event_deep(events: &[InformationEvent], pred: impl Fn(&EventKind) -> bool + Copy) -> bool {
+        events.iter().any(|e| pred(&e.kind) || any_event_deep(&e.reactions, pred))
+    }
+
     /// Find the first top-level event whose kind is `MoveUsed` by the given slot.
     fn find_move_used<'a>(
         events: &'a [InformationEvent],
@@ -32699,5 +32751,129 @@ mod event_round_trip {
         assert!(no_crit_branch_exists,
             "a branch without Crit in MoveUsed.reactions must exist;\n\
              branches = {:#?}", branches.iter().map(|(_, e, p)| (e, p)).collect::<Vec<_>>());
+    }
+
+    // ── Test 7: Flinch is not revealed at hit time ─────────────────────────────
+
+    /// A King's Rock flinch must NOT emit `VolatileStart{Flinch}` anywhere in the
+    /// event tree.  The only observable flinch signal is `Cant{Flinch}` at
+    /// failed-move time — it is cause-agnostic and reveals only that the target
+    /// failed to move, not which attacker's item/ability caused it.
+    #[test]
+    fn flinch_no_hit_time_volatile_start_event() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: faster Snorlax with King's Rock, Tackle (no flinch secondary).
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None, Some(Item::KingsRock),
+            None, None, None, false,
+        );
+        p1.stats[5] = 200; // guarantee P1 moves first
+
+        // P2: slower Snorlax using Splash (may be flinched before it acts).
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let branches = run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
+
+        // Every branch — flinch and no-flinch — must have no VolatileStart{Flinch}.
+        for (_, evs, _) in &branches {
+            let events = evs.as_deref().expect("observer set, events must be Some");
+            assert!(
+                !any_event_deep(events, |k| matches!(k,
+                    EventKind::VolatileStart { volatile: VolatileStatus::Flinch, .. }
+                )),
+                "VolatileStart{{Flinch}} must never appear in the event stream (flinch cause is hidden);\n\
+                 events = {:#?}", events
+            );
+        }
+
+        // The flinch branch (10% probability) must have Cant{Flinch} at the top level.
+        let flinch_branch = branches.iter().find(|(_, evs, _)| {
+            evs.as_deref().map(|ev| {
+                ev.iter().any(|e| matches!(&e.kind, EventKind::Cant {
+                    reason: CantReason::Flinch, ..
+                }))
+            }).unwrap_or(false)
+        });
+        assert!(flinch_branch.is_some(),
+            "Expected a flinch branch with Cant{{Flinch}} at the top level");
+    }
+
+    // ── Test 8: Steadfast speed boost is still emitted when flinch event is hidden ─
+
+    /// When a Pokémon with Steadfast flinches, its +1 Speed boost must still appear
+    /// somewhere in the event stream even though VolatileStart{Flinch} is suppressed.
+    /// The boost must NOT be nested under a VolatileStart{Flinch} (which no longer exists).
+    #[test]
+    fn steadfast_boost_emitted_on_flinch() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: faster attacker with King's Rock.
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None, Some(Item::KingsRock),
+            None, None, None, false,
+        );
+        p1.stats[5] = 200;
+
+        // P2: Lucario with Steadfast — gets +1 Spe when it flinches.
+        let p2 = build_pokemon_state(
+            Species::Lucario, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Steadfast), None, None, None, None, None, false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let branches = run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
+
+        // Flinch branch: Cant{Flinch} present, no VolatileStart{Flinch}, boost is present.
+        let flinch_branch = branches.iter().find(|(_, evs, _)| {
+            evs.as_deref().map(|ev| {
+                ev.iter().any(|e| matches!(&e.kind, EventKind::Cant {
+                    reason: CantReason::Flinch, ..
+                }))
+            }).unwrap_or(false)
+        }).expect("Expected a flinch branch");
+        let flinch_events = flinch_branch.1.as_deref().unwrap();
+
+        // No VolatileStart{Flinch} anywhere.
+        assert!(
+            !any_event_deep(flinch_events, |k| matches!(k,
+                EventKind::VolatileStart { volatile: VolatileStatus::Flinch, .. }
+            )),
+            "VolatileStart{{Flinch}} must not appear even on a Steadfast mon;\n\
+             events = {:#?}", flinch_events
+        );
+
+        // Steadfast +1 Spe boost for P2 IS present somewhere in the event tree.
+        assert!(
+            any_event_deep(flinch_events, |k| matches!(k,
+                EventKind::BoostChanged {
+                    target,
+                    boost_idx: 4,  // Spe is index 4
+                    stages: 1,
+                } if *target == p2s0()
+            )),
+            "Steadfast +1 Spe boost for P2 must appear in the flinch branch;\n\
+             events = {:#?}", flinch_events
+        );
     }
 }

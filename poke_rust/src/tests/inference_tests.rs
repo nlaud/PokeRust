@@ -14,15 +14,15 @@ use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
-    AccuracyType, DamageOverride, MoveCategory, MoveData, MoveTarget, PokemonData,
-    PokemonType, PseudoWeather, SelfDestructType, SelfSwitchType, SideCondition, Status,
-    Terrain, Weather,
+    AccuracyType, DamageOverride, HitEffect, MoveCategory, MoveData, MoveTarget, PokemonData,
+    PokemonSecondaryEffect, PokemonType, PseudoWeather, SelfDestructType, SelfSwitchType,
+    SideCondition, Status, Terrain, VolatileStatus, Weather,
 };
 use crate::information::inference::{
     apply_information, get_mon_by_idx, mon_idx_for_active_slot, pass5_back_solve,
     unknown_is_excluded, InferenceConfig, EV_LATTICE,
 };
-use crate::information::information::{EventKind, InformationEvent, SwitchState};
+use crate::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
 use crate::information::unknowns::{
     PokemonHP, Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
 };
@@ -4082,4 +4082,229 @@ fn test_illusion_ended_own_side() {
         result.p1_active_mons[0].possible_species,
         Unknown::Known(Species::Zoroark),
     );
+}
+
+// ── Flinch attribution (pass2_flinch_holder_from_cant) ───────────────────────
+//
+// When a P1 mon is flinched by a single P2 attacker whose move has no flinch
+// secondary, the inference engine should emit a clause
+// [HasItem{KingsRock}, HasItem{RazorFang}, HasAbility{Stench}] for the attacker.
+// BCP resolves it to Known(KingsRock) when the other two candidates are already
+// excluded from the attacker.
+
+/// Single unambiguous attacker, no flinch secondary, Stench+RazorFang excluded →
+/// deduces King's Rock.
+#[test]
+fn flinch_deduces_kings_rock_single_attacker() {
+    // P2 attacker: item unknown but RazorFang excluded; ability known-not-Stench.
+    let mut attacker = unknown_mon();
+    attacker.item = Unknown::Not(vec![Item::RazorFang]);
+    attacker.possible_abilities = Unknown::Not(vec![Ability::Stench]);
+
+    let state = battle_1v1(unknown_mon(), attacker);
+
+    // P2 uses Tackle on P1 (deals damage), then P1 can't move (flinched).
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p1(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
+        ),
+        event(EventKind::Cant {
+            slot: p1(0),
+            reason: CantReason::Flinch,
+        }),
+    ];
+
+    // Tackle: damaging, no flinch secondary.
+    let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
+    let result = apply_ex(state, events, HashMap::new(), md);
+
+    // BCP should collapse the [KingsRock] unit clause to Known(KingsRock).
+    assert_eq!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::KingsRock),
+        "With RazorFang excluded and Stench excluded, flinch from sole attacker must \
+         deduce Known(KingsRock); got {:?}", result.p2_active_mons[0].item
+    );
+}
+
+/// Ambiguous flinch (two P2 attackers both dealt damage to T) → no deduction.
+#[test]
+fn flinch_no_deduction_multiple_attackers() {
+    use crate::information::unknowns::UnknownBattleState;
+
+    // 2v2: P1 slot 0 is the flinched target; P2 slots 0 and 1 are both attackers.
+    let state = UnknownBattleState {
+        active_per_side: 2,
+        back_mons_per_side: 4,
+        p1_active_mons: vec![unknown_mon(), unknown_mon()],
+        p2_active_mons: vec![unknown_mon(), unknown_mon()],
+        p1_known_back_mons: vec![],
+        p2_known_back_mons: vec![],
+        p1_possible_back_mons: vec![],
+        p2_possible_back_mons: vec![],
+        turn_number: 1,
+        turn_started: false,
+        turn_ended: false,
+        p1_has_tera: false,
+        p2_has_tera: false,
+        p1_has_mega: false,
+        p2_has_mega: false,
+        weather: None,
+        weather_turns: None,
+        weather_setter_mon_idx: None,
+        pseudo_weathers: vec![],
+        pseudo_weather_turns: vec![],
+        terrain: None,
+        terrain_turns: None,
+        terrain_setter_mon_idx: None,
+        p1_side_conditions: vec![],
+        p1_side_condition_turns: vec![],
+        p1_side_condition_setters: vec![],
+        p2_side_conditions: vec![],
+        p2_side_condition_turns: vec![],
+        p2_side_condition_setters: vec![],
+        p1_slot_conditions: vec![vec![], vec![]],
+        p2_slot_conditions: vec![vec![], vec![]],
+        self_switch_pending: None,
+        items_consumed_this_turn: vec![],
+        last_move_on_field: None,
+        sub_damage_dealt: 0,
+        round_used_this_turn: false,
+        predicates: vec![],
+    };
+
+    // Both P2 attackers deal damage to P1 slot 0 this turn, then P1/0 flinches.
+    let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(80) })],
+        ),
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(1),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(60) })],
+        ),
+        event(EventKind::Cant { slot: p1(0), reason: CantReason::Flinch }),
+    ];
+
+    let result = apply_ex(state, events, HashMap::new(), md);
+
+    // With two candidate attackers, no flinch clause should be pushed.
+    let has_flinch_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(s,
+            Statement::HasItem { item: Item::KingsRock, .. }
+            | Statement::HasItem { item: Item::RazorFang, .. }
+            | Statement::HasAbility { ability: Ability::Stench, .. }
+        ))
+    });
+    assert!(!has_flinch_clause,
+        "Ambiguous flinch (two attackers) must not push a flinch clause;\n\
+         predicates = {:#?}", result.predicates);
+    // Neither attacker's item should be forced.
+    assert!(!matches!(&result.p2_active_mons[0].item, Unknown::Known(_)),
+        "Attacker 0 item must not be forced; got {:?}", result.p2_active_mons[0].item);
+    assert!(!matches!(&result.p2_active_mons[1].item, Unknown::Known(_)),
+        "Attacker 1 item must not be forced; got {:?}", result.p2_active_mons[1].item);
+}
+
+/// Move already has a flinch secondary (e.g. Iron Head 30%) → no item/ability deduction.
+#[test]
+fn flinch_no_deduction_move_has_flinch_secondary() {
+    let mut attacker = unknown_mon();
+    attacker.item = Unknown::Not(vec![Item::RazorFang]);
+    attacker.possible_abilities = Unknown::Not(vec![Ability::Stench]);
+
+    let state = battle_1v1(unknown_mon(), attacker);
+
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::IronHead,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(70) })],
+        ),
+        event(EventKind::Cant { slot: p1(0), reason: CantReason::Flinch }),
+    ];
+
+    // Iron Head: physical Steel move with a 30% flinch secondary.
+    let mut iron_head = normal_physical_move(PokemonMove::IronHead, 80);
+    iron_head.secondaries = vec![PokemonSecondaryEffect {
+        chance: 30,
+        effect: HitEffect {
+            volatile_status: Some(VolatileStatus::Flinch),
+            ..Default::default()
+        },
+        random_choices: vec![],
+    }];
+    let md = HashMap::from([(PokemonMove::IronHead, iron_head)]);
+    let result = apply_ex(state, events, HashMap::new(), md);
+
+    // The move explains the flinch; no item deduction should occur.
+    let has_flinch_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(s,
+            Statement::HasItem { item: Item::KingsRock, .. }
+            | Statement::HasAbility { ability: Ability::Stench, .. }
+        ))
+    });
+    assert!(!has_flinch_clause,
+        "Iron Head's flinch secondary explains the flinch; no clause should be pushed;\n\
+         predicates = {:#?}", result.predicates);
+    // KingsRock must not be deduced.
+    assert!(
+        !matches!(&result.p2_active_mons[0].item, Unknown::Known(Item::KingsRock)),
+        "Must not attribute King's Rock when move has a flinch secondary; got {:?}",
+        result.p2_active_mons[0].item
+    );
+}
+
+/// When P2's mon flinches (T is P2, attacker is P1 = observer's own side),
+/// no clause should be pushed — it's not useful to constrain the observer's own mons.
+#[test]
+fn flinch_no_deduction_when_observer_side_flinches() {
+    let state = battle_1v1(unknown_mon(), unknown_mon());
+
+    // P1 attacks P2, and P2 flinches.
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(70) })],
+        ),
+        event(EventKind::Cant { slot: p2(0), reason: CantReason::Flinch }),
+    ];
+
+    let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
+    let result = apply_ex(state, events, HashMap::new(), md);
+
+    // P2 flinching: attacker is P1 (observer's own side) — no useful clause.
+    let has_flinch_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(s,
+            Statement::HasItem { item: Item::KingsRock, .. }
+            | Statement::HasAbility { ability: Ability::Stench, .. }
+        ))
+    });
+    assert!(!has_flinch_clause,
+        "P2 flinching (from P1 attack) must not push a flinch clause on P1;\n\
+         predicates = {:#?}", result.predicates);
 }

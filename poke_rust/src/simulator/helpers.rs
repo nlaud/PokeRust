@@ -9794,21 +9794,44 @@ fn apply_effect_to_target(
         emit(state, EventKind::StatusInflicted { target: target_slot, status });
     }
     if let Some(v) = volatile_started {
-        // Steadfast's Speed boost and Mental Herb cures nest under the VolatileStart
-        // (the volatile application caused them both).
-        with_reactions(state, EventKind::VolatileStart { target: target_slot, volatile: v }, |bs| {
+        if matches!(v, VolatileStatus::Flinch) {
+            // Flinch is NOT announced at hit time — the observer only learns of it when the
+            // flinched Pokémon fails to act (EventKind::Cant { reason: CantReason::Flinch }).
+            // Emitting VolatileStart here would reveal which attacker's move caused the
+            // flinch, which is wrong in doubles (two unknown opponents; can't tell who holds
+            // King's Rock).  The inference engine attributes the flinch cause from Cant instead.
+            //
+            // Steadfast's +1 Spe boost is still game-visible; emit it flat (not nested under
+            // any attacker-attributed event, since the boost is on the defender).
+            // Mental Herb never cures Flinch, but route those events the same way defensively.
             for i in 0..7 {
                 if steadfast_boost_delta[i] != 0 {
-                    emit(bs, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: steadfast_boost_delta[i] });
+                    emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: steadfast_boost_delta[i] });
                 }
             }
             for mv in &target_mental_herb_cures {
-                emit(bs, EventKind::VolatileEnd { target: target_slot, volatile: mv.clone() });
+                emit(state, EventKind::VolatileEnd { target: target_slot, volatile: mv.clone() });
             }
             if !target_mental_herb_cures.is_empty() {
-                emit(bs, EventKind::ItemLost { slot: target_slot, item: Item::MentalHerb, consumed: true });
+                emit(state, EventKind::ItemLost { slot: target_slot, item: Item::MentalHerb, consumed: true });
             }
-        });
+        } else {
+            // For all other volatiles, Steadfast's Speed boost and Mental Herb cures nest
+            // under VolatileStart (the volatile application caused them both).
+            with_reactions(state, EventKind::VolatileStart { target: target_slot, volatile: v }, |bs| {
+                for i in 0..7 {
+                    if steadfast_boost_delta[i] != 0 {
+                        emit(bs, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: steadfast_boost_delta[i] });
+                    }
+                }
+                for mv in &target_mental_herb_cures {
+                    emit(bs, EventKind::VolatileEnd { target: target_slot, volatile: mv.clone() });
+                }
+                if !target_mental_herb_cures.is_empty() {
+                    emit(bs, EventKind::ItemLost { slot: target_slot, item: Item::MentalHerb, consumed: true });
+                }
+            });
+        }
     } else if steadfast_boost_delta != [0i8; 7] {
         // Steadfast boost without newly-started flinch (shouldn't happen, but guard anyway).
         for i in 0..7 {
@@ -9957,15 +9980,19 @@ fn apply_effect_to_attacker(state: &mut BattleState, attacker_slot: FieldSlot, e
         emit(state, EventKind::StatusInflicted { target: attacker_slot, status });
     }
     if let Some(v) = self_volatile_started {
-        // Mental Herb cures nest under the VolatileStart (the volatile application caused them).
-        with_reactions(state, EventKind::VolatileStart { target: attacker_slot, volatile: v }, |bs| {
-            for mv in &self_mental_herb_cures {
-                emit(bs, EventKind::VolatileEnd { target: attacker_slot, volatile: mv.clone() });
-            }
-            if !self_mental_herb_cures.is_empty() {
-                emit(bs, EventKind::ItemLost { slot: attacker_slot, item: Item::MentalHerb, consumed: true });
-            }
-        });
+        // Flinch is never self-applied, but guard defensively: don't emit VolatileStart{Flinch}
+        // even on the self-target path (see apply_effect_to_target for the full rationale).
+        if !matches!(v, VolatileStatus::Flinch) {
+            // Mental Herb cures nest under the VolatileStart (the volatile application caused them).
+            with_reactions(state, EventKind::VolatileStart { target: attacker_slot, volatile: v }, |bs| {
+                for mv in &self_mental_herb_cures {
+                    emit(bs, EventKind::VolatileEnd { target: attacker_slot, volatile: mv.clone() });
+                }
+                if !self_mental_herb_cures.is_empty() {
+                    emit(bs, EventKind::ItemLost { slot: attacker_slot, item: Item::MentalHerb, consumed: true });
+                }
+            });
+        }
     }
     for i in 0..7 {
         if self_boost_delta[i] != 0 {
@@ -10296,7 +10323,7 @@ pub fn apply_kings_rock_flinch(
     // Check that the attacker holds King's Rock and its item is active (Magic Room / Klutz).
     let eligible = branches.first().map_or(false, |(bs, _)| {
         get_pokemon_at_slot(bs, attacker_slot).map_or(false, |m| {
-            item_is_active(bs, m) && m.item == Item::KingsRock
+            item_is_active(bs, m) && (m.item == Item::KingsRock || m.item == Item::RazorFang)
         })
     });
     if !eligible {
