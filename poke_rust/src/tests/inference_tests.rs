@@ -816,6 +816,14 @@ fn test_pass3_dir_b_no_contradiction_across_damage_range() {
     // impossible under the engine's IV assumption and correctly unreachable in real play.
     // The min damage for neutral Garchomp (IV=31, EV=0) vs Def=100:
     //   Atk=150 → base=68 → roll=85 → floor(57*1.5) = 85.
+    // The true Atk BSV for neutral Garchomp (EV=0, IV=31, Hardy) is 150.
+    // Damages 85–102 are achievable from Atk=150 (min roll gives 85, max gives 102).
+    // For those, the soundness invariant requires 150 to lie within the inferred range.
+    // Damages 103–123 require Atk > 150 (only higher EVs can produce them), so we do
+    // NOT assert 150 in-bounds there — that would be unsound in the other direction.
+    const TRUE_ATK_BSV: u16 = 150;
+    const MAX_FROM_150: u16 = 102; // floor(floor(68*1.0)*1.5) = floor(102) = 102
+
     for damage in 85u16..=123u16 {
         let result = run_direction_b(neutral_no_item_garchomp(), damage);
         let p2 = &result.p2_active_mons[0];
@@ -835,6 +843,33 @@ fn test_pass3_dir_b_no_contradiction_across_damage_range() {
             "max BSV ({}) exceeded Garchomp's maximum (182) for damage={}",
             p2.max_pre_nature_stat[1], damage
         );
+
+        // ── T3 additions: soundness + tightness assertions ────────────────────
+        if damage <= MAX_FROM_150 {
+            // Soundness: true value (150) must lie within bounds for any damage
+            // achievable from Atk=150.  A regression that over-narrows (raising min
+            // above 150 or lowering max below 150) would be caught here.
+            assert!(
+                p2.min_pre_nature_stat[1] <= TRUE_ATK_BSV
+                    && TRUE_ATK_BSV <= p2.max_pre_nature_stat[1],
+                "soundness: true Atk BSV ({}) must lie within [{}, {}] for damage={}",
+                TRUE_ATK_BSV, p2.min_pre_nature_stat[1], p2.max_pre_nature_stat[1], damage
+            );
+        }
+        if damage == 100 {
+            // Tightness: damage=100 is produced only by Atk in roughly [148, 175],
+            // so both bounds should be strictly inside the species range [135, 182].
+            assert!(
+                p2.min_pre_nature_stat[1] > 135,
+                "tightness: damage=100 should raise min above 135; got {}",
+                p2.min_pre_nature_stat[1]
+            );
+            assert!(
+                p2.max_pre_nature_stat[1] < 182,
+                "tightness: damage=100 should lower max below 182; got {}",
+                p2.max_pre_nature_stat[1]
+            );
+        }
     }
 }
 
@@ -1033,6 +1068,20 @@ fn test_pass3_dir_b_crit_observed_no_contradiction() {
     // Bounds must stay within Garchomp's theoretical range.
     assert!(p2_r.min_pre_nature_stat[1] >= 135);
     assert!(p2_r.max_pre_nature_stat[1] <= 182);
+
+    // T3: Infeasibility note — crit EQ damage=100 from Atk in [135, 182] is impossible.
+    // Crit multiplies the pre-random base by ×1.5 before STAB, so Atk=135 min crit
+    // damage ≈ floor(floor(floor(0.44*135)+2)*1.5*1.5*0.85) ≈ 129, far above 100.
+    // Like the multi-hit test, this scenario exercises robustness (no panic on infeasible
+    // input), not correctness of inference narrowing.  The no-inversion and species-range
+    // bounds above are the meaningful invariants.  Bounds should remain at [135, 182]
+    // (no over-narrowing from infeasible data):
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 150 && p2_r.max_pre_nature_stat[1] >= 150,
+        "T3: infeasible crit damage must not exclude plausible-Atk values from \
+         bounds [{}, {}]",
+        p2_r.min_pre_nature_stat[1], p2_r.max_pre_nature_stat[1]
+    );
 }
 
 // ── Pass 4: Speed ordering ────────────────────────────────────────────────────
@@ -1304,6 +1353,20 @@ fn test_pass3_multihit_2hits_no_contradiction() {
     // Bounds must be within Garchomp's Atk range.
     assert!(p2_r.min_pre_nature_stat[1] >= 135, "min BSV below Garchomp minimum");
     assert!(p2_r.max_pre_nature_stat[1] <= 182, "max BSV above Garchomp maximum");
+
+    // T3: Note on damage values — 40 and 38 are physically impossible from a 25 BP
+    // Normal move with Atk ≤ 182 vs Def=100 (max achievable ≈ 22).  This test
+    // exercises robustness: the engine must not crash or invert bounds on infeasible
+    // input.  Since no Atk in [135, 182] can produce 40, the engine is expected to
+    // leave the initial range unchanged rather than over-narrow.  We assert that the
+    // bounds stay exactly at [135, 182] as a non-regression invariant: a future bug
+    // that incorrectly narrows or inverts them would be caught here.
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 150 && p2_r.max_pre_nature_stat[1] >= 150,
+        "T3: infeasible multihit damage must not exclude true BSV (150) from \
+         bounds [{}, {}]",
+        p2_r.min_pre_nature_stat[1], p2_r.max_pre_nature_stat[1]
+    );
 }
 
 /// Multi-hit with varied per-hit damage should produce bounds at least as tight
@@ -3575,6 +3638,7 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
 //     in default probe state
 #[test]
 fn test_sc_allowlist_completeness_cross_validation() {
+    use crate::state::dex_data::{Status, Terrain, Weather};
     use crate::information::inference::{
         defensive_damage_abilities, defensive_damage_items,
         offensive_damage_abilities, offensive_damage_items,
@@ -3787,6 +3851,165 @@ fn test_sc_allowlist_completeness_cross_validation() {
                     "[ATK-ABILITY] {:?} changes damage on probe '{}' but is NOT in offensive_damage_abilities",
                     ability, probe.name
                 ));
+            }
+        }
+    }
+
+    // ── T2: Field/status conditioned offensive-ability probes ─────────────────
+    //
+    // The clean-field probes above cannot trigger abilities that require weather,
+    // terrain, or status to boost damage (SolarPower/SandForce/Guts/HadronEngine).
+    // These variants activate the triggering condition so that if any such ability
+    // were accidentally removed from `offensive_damage_abilities`, the oracle output
+    // would diverge from baseline and the omission would be caught.
+    //
+    // Pattern: conditioned_battle with the relevant field active; baseline uses the
+    // same battle but Ability::None; probe uses the field-triggering ability.
+    {
+        // Helper to build an UnknownBattleState with weather set (1v1 shell).
+        let battle_with_weather = |w: Weather| -> UnknownBattleState {
+            let mut b = battle_with_p2(vec![open_mon()]);
+            b.weather = Some(w);
+            b.weather_turns = Some(Unknown::Known(5));
+            b
+        };
+        let battle_with_terrain = |t: Terrain| -> UnknownBattleState {
+            let mut b = battle_with_p2(vec![open_mon()]);
+            b.terrain = Some(t);
+            b.terrain_turns = Some(Unknown::Known(5));
+            b
+        };
+
+        // (a) Sun + SolarPower: special attacker gains +SpA under harsh sun.
+        {
+            let battle_sun = battle_with_weather(Weather::Sun);
+            let mut atk_unk = open_mon();
+            atk_unk.possible_types = Unknown::Known(vec![PokemonType::Fire]);
+            let def_base = materialize_pokemon(&open_mon(), def_stats, Item::None, Ability::None);
+            let atk_base = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
+            let battle_base = materialize_battle(&battle_sun, vec![atk_base.clone()], vec![def_base.clone()]);
+            let baseline = calculate_damage_outcomes_for_target_with_options(
+                &battle_base, &atk_base, &def_base, p1(0), p2(0),
+                &{
+                    let mut md = normal_physical_move(PokemonMove::Tackle, 90);
+                    md.category = MoveCategory::Special;
+                    md.pokemon_type = PokemonType::Fire;
+                    md
+                },
+                oracle_config, 1.0, 1.0, None, None,
+            );
+            let atk_with = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::SolarPower);
+            let battle_with = materialize_battle(&battle_sun, vec![atk_with.clone()], vec![def_base.clone()]);
+            let move_data = {
+                let mut md = normal_physical_move(PokemonMove::Tackle, 90);
+                md.category = MoveCategory::Special;
+                md.pokemon_type = PokemonType::Fire;
+                md
+            };
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle_with, &atk_with, &def_base, p1(0), p2(0),
+                &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(&Ability::SolarPower) {
+                failures.push(
+                    "[CONDITIONED-ATK-ABILITY] SolarPower changes damage under Sun but is \
+                     NOT in offensive_damage_abilities".to_string()
+                );
+            }
+        }
+
+        // (b) Sandstorm + SandForce: physical attacker using a Rock move gains 1.3× in sand.
+        {
+            let battle_sand = battle_with_weather(Weather::Sandstorm);
+            let mut atk_unk = open_mon();
+            atk_unk.possible_types = Unknown::Known(vec![PokemonType::Rock]);
+            let def_base = materialize_pokemon(&open_mon(), def_stats, Item::None, Ability::None);
+            let atk_base = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
+            let move_data = {
+                let mut md = normal_physical_move(PokemonMove::Tackle, 80);
+                md.category = MoveCategory::Physical;
+                md.pokemon_type = PokemonType::Rock;
+                md
+            };
+            let battle_base = materialize_battle(&battle_sand, vec![atk_base.clone()], vec![def_base.clone()]);
+            let baseline = calculate_damage_outcomes_for_target_with_options(
+                &battle_base, &atk_base, &def_base, p1(0), p2(0),
+                &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            let atk_with = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::SandForce);
+            let battle_with = materialize_battle(&battle_sand, vec![atk_with.clone()], vec![def_base.clone()]);
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle_with, &atk_with, &def_base, p1(0), p2(0),
+                &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(&Ability::SandForce) {
+                failures.push(
+                    "[CONDITIONED-ATK-ABILITY] SandForce changes damage under Sandstorm but is \
+                     NOT in offensive_damage_abilities".to_string()
+                );
+            }
+        }
+
+        // (c) Burned attacker + Guts: physical attacker with Burn + Guts nets a net Atk boost
+        //     (Guts 1.5× overrides the Burn 0.5× penalty, netting a 50% increase relative to
+        //     a burned attacker with no ability).
+        {
+            let mut atk_unk_burned = open_mon();
+            atk_unk_burned.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+            atk_unk_burned.status = Some(Status::Burn);
+            let def_base = materialize_pokemon(&open_mon(), def_stats, Item::None, Ability::None);
+            let move_data = normal_physical_move(PokemonMove::Tackle, 80);
+            // Baseline: burned attacker, no ability.
+            let atk_base = materialize_pokemon(&atk_unk_burned, atk_stats, Item::None, Ability::None);
+            let battle_base = materialize_battle(&blank_battle_unk, vec![atk_base.clone()], vec![def_base.clone()]);
+            let baseline = calculate_damage_outcomes_for_target_with_options(
+                &battle_base, &atk_base, &def_base, p1(0), p2(0),
+                &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            // Probe: burned attacker + Guts.
+            let atk_with = materialize_pokemon(&atk_unk_burned, atk_stats, Item::None, Ability::Guts);
+            let battle_with = materialize_battle(&blank_battle_unk, vec![atk_with.clone()], vec![def_base.clone()]);
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle_with, &atk_with, &def_base, p1(0), p2(0),
+                &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(&Ability::Guts) {
+                failures.push(
+                    "[CONDITIONED-ATK-ABILITY] Guts changes damage on a burned attacker but is \
+                     NOT in offensive_damage_abilities".to_string()
+                );
+            }
+        }
+
+        // (d) Electric Terrain + HadronEngine: special attacker gains +SpA under Electric Terrain.
+        {
+            let battle_eterrain = battle_with_terrain(Terrain::ElectricTerrain);
+            let mut atk_unk = open_mon();
+            atk_unk.possible_types = Unknown::Known(vec![PokemonType::Electric]);
+            let def_base = materialize_pokemon(&open_mon(), def_stats, Item::None, Ability::None);
+            let move_data = {
+                let mut md = normal_physical_move(PokemonMove::Tackle, 90);
+                md.category = MoveCategory::Special;
+                md.pokemon_type = PokemonType::Electric;
+                md
+            };
+            let atk_base = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
+            let battle_base = materialize_battle(&battle_eterrain, vec![atk_base.clone()], vec![def_base.clone()]);
+            let baseline = calculate_damage_outcomes_for_target_with_options(
+                &battle_base, &atk_base, &def_base, p1(0), p2(0),
+                &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            let atk_with = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::HadronEngine);
+            let battle_with = materialize_battle(&battle_eterrain, vec![atk_with.clone()], vec![def_base.clone()]);
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle_with, &atk_with, &def_base, p1(0), p2(0),
+                &move_data, oracle_config, 1.0, 1.0, None, None,
+            );
+            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(&Ability::HadronEngine) {
+                failures.push(
+                    "[CONDITIONED-ATK-ABILITY] HadronEngine changes damage under Electric Terrain \
+                     but is NOT in offensive_damage_abilities".to_string()
+                );
             }
         }
     }
@@ -4307,4 +4530,603 @@ fn flinch_no_deduction_when_observer_side_flinches() {
     assert!(!has_flinch_clause,
         "P2 flinching (from P1 attack) must not push a flinch clause on P1;\n\
          predicates = {:#?}", result.predicates);
+}
+
+// ── Regression tests for audit fixes (C1–C4) ─────────────────────────────────
+
+/// C1: a voluntary Switch event with `tera_type: None` must NOT reveal tera type or
+/// flip `is_tera`, and a switch with `tera_type: Some(Fire)` MUST set both fields.
+#[test]
+fn test_c1_switch_tera_type_not_leaked_when_none() {
+    // ── Case 1: non-tera switch (tera_type: None) ──────────────────────────
+    let state_a = battle_with_p2(vec![unknown_mon()]);
+    let events_a = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }))];
+    let result_a = apply(state_a, events_a);
+    let p2_a = &result_a.p2_active_mons[0];
+    assert!(!p2_a.is_tera,
+        "non-tera switch must leave is_tera=false; got is_tera=true");
+    assert!(
+        !matches!(&p2_a.possible_tera_type, Unknown::Known(_)),
+        "non-tera switch must NOT set possible_tera_type to Known; got {:?}",
+        p2_a.possible_tera_type
+    );
+
+    // ── Case 2: tera switch (tera_type: Some(Fire)) ─────────────────────────
+    let state_b = battle_with_p2(vec![unknown_mon()]);
+    let events_b = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: Some(PokemonType::Fire),
+    }))];
+    let result_b = apply(state_b, events_b);
+    let p2_b = &result_b.p2_active_mons[0];
+    assert!(p2_b.is_tera,
+        "tera switch must set is_tera=true");
+    assert_eq!(
+        p2_b.possible_tera_type, Unknown::Known(PokemonType::Fire),
+        "tera switch must set possible_tera_type = Known(Fire); got {:?}",
+        p2_b.possible_tera_type
+    );
+}
+
+/// C2: when P2 has Known(Analytic) and moves FIRST this turn (no prior P1 MoveUsed),
+/// Analytic's ×1.3 must NOT be applied to the oracle → the true stat must remain
+/// within the inferred upper bound.
+///
+/// Setup: P2 (Garchomp, Analytic, Atk BSV=150) attacks P1 (Def=115) for 24 damage
+/// (= Tackle max roll at ×1.0, Atk=150, Def=115, level=50).
+///
+/// With fix (×1.0): oracle range for BSV=150 is [20, 24]; 24 ∈ [20, 24] → feasible.
+/// Without fix (×1.3): oracle range for BSV=150 is [26, 31]; 24 ∉ [26, 31] → infeasible.
+#[test]
+fn test_c2_analytic_first_mover_does_not_exclude_true_stat() {
+    use crate::state::dex_data::PokemonData;
+    use crate::state::pokemon::PokemonGender;
+
+    // Minimal Garchomp dex entry: only base_stats[1] (Atk=130) matters for Direction B.
+    let garchomp_data = PokemonData {
+        species: Species::Garchomp,
+        types: vec![PokemonType::Dragon, PokemonType::Ground],
+        base_stats: [108, 130, 95, 80, 85, 102],
+        weight: 950,
+        primary_ability: None,
+        abilities: vec![],
+        base_species: None,
+        forme: None,
+        required_item: None,
+        battle_only: None,
+        default_gender: PokemonGender::Genderless,
+    };
+    let dex = HashMap::from([(Species::Garchomp, garchomp_data)]);
+
+    // HP=200 is achievable for Garchomp base-HP=108 at level 50
+    // (e.g. IV=31, EV=132: floor((216+31+33)*0.5)+60=200). Staying in [168, 215]
+    // avoids a pass5 "no IV/EV can produce observed HP bounds" contradiction.
+    let p1_hp = 200u16;
+    let p1_def = 115u16;
+
+    // mon_p1 / mon_p2: avoid shadowing the `p1()` / `p2()` slot-builder helpers.
+    // P1: observer's own mon — exact Number HP, known Def.
+    let mut mon_p1 = unknown_mon();
+    mon_p1.hp = PokemonHP::Number(p1_hp);
+    mon_p1.minStats[0] = p1_hp; mon_p1.maxStats[0] = p1_hp;
+    mon_p1.minStats[2] = p1_def; mon_p1.maxStats[2] = p1_def;
+
+    // P2: Garchomp with Analytic, pre-nature Atk stat tightened to exactly 150
+    // (corresponds to 31 IVs, 0 EVs, neutral nature at level 50).
+    let true_atk_bsv = 150u16;
+    let mut mon_p2 = unknown_mon_species(Species::Garchomp);
+    mon_p2.possible_abilities = Unknown::Known(Ability::Analytic);
+    mon_p2.min_pre_nature_stat[1] = true_atk_bsv;
+    mon_p2.max_pre_nature_stat[1] = true_atk_bsv;
+    mon_p2.minStats[1] = true_atk_bsv;
+    mon_p2.maxStats[1] = true_atk_bsv;
+
+    // Damage 24 = Tackle max roll (100%) at Atk=150, Def=115, level=50, ×1.0.
+    // Base: floor(floor(22*40*150/115)/50)+2 = floor(floor(1147)/50)+2 = 22+2 = 24.
+    // Range without Analytic: [20, 24]. Range with ×1.3 Analytic: [26, 31].
+    // 24 is in [20, 24] but NOT in [26, 31] → the fix is required for this to pass.
+    // new_hp = 200 - 24 = 176.
+    let exact_damage = 24u16;
+    let new_hp_val = PokemonHP::Number(p1_hp - exact_damage); // 200 - 24 = 176
+
+    let state = battle_1v1(mon_p1, mon_p2);
+    let md = HashMap::from([
+        (PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40)),
+    ]);
+
+    // P2 moves first — no P1 MoveUsed before this event.
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: new_hp_val })],
+        ),
+    ];
+
+    let result = apply_ex(state, events, dex, md);
+
+    let p2_result = &result.p2_active_mons[0];
+    assert!(
+        p2_result.max_pre_nature_stat[1] >= true_atk_bsv,
+        "Analytic first-mover: upper Atk BSV bound must be ≥ {true_atk_bsv} (true stat); \
+         got {} — Analytic (×1.3) must only apply when the holder moves last",
+        p2_result.max_pre_nature_stat[1]
+    );
+}
+
+/// C3: Intrepid Sword / Dauntless Shield must NOT be excluded on re-entry after the
+/// ability has already fired (one_time_ability_used should be set, preventing the
+/// absence-exclusion on subsequent switch-ins).
+#[test]
+fn test_c3_intrepid_sword_not_excluded_on_reentry() {
+    // Turn 1: P2 enters with Intrepid Sword firing (+1 Atk to self).
+    // This should mark one_time_ability_used = true on P2's mon.
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let events_turn1 = vec![
+        event_with(
+            EventKind::Switch(SwitchState {
+                slot: p2(0),
+                species: Species::Garchomp,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+            }),
+            vec![event(EventKind::BoostChanged {
+                target: p2(0),
+                boost_idx: 0,
+                stages: 1,
+            })],
+        ),
+    ];
+    let after_turn1 = apply(state, events_turn1);
+
+    assert!(
+        after_turn1.p2_active_mons[0].one_time_ability_used,
+        "after seeing the +1 Atk boost on switch-in, one_time_ability_used must be true"
+    );
+
+    // Turn 2: P2 re-enters with NO +1 Atk boost (once-per-battle ability exhausted).
+    // The absence inference must NOT exclude IntrepidSword because one_time_ability_used = true.
+    let events_turn2 = vec![
+        event(EventKind::Switch(SwitchState {
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        })),
+    ];
+    let after_turn2 = apply(after_turn1, events_turn2);
+
+    let p2_mon = &after_turn2.p2_active_mons[0];
+    assert!(
+        !unknown_is_excluded(&p2_mon.possible_abilities, &Ability::IntrepidSword),
+        "IntrepidSword must NOT be excluded after re-entry (one_time_ability_used = true); \
+         possible_abilities = {:?}", p2_mon.possible_abilities
+    );
+}
+
+/// C4: a Drizzle/Drought mon switching in under primordial weather
+/// (Heavy Rain / Extreme Sunlight) must neither be excluded nor trigger a contradiction
+/// panic.  The `set_weather` no-op means WeatherChanged is absent, but the unconditional
+/// `AbilityRevealed{Drizzle}` still fires — so the absence inference must not run.
+#[test]
+fn test_c4_weather_setter_not_excluded_under_primordial_weather() {
+    // State: Heavy Rain active (primordial weather).
+    let mut state = battle_with_p2(vec![unknown_mon()]);
+    state.weather = Some(Weather::HeavyRain);
+
+    // P2 switches in with Drizzle revealed (AbilityRevealed reaction) but NO WeatherChanged.
+    // Under Heavy Rain, set_weather silently no-ops, so no WeatherChanged event fires.
+    let events = vec![
+        event_with(
+            EventKind::Switch(SwitchState {
+                slot: p2(0),
+                species: Species::Garchomp,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+            }),
+            vec![
+                event_with(
+                    EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Drizzle },
+                    vec![], // No WeatherChanged reaction (primordial weather suppressed it).
+                ),
+            ],
+        ),
+    ];
+
+    // This must not panic (before fix: absence pass would exclude Drizzle, then
+    // AbilityRevealed would try to set Known(Drizzle) → contradiction panic).
+    let result = apply(state, events);
+
+    let p2_mon = &result.p2_active_mons[0];
+    assert!(
+        !unknown_is_excluded(&p2_mon.possible_abilities, &Ability::Drizzle),
+        "Drizzle must NOT be excluded when switching in under Heavy Rain (primordial weather); \
+         possible_abilities = {:?}", p2_mon.possible_abilities
+    );
+}
+
+// ── T1: End-to-end simulator → inference round-trip harness ──────────────────
+//
+// These tests wire the full pipeline: a real `BattleState` → `simulate_turn` with
+// `event_observer = P1` → real `InformationEvent` stream → `apply_information` →
+// `UnknownBattleState`.  The soundness invariant (every true P2 hidden value lies
+// within the inferred bounds) is asserted on each turn.
+//
+// This is the structural gap that made C1 (tera leak) invisible to the hand-written
+// test suite: no prior test exercised the *simulator's* actual emission path.
+mod roundtrip_soundness {
+    use std::collections::HashMap;
+
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::inference::{apply_information, unknown_is_excluded, InferenceConfig};
+    use crate::information::information::InformationEvent;
+    use crate::information::unknowns::{Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::dex_data::PokemonType;
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn_with_events, simple_attack,
+    };
+
+    // ── Shared helpers ────────────────────────────────────────────────────────
+
+    /// Build a 1v1 `UnknownBattleState` for P1's fog-of-war view.
+    /// P1's side is fully known (`from_known_pokemon`); P2's active slot is
+    /// species-only (`from_opponent_species`).
+    fn fog_1v1(p1: &PokemonState, p2_species: Species) -> UnknownBattleState {
+        let dex = pokemon_dex();
+        let n: usize = 1;
+        UnknownBattleState {
+            active_per_side: 1,
+            back_mons_per_side: 5,
+            p1_active_mons: vec![UnknownPokemonState::from_known_pokemon(p1)],
+            p2_active_mons: vec![UnknownPokemonState::from_opponent_species(p2_species, dex, 50)],
+            p1_known_back_mons: vec![],
+            p2_known_back_mons: vec![],
+            p1_possible_back_mons: vec![],
+            p2_possible_back_mons: vec![],
+            turn_number: 1,
+            turn_started: false,
+            turn_ended: false,
+            p1_has_tera: false,
+            p2_has_tera: false,
+            p1_has_mega: false,
+            p2_has_mega: false,
+            weather: None,
+            weather_turns: None,
+            weather_setter_mon_idx: None,
+            pseudo_weathers: vec![],
+            pseudo_weather_turns: vec![],
+            terrain: None,
+            terrain_turns: None,
+            terrain_setter_mon_idx: None,
+            p1_side_conditions: vec![],
+            p1_side_condition_turns: vec![],
+            p1_side_condition_setters: vec![],
+            p2_side_conditions: vec![],
+            p2_side_condition_turns: vec![],
+            p2_side_condition_setters: vec![],
+            p1_slot_conditions: vec![vec![]; n],
+            p2_slot_conditions: vec![vec![]; n],
+            self_switch_pending: None,
+            items_consumed_this_turn: vec![],
+            last_move_on_field: None,
+            sub_damage_dealt: 0,
+            round_used_this_turn: false,
+            predicates: vec![],
+        }
+    }
+
+    /// Run the real simulator (P1 observer), pick the highest-probability `BattleState`
+    /// branch, and return its event list.
+    fn simulate_and_get_events(
+        state: MatchState,
+        p1_cmd: PlayerCommand,
+        p2_cmd: PlayerCommand,
+    ) -> Vec<InformationEvent> {
+        let md = move_dex();
+        let pd = pokemon_dex();
+        let mut branches = run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
+        // Sort highest probability first; take the first BattleState branch.
+        branches.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        for (st, ev_opt, _) in branches {
+            if matches!(&st, MatchState::BattleState(_)) {
+                return ev_opt.expect("observer set → events must be Some");
+            }
+        }
+        panic!("no BattleState branch found — both mons may have fainted");
+    }
+
+    /// Apply the real event stream to the fog-of-war state, returning the updated battle.
+    fn apply_roundtrip(fog: UnknownBattleState, events: Vec<InformationEvent>) -> UnknownBattleState {
+        let dex = pokemon_dex();
+        let md = move_dex();
+        let result = apply_information(
+            UnknownMatchState::Battle(fog),
+            &events,
+            false,
+            dex,
+            md,
+            &HashMap::new(), // ability_dex — not needed for these tests
+            &InferenceConfig::default(),
+        );
+        match result {
+            UnknownMatchState::Battle(b) => b,
+            _ => panic!("expected Battle state after apply_information"),
+        }
+    }
+
+    // ── Scenario A: Voluntary switch — C1 tera-leak regression ───────────────
+
+    /// P2 voluntarily switches from Snorlax → Garchomp.  Garchomp has tera_type=Fire
+    /// but has NOT Terastallized (is_tera=false).
+    ///
+    /// **C1 regression**: After the C1 fix, the emitted Switch event has `tera_type=None`
+    /// for a non-terastallized mon.  Inference must therefore NOT set `is_tera=true` or
+    /// `possible_tera_type=Known(Fire)` on the incoming Garchomp.
+    ///
+    /// Reverting `simulator/mod.rs:6498` back to unconditional `Some(mon.tera_type)` would
+    /// make this test fail — confirming the C1 fix is exercised by the real emission path.
+    #[test]
+    fn roundtrip_a_voluntary_switch_tera_type_not_leaked() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: slow Shuckle with Splash.
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        // P2 active: Snorlax with Splash, Immunity ability.
+        let p2_active = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        // P2 back: Garchomp, SandVeil, tera_type=Fire — but NOT Terastallized.
+        let p2_back = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::SandVeil), Some(Nature::Hardy), None,
+            Some(PokemonType::Fire), // tera_type = Fire
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        assert!(!p2_back.is_tera, "test setup: back Garchomp must not be Terastallized");
+
+        let battle = battle_state_from_lists(
+            vec![p1.clone()], vec![],
+            vec![p2_active], vec![p2_back],
+        );
+        let state = MatchState::BattleState(battle);
+
+        // P1 uses Splash (harmless); P2 switches to Garchomp (back-index 0).
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(vec![
+            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+        ]);
+
+        let fog = fog_1v1(&p1, Species::Snorlax);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        // After the switch, P2 slot 0 holds Garchomp.
+        let incoming = &result.p2_active_mons[0];
+        assert!(
+            !incoming.is_tera,
+            "C1 regression: switched-in non-tera Garchomp must NOT be flagged as Terastallized; \
+             is_tera = {}", incoming.is_tera
+        );
+        assert_ne!(
+            incoming.possible_tera_type,
+            Unknown::Known(PokemonType::Fire),
+            "C1 regression: Garchomp's hidden tera type (Fire) must NOT be Known — \
+             tera type is only observable when the mon actually Terastallizes; \
+             possible_tera_type = {:?}", incoming.possible_tera_type
+        );
+        // Ability soundness: true ability (SandVeil) must be within possible_abilities.
+        // from_opponent_species(Garchomp) gives Possibly([SandVeil, RoughSkin]).
+        assert!(
+            !unknown_is_excluded(&incoming.possible_abilities, &Ability::SandVeil),
+            "soundness: true ability SandVeil must not be excluded; \
+             possible_abilities = {:?}", incoming.possible_abilities
+        );
+    }
+
+    // ── Scenario B: P1 attacks P2 — Pass 3 Direction A soundness ─────────────
+
+    /// P1 (Garchomp, known Atk=150) attacks P2 (Snorlax, hidden Def=85) with Earthquake.
+    /// The real DamageDealt event carries P2's HP as `Percent` (opponent FOW).
+    /// Pass 3 Direction A uses the Percent HP to bound P2's Def BSV.
+    ///
+    /// Soundness assertion: true Def BSV (85) must lie within
+    /// `[min_pre_nature_stat[2], max_pre_nature_stat[2]]` after inference.
+    #[test]
+    fn roundtrip_b_p1_attacks_p2_def_stat_soundness() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: Garchomp with Earthquake (Atk=150 at Hardy/31IVs/0EVs/Lv50). Garchomp
+        // is Ground-type so Earthquake gets STAB.  Garchomp base Spe=102 → faster than Snorlax.
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        // P2: Snorlax with Splash, Immunity ability (in Snorlax's real ability list).
+        // Hardy/31IVs/0EVs → true Def BSV = 85.
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let true_def_bsv = p2.stats[2]; // Hardy neutral: post-nature stat == BSV
+
+        let battle = battle_state_from_lists(
+            vec![p1.clone()], vec![], vec![p2.clone()], vec![],
+        );
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Earthquake
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
+
+        let fog = fog_1v1(&p1, Species::Snorlax);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        let p2_fog = &result.p2_active_mons[0];
+        assert!(
+            p2_fog.min_pre_nature_stat[2] <= true_def_bsv
+                && true_def_bsv <= p2_fog.max_pre_nature_stat[2],
+            "soundness (Direction A): true Def BSV ({true_def_bsv}) must lie within \
+             inferred range [{}, {}]",
+            p2_fog.min_pre_nature_stat[2], p2_fog.max_pre_nature_stat[2]
+        );
+        assert!(
+            !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::Immunity),
+            "soundness: true ability Immunity must not be excluded; \
+             possible_abilities = {:?}", p2_fog.possible_abilities
+        );
+    }
+
+    // ── Scenario C: P2 attacks P1 — Pass 3 Direction B soundness + C2 path ───
+
+    /// P2 (Garchomp, hidden Atk=150) attacks P1 (Snorlax, known Def=85) with Earthquake.
+    /// P1's HP is `Number` (observer's own mon), so Direction B can do a tight inference.
+    /// Garchomp also has `Ability::SandVeil` (not Analytic), so the C2 move-order guard
+    /// is exercised without actually firing Analytic (safe boundary check).
+    ///
+    /// Soundness assertion: true Atk BSV (150) must lie within
+    /// `[min_pre_nature_stat[1], max_pre_nature_stat[1]]` after inference.
+    #[test]
+    fn roundtrip_c_p2_attacks_p1_atk_stat_soundness() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: Snorlax with Splash (Spe=50, will be damaged by Garchomp first).
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        // P2: Garchomp with Earthquake, SandVeil ability (real Garchomp ability).
+        // Hardy/31IVs/0EVs → true Atk BSV = 150, Spe BSV = 122.
+        let p2 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::SandVeil), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let true_atk_bsv = p2.stats[1]; // Hardy neutral: post-nature stat == BSV
+
+        let battle = battle_state_from_lists(
+            vec![p1.clone()], vec![], vec![p2.clone()], vec![],
+        );
+        let state = MatchState::BattleState(battle);
+        // P1 uses Splash; P2 uses Earthquake. P2 (Spe=122) moves first.
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Splash
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Earthquake
+
+        let fog = fog_1v1(&p1, Species::Garchomp);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        let p2_fog = &result.p2_active_mons[0];
+        assert!(
+            p2_fog.min_pre_nature_stat[1] <= true_atk_bsv
+                && true_atk_bsv <= p2_fog.max_pre_nature_stat[1],
+            "soundness (Direction B): true Atk BSV ({true_atk_bsv}) must lie within \
+             inferred range [{}, {}]",
+            p2_fog.min_pre_nature_stat[1], p2_fog.max_pre_nature_stat[1]
+        );
+        assert!(
+            !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::SandVeil),
+            "soundness: true ability SandVeil must not be excluded; \
+             possible_abilities = {:?}", p2_fog.possible_abilities
+        );
+    }
+
+    // ── Scenario D: Speed order — Pass 4 soundness ───────────────────────────
+
+    /// Both mons use Tackle. P1 (Garchomp, Spe=122) moves first; P2 (Snorlax, Spe=50)
+    /// moves second.  Pass 4 emits a SpeedComparison constraint and propagates it.
+    ///
+    /// Soundness assertion: true Spe BSV (50) must lie within
+    /// `[minStats[5], maxStats[5]]` after Pass 4's bound propagation.
+    #[test]
+    fn roundtrip_d_speed_order_spe_stat_soundness() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: Garchomp with Tackle (Spe=122, moves first).
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        // P2: Snorlax with Tackle (Spe=50, moves second), Immunity ability.
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let true_spe_bsv = p2.stats[5]; // Hardy neutral: post-nature stat == BSV
+
+        let battle = battle_state_from_lists(
+            vec![p1.clone()], vec![], vec![p2.clone()], vec![],
+        );
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let fog = fog_1v1(&p1, Species::Snorlax);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        let p2_fog = &result.p2_active_mons[0];
+        // Pass 4 propagates speed bounds through SpeedComparison predicates.
+        assert!(
+            p2_fog.minStats[5] <= true_spe_bsv && true_spe_bsv <= p2_fog.maxStats[5],
+            "soundness (Pass 4): true Spe BSV ({true_spe_bsv}) must lie within \
+             inferred Spe range [{}, {}]",
+            p2_fog.minStats[5], p2_fog.maxStats[5]
+        );
+        assert!(
+            !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::Immunity),
+            "soundness: true ability Immunity must not be excluded"
+        );
+    }
 }

@@ -6495,7 +6495,9 @@ fn execute_action(
                         level: mon.level,
                         hp,
                         status: mon.status.clone(),
-                        tera_type: Some(mon.tera_type.clone()),
+                        // Only reveal tera type if the mon has already Terastallized;
+                        // matches the SimultaneousSwitch path (mod.rs:7118).
+                        tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
                     };
                     state.pending_events.push(InformationEvent {
                         kind: EventKind::Switch(switch_state),
