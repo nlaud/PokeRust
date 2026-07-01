@@ -5108,6 +5108,96 @@ mod roundtrip_soundness {
             "soundness: true ability Immunity must not be excluded"
         );
     }
+
+    // ── Scenario E: Intimidate vs. Clear Body (C2 end-to-end regression) ─────
+
+    /// P2 switches Garchomp in (true ability = Intimidate).  P1 has Regice
+    /// with Clear Body, which silently swallows the −1 Atk drop — the real
+    /// simulator emits **no** `BoostChanged{Atk,−1}` event.
+    ///
+    /// **G1 / C2 regression**: after feeding the real event stream into
+    /// `apply_information`, Intimidate must remain *possible* on Garchomp.
+    /// Before the C2 fix the absence of a −1 boost wrongly excluded Intimidate.
+    #[test]
+    fn roundtrip_e_intimidate_vs_clear_body_stays_possible() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: Regice — Clear Body silently blocks Intimidate.
+        let p1 = build_pokemon_state(
+            Species::Regice, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::ClearBody), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        // P2 lead: harmless Snorlax.  Back: Garchomp with Intimidate.
+        let p2_lead = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let p2_back = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Intimidate), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        let battle = battle_state_from_lists(
+            vec![p1.clone()], vec![],
+            vec![p2_lead], vec![p2_back],
+        );
+        let state = MatchState::BattleState(battle);
+
+        // P1 uses Splash; P2 switches to Garchomp (back-index 0).
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(vec![
+            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+        ]);
+
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+
+        // Build P1's fog-of-war state.
+        // Use the minimal Garchomp dex ([Intimidate, SandVeil]) so that:
+        //   - Intimidate is in Garchomp's possible abilities (makes the exclusion test meaningful)
+        //   - NeutralizingGas is excluded (suppression guard won't silently skip absence inference)
+        let infer_dex = super::intimidate_species_dex();
+
+        let p1_fog = UnknownPokemonState::from_known_pokemon(&p1);
+        let mut initial_fog = super::battle_nvn(
+            vec![p1_fog],
+            vec![UnknownPokemonState::from_opponent_species(Species::Snorlax, &HashMap::new(), 50)],
+        );
+        initial_fog.p2_known_back_mons = vec![
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &infer_dex, 50),
+        ];
+
+        let result = apply_information(
+            UnknownMatchState::Battle(initial_fog),
+            &events,
+            false,
+            &infer_dex,
+            md,
+            &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+        let fog = match result {
+            UnknownMatchState::Battle(b) => b,
+            _ => panic!("expected Battle state"),
+        };
+
+        let p2_active = &fog.p2_active_mons[0];
+        // C2 regression: absence of −1 Atk is explained by Clear Body, not by
+        // the absence of Intimidate — so Intimidate must remain possible.
+        assert!(
+            !unknown_is_excluded(&p2_active.possible_abilities, &Ability::Intimidate),
+            "G1/C2 regression: Intimidate must remain possible on Garchomp \
+             when P1 has Clear Body; possible_abilities = {:?}",
+            p2_active.possible_abilities
+        );
+    }
 }
 
 // ── Gap 1: Team-preview inference path ───────────────────────────────────────

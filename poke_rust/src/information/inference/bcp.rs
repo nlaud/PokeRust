@@ -1,0 +1,539 @@
+//! Pass 6: Boolean Constraint Propagation (BCP) to fixpoint.
+//!
+//! Propagates disjunctive constraints (CNF predicates) by:
+//! 1. Removing literals known to be false from each clause.
+//! 2. Dropping clauses with a known-true literal.
+//! 3. Forcing unit clauses into the state.
+//! 4. Propagating `SpeedComparison` Spe bounds bidirectionally.
+
+#![allow(unused)]
+
+use crate::data::pokemon_move::PokemonMove;
+use crate::data::species::Species;
+use crate::information::unknowns::{Statement, Unknown, UnknownBattleState};
+use crate::state::battle::{FieldSlot, Player};
+use crate::state::dex_data::{PokemonStat, SideCondition};
+use crate::state::pokemon::Nature;
+
+// ── Illusion-detection constant ────────────────────────────────────────────────
+
+const ILLUSION_FORMES: &[Species] = &[Species::Zoroark, Species::ZoroarkHisui];
+
+// ── Public interface (called from mod.rs orchestrator) ─────────────────────────
+
+/// BCP fixpoint loop.  Mutates `state` until no more propagation is possible.
+pub(super) fn run_bcp(state: &mut UnknownBattleState, allow_repeat_items: bool) {
+    let mut changed = true;
+    // Collect SpeedComparison predicates once; re-collect only when the clause-pruning
+    // loop actually mutates state.predicates (tracked via `clauses_changed`).
+    let mut sc = collect_speed_comparisons(state);
+    while changed {
+        changed = false;
+        let mut clauses_changed = false;
+
+        let mut i = 0;
+        while i < state.predicates.len() {
+            // Remove literals that are definitely false.
+            let still_live: Vec<Statement> = state.predicates[i]
+                .iter()
+                .filter(|lit| !eval_false(state, lit))
+                .cloned()
+                .collect();
+
+            if still_live.is_empty() {
+                inference_contradiction!("bcp", "unsatisfiable clause (all literals false)");
+            }
+
+            // Clause already satisfied by a known-true literal — drop it.
+            if still_live.iter().any(|lit| eval_true(state, lit)) {
+                state.predicates.remove(i);
+                changed = true;
+                clauses_changed = true;
+                continue;
+            }
+
+            // Unit clause — force the single remaining literal.
+            // SpeedComparison and KnowsThreateningMove are permanent relational constraints;
+            // they cannot be "forced" into a field and must remain in predicates for propagation.
+            if still_live.len() == 1
+                && !matches!(still_live[0], Statement::SpeedComparison { .. })
+                && !matches!(still_live[0], Statement::KnowsThreateningMove { .. })
+            {
+                let lit = still_live[0].clone();
+                state.predicates.remove(i);
+                force_literal(state, &lit, allow_repeat_items);
+                changed = true;
+                clauses_changed = true;
+                continue;
+            }
+
+            if still_live.len() != state.predicates[i].len() {
+                state.predicates[i] = still_live;
+                changed = true;
+                clauses_changed = true;
+            }
+            i += 1;
+        }
+
+        // Re-collect only when the clause list changed; otherwise reuse the cached list.
+        if clauses_changed {
+            sc = collect_speed_comparisons(state);
+        }
+        if propagate_collected(state, &sc) {
+            changed = true;
+        }
+    }
+}
+
+/// Collect all valid `SpeedComparison` literals from the predicate set.
+/// Separated from propagation so the caller can cache the list across BCP iterations
+/// and only re-collect when the clause list actually changes.
+pub(super) fn collect_speed_comparisons(state: &UnknownBattleState) -> Vec<(usize, usize, u32, u32)> {
+    let total = super::mons_count_battle(state);
+    state
+        .predicates
+        .iter()
+        .flat_map(|clause| {
+            clause.iter().filter_map(|lit| {
+                if let Statement::SpeedComparison {
+                    fast_idx,
+                    slow_idx,
+                    fast_mult,
+                    slow_mult,
+                } = lit
+                {
+                    if *fast_idx < total && *slow_idx < total && *fast_mult > 0 && *slow_mult > 0 {
+                        Some((*fast_idx, *slow_idx, *fast_mult, *slow_mult))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
+}
+
+/// Bidirectional Spe bound propagation from a pre-collected list of `SpeedComparison`
+/// tuples.  Returns `true` if any bound changed.
+pub(super) fn propagate_collected(
+    state: &mut UnknownBattleState,
+    comparisons: &[(usize, usize, u32, u32)],
+) -> bool {
+    let mut changed = false;
+    for &(fast_idx, slow_idx, fast_mult, slow_mult) in comparisons {
+        // Raise fast's min Spe: base_spe(fast) >= ceil(base_spe(slow)*slow_mult / fast_mult)
+        let slow_min = super::get_mon_by_idx(state, slow_idx).map_or(0u64, |m| m.minStats[5] as u64);
+        let new_fast_min = div_ceil(slow_min * slow_mult as u64, fast_mult as u64) as u16;
+        if let Some(mon) = super::get_mon_mut_by_idx(state, fast_idx) {
+            if new_fast_min > mon.minStats[5] {
+                if new_fast_min > mon.maxStats[5] {
+                    inference_contradiction!(
+                        fast_idx,
+                        "SpeedComparison raises min({}) above max({})",
+                        new_fast_min,
+                        mon.maxStats[5]
+                    );
+                }
+                mon.minStats[5] = new_fast_min;
+                changed = true;
+            }
+        }
+
+        // Lower slow's max Spe: base_spe(slow) <= floor(base_spe(fast)*fast_mult / slow_mult)
+        let fast_max =
+            super::get_mon_by_idx(state, fast_idx).map_or(u64::MAX / 2, |m| m.maxStats[5] as u64);
+        let new_slow_max = (fast_max.saturating_mul(fast_mult as u64) / slow_mult as u64)
+            .min(u16::MAX as u64) as u16;
+        if let Some(mon) = super::get_mon_mut_by_idx(state, slow_idx) {
+            if new_slow_max < mon.maxStats[5] {
+                if new_slow_max < mon.minStats[5] {
+                    inference_contradiction!(
+                        slow_idx,
+                        "SpeedComparison lowers max({}) below min({})",
+                        new_slow_max,
+                        mon.minStats[5]
+                    );
+                }
+                mon.maxStats[5] = new_slow_max;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Widen `possible_species` to include Zoroark formes when the opponent's back
+/// contains one and the on-field species is unconfirmed.  Call after a Switch.
+pub(super) fn maybe_widen_for_illusion(
+    state: &mut UnknownBattleState,
+    slot: &FieldSlot,
+    opponent_known_back_species: &[Species],
+) {
+    let has_zoroark = opponent_known_back_species
+        .iter()
+        .any(|s| ILLUSION_FORMES.contains(s));
+    if !has_zoroark {
+        return;
+    }
+    let Some(idx) = super::mon_idx_for_active_slot(state, slot) else {
+        return;
+    };
+    let Some(mon) = super::get_mon_mut_by_idx(state, idx) else {
+        return;
+    };
+    if let Unknown::Known(ref s) = mon.possible_species.clone() {
+        if !ILLUSION_FORMES.contains(s) {
+            let mut candidates = vec![s.clone()];
+            for zf in ILLUSION_FORMES {
+                if opponent_known_back_species.contains(zf) {
+                    candidates.push(zf.clone());
+                }
+            }
+            if candidates.len() > 1 {
+                mon.possible_species = Unknown::Possibly(candidates);
+            }
+        }
+    }
+}
+
+// ── Private helpers ─────────────────────────────────────────────────────────────
+
+fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
+    match lit {
+        Statement::Not(inner) => eval_true(state, inner),
+        Statement::HasItem { mon_idx, item } => {
+            super::get_mon_by_idx(state, *mon_idx)
+                .map_or(false, |m| super::unknown_is_excluded(&m.item, item))
+        }
+        Statement::HasStatus { mon_idx, status } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| m.status.as_ref().map_or(true, |s| s != status)),
+        Statement::HasMove { mon_idx, pokemon_move } => {
+            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                let full = m.known_moves.iter().all(|s| s.is_some());
+                full && !m.known_moves.iter().any(|s| s.as_ref() == Some(pokemon_move))
+            })
+        }
+        Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| super::unknown_is_excluded(&m.possible_abilities, ability)),
+        Statement::NatureBoostsStat { mon_idx, stat } => {
+            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                boosting_natures_for_stat(stat)
+                    .iter()
+                    .all(|n| super::unknown_is_excluded(&m.possible_natures, n))
+            })
+        }
+        Statement::NatureNerfsStat { mon_idx, stat } => {
+            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                nerfing_natures_for_stat(stat)
+                    .iter()
+                    .all(|n| super::unknown_is_excluded(&m.possible_natures, n))
+            })
+        }
+        Statement::EVIVStatGE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] < *value),
+        Statement::EVIVStatLE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] > *value),
+        Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
+            let fast_max =
+                super::get_mon_by_idx(state, *fast_idx).map_or(999u64, |m| m.maxStats[5] as u64);
+            let slow_min =
+                super::get_mon_by_idx(state, *slow_idx).map_or(0u64, |m| m.minStats[5] as u64);
+            fast_max * (*fast_mult as u64) < slow_min * (*slow_mult as u64)
+        }
+        Statement::WeatherTurns { turns } => state
+            .weather_turns
+            .as_ref()
+            .map_or(true, |wt| super::unknown_is_excluded(wt, &(*turns as u8))),
+        Statement::PseudoWeatherTurns { turns } => {
+            if state.pseudo_weather_turns.len() == 1 {
+                super::unknown_is_excluded(&state.pseudo_weather_turns[0], &(*turns as u8))
+            } else {
+                false
+            }
+        }
+        Statement::SideConditionTurns { side, side_condition, turns } => {
+            let (conditions, turns_vec) = match side {
+                Player::P1 => (&state.p1_side_conditions, &state.p1_side_condition_turns),
+                Player::P2 => (&state.p2_side_conditions, &state.p2_side_condition_turns),
+            };
+            conditions
+                .iter()
+                .position(|c| c == side_condition)
+                .map_or(true, |i| {
+                    turns_vec
+                        .get(i)
+                        .map_or(true, |ct| super::unknown_is_excluded(ct, &(*turns as u8)))
+                })
+        }
+        // KnowsThreateningMove is a persistent relational constraint — never pruned
+        // conservatively in BCP without move_dex access.
+        Statement::KnowsThreateningMove { .. } => false,
+    }
+}
+
+fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
+    match lit {
+        Statement::Not(inner) => eval_false(state, inner),
+        Statement::HasItem { mon_idx, item } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| super::unknown_is_known_as(&m.item, item)),
+        Statement::HasStatus { mon_idx, status } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| m.status.as_ref() == Some(status)),
+        Statement::HasMove { mon_idx, pokemon_move } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| {
+                m.known_moves.iter().any(|s| s.as_ref() == Some(pokemon_move))
+            }),
+        Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| super::unknown_is_known_as(&m.possible_abilities, ability)),
+        Statement::EVIVStatGE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] >= *value),
+        Statement::EVIVStatLE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
+            .map_or(false, |m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] <= *value),
+        Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
+            let fast_min =
+                super::get_mon_by_idx(state, *fast_idx).map_or(0u64, |m| m.minStats[5] as u64);
+            let slow_max =
+                super::get_mon_by_idx(state, *slow_idx).map_or(999u64, |m| m.maxStats[5] as u64);
+            fast_min * (*fast_mult as u64) >= slow_max * (*slow_mult as u64)
+        }
+        Statement::NatureBoostsStat { mon_idx, stat } => {
+            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                let boosters = boosting_natures_for_stat(stat);
+                match &m.possible_natures {
+                    Unknown::Known(n) => boosters.contains(n),
+                    Unknown::Possibly(v) => !v.is_empty() && v.iter().all(|n| boosters.contains(n)),
+                    Unknown::Not(_) => false,
+                }
+            })
+        }
+        Statement::NatureNerfsStat { mon_idx, stat } => {
+            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                let nerfers = nerfing_natures_for_stat(stat);
+                match &m.possible_natures {
+                    Unknown::Known(n) => nerfers.contains(n),
+                    Unknown::Possibly(v) => !v.is_empty() && v.iter().all(|n| nerfers.contains(n)),
+                    Unknown::Not(_) => false,
+                }
+            })
+        }
+        Statement::WeatherTurns { turns } => state
+            .weather_turns
+            .as_ref()
+            .map_or(false, |wt| matches!(wt, Unknown::Known(v) if *v == *turns as u8)),
+        Statement::PseudoWeatherTurns { turns } => {
+            if state.pseudo_weather_turns.len() == 1 {
+                matches!(&state.pseudo_weather_turns[0], Unknown::Known(v) if *v == *turns as u8)
+            } else {
+                false
+            }
+        }
+        Statement::SideConditionTurns { side, side_condition, turns } => {
+            let (conditions, turns_vec) = match side {
+                Player::P1 => (&state.p1_side_conditions, &state.p1_side_condition_turns),
+                Player::P2 => (&state.p2_side_conditions, &state.p2_side_condition_turns),
+            };
+            conditions
+                .iter()
+                .position(|c| c == side_condition)
+                .and_then(|i| turns_vec.get(i))
+                .map_or(false, |ct| matches!(ct, Unknown::Known(v) if *v == *turns as u8))
+        }
+        // KnowsThreateningMove is satisfied once a known OHKO move is on the mon.
+        Statement::KnowsThreateningMove { mon_idx, .. } => {
+            const OHKO_MOVES: &[PokemonMove] = &[
+                PokemonMove::Fissure,
+                PokemonMove::Guillotine,
+                PokemonMove::HornDrill,
+                PokemonMove::SheerCold,
+            ];
+            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+                m.known_moves
+                    .iter()
+                    .any(|mv| mv.as_ref().map_or(false, |m| OHKO_MOVES.contains(m)))
+            })
+        }
+    }
+}
+
+fn force_literal(state: &mut UnknownBattleState, lit: &Statement, allow_repeat_items: bool) {
+    match lit {
+        Statement::HasItem { mon_idx, item } => {
+            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
+                super::unknown_set_known(&mut mon.item, item.clone(), &format!("bcp#{mon_idx}"));
+            }
+            // BCP-committed item cannot be held by any other roster member on the same side.
+            super::enforce_unique_item(state, *mon_idx, item, allow_repeat_items);
+        }
+        Statement::HasAbility { mon_idx, ability } => {
+            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
+                super::unknown_set_known(
+                    &mut mon.possible_abilities,
+                    ability.clone(),
+                    &format!("bcp#{mon_idx}"),
+                );
+            }
+        }
+        Statement::HasMove { mon_idx, pokemon_move } => {
+            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
+                super::reveal_move_on_mon(mon, pokemon_move);
+            }
+        }
+        Statement::HasStatus { mon_idx, status } => {
+            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
+                mon.status = Some(status.clone());
+            }
+        }
+        Statement::EVIVStatGE { mon_idx, stat, value } => {
+            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
+                let si = stat_to_stats_idx(stat);
+                if mon.min_pre_nature_stat[si] < *value {
+                    mon.min_pre_nature_stat[si] = *value;
+                }
+            }
+        }
+        Statement::EVIVStatLE { mon_idx, stat, value } => {
+            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
+                let si = stat_to_stats_idx(stat);
+                if mon.max_pre_nature_stat[si] > *value {
+                    mon.max_pre_nature_stat[si] = *value;
+                }
+            }
+        }
+        Statement::NatureBoostsStat { mon_idx, stat } => {
+            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
+                let valid = boosting_natures_for_stat(stat);
+                filter_natures_to_set(&mut mon.possible_natures, &valid, "bcp-nature-boosts");
+            }
+        }
+        Statement::NatureNerfsStat { mon_idx, stat } => {
+            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
+                let valid = nerfing_natures_for_stat(stat);
+                filter_natures_to_set(&mut mon.possible_natures, &valid, "bcp-nature-nerfs");
+            }
+        }
+        Statement::WeatherTurns { turns } => {
+            let t = *turns as u8;
+            if let Some(wt) = &mut state.weather_turns {
+                super::unknown_set_known(wt, t, "bcp-weather-turns");
+            } else {
+                inference_contradiction!(
+                    "bcp-weather-turns",
+                    "WeatherTurns forced to {} but no weather is active",
+                    turns
+                );
+            }
+        }
+        Statement::PseudoWeatherTurns { turns } => {
+            if state.pseudo_weather_turns.len() == 1 {
+                let t = *turns as u8;
+                super::unknown_set_known(
+                    &mut state.pseudo_weather_turns[0],
+                    t,
+                    "bcp-pseudo-weather-turns",
+                );
+            }
+        }
+        Statement::SideConditionTurns { side, side_condition, turns } => {
+            let t = *turns as u8;
+            let idx = match side {
+                Player::P1 => state.p1_side_conditions.iter().position(|c| c == side_condition),
+                Player::P2 => state.p2_side_conditions.iter().position(|c| c == side_condition),
+            };
+            if let Some(i) = idx {
+                let turns_vec = match side {
+                    Player::P1 => &mut state.p1_side_condition_turns,
+                    Player::P2 => &mut state.p2_side_condition_turns,
+                };
+                if let Some(ct) = turns_vec.get_mut(i) {
+                    super::unknown_set_known(ct, t, "bcp-side-condition-turns");
+                }
+            }
+        }
+        // Persistent relational constraints — never unit-forced into a field.
+        Statement::Not(_)
+        | Statement::SpeedComparison { .. }
+        | Statement::KnowsThreateningMove { .. } => {}
+    }
+}
+
+/// Retain in `natures` only those that appear in `valid`.
+/// Converts `Not(excluded)` to an explicit `Possibly` before filtering.
+fn filter_natures_to_set(natures: &mut Unknown<Nature>, valid: &[Nature], ctx: &str) {
+    match natures {
+        Unknown::Known(n) => {
+            if !valid.contains(n) {
+                inference_contradiction!(
+                    ctx,
+                    "Nature {:?} does not satisfy constraint (valid: {:?})",
+                    n,
+                    valid
+                );
+            }
+        }
+        Unknown::Not(excluded) => {
+            let mut candidates: Vec<Nature> = super::ALL_NATURES
+                .iter()
+                .filter(|n| valid.contains(n) && !excluded.contains(n))
+                .cloned()
+                .collect();
+            if candidates.is_empty() {
+                inference_contradiction!(ctx, "No valid natures remain after constraint");
+            }
+            if candidates.len() == 1 {
+                *natures = Unknown::Known(candidates.remove(0));
+            } else {
+                *natures = Unknown::Possibly(candidates);
+            }
+        }
+        Unknown::Possibly(v) => {
+            v.retain(|n| valid.contains(n));
+            if v.is_empty() {
+                inference_contradiction!(ctx, "No valid natures remain after constraint");
+            }
+            if v.len() == 1 {
+                let n = v[0].clone();
+                *natures = Unknown::Known(n);
+            }
+        }
+    }
+}
+
+fn div_ceil(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return a;
+    }
+    (a + b - 1) / b
+}
+
+// ── Nature helpers ────────────────────────────────────────────────────────────
+
+pub(super) fn boosting_natures_for_stat(stat: &PokemonStat) -> Vec<Nature> {
+    match stat {
+        PokemonStat::Atk => vec![Nature::Lonely, Nature::Adamant, Nature::Naughty, Nature::Brave],
+        PokemonStat::Def => vec![Nature::Bold, Nature::Impish, Nature::Lax, Nature::Relaxed],
+        PokemonStat::SpA => vec![Nature::Modest, Nature::Mild, Nature::Rash, Nature::Quiet],
+        PokemonStat::SpD => vec![Nature::Calm, Nature::Gentle, Nature::Careful, Nature::Sassy],
+        PokemonStat::Spe => vec![Nature::Timid, Nature::Hasty, Nature::Jolly, Nature::Naive],
+    }
+}
+
+pub(super) fn nerfing_natures_for_stat(stat: &PokemonStat) -> Vec<Nature> {
+    match stat {
+        PokemonStat::Atk => vec![Nature::Bold, Nature::Modest, Nature::Calm, Nature::Timid],
+        PokemonStat::Def => vec![Nature::Lonely, Nature::Mild, Nature::Gentle, Nature::Hasty],
+        PokemonStat::SpA => vec![Nature::Adamant, Nature::Impish, Nature::Careful, Nature::Jolly],
+        PokemonStat::SpD => vec![Nature::Naughty, Nature::Lax, Nature::Rash, Nature::Naive],
+        PokemonStat::Spe => vec![Nature::Brave, Nature::Relaxed, Nature::Quiet, Nature::Sassy],
+    }
+}
+
+pub(super) fn stat_to_stats_idx(stat: &PokemonStat) -> usize {
+    match stat {
+        PokemonStat::Atk => 1,
+        PokemonStat::Def => 2,
+        PokemonStat::SpA => 3,
+        PokemonStat::SpD => 4,
+        PokemonStat::Spe => 5,
+    }
+}

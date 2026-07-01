@@ -890,11 +890,7 @@ fn apply_single_hit_branch(
 
         // Emit DamageDealt now that the target_mon borrow has ended.
         if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, damage_dealt_hp_info) {
-            let pokemon_hp = if target_slot.player == observer {
-                PokemonHP::Number(new_hp)
-            } else {
-                PokemonHP::Percent(simulator_helpers::hp_to_percent(new_hp, max_hp))
-            };
+            let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
             simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp });
         }
 
@@ -3172,18 +3168,10 @@ fn possible_damage_outcomes_for_move(
         // Emit SetHp for both slots (borrows ended above; NLL safe).
         if let Some(observer) = next_state.event_observer {
             let (u_hp, u_max) = user_new_hp;
-            let user_new_hp_ev = if action.user_slot.player == observer {
-                PokemonHP::Number(u_hp)
-            } else {
-                PokemonHP::Percent(simulator_helpers::hp_to_percent(u_hp, u_max))
-            };
+            let user_new_hp_ev = simulator_helpers::observed_hp_value(observer, action.user_slot.player, u_hp, u_max);
             simulator_helpers::emit(&mut next_state, EventKind::SetHp { target: action.user_slot, new_hp: user_new_hp_ev });
             let (t_hp, t_max) = target_new_hp;
-            let target_new_hp_ev = if target_slot.player == observer {
-                PokemonHP::Number(t_hp)
-            } else {
-                PokemonHP::Percent(simulator_helpers::hp_to_percent(t_hp, t_max))
-            };
+            let target_new_hp_ev = simulator_helpers::observed_hp_value(observer, target_slot.player, t_hp, t_max);
             simulator_helpers::emit(&mut next_state, EventKind::SetHp { target: target_slot, new_hp: target_new_hp_ev });
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
@@ -6491,11 +6479,7 @@ fn execute_action(
             // Emit Switch event.
             if let Some(observer) = state.event_observer {
                 if let Some(mon) = simulator_helpers::get_pokemon_at_slot(&state, s.user_slot) {
-                    let hp = if s.user_slot.player == observer {
-                        PokemonHP::Number(mon.hp)
-                    } else {
-                        PokemonHP::Percent(simulator_helpers::hp_to_percent(mon.hp, mon.stats[0]))
-                    };
+                    let hp = simulator_helpers::observed_hp_value(observer, s.user_slot.player, mon.hp, mon.stats[0]);
                     let switch_state = InfoSwitchState {
                         slot: s.user_slot,
                         species: simulator_helpers::observed_species(mon, s.user_slot, observer),

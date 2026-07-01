@@ -3736,11 +3736,7 @@ pub fn apply_damage_and_check_game_over(
         handle_pokemon_faint(state, target_slot.player, target_slot.slot_index);
         // Emit DamageDealt (hp=0 at faint) then Faint as a sibling.
         if let Some(observer) = state.event_observer {
-            let new_hp = if target_slot.player == observer {
-                PokemonHP::Number(0)
-            } else {
-                PokemonHP::Percent(0)
-            };
+            let new_hp = observed_hp_value(observer, target_slot.player, 0, max_hp);
             emit(state, EventKind::DamageDealt { target: target_slot, new_hp });
             emit(state, EventKind::Faint { slot: target_slot });
         }
@@ -3754,11 +3750,7 @@ pub fn apply_damage_and_check_game_over(
     } else {
         // Emit DamageDealt for non-faint damage.
         if let Some(observer) = state.event_observer {
-            let new_hp = if target_slot.player == observer {
-                PokemonHP::Number(post_hp)
-            } else {
-                PokemonHP::Percent(hp_to_percent(post_hp, max_hp))
-            };
+            let new_hp = observed_hp_value(observer, target_slot.player, post_hp, max_hp);
             emit(state, EventKind::DamageDealt { target: target_slot, new_hp });
         }
     }
@@ -5495,6 +5487,13 @@ pub fn weather_rock_duration(mon: &PokemonState, weather: &Weather) -> u8 {
 
 /// Set weather, respecting strong weather precedence.
 /// Strong weather can only be overridden by other strong weather.
+///
+/// NOTE: This always re-emits `WeatherChanged` even if the incoming weather is already
+/// active. While that deviates from strict game accuracy (ability weather-setters do not
+/// re-trigger on identical weather), the emission is unconditional so absence of
+/// `WeatherChanged` still correctly implies no setter fired — weather-absence inference
+/// stays sound. If a handler is ever added that early-returns on same-weather, this
+/// invariant must be re-checked.
 pub fn set_weather(state: &mut BattleState, weather: Weather, duration: u8) {
     let current_is_strong = matches!(
         state.weather.as_ref(),
@@ -5863,11 +5862,7 @@ pub fn process_pokemon_send_out(
                     |bs| {
                         if let Some(observer) = bs.event_observer {
                             if current_hp < max_hp {
-                                let new_hp = if slot.player == observer {
-                                    PokemonHP::Number(max_hp)
-                                } else {
-                                    PokemonHP::Percent(hp_to_percent(max_hp, max_hp))
-                                };
+                                let new_hp = observed_hp_value(observer, slot.player, max_hp, max_hp);
                                 emit(bs, EventKind::Healed { target: slot, new_hp });
                             }
                             if let Some(ref status) = old_status {
@@ -8312,11 +8307,7 @@ fn apply_leech_seed_residual(
             if post_hp != before {
                 let seeder_slot = FieldSlot { player: seeder_player, slot_index: idx as u8 };
                 if let Some(observer) = state.event_observer {
-                    let new_hp = if seeder_slot.player == observer {
-                        PokemonHP::Number(post_hp)
-                    } else {
-                        PokemonHP::Percent(hp_to_percent(post_hp, max_hp))
-                    };
+                    let new_hp = observed_hp_value(observer, seeder_slot.player, post_hp, max_hp);
                     emit(state, EventKind::Healed { target: seeder_slot, new_hp });
                 }
             }
