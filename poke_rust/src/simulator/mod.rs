@@ -870,6 +870,24 @@ fn apply_single_hit_branch(
             }
         }
 
+        // Illusion disguise break: any direct damaging hit (eff_damage > 0) dispels Illusion.
+        // This is a mechanical state change and must happen regardless of whether there is an
+        // observer — keeping it observer-gated would mean the disguise persists when no one is
+        // watching, which could cause stale state if illusion_disguise is ever read mechanically.
+        // Grab the true species before the mutable clear so the borrows don't overlap.
+        let illusion_species: Option<Species> = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+            .and_then(|m| m.illusion_disguise.as_ref().map(|_| m.species.clone()));
+        if let Some(actual_species) = illusion_species {
+            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, target_slot) {
+                mon.illusion_disguise = None;
+            }
+            // Only emit the event when there is an observer — the IllusionEnded event is
+            // information-facing and should not surface when observability is disabled.
+            if bs.event_observer.is_some() {
+                simulator_helpers::emit(&mut bs, EventKind::IllusionEnded { slot: target_slot, actual_species });
+            }
+        }
+
         // Emit DamageDealt now that the target_mon borrow has ended.
         if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, damage_dealt_hp_info) {
             let pokemon_hp = if target_slot.player == observer {
@@ -878,17 +896,6 @@ fn apply_single_hit_branch(
                 PokemonHP::Percent(simulator_helpers::hp_to_percent(new_hp, max_hp))
             };
             simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp });
-
-            // Illusion disguise break: any direct damaging hit (eff_damage > 0) dispels Illusion.
-            // Grab the true species before the mutable clear so they don't overlap.
-            let illusion_species: Option<Species> = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
-                .and_then(|m| m.illusion_disguise.as_ref().map(|_| m.species.clone()));
-            if let Some(actual_species) = illusion_species {
-                if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, target_slot) {
-                    mon.illusion_disguise = None;
-                }
-                simulator_helpers::emit(&mut bs, EventKind::IllusionEnded { slot: target_slot, actual_species });
-            }
         }
 
         // Emit Smack Down's volatile removals now that the target_mon borrow has ended.

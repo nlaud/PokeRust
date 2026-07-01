@@ -19,8 +19,8 @@ use crate::state::dex_data::{
     SideCondition, Status, Terrain, VolatileStatus, Weather,
 };
 use crate::information::inference::{
-    apply_information, get_mon_by_idx, mon_idx_for_active_slot, pass5_back_solve,
-    unknown_is_excluded, InferenceConfig, EV_LATTICE,
+    apply_information, apply_switch_out_reset, get_mon_by_idx, mon_idx_for_active_slot,
+    pass5_back_solve, unknown_is_excluded, InferenceConfig, EV_LATTICE,
 };
 use crate::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
 use crate::information::unknowns::{
@@ -92,87 +92,58 @@ fn unknown_mon() -> UnknownPokemonState {
 }
 
 fn battle_with_p2(p2_active: Vec<UnknownPokemonState>) -> UnknownBattleState {
-    let n = p2_active.len();
-    UnknownBattleState {
-        active_per_side: n as u8,
-        back_mons_per_side: 5,
-        p1_active_mons: vec![],
-        p2_active_mons: p2_active,
-        p1_known_back_mons: vec![],
-        p2_known_back_mons: vec![],
-        p1_possible_back_mons: vec![],
-        p2_possible_back_mons: vec![],
-        turn_number: 1,
-        turn_started: false,
-        turn_ended: false,
-        p1_has_tera: false,
-        p2_has_tera: false,
-        p1_has_mega: false,
-        p2_has_mega: false,
-        weather: None,
-        weather_turns: None,
-        weather_setter_mon_idx: None,
-        pseudo_weathers: vec![],
-        pseudo_weather_turns: vec![],
-        terrain: None,
-        terrain_turns: None,
-        terrain_setter_mon_idx: None,
-        p1_side_conditions: vec![],
-        p1_side_condition_turns: vec![],
-        p1_side_condition_setters: vec![],
-        p2_side_conditions: vec![],
-        p2_side_condition_turns: vec![],
-        p2_side_condition_setters: vec![],
-        p1_slot_conditions: (0..n).map(|_| vec![]).collect(),
-        p2_slot_conditions: (0..n).map(|_| vec![]).collect(),
-        self_switch_pending: None,
-        items_consumed_this_turn: vec![],
-        last_move_on_field: None,
-        sub_damage_dealt: 0,
-        round_used_this_turn: false,
-        predicates: vec![],
-    }
+    battle_nvn(vec![], p2_active)
 }
 
 fn battle_1v1(p1_mon: UnknownPokemonState, p2_mon: UnknownPokemonState) -> UnknownBattleState {
+    battle_nvn(vec![p1_mon], vec![p2_mon])
+}
+
+/// Generic N-vs-N battle builder.  Compared to the single-slot helpers, this one
+/// is useful when you need more than one active Pokémon per side.
+fn battle_nvn(
+    p1_active: Vec<UnknownPokemonState>,
+    p2_active: Vec<UnknownPokemonState>,
+) -> UnknownBattleState {
+    let n = p1_active.len().max(p2_active.len());
     UnknownBattleState {
-        active_per_side: 1,
-        back_mons_per_side: 5,
-        p1_active_mons: vec![p1_mon],
-        p2_active_mons: vec![p2_mon],
-        p1_known_back_mons: vec![],
-        p2_known_back_mons: vec![],
+        active_per_side:   n as u8,
+        back_mons_per_side: 6u8.saturating_sub(n as u8),
+        p1_active_mons:    p1_active,
+        p2_active_mons:    p2_active,
+        p1_known_back_mons:    vec![],
+        p2_known_back_mons:    vec![],
         p1_possible_back_mons: vec![],
         p2_possible_back_mons: vec![],
-        turn_number: 1,
-        turn_started: false,
-        turn_ended: false,
-        p1_has_tera: false,
-        p2_has_tera: false,
-        p1_has_mega: false,
-        p2_has_mega: false,
-        weather: None,
-        weather_turns: None,
+        turn_number:   1,
+        turn_started:  false,
+        turn_ended:    false,
+        p1_has_tera:   false,
+        p2_has_tera:   false,
+        p1_has_mega:   false,
+        p2_has_mega:   false,
+        weather:              None,
+        weather_turns:        None,
         weather_setter_mon_idx: None,
-        pseudo_weathers: vec![],
+        pseudo_weathers:      vec![],
         pseudo_weather_turns: vec![],
-        terrain: None,
-        terrain_turns: None,
+        terrain:              None,
+        terrain_turns:        None,
         terrain_setter_mon_idx: None,
-        p1_side_conditions: vec![],
-        p1_side_condition_turns: vec![],
+        p1_side_conditions:        vec![],
+        p1_side_condition_turns:   vec![],
         p1_side_condition_setters: vec![],
-        p2_side_conditions: vec![],
-        p2_side_condition_turns: vec![],
+        p2_side_conditions:        vec![],
+        p2_side_condition_turns:   vec![],
         p2_side_condition_setters: vec![],
-        p1_slot_conditions: vec![vec![]],
-        p2_slot_conditions: vec![vec![]],
-        self_switch_pending: None,
+        p1_slot_conditions: (0..n).map(|_| vec![]).collect(),
+        p2_slot_conditions: (0..n).map(|_| vec![]).collect(),
+        self_switch_pending:      None,
         items_consumed_this_turn: vec![],
-        last_move_on_field: None,
-        sub_damage_dealt: 0,
-        round_used_this_turn: false,
-        predicates: vec![],
+        last_move_on_field:       None,
+        sub_damage_dealt:         0,
+        round_used_this_turn:     false,
+        predicates:               vec![],
     }
 }
 
@@ -478,6 +449,116 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
     assert!(
         !is_item_excluded(&result.p2_active_mons[0], &Item::LifeOrb),
         "LifeOrb must not be excluded when self-damage reaction is present"
+    );
+}
+
+/// Regression for the Bright Powder / Lax Incense soundness bug.
+///
+/// Scenario: P1 uses a 100%-accurate move in Sandstorm; P2 has no accuracy/evasion
+/// stage modifiers and the move misses.  P2 *might* have Sand Veil (not excluded).
+///
+/// Before the fix, the engine emitted `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]`
+/// — a clause that is *unsound* when Sand Veil caused the miss, because it rules out
+/// the true world where P2 holds no evasion item.  After the fix it must include
+/// `HasAbility(SandVeil)` as a disjunct so BCP cannot force a wrong item.
+///
+/// More concretely: if BCP were then given evidence that rules out BrightPowder and
+/// LaxIncense, a fully-sound engine must *not* panic (no contradiction) — it has the
+/// SandVeil disjunct to fall back on.
+#[test]
+fn test_brightpowder_clause_includes_sand_veil_in_sandstorm() {
+    use crate::information::unknowns::Statement;
+
+    let mut p2_mon = unknown_mon();
+    // P2 might have Sand Veil (Not([]) means all abilities allowed, which is the default
+    // from `unknown_mon`; we just leave it as-is).
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    // Set weather to Sandstorm on the state directly.
+    state.weather = Some(Weather::Sandstorm);
+
+    let mut move_dex = HashMap::new();
+    let mut tackle = normal_physical_move(PokemonMove::Tackle, 40);
+    // 100% accurate, Physical.
+    move_dex.insert(PokemonMove::Tackle, tackle);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::Missed { target: p2(0) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // The clause must contain HasAbility(SandVeil) as a disjunct so that BCP cannot
+    // force an evasion item in a world where Sand Veil caused the miss.
+    let clause_has_sand_veil = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(s, Statement::HasAbility { ability: Ability::SandVeil, .. })
+        })
+    });
+    assert!(
+        clause_has_sand_veil,
+        "In sandstorm with Sand Veil possible, the 100%-accurate miss clause must \
+         include HasAbility(SandVeil) as a disjunct (soundness invariant)"
+    );
+}
+
+/// Positive regression: when Sand Veil / Snow Cloak / Tangled Feet are all ruled out,
+/// the engine must still emit the Bright Powder / Lax Incense clause (no regression
+/// of the original inference on a normal miss).
+#[test]
+fn test_brightpowder_clause_emitted_when_no_evasion_ability_possible() {
+    use crate::information::unknowns::Statement;
+
+    let mut p2_mon = unknown_mon();
+    // Exclude all three evasion abilities so they can't suppress the clause.
+    p2_mon.possible_abilities = Unknown::Not(vec![
+        Ability::SandVeil,
+        Ability::SnowCloak,
+        Ability::TangledFeet,
+    ]);
+
+    let state = battle_with_p2(vec![p2_mon]);
+    // No sandstorm / snow active, so the condition guards also don't add them.
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::Missed { target: p2(0) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // The clause must contain at least one item disjunct.
+    let has_item_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem { item: Item::BrightPowder, .. }
+                    | Statement::HasItem { item: Item::LaxIncense, .. }
+            )
+        })
+    });
+    assert!(
+        has_item_clause,
+        "With all evasion abilities excluded, the 100%-accurate miss must still \
+         emit a BrightPowder/LaxIncense clause"
     );
 }
 
@@ -1203,12 +1284,9 @@ fn test_pass4_trick_room_swaps_comparison() {
 #[test]
 fn test_pass4_prankster_escape_on_status_move() {
     let p1_mon = no_speed_escape_mon(Species::Garchomp);
-    // P2 might have Prankster.
+    // P2 might have Prankster (all abilities allowed except QuickDraw which would be a
+    // different speed-priority escape; Prankster must stay possible so the escape disjunct fires).
     let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
-    p2_mon.possible_abilities = Unknown::Not(vec![
-        Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
-    ].iter().map(|_| Ability::QuickDraw).collect()); // re-use field but only exclude QuickDraw
-    // Actually just allow all abilities (Not([]) = all allowed).
     p2_mon.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
     p2_mon.item = Unknown::Not(vec![
         Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
@@ -1369,31 +1447,46 @@ fn test_pass3_multihit_2hits_no_contradiction() {
     );
 }
 
-/// Multi-hit with varied per-hit damage should produce bounds at least as tight
-/// as a single-hit observation of just the first hit.
+/// Multi-hit with varied per-hit damage should produce bounds strictly tighter
+/// than a single-hit observation of just the first hit.
+///
+/// Setup: P2 Garchomp (Hardy, no item, Atk BSV ∈ [135,182]), P1 Def=100, HP=500.
+/// Move: 40 BP Normal Physical (no STAB on Dragon/Ground Garchomp), 2-hit.
+///
+/// Hand-derived bounds (formula: floor(floor(22*40*atk/100)/50)+2, min roll=0.85):
+///   Damage 28 (hit 1): produced by atk ∈ [148, 181]  (base=28 @ roll 1.0 … base=33 @ roll 0.85)
+///   Damage 29 (hit 2): produced by atk ∈ [154, 182]  (base=29 @ roll 1.0 … base=34 @ roll 0.85)
+///   Intersection:             atk ∈ [154, 181]
+///
+/// The single-hit observation of just 28 damage gives [148, 181].
+/// The 2-hit intersection [154, 181] is strictly tighter on the min side: 154 > 148.
 #[test]
 fn test_pass3_multihit_tighter_than_single_hit() {
     let p1_mon = known_p1_normal(); // HP=500, Def=100
     let p2_mon = neutral_no_item_garchomp();
 
+    // 40 BP Normal/Physical 2-hit move.  Normal gives no STAB on Dragon/Ground Garchomp,
+    // so the hand-derived bounds above apply without type multipliers.
     let mut move_dex_multi = HashMap::new();
-    let mut hit2_move = normal_physical_move(PokemonMove::BulletSeed, 25);
+    let mut hit2_move = normal_physical_move(PokemonMove::BulletSeed, 40);
     hit2_move.multihit_range = [2, 2];
     move_dex_multi.insert(PokemonMove::BulletSeed, hit2_move);
 
     let mut move_dex_single = HashMap::new();
-    let mut single_move = normal_physical_move(PokemonMove::Earthquake, 25);
+    let mut single_move = normal_physical_move(PokemonMove::Tackle, 40);
     single_move.multihit_range = [1, 1];
-    move_dex_single.insert(PokemonMove::Earthquake, single_move);
+    move_dex_single.insert(PokemonMove::Tackle, single_move);
 
-    // 2-hit: first hit deals 40 damage, second deals 38 (different rolls → tighter intersection).
+    // 2-hit:
+    //   Hit 1: HP 500 → 472  (delta = 28)
+    //   Hit 2: HP 472 → 443  (delta = 29, using updated running_hp — confirmed at pass3:3987)
     let multi_result = apply_ex(
         battle_1v1(p1_mon.clone(), p2_mon.clone()),
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
             vec![
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(460) }), // 40 dmg
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(422) }), // 38 dmg
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(472) }), // 28 dmg
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(443) }), // 29 dmg
                 event(EventKind::HitCount { target: p1(0), hits: 2 }),
             ],
         )],
@@ -1401,12 +1494,12 @@ fn test_pass3_multihit_tighter_than_single_hit() {
         move_dex_multi,
     );
 
-    // Single hit: only the first hit (40 damage).
+    // Single hit: only the first hit (28 damage, new_hp = 472).
     let single_result = apply_ex(
         battle_1v1(p1_mon, p2_mon),
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(460) })], // 40 dmg
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(472) })], // 28 dmg
         )],
         garchomp_dex(),
         move_dex_single,
@@ -1415,17 +1508,24 @@ fn test_pass3_multihit_tighter_than_single_hit() {
     let m = &multi_result.p2_active_mons[0];
     let s = &single_result.p2_active_mons[0];
 
-    // Sound: true BSV must lie within both bounds.
+    // Sound: bounds must not be inverted.
     assert!(m.min_pre_nature_stat[1] <= m.max_pre_nature_stat[1], "multi-hit bounds inverted");
     assert!(s.min_pre_nature_stat[1] <= s.max_pre_nature_stat[1], "single-hit bounds inverted");
 
-    // Multi-hit bounds should be at least as tight as single-hit.
+    // Multi-hit intersection must be STRICTLY tighter than single-hit alone.
+    // The second hit (29 dmg) raises the min beyond what the first hit (28 dmg) constrains.
     assert!(
-        m.min_pre_nature_stat[1] >= s.min_pre_nature_stat[1]
-            || m.max_pre_nature_stat[1] <= s.max_pre_nature_stat[1],
-        "Multi-hit bounds should be at least as tight as single-hit: multi [{}, {}] vs single [{}, {}]",
-        m.min_pre_nature_stat[1], m.max_pre_nature_stat[1],
-        s.min_pre_nature_stat[1], s.max_pre_nature_stat[1],
+        m.min_pre_nature_stat[1] > s.min_pre_nature_stat[1],
+        "Multi-hit must raise min Atk BSV higher than single-hit: \
+         multi min={} should be > single min={}",
+        m.min_pre_nature_stat[1], s.min_pre_nature_stat[1],
+    );
+    // Max should not be wider (the intersection can only be the same or tighter).
+    assert!(
+        m.max_pre_nature_stat[1] <= s.max_pre_nature_stat[1],
+        "Multi-hit must not produce a wider max Atk BSV than single-hit: \
+         multi max={}, single max={}",
+        m.max_pre_nature_stat[1], s.max_pre_nature_stat[1],
     );
 }
 
@@ -2056,55 +2156,40 @@ fn test_life_orb_not_excluded_without_damage() {
 
 // ── Regression: S5 — Switch-out reset clears boosts and volatiles ────────────
 
-/// `apply_switch_out_reset` must clear boosts and volatile statuses from the mon
-/// leaving the field.  This regression verifies that processing a Switch event
-/// for a mon that carries non-zero boosts, a volatile, and a ToxicPoison tier
-/// does NOT panic and produces a consistent subsequent state.
+/// Direct unit test for `apply_switch_out_reset`: verifies that it clears boosts,
+/// volatile statuses, and the ToxicPoison tier on the active slot.
 ///
-/// **Architecture note**: `apply_switch_out_reset` modifies the active slot
-/// in-place, then `pass1_switch` immediately overwrites that slot with the
-/// incoming mon.  The cleared outgoing-mon state is not externally visible after
-/// the replacement; this test therefore covers the code path and verifies that
-/// the incoming mon has clean state regardless of what the outgoing mon carried.
+/// **Why direct and not end-to-end?** `apply_switch_out_reset` modifies the active
+/// slot in-place, but `pass1_switch` immediately overwrites that slot with the
+/// incoming mon.  The cleared outgoing-mon state is therefore never observable
+/// through `apply_information` (the outgoing mon isn't moved to `known_back`).
+/// Testing the function end-to-end would only verify that the *incoming* mon
+/// is built fresh — which is trivially true regardless of whether the reset ran.
+/// A direct unit test is the only way to validate the reset function itself.
 #[test]
 fn test_switch_out_clears_boosts_and_volatiles() {
     use crate::state::pokemon::VolatileStatusState;
     use crate::state::dex_data::VolatileStatus;
 
-    let mut p2_mon = unknown_mon(); // Garchomp in active slot
-    // Artificially set boosts, a volatile, and a ToxicPoison tier — all of which
-    // the real simulator clears on switch-out (mirrors/mod.rs 6205-6214).
+    let mut p2_mon = unknown_mon();
+    // Set up field-state that apply_switch_out_reset is responsible for clearing.
     p2_mon.boosts = [3, 2, 1, -1, 0, 0, 0];
     p2_mon.volatiles = vec![
         VolatileStatusState::TurnStatus(VolatileStatus::Confusion, 3),
     ];
-    p2_mon.status = Some(Status::ToxicPoison(4)); // tier-4 toxic (escalates each EOT)
+    p2_mon.status = Some(Status::ToxicPoison(4)); // tier-4 toxic
 
-    let state = battle_with_p2(vec![p2_mon]);
+    let mut state = battle_with_p2(vec![p2_mon]);
 
-    // Charizard switches in at P2 slot 0 (replacing the Garchomp).
-    // apply_switch_out_reset runs on the Garchomp slot before the replacement.
-    let result = apply(
-        state,
-        vec![event(EventKind::Switch(SwitchState {
-            slot:      p2(0),
-            species:   Species::Charizard,
-            level:     50,
-            hp:        PokemonHP::Percent(100),
-            status:    None,
-            tera_type: None,
-        }))],
-    );
+    // Call the reset directly: it should clear the active P2 slot in-place.
+    apply_switch_out_reset(&mut state, &p2(0));
 
-    // The incoming Charizard must have clean state — no stale boosts or volatiles
-    // from the outgoing Garchomp.
-    let incoming = &result.p2_active_mons[0];
-    assert_eq!(incoming.boosts, [0i8; 7], "incoming mon must start with 0 boosts");
-    assert!(incoming.volatiles.is_empty(), "incoming mon must have no volatiles");
-    // No ToxicPoison tier should bleed across into the fresh mon.
+    let mon = &state.p2_active_mons[0];
+    assert_eq!(mon.boosts, [0i8; 7], "apply_switch_out_reset must zero all boosts");
+    assert!(mon.volatiles.is_empty(), "apply_switch_out_reset must clear all volatiles");
     assert!(
-        !matches!(incoming.status, Some(Status::ToxicPoison(n)) if n > 0),
-        "incoming mon must not inherit a ToxicPoison tier from the outgoing slot"
+        matches!(mon.status, Some(Status::ToxicPoison(0))),
+        "apply_switch_out_reset must reset ToxicPoison tier to 0, got {:?}", mon.status
     );
 }
 
@@ -2641,19 +2726,22 @@ fn test_e1_binary_search_direction_b_preserves_precision() {
     );
 
     let p2_result = &result.p2_active_mons[0];
-    // The binary search (or the former linear scan) must tighten the Atk BSV bounds.
-    assert!(
-        p2_result.min_pre_nature_stat[1] >= initial_atk_min,
-        "Binary search must not lower min Atk BSV below initial value"
+    // Hand-derived expected bounds (verified against the damage formula):
+    //   atk=147 → pre-roll dmg = floor(floor(880*147/65)/50)+2 = floor(39)+2 = 41 ✗ (max roll = 41 < 42)
+    //   atk=148 → pre-roll dmg = floor(floor(880*148/65)/50)+2 = floor(40)+2 = 42 ✓ (max roll = 42)
+    //   atk=180 → pre-roll dmg = floor(floor(880*180/65)/50)+2 = floor(48)+2 = 50 ✓ (min roll 0.85×50=42)
+    //   atk=181 → pre-roll dmg = floor(floor(880*181/65)/50)+2 = floor(49)+2 = 51 ✗ (min roll 0.85×51=43 > 42)
+    let expected_min = 148u16;
+    let expected_max = 180u16;
+    assert_eq!(
+        p2_result.min_pre_nature_stat[1], expected_min,
+        "Binary search must raise min Atk BSV from {} to {} (42 HP dealt from 200)",
+        initial_atk_min, expected_min
     );
-    assert!(
-        p2_result.max_pre_nature_stat[1] <= initial_atk_max,
-        "Binary search must not raise max Atk BSV above initial value"
-    );
-    assert!(
-        p2_result.min_pre_nature_stat[1] > initial_atk_min
-        || p2_result.max_pre_nature_stat[1] < initial_atk_max,
-        "Binary search must produce a non-trivial narrowing of the Atk BSV range from 24 HP dealt"
+    assert_eq!(
+        p2_result.max_pre_nature_stat[1], expected_max,
+        "Binary search must lower max Atk BSV from {} to {} (42 HP dealt from 200)",
+        initial_atk_max, expected_max
     );
 }
 
@@ -2934,45 +3022,9 @@ fn battle_1v1_with_known_back(
     p2_active: UnknownPokemonState,
     p2_back: UnknownPokemonState,
 ) -> UnknownBattleState {
-    UnknownBattleState {
-        active_per_side: 1,
-        back_mons_per_side: 5,
-        p1_active_mons: vec![p1_active],
-        p2_active_mons: vec![p2_active],
-        p1_known_back_mons: vec![],
-        p2_known_back_mons: vec![p2_back],
-        p1_possible_back_mons: vec![],
-        p2_possible_back_mons: vec![],
-        turn_number: 1,
-        turn_started: false,
-        turn_ended: false,
-        p1_has_tera: false,
-        p2_has_tera: false,
-        p1_has_mega: false,
-        p2_has_mega: false,
-        weather: None,
-        weather_turns: None,
-        weather_setter_mon_idx: None,
-        pseudo_weathers: vec![],
-        pseudo_weather_turns: vec![],
-        terrain: None,
-        terrain_turns: None,
-        terrain_setter_mon_idx: None,
-        p1_side_conditions: vec![],
-        p1_side_condition_turns: vec![],
-        p1_side_condition_setters: vec![],
-        p2_side_conditions: vec![],
-        p2_side_condition_turns: vec![],
-        p2_side_condition_setters: vec![],
-        p1_slot_conditions: vec![vec![]],
-        p2_slot_conditions: vec![vec![]],
-        self_switch_pending: None,
-        items_consumed_this_turn: vec![],
-        last_move_on_field: None,
-        sub_damage_dealt: 0,
-        round_used_this_turn: false,
-        predicates: vec![],
-    }
+    let mut state = battle_nvn(vec![p1_active], vec![p2_active]);
+    state.p2_known_back_mons.push(p2_back);
+    state
 }
 
 /// Item clause: revealing the active opponent's item excludes it from the back mon.
@@ -4361,48 +4413,11 @@ fn flinch_deduces_kings_rock_single_attacker() {
 /// Ambiguous flinch (two P2 attackers both dealt damage to T) → no deduction.
 #[test]
 fn flinch_no_deduction_multiple_attackers() {
-    use crate::information::unknowns::UnknownBattleState;
-
     // 2v2: P1 slot 0 is the flinched target; P2 slots 0 and 1 are both attackers.
-    let state = UnknownBattleState {
-        active_per_side: 2,
-        back_mons_per_side: 4,
-        p1_active_mons: vec![unknown_mon(), unknown_mon()],
-        p2_active_mons: vec![unknown_mon(), unknown_mon()],
-        p1_known_back_mons: vec![],
-        p2_known_back_mons: vec![],
-        p1_possible_back_mons: vec![],
-        p2_possible_back_mons: vec![],
-        turn_number: 1,
-        turn_started: false,
-        turn_ended: false,
-        p1_has_tera: false,
-        p2_has_tera: false,
-        p1_has_mega: false,
-        p2_has_mega: false,
-        weather: None,
-        weather_turns: None,
-        weather_setter_mon_idx: None,
-        pseudo_weathers: vec![],
-        pseudo_weather_turns: vec![],
-        terrain: None,
-        terrain_turns: None,
-        terrain_setter_mon_idx: None,
-        p1_side_conditions: vec![],
-        p1_side_condition_turns: vec![],
-        p1_side_condition_setters: vec![],
-        p2_side_conditions: vec![],
-        p2_side_condition_turns: vec![],
-        p2_side_condition_setters: vec![],
-        p1_slot_conditions: vec![vec![], vec![]],
-        p2_slot_conditions: vec![vec![], vec![]],
-        self_switch_pending: None,
-        items_consumed_this_turn: vec![],
-        last_move_on_field: None,
-        sub_damage_dealt: 0,
-        round_used_this_turn: false,
-        predicates: vec![],
-    };
+    let state = battle_nvn(
+        vec![unknown_mon(), unknown_mon()],
+        vec![unknown_mon(), unknown_mon()],
+    );
 
     // Both P2 attackers deal damage to P1 slot 0 this turn, then P1/0 flinches.
     let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
@@ -4798,46 +4813,10 @@ mod roundtrip_soundness {
     /// species-only (`from_opponent_species`).
     fn fog_1v1(p1: &PokemonState, p2_species: Species) -> UnknownBattleState {
         let dex = pokemon_dex();
-        let n: usize = 1;
-        UnknownBattleState {
-            active_per_side: 1,
-            back_mons_per_side: 5,
-            p1_active_mons: vec![UnknownPokemonState::from_known_pokemon(p1)],
-            p2_active_mons: vec![UnknownPokemonState::from_opponent_species(p2_species, dex, 50)],
-            p1_known_back_mons: vec![],
-            p2_known_back_mons: vec![],
-            p1_possible_back_mons: vec![],
-            p2_possible_back_mons: vec![],
-            turn_number: 1,
-            turn_started: false,
-            turn_ended: false,
-            p1_has_tera: false,
-            p2_has_tera: false,
-            p1_has_mega: false,
-            p2_has_mega: false,
-            weather: None,
-            weather_turns: None,
-            weather_setter_mon_idx: None,
-            pseudo_weathers: vec![],
-            pseudo_weather_turns: vec![],
-            terrain: None,
-            terrain_turns: None,
-            terrain_setter_mon_idx: None,
-            p1_side_conditions: vec![],
-            p1_side_condition_turns: vec![],
-            p1_side_condition_setters: vec![],
-            p2_side_conditions: vec![],
-            p2_side_condition_turns: vec![],
-            p2_side_condition_setters: vec![],
-            p1_slot_conditions: vec![vec![]; n],
-            p2_slot_conditions: vec![vec![]; n],
-            self_switch_pending: None,
-            items_consumed_this_turn: vec![],
-            last_move_on_field: None,
-            sub_damage_dealt: 0,
-            round_used_this_turn: false,
-            predicates: vec![],
-        }
+        super::battle_nvn(
+            vec![UnknownPokemonState::from_known_pokemon(p1)],
+            vec![UnknownPokemonState::from_opponent_species(p2_species, dex, 50)],
+        )
     }
 
     /// Run the real simulator (P1 observer), pick the highest-probability `BattleState`
@@ -5129,4 +5108,363 @@ mod roundtrip_soundness {
             "soundness: true ability Immunity must not be excluded"
         );
     }
+}
+
+// ── Gap 1: Team-preview inference path ───────────────────────────────────────
+//
+// `apply_information_team_preview` and `process_team_preview_event` are the
+// entry points for inference during team preview.  Every existing test uses a
+// `Battle` state; this is the first coverage of the `TeamPreview` path.
+
+/// Basic team-preview inference: when P2's lead switches in via a `Switch` event
+/// during team preview, the engine should update that mon's HP and level from the
+/// `SwitchState` payload.
+#[test]
+fn test_team_preview_switch_updates_hp_and_level() {
+    use crate::information::unknowns::UnknownTeamPreviewState;
+
+    // Pre-populate P2 with two species (as team preview reveals all species up front).
+    let p2_garchomp = unknown_mon_species(Species::Garchomp);
+    let p2_snorlax  = unknown_mon_species(Species::Snorlax);
+
+    let mut preview_state = UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
+        active_per_side:  1,
+        brought_per_side: 3,
+        p1_mons: vec![],
+        p2_mons: vec![p2_garchomp, p2_snorlax],
+    });
+
+    // P2 leads with Garchomp at 80% HP, level 50.
+    let events = vec![event(EventKind::Switch(SwitchState {
+        slot:      p2(0),
+        species:   Species::Garchomp,
+        level:     50,
+        hp:        PokemonHP::Percent(80),
+        status:    None,
+        tera_type: None,
+    }))];
+
+    let result = apply_information(
+        preview_state,
+        &events,
+        true, // is_team_preview (ignored — determined by state variant)
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &InferenceConfig::default(),
+    );
+
+    let preview = match result {
+        UnknownMatchState::TeamPreview(ref p) => p,
+        _ => panic!("expected TeamPreview state"),
+    };
+
+    // Garchomp (index 0 in p2_mons) was chosen as lead: HP should reflect the switch-in.
+    let garchomp = &preview.p2_mons[0];
+    assert_eq!(
+        garchomp.level, 50,
+        "Garchomp's level must be set from SwitchState"
+    );
+    assert!(
+        matches!(garchomp.hp, PokemonHP::Percent(80)),
+        "Garchomp's HP must be Percent(80) from SwitchState, got {:?}", garchomp.hp
+    );
+
+    // Snorlax (index 1) was NOT switched in — its state must be unchanged.
+    let snorlax = &preview.p2_mons[1];
+    assert!(
+        matches!(snorlax.hp, PokemonHP::Percent(100)),
+        "Snorlax's HP must remain unchanged (not switched in)"
+    );
+}
+
+/// Team preview with a simultaneous (multi-lead) switch.
+/// Both P2 leads are registered in the correct slots.
+#[test]
+fn test_team_preview_simultaneous_switch_two_leads() {
+    use crate::information::unknowns::UnknownTeamPreviewState;
+
+    let p2_garchomp  = unknown_mon_species(Species::Garchomp);
+    let p2_snorlax   = unknown_mon_species(Species::Snorlax);
+    let p2_charizard = unknown_mon_species(Species::Charizard);
+
+    let mut preview_state = UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
+        active_per_side:  2,
+        brought_per_side: 3,
+        p1_mons: vec![],
+        p2_mons: vec![p2_garchomp, p2_snorlax, p2_charizard],
+    });
+
+    // P2 leads with Garchomp at slot 0 and Snorlax at slot 1.
+    let events = vec![event(EventKind::SimultaneousSwitch {
+        switches: vec![
+            SwitchState {
+                slot:      p2(0),
+                species:   Species::Garchomp,
+                level:     50,
+                hp:        PokemonHP::Percent(100),
+                status:    None,
+                tera_type: None,
+            },
+            SwitchState {
+                slot:      p2(1),
+                species:   Species::Snorlax,
+                level:     50,
+                hp:        PokemonHP::Percent(90),
+                status:    None,
+                tera_type: None,
+            },
+        ],
+    })];
+
+    let result = apply_information(
+        preview_state,
+        &events,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &InferenceConfig::default(),
+    );
+
+    let preview = match result {
+        UnknownMatchState::TeamPreview(ref p) => p,
+        _ => panic!("expected TeamPreview state"),
+    };
+
+    // Both leads were switched in; Charizard (not switched in) must be unchanged.
+    assert!(
+        matches!(preview.p2_mons[0].hp, PokemonHP::Percent(100)),
+        "Garchomp HP must be Percent(100), got {:?}", preview.p2_mons[0].hp
+    );
+    assert!(
+        matches!(preview.p2_mons[1].hp, PokemonHP::Percent(90)),
+        "Snorlax HP must be Percent(90), got {:?}", preview.p2_mons[1].hp
+    );
+    assert!(
+        matches!(preview.p2_mons[2].hp, PokemonHP::Percent(100)),
+        "Charizard HP must remain Percent(100) (not switched in)"
+    );
+}
+
+// ── Gap 2: Terrain timer model ────────────────────────────────────────────────
+//
+// Weather timers (rain, sand, sun, snow) and side-condition timers (Reflect,
+// etc.) are exhaustively tested in the S-A block above.  This is the first test
+// of the *terrain* timer, which shares the same `Possibly([5,8])` structure.
+
+/// When a terrain is set via `TerrainChanged`, the timer starts at `Possibly([5,8])`.
+/// After 5 end-of-turn decrements it collapses to `Known(3)`, revealing the
+/// `TerrainExtender` on the setter (mirror of the I-A weather test).
+#[test]
+fn test_terrain_timer_collapse_reveals_terrain_extender() {
+    use crate::information::unknowns::Unknown;
+
+    // P2 Garchomp sets Electric Terrain.
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_with_p2(vec![p2_mon]);
+
+    // Turn 1: a move-effect sets Electric Terrain.
+    let mut move_dex = HashMap::new();
+    // Build a minimal status move that triggers a TerrainChanged reaction.
+    let terrain_move = MoveData {
+        name: PokemonMove::ElectricTerrain,
+        base_power: 0,
+        accuracy: AccuracyType::Percent(100),
+        target: MoveTarget::Normal,
+        secondaries: vec![],
+        self_secondaries: vec![],
+        pp: 10,
+        category: MoveCategory::Status,
+        pokemon_type: PokemonType::Normal,
+        priority: 0,
+        flags: vec![],
+        ohko: false,
+        thaws_target: false,
+        heal_fraction: [0, 0],
+        force_switch: false,
+        self_switch: SelfSwitchType::None,
+        self_boost: [0; 7],
+        self_destruct: SelfDestructType::None,
+        breaks_protect: false,
+        recoil_fraction: [0, 0],
+        drain_fraction: [0, 0],
+        mind_blown_recoil: false,
+        struggle_recoil: false,
+        crit_ratio: 1,
+        foul_play: false,
+        ignore_ability: false,
+        ignore_defense_boosts: false,
+        ignore_evasion: false,
+        ignore_immunity: vec![],
+        multihit_range: [1, 1],
+        multihit_accuracy: false,
+        sleep_usable: false,
+        has_crash_damage: false,
+        damage_override: DamageOverride::None,
+        stalling_move: false,
+        override_offensive_stat: None,
+        override_defensive_stat: None,
+    };
+    move_dex.insert(PokemonMove::ElectricTerrain, terrain_move);
+
+    let set_terrain_turn = vec![event_with(
+        EventKind::MoveUsed {
+            user:      p2(0),
+            move_used: PokemonMove::ElectricTerrain,
+            targets:   vec![],
+        },
+        vec![event(EventKind::TerrainChanged { terrain: Some(Terrain::ElectricTerrain) })],
+    )];
+
+    let mut cur_state = apply_ex(state, set_terrain_turn, HashMap::new(), move_dex);
+
+    // Timer must start as Possibly([5, 8]).
+    assert_eq!(
+        cur_state.terrain_turns,
+        Some(Unknown::Possibly(vec![5, 8])),
+        "terrain_turns must start as Possibly([5,8])"
+    );
+    assert_eq!(cur_state.terrain, Some(Terrain::ElectricTerrain));
+    assert_eq!(
+        cur_state.terrain_setter_mon_idx, Some(0),
+        "terrain setter must be mon_idx=0 (p2 Garchomp)"
+    );
+
+    // Advance 4 EOTs — timer decrements but must not collapse yet.
+    for expected in [
+        Unknown::Possibly(vec![4, 7]),
+        Unknown::Possibly(vec![3, 6]),
+        Unknown::Possibly(vec![2, 5]),
+        Unknown::Possibly(vec![1, 4]),
+    ] {
+        cur_state = apply_ex(
+            cur_state, vec![event(EventKind::EndOfTurn)], HashMap::new(), HashMap::new(),
+        );
+        assert_eq!(
+            cur_state.terrain_turns,
+            Some(expected.clone()),
+            "terrain_turns after decrement: expected {:?}", expected
+        );
+        // Item still unknown.
+        assert!(
+            matches!(cur_state.p2_active_mons[0].item, Unknown::Not(ref v) if v.is_empty()),
+            "item must remain unknown before the 5th EOT"
+        );
+    }
+
+    // 5th EOT — collapses: Possibly([1,4]) → filter(>1) → [3] → Known(3).
+    cur_state = apply_ex(
+        cur_state, vec![event(EventKind::EndOfTurn)], HashMap::new(), HashMap::new(),
+    );
+    assert_eq!(
+        cur_state.terrain_turns,
+        Some(Unknown::Known(3)),
+        "terrain_turns must collapse to Known(3) after the 5th EOT"
+    );
+
+    // I-A: TerrainExtender must now be revealed as Known on Garchomp.
+    assert_eq!(
+        cur_state.p2_active_mons[0].item,
+        Unknown::Known(Item::TerrainExtender),
+        "TerrainExtender must be revealed as Known after the 5th EOT confirms the 8-turn branch"
+    );
+}
+
+// ── Gap 3: EOT sand-immunity disjunction ─────────────────────────────────────
+//
+// `pass_eot_heal` and `pass_eot_self_status` are covered by existing tests but
+// `pass_eot_sand_immunity` (inference.rs ~3464) is not.  When an opponent mon
+// takes NO sand chip under Sandstorm at EOT, the engine emits a disjunction of
+// immunity sources (SafetyGoggles ∨ SandVeil ∨ SandRush ∨ SandForce ∨ Overcoat
+// ∨ MagicGuard).
+
+/// Under Sandstorm, if a P2 Normal-type mon takes no EOT sand chip, the engine
+/// must emit the sand-immunity disjunction covering SafetyGoggles and the
+/// sand-immunity abilities.
+#[test]
+fn test_eot_sand_immunity_emits_clause_when_no_chip() {
+    // P2 Garchomp — typed as Normal so it is NOT innately immune (Normal ≠ Rock/Ground/Steel).
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    // Sandstorm is active.
+    state.weather = Some(Weather::Sandstorm);
+
+    // EndOfTurn with no DamageDealt on P2 (no sand chip).
+    let result = apply(state, vec![event(EventKind::EndOfTurn)]);
+
+    // The predicates must contain a clause that mentions at least SafetyGoggles
+    // or one of the sand-immunity abilities.
+    let clause_with_sand_immunity = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }
+                | Statement::HasAbility { ability: Ability::SandRush, .. }
+                | Statement::HasAbility { ability: Ability::SandForce, .. }
+                | Statement::HasAbility { ability: Ability::Overcoat, .. }
+                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
+        ))
+    });
+    assert!(
+        clause_with_sand_immunity,
+        "EOT sand chip absence must emit a sand-immunity disjunction on the P2 mon"
+    );
+}
+
+/// Under Sandstorm, if a P2 Steel-type mon takes no EOT chip, the engine must
+/// NOT emit a sand-immunity clause (Steel is innately immune).
+#[test]
+fn test_eot_sand_immunity_not_emitted_for_innately_immune_type() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Steel]);
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Sandstorm);
+
+    let result = apply(state, vec![event(EventKind::EndOfTurn)]);
+
+    // No sand-immunity clause should appear for a Steel-type.
+    let has_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }
+                | Statement::HasAbility { ability: Ability::SandRush, .. }
+                | Statement::HasAbility { ability: Ability::SandForce, .. }
+                | Statement::HasAbility { ability: Ability::Overcoat, .. }
+                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
+        ))
+    });
+    assert!(
+        !has_clause,
+        "Sand-immunity clause must NOT be emitted for innately-immune Steel-type"
+    );
+}
+
+/// When Sandstorm is NOT active, EOT must not emit sand-immunity clauses even if
+/// the mon takes no chip (no sandstorm → no chip → no information).
+#[test]
+fn test_eot_sand_immunity_not_emitted_without_sandstorm() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+
+    // No weather — not sandstorm.
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let result = apply(state, vec![event(EventKind::EndOfTurn)]);
+
+    let has_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }
+        ))
+    });
+    assert!(
+        !has_clause,
+        "Sand-immunity clause must NOT be emitted when there is no Sandstorm"
+    );
 }
