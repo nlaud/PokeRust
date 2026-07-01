@@ -32344,13 +32344,14 @@ mod rollout {
 // exercise the forward (simulator → observer) path; all prior event tests in
 // `inference_tests.rs` run the inverse (observer → inferred state) direction.
 mod event_round_trip {
-    use crate::state::battle::{FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleCommand, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::information::information::{CantReason, EventKind, InformationEvent};
     use crate::information::unknowns::PokemonHP;
+    use crate::simulator::helpers::hp_to_percent;
     use crate::state::dex_data::VolatileStatus;
     use crate::state::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
@@ -32874,6 +32875,114 @@ mod event_round_trip {
             )),
             "Steadfast +1 Spe boost for P2 must appear in the flinch branch;\n\
              events = {:#?}", flinch_events
+        );
+    }
+
+    // ── Test 9: Regenerator emits no reveal event; re-entry shows healed HP ───
+
+    /// Verify the full Regenerator event contract:
+    /// - Switch-out is **silent**: no `Healed` or `AbilityRevealed` event fires for
+    ///   the departing Pokémon.
+    /// - On re-entry the `Switch` event reports HP ≈ (hp at exit) + 1/3 max,
+    ///   observed as a `Percent` from the opponent's perspective.
+    ///
+    /// Two turns are needed: one to switch the Regenerator holder out, and one to
+    /// bring it back in.  The HP at re-entry is compared to the exact expected
+    /// value computed from the mon's max HP so the assertion is species-agnostic.
+    #[test]
+    fn regenerator_switch_out_is_silent_and_return_shows_healed_hp() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1 lead: Snorlax with Regenerator, damaged to 50% HP.
+        // Snorlax has a high HP stat; it will not faint to anything in this test.
+        let mut regen_holder = build_pokemon_state(
+            Species::Snorlax, &pd, &md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Regenerator), None, None, None, None, None, false,
+        );
+        let max_hp = regen_holder.stats[0];
+        regen_holder.hp = max_hp / 2;
+        let hp_at_exit = max_hp / 2;
+
+        // P1 back: a passive Clefable (no entry effects, no ability).
+        let replacement = build_pokemon_state(
+            Species::Clefable, &pd, &md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        // P2: a passive Snorlax so the opponent does nothing interesting.
+        let p2_mon = build_pokemon_state(
+            Species::Snorlax, &pd, &md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let initial = battle_state_from_lists(
+            vec![regen_holder], vec![replacement],
+            vec![p2_mon], vec![],
+        );
+        let state_t0 = MatchState::BattleState(initial);
+
+        // ── Turn 1: P1 switches Regen holder out; Clefable enters ────────────
+        let p1_switch_out = PlayerCommand::Battle(
+            vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })],
+        );
+        let p2_splash = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let mut branches_t1 = run_single_turn_with_events(
+            &state_t0, &p1_switch_out, &p2_splash, &md, &pd, Player::P2,
+        );
+        assert_eq!(branches_t1.len(), 1, "expected one deterministic branch for turn 1");
+        let (state_t1, events_t1_opt, _) = branches_t1.remove(0);
+        let events_t1 = events_t1_opt.expect("observer set — events must be Some (turn 1)");
+
+        // Regenerator must be completely silent: no Healed for P1 slot 0 and no
+        // AbilityRevealed anywhere in the event tree.
+        assert!(
+            !any_event_deep(&events_t1, |k| matches!(k,
+                EventKind::Healed { target, .. }
+                if *target == (FieldSlot { player: Player::P1, slot_index: 0 })
+            )),
+            "Regenerator must NOT emit a Healed event on switch-out;\n\
+             turn-1 events = {:#?}", events_t1
+        );
+        assert!(
+            !any_event_deep(&events_t1, |k| matches!(k,
+                EventKind::AbilityRevealed { ability: Ability::Regenerator, .. }
+            )),
+            "Regenerator must NOT be revealed when it activates;\n\
+             turn-1 events = {:#?}", events_t1
+        );
+
+        // ── Turn 2: P1 switches Clefable out; Regen holder returns ───────────
+        let p1_switch_back = PlayerCommand::Battle(
+            vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })],
+        );
+
+        let mut branches_t2 = run_single_turn_with_events(
+            &state_t1, &p1_switch_back, &p2_splash, &md, &pd, Player::P2,
+        );
+        assert_eq!(branches_t2.len(), 1, "expected one deterministic branch for turn 2");
+        let (_, events_t2_opt, _) = branches_t2.remove(0);
+        let events_t2 = events_t2_opt.expect("observer set — events must be Some (turn 2)");
+
+        // The Switch event for P1 slot 0 must report the healed HP.
+        // Observer is P2, so P1's HP is Percent-encoded.
+        let switch_ev = events_t2
+            .iter()
+            .find(|e| matches!(&e.kind, EventKind::Switch(sw) if sw.slot.player == Player::P1))
+            .expect("Switch event for P1 must be present in turn-2 events;\n\
+                     turn-2 events = {:#?}");
+        let expected_actual_hp = (hp_at_exit + max_hp / 3).min(max_hp);
+        let expected_pct = hp_to_percent(expected_actual_hp, max_hp);
+        assert!(
+            matches!(&switch_ev.kind,
+                EventKind::Switch(sw) if sw.hp == PokemonHP::Percent(expected_pct)
+            ),
+            "Regen holder must re-enter with healed HP (Percent({expected_pct}));\n\
+             Switch event = {:#?}", switch_ev.kind
         );
     }
 }

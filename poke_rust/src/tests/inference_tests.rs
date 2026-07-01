@@ -5787,6 +5787,324 @@ fn test_intimidate_not_excluded_when_own_mon_has_guard_dog() {
 /// **C2 regression** — own mon's Atk boost is at −6 (Intimidate is a no-op clamp).
 ///
 /// If the target's Atk is already clamped at −6, Intimidate's drop produces
+// ── Regenerator inference (B1 bench-state preservation + B2 HP-delta inference) ──────────────
+//
+// Tests in this section verify two features added together:
+//
+// B1: a switched-out opponent mon is now preserved to the bench list (with its
+//     last-seen HP) rather than being discarded.  On re-entry it is pulled from
+//     that list and its state (HP, revealed moves, ability narrowing) is reused.
+//
+// B2: when a mon returns from the bench with HP that differs from its last-seen
+//     HP by ≈33% (with no hazards on the entering side), the engine narrows the
+//     ability to `Known(Regenerator)` (positive case) or excludes Regenerator
+//     (absence case).
+
+/// B1 basic: a Pokémon's last-observed HP survives the bench round-trip.
+///
+/// Scenario (observer = P2 fog-of-war on P2's opponent, P1):
+///   Initial: P1 active = Garchomp at 50%.  P1 back = Snorlax.
+///   Turn 1 event: Snorlax switches into P1 slot 0 → Garchomp goes to bench.
+///   Expected: `p1_known_back_mons` contains Garchomp, still at Percent(50).
+#[test]
+fn test_b1_bench_hp_preserved_across_switch_out() {
+    let mut garchomp = unknown_mon_species(Species::Garchomp);
+    garchomp.hp = PokemonHP::Percent(50);
+
+    let snorlax = unknown_mon_species(Species::Snorlax);
+
+    let mut state = battle_with_p2(vec![]); // We're testing P1 side (works same way)
+    state.p1_active_mons = vec![garchomp];
+    state.p1_known_back_mons = vec![snorlax];
+    state.active_per_side = 1;
+    state.back_mons_per_side = 5;
+
+    // Snorlax switches into P1 slot 0 → Garchomp displaced to bench.
+    let switch_ev = event(EventKind::Switch(SwitchState {
+        slot: p1(0),
+        species: Species::Snorlax,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let after = apply(state, vec![switch_ev]);
+
+    // Snorlax is now active; Garchomp was benched (B1).
+    assert_eq!(after.p1_active_mons.len(), 1);
+    assert!(
+        matches!(&after.p1_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Snorlax),
+        "Snorlax must be active after the switch"
+    );
+    let benched = after.p1_known_back_mons.iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Garchomp))
+        .expect("Garchomp must be in known_back_mons after being displaced (B1)");
+    assert_eq!(
+        benched.hp, PokemonHP::Percent(50),
+        "B1: Garchomp's last-seen HP (50%) must survive the bench round-trip; got {:?}", benched.hp
+    );
+}
+
+/// B2 positive: opponent returns with ≈33% more HP than it left with → Regenerator inferred.
+///
+/// Scenario (two-turn):
+///   Turn 1: P2 Snorlax switches out (was at 50%), Garchomp comes in.
+///   Turn 2: P2 Snorlax switches back in at 83% (50 + 33 = 83).
+///   Expected: Snorlax's ability is narrowed to Known(Regenerator).
+#[test]
+fn test_b2_regenerator_inferred_from_hp_gain_on_reentry() {
+    // P2 active: Snorlax at 50% HP.  P2 back: Garchomp.
+    let mut snorlax = unknown_mon_species(Species::Snorlax);
+    snorlax.hp = PokemonHP::Percent(50);
+
+    let garchomp = unknown_mon_species(Species::Garchomp);
+
+    let mut state = battle_with_p2(vec![snorlax]);
+    state.p2_known_back_mons = vec![garchomp];
+
+    // ── Turn 1: P2 switches to Garchomp (Snorlax goes to bench at 50%) ────────
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }))];
+    let after_t1 = apply(state, t1);
+
+    // Sanity: Garchomp is active; Snorlax is on the bench at 50%.
+    assert!(
+        matches!(&after_t1.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Garchomp)
+    );
+    let benched_snorlax = after_t1.p2_known_back_mons.iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Snorlax))
+        .expect("Snorlax must be on bench after turn 1");
+    assert_eq!(benched_snorlax.hp, PokemonHP::Percent(50), "bench HP must be 50%");
+
+    // ── Turn 2: Snorlax returns at 83% (50% + 33% Regen heal) ────────────────
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Snorlax,
+        level: 50,
+        hp: PokemonHP::Percent(83), // 50 + 33
+        status: None,
+        tera_type: None,
+    }))];
+    let after_t2 = apply(after_t1, t2);
+
+    let p2_active = &after_t2.p2_active_mons[0];
+    assert!(
+        matches!(&p2_active.possible_species, Unknown::Known(s) if *s == Species::Snorlax),
+        "Snorlax must be active after turn 2"
+    );
+    assert_eq!(
+        p2_active.hp, PokemonHP::Percent(83),
+        "Snorlax's HP must reflect the re-entry value"
+    );
+    assert!(
+        matches!(&p2_active.possible_abilities, Unknown::Known(Ability::Regenerator)),
+        "B2: Snorlax must be inferred to have Regenerator from the ≈33% HP gain;\n\
+         possible_abilities = {:?}", p2_active.possible_abilities
+    );
+}
+
+/// B2 absence: opponent returns with the same HP it left with (no gain) →
+/// Regenerator excluded when the gain would have been distinguishable.
+#[test]
+fn test_b2_regenerator_excluded_when_no_hp_gain_on_reentry() {
+    // Same setup but Snorlax returns at 50% (same as it left).
+    let mut snorlax = unknown_mon_species(Species::Snorlax);
+    snorlax.hp = PokemonHP::Percent(40);
+
+    let garchomp = unknown_mon_species(Species::Garchomp);
+
+    let mut state = battle_with_p2(vec![snorlax]);
+    state.p2_known_back_mons = vec![garchomp];
+
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }))];
+    let after_t1 = apply(state, t1);
+
+    // Snorlax returns at 40% — same as it left (no Regenerator gain).
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Snorlax,
+        level: 50,
+        hp: PokemonHP::Percent(40),
+        status: None,
+        tera_type: None,
+    }))];
+    let after_t2 = apply(after_t1, t2);
+
+    let p2_active = &after_t2.p2_active_mons[0];
+    assert!(
+        unknown_is_excluded(&p2_active.possible_abilities, &Ability::Regenerator),
+        "B2: Regenerator must be excluded when no HP gain observed (mon left at 40%, \
+         returned at 40%);\n\
+         possible_abilities = {:?}", p2_active.possible_abilities
+    );
+}
+
+/// B2 hazard skip: Stealth Rock is on the entering side → inference is skipped
+/// because hazard chip would confound the delta calculation.
+/// Neither Regenerator inference nor exclusion should fire.
+#[test]
+fn test_b2_regenerator_skip_when_stealth_rock_present() {
+    let mut snorlax = unknown_mon_species(Species::Snorlax);
+    snorlax.hp = PokemonHP::Percent(50);
+
+    let garchomp = unknown_mon_species(Species::Garchomp);
+
+    let mut state = battle_with_p2(vec![snorlax]);
+    state.p2_known_back_mons = vec![garchomp];
+    // Stealth Rock on P2's side (damages P2's incoming mons).
+    state.p2_side_conditions = vec![SideCondition::StealthRock];
+    state.p2_side_condition_turns = vec![Unknown::Known(0)];
+    state.p2_side_condition_setters = vec![Some(0)];
+
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }))];
+    let after_t1 = apply(state, t1);
+
+    // Snorlax returns at 75% — looks like 50% + 33% Regen − 8% rock = 75%, but
+    // the engine should skip inference entirely when rocks are present.
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Snorlax,
+        level: 50,
+        hp: PokemonHP::Percent(75),
+        status: None,
+        tera_type: None,
+    }))];
+    let after_t2 = apply(after_t1, t2);
+
+    let p2_active = &after_t2.p2_active_mons[0];
+    // Must be neither Known(Regenerator) nor Excluded(Regenerator).
+    assert!(
+        !matches!(&p2_active.possible_abilities, Unknown::Known(Ability::Regenerator)),
+        "B2: Regenerator must NOT be inferred when Stealth Rock is present (hazard skip);\n\
+         possible_abilities = {:?}", p2_active.possible_abilities
+    );
+    assert!(
+        !unknown_is_excluded(&p2_active.possible_abilities, &Ability::Regenerator),
+        "B2: Regenerator must NOT be excluded when Stealth Rock is present (hazard skip);\n\
+         possible_abilities = {:?}", p2_active.possible_abilities
+    );
+}
+
+/// B2 inconclusive: mon left near-full HP (>66%) → inference skipped because
+/// Regenerator's heal would cap at 100% and the observed delta would be ambiguous.
+#[test]
+fn test_b2_regenerator_skip_when_mon_left_near_full() {
+    // Snorlax left at 70% — above the 66% threshold for distinguishable Regen.
+    let mut snorlax = unknown_mon_species(Species::Snorlax);
+    snorlax.hp = PokemonHP::Percent(70);
+
+    let garchomp = unknown_mon_species(Species::Garchomp);
+
+    let mut state = battle_with_p2(vec![snorlax]);
+    state.p2_known_back_mons = vec![garchomp];
+
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }))];
+    let after_t1 = apply(state, t1);
+
+    // Returns at 100% — could be 70% + 33% Regen (capped) or just full HP.
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Snorlax,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }))];
+    let after_t2 = apply(after_t1, t2);
+
+    let p2_active = &after_t2.p2_active_mons[0];
+    assert!(
+        !matches!(&p2_active.possible_abilities, Unknown::Known(Ability::Regenerator)),
+        "B2: Regenerator must NOT be inferred when mon left near-full (near-cap — inconclusive);\n\
+         possible_abilities = {:?}", p2_active.possible_abilities
+    );
+    assert!(
+        !unknown_is_excluded(&p2_active.possible_abilities, &Ability::Regenerator),
+        "B2: Regenerator must NOT be excluded when mon left near-full;\n\
+         possible_abilities = {:?}", p2_active.possible_abilities
+    );
+}
+
+/// B2 persistence: once Regenerator is inferred it survives another switch cycle,
+/// because `possible_original_abilities` is also updated.
+#[test]
+fn test_b2_regenerator_inference_persists_across_second_switch() {
+    // Same as test_b2_regenerator_inferred_from_hp_gain_on_reentry, then one more cycle.
+    let mut snorlax = unknown_mon_species(Species::Snorlax);
+    snorlax.hp = PokemonHP::Percent(50);
+
+    let garchomp = unknown_mon_species(Species::Garchomp);
+
+    let mut state = battle_with_p2(vec![snorlax]);
+    state.p2_known_back_mons = vec![garchomp];
+
+    // Turn 1: Garchomp in, Snorlax (50%) to bench.
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0), species: Species::Garchomp, level: 50,
+        hp: PokemonHP::Percent(100), status: None, tera_type: None,
+    }))];
+    let after_t1 = apply(state, t1);
+
+    // Turn 2: Snorlax returns at 83% → Regenerator inferred.
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0), species: Species::Snorlax, level: 50,
+        hp: PokemonHP::Percent(83), status: None, tera_type: None,
+    }))];
+    let after_t2 = apply(after_t1, t2);
+    assert!(
+        matches!(&after_t2.p2_active_mons[0].possible_abilities, Unknown::Known(Ability::Regenerator)),
+        "Prerequisite: Regenerator must be inferred after turn 2"
+    );
+
+    // Turn 3: Snorlax switches out again (bench it).
+    // Turn 4: Snorlax returns at some HP — the ability should still be Known(Regenerator).
+    let t3 = vec![event(EventKind::Switch(SwitchState {
+        slot: p2(0), species: Species::Garchomp, level: 50,
+        hp: PokemonHP::Percent(90), status: None, tera_type: None,
+    }))];
+    let after_t3 = apply(after_t2, t3);
+
+    // Garchomp is now active; Snorlax is benched.
+    let benched_snorlax = after_t3.p2_known_back_mons.iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Snorlax))
+        .expect("Snorlax must be on bench after turn 3");
+    // After switch-out, possible_abilities resets to possible_original_abilities.
+    // Since we updated possible_original_abilities in turn 2, it should still be Known(Regen).
+    assert!(
+        matches!(&benched_snorlax.possible_abilities, Unknown::Known(Ability::Regenerator)),
+        "B2 persistence: Regenerator must still be Known after a second switch-out;\n\
+         (possible_original_abilities must have been updated)\n\
+         possible_abilities = {:?}", benched_snorlax.possible_abilities
+    );
+}
+
 /// no visible `BoostChanged` — absence of the event does not prove absence of Intimidate.
 #[test]
 fn test_intimidate_not_excluded_when_own_mon_atk_at_minus_six() {

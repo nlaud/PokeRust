@@ -1549,12 +1549,17 @@ fn pass1_apply_switch_event(
     match &event.kind {
         EventKind::Switch(sw) => {
             apply_switch_out_reset(state, &sw.slot);
+            // B1: preserve the outgoing mon to the bench so its state (HP, move reveals,
+            // ability/item narrowing) survives for future re-entry inference.
+            bench_outgoing_mon(state, &sw.slot);
             pass1_switch(state, sw, ctx);
             pass1_ability_absence_inference(state, &[sw.slot.clone()], &event.reactions, ctx);
         }
         EventKind::SimultaneousSwitch { switches } => {
             for sw in switches {
                 apply_switch_out_reset(state, &sw.slot);
+                // B1: preserve each outgoing mon before any pass1_switch replaces its slot.
+                bench_outgoing_mon(state, &sw.slot);
             }
             for sw in switches {
                 pass1_switch(state, sw, ctx);
@@ -1563,6 +1568,39 @@ fn pass1_apply_switch_event(
             pass1_ability_absence_inference(state, &slots, &event.reactions, ctx);
         }
         _ => {}
+    }
+}
+
+/// Push the mon currently at `slot` (if any and not fainted) onto the appropriate
+/// bench list with its post-`apply_switch_out_reset` state (HP intact, boosts/volatiles
+/// cleared).  Called immediately after `apply_switch_out_reset` and before `pass1_switch`
+/// overwrites the active slot, so the bench baseline reflects the last-seen HP.
+///
+/// Mons with `Unknown::Known` species go to the `known_back_mons` list so that
+/// `pass1_switch` can find them by species on re-entry.  Unknown-species mons go to
+/// `possible_back_mons`.
+fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot) {
+    let slot_i = slot.slot_index as usize;
+    // Clone in a temporary scope to avoid simultaneous mutable borrows.
+    let maybe_benched: Option<UnknownPokemonState> = {
+        let actives = match slot.player {
+            Player::P1 => &state.p1_active_mons,
+            Player::P2 => &state.p2_active_mons,
+        };
+        actives.get(slot_i).filter(|m| !m.fainted).cloned()
+    };
+    if let Some(benched) = maybe_benched {
+        if matches!(&benched.possible_species, Unknown::Known(_)) {
+            match slot.player {
+                Player::P1 => state.p1_known_back_mons.push(benched),
+                Player::P2 => state.p2_known_back_mons.push(benched),
+            }
+        } else {
+            match slot.player {
+                Player::P1 => state.p1_possible_back_mons.push(benched),
+                Player::P2 => state.p2_possible_back_mons.push(benched),
+            }
+        }
     }
 }
 
@@ -1594,7 +1632,10 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         }
     };
 
-    let mut mon = if let Some(m) = back_mon {
+    let mut mon = if let Some(mut m) = back_mon {
+        // B2: before apply_switch_state_to_mon overwrites m.hp, compare the benched
+        // baseline against the incoming HP to infer (or exclude) Regenerator.
+        infer_regenerator_from_hp_delta(&mut m, sw, state);
         m
     } else {
         // Completely new opponent mon: build from species, then recompute stat bounds for
@@ -1722,6 +1763,109 @@ fn apply_switch_state_to_mon(
         mon.minIvs = [31; 6];
         mon.maxIvs = [31; 6];
     }
+}
+
+/// Infer or exclude the ability `Regenerator` by comparing the mon's last-known
+/// benched HP against the incoming HP observed in `sw`.
+///
+/// Regenerator heals exactly `floor(max_hp / 3)` when a Pokémon switches out.  The
+/// heal fires silently (no `Healed` or `AbilityRevealed` event), so the only
+/// observable is that the mon returns with higher HP than it left with.  In percent
+/// terms this is ≈33% (±2% from `hp_to_percent` rounding).
+///
+/// Rules:
+/// - Only runs when the ability is still uncertain (`!Known`).
+/// - Only runs for `PokemonHP::Percent` (opponent-side) — own-side abilities are
+///   already known so the inference is redundant there.
+/// - Skips when entry hazards are on the entering side (conservative — hazard chip
+///   reduces the re-entry HP and would require knowing the mon's exact types to
+///   account for; not yet implemented).
+/// - Skips when the mon left near-full HP, because Regenerator would cap at 100%
+///   and the observed delta would be indistinguishable from normal (≤1% rounding
+///   noise).
+///
+/// When both hypotheses are distinguishable:
+/// - **Observed delta ≈ 33% gain** → narrow `possible_abilities` and
+///   `possible_original_abilities` to `Known(Regenerator)`.
+/// - **No gain (delta ≈ 0)** → exclude `Regenerator` from both ability fields.
+///
+/// Updating `possible_original_abilities` makes the inference persist across
+/// future switch cycles (which reset `possible_abilities` to `possible_original_abilities`
+/// via `apply_switch_out_reset`).
+fn infer_regenerator_from_hp_delta(
+    mon: &mut UnknownPokemonState,
+    sw: &SwitchState,
+    state: &UnknownBattleState,
+) {
+    // Skip if ability is already certain.
+    if matches!(mon.possible_abilities, Unknown::Known(_)) {
+        return;
+    }
+
+    // Only meaningful for Percent HP (opponent's perspective).
+    let (h_out, h_in) = match (&mon.hp, &sw.hp) {
+        (PokemonHP::Percent(out), PokemonHP::Percent(r#in)) => (*out as i16, *r#in as i16),
+        _ => return,
+    };
+
+    // Skip when entry hazards are present on the entering side — hazard chip would
+    // reduce the incoming HP and require type-effectiveness math to account for.
+    let entering_conditions = match sw.slot.player {
+        Player::P1 => &state.p1_side_conditions,
+        Player::P2 => &state.p2_side_conditions,
+    };
+    let has_hazards = entering_conditions.iter().any(|sc| {
+        matches!(sc, SideCondition::StealthRock | SideCondition::Spikes(_) | SideCondition::ToxicSpikes(_))
+    });
+    if has_hazards {
+        return;
+    }
+
+    // If the mon left at > 66% HP, Regenerator's heal would push it to ≥100% (cap)
+    // and the re-entry HP cannot distinguish Regenerator from any other scenario.
+    // The threshold is conservative: regen heal ≈ 33%, 66 + 33 = 99 < 100.
+    if h_out > 66 {
+        return;
+    }
+
+    let delta = h_in - h_out;
+
+    // Regenerator heal ≈ 33% in percent terms (±2% for rounding).
+    // A gain in [31, 35] is consistent with Regen and inconsistent with no-Regen.
+    const REGEN_GAIN_MIN: i16 = 31;
+    const REGEN_GAIN_MAX: i16 = 35;
+    // Without Regen the HP should not change (HP changes between turns on the bench
+    // other than Regen and hazards, which we've excluded).  Allow ±1 for rounding.
+    const NO_REGEN_TOLERANCE: i16 = 1;
+
+    if delta >= REGEN_GAIN_MIN && delta <= REGEN_GAIN_MAX {
+        // HP gain matches Regenerator; Regenerator is the only benched-heal ability.
+        if !unknown_is_excluded(&mon.possible_abilities, &Ability::Regenerator) {
+            unknown_set_known(
+                &mut mon.possible_abilities,
+                Ability::Regenerator,
+                "regenerator-hp-gain",
+            );
+            unknown_set_known(
+                &mut mon.possible_original_abilities,
+                Ability::Regenerator,
+                "regenerator-hp-gain",
+            );
+        }
+    } else if delta.unsigned_abs() <= NO_REGEN_TOLERANCE as u16 {
+        // No HP gain observed; a Regenerator gain would have been distinguishable.
+        unknown_exclude(
+            &mut mon.possible_abilities,
+            &Ability::Regenerator,
+            "regenerator-absence",
+        );
+        unknown_exclude(
+            &mut mon.possible_original_abilities,
+            &Ability::Regenerator,
+            "regenerator-absence",
+        );
+    }
+    // Delta outside both windows (e.g. partial gain from some other effect): do nothing.
 }
 
 /// Apply the bench (switch-out) reset to whatever mon is currently in `slot`, if any.
