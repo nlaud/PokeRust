@@ -99,6 +99,24 @@ pub fn observed_hp(bs: &BattleState, slot: FieldSlot, observer: Player) -> Pokem
     }
 }
 
+/// Perspective-correct `PokemonHP` from already-captured `(hp, max_hp)` values.
+///
+/// Use this variant (instead of [`observed_hp`]) when the post-mutation HP has already
+/// been read from the Pokémon *before* the mutable borrow was released — e.g. inside
+/// the 28+ inline `if slot.player == observer { Number(hp) } else { Percent(...) }`
+/// sites that exist throughout `simulator/mod.rs` and `simulator/helpers.rs`.
+///
+/// Consolidating those sites here removes a whole class of perspective-leak risk: any
+/// future mistake would only need to be fixed in one place.
+#[inline]
+pub fn observed_hp_value(observer: Player, slot_player: Player, hp: u16, max_hp: u16) -> PokemonHP {
+    if slot_player == observer {
+        PokemonHP::Number(hp)
+    } else {
+        PokemonHP::Percent(hp_to_percent(hp, max_hp))
+    }
+}
+
 // ── Move-outcome resolver ─────────────────────────────────────────────────────
 
 /// Player-visible result of a move attempt, used by `note_move_outcome` to emit the

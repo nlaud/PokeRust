@@ -2265,6 +2265,66 @@ const TERRAIN_SETTING_ABILITIES: &[Ability] = &[
 /// Sound: only excludes when we can be certain the ability would have been visible.
 /// Conservative: multi-mon battles with multiple possible setters are skipped unless
 /// the attribution is unambiguous.
+/// Returns `true` when every active Pokémon on the side opposing `entering_slot` would
+/// produce a visible `BoostChanged { Atk, −1 }` reaction if Intimidate had fired.
+///
+/// Returns `false` — so Intimidate **cannot** be safely excluded — when at least one foe:
+/// - Has an ability that silently blocks, redirects, or inverts the −1 Atk drop, OR
+/// - Already has Atk boost clamped at −6 (the −1 is a no-op, nothing visible).
+///
+/// Abilities that prevent a visible −1:
+/// - `InnerFocus / OwnTempo / Oblivious / Scrappy` — full immunity; the −1 is never applied.
+/// - `ClearBody / WhiteSmoke / FullMetalBody` — drop blocked; only `AbilityRevealed` emitted.
+/// - `HyperCutter` — specifically blocks Atk drops.
+/// - `GuardDog` — converts the −1 into a +1 raise.
+/// - `Contrary` — inverts the −1 into a +1 on that target.
+/// - `MirrorArmor` — bounces the drop back onto the Intimidate user; no −1 on the foe.
+///
+/// Observer's own mons always have `Known` abilities, so checking `Unknown::Known(ab)` is safe.
+fn intimidate_drop_would_be_visible(state: &UnknownBattleState, entering_slot: &FieldSlot) -> bool {
+    let foe_mons: &Vec<UnknownPokemonState> = match entering_slot.player {
+        Player::P1 => &state.p2_active_mons,
+        Player::P2 => &state.p1_active_mons,
+    };
+
+    let blocks_visible_drop = |ability: &Ability| {
+        matches!(
+            ability,
+            Ability::InnerFocus
+                | Ability::OwnTempo
+                | Ability::Oblivious
+                | Ability::Scrappy
+                | Ability::ClearBody
+                | Ability::WhiteSmoke
+                | Ability::FullMetalBody
+                | Ability::HyperCutter
+                | Ability::GuardDog
+                | Ability::Contrary
+                | Ability::MirrorArmor
+        )
+    };
+
+    let non_fainted: Vec<&UnknownPokemonState> = foe_mons.iter().filter(|m| !m.fainted).collect();
+    // No active non-fainted foes → Intimidate fires but hits nobody; no −1 visible.
+    if non_fainted.is_empty() {
+        return false;
+    }
+    for mon in non_fainted {
+        // If the foe's ability is Known and blocks/redirects the drop, the −1 won't appear
+        // even when Intimidate is present.
+        if let Unknown::Known(ref ability) = mon.possible_abilities {
+            if blocks_visible_drop(ability) {
+                return false;
+            }
+        }
+        // Atk already at −6: the drop is clamped to zero, nothing emitted.
+        if mon.boosts[0] <= -6 {
+            return false;
+        }
+    }
+    true
+}
+
 fn pass1_ability_absence_inference(
     state: &mut UnknownBattleState,
     entered_slots: &[FieldSlot],
@@ -2383,12 +2443,17 @@ fn pass1_ability_absence_inference(
                 }
             });
             if !intimidate_fired {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    unknown_exclude(
-                        &mut mon.possible_abilities,
-                        &Ability::Intimidate,
-                        "ability-absence-intimidate",
-                    );
+                // Only exclude Intimidate when every adjacent foe would have visibly received
+                // the −1 Atk drop.  If any foe has Clear Body, Inner Focus, Guard Dog,
+                // Mirror Armor, Contrary, etc., no −1 would appear even WITH Intimidate.
+                if intimidate_drop_would_be_visible(state, slot) {
+                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                        unknown_exclude(
+                            &mut mon.possible_abilities,
+                            &Ability::Intimidate,
+                            "ability-absence-intimidate",
+                        );
+                    }
                 }
             }
         }
@@ -2871,16 +2936,19 @@ fn pass2_contact_absence(
             unknown_exclude(&mut mon.item, &Item::RockyHelmet, "no-helmet-chip");
         }
 
-        // Rough Skin / Iron Barbs: Magic Guard does NOT prevent these (they deal
-        // damage directly), so absence is unconditional once contact/pads are checked.
-        if !rough_skin_revealed {
+        // Rough Skin / Iron Barbs: Magic Guard on the attacker ALSO prevents these —
+        // all three contact chips (Rough Skin, Iron Barbs, Rocky Helmet) are classified
+        // as "indirect damage" and are blocked by Magic Guard.  The previous comment
+        // claiming Magic Guard did not apply to Rough Skin / Iron Barbs was incorrect
+        // (confirmed on Bulbapedia). Gate the same way as Rocky Helmet.
+        if !rough_skin_revealed && !magic_guard_possible {
             unknown_exclude(
                 &mut mon.possible_abilities,
                 &Ability::RoughSkin,
                 "no-rough-skin-chip",
             );
         }
-        if !iron_barbs_revealed {
+        if !iron_barbs_revealed && !magic_guard_possible {
             unknown_exclude(
                 &mut mon.possible_abilities,
                 &Ability::IronBarbs,
@@ -2915,6 +2983,49 @@ fn reaction_contains_ability_reveal(
     reaction_contains(event, &|k| {
         matches!(k, EventKind::AbilityRevealed { slot: s, ability: a } if s == slot && a == ability)
     })
+}
+
+/// Returns `true` if `event`'s reactions include any of `Immune`, `MoveFailed`, or
+/// `Blocked` directed at `target`.  This covers the three ways a move can "not happen"
+/// on a particular target without having missed (missed = wrong target choice, not
+/// absorbed/immunity/blocked here).
+///
+/// Used by `pass2_prankster_immunity`, `pass2_powder_immunity`, and
+/// `pass2_guaranteed_status_absence` (which also checks `Missed`).
+fn move_blocked_on_target(event: &InformationEvent, target: &FieldSlot) -> bool {
+    event.reactions.iter().any(|r| {
+        matches!(
+            &r.kind,
+            EventKind::Immune { target: t }
+            | EventKind::MoveFailed { slot: t }
+            | EventKind::Blocked { target: t }
+            if t == target
+        )
+    })
+}
+
+/// Returns `true` if a damaging move's reactions include `DamageDealt` for `target`
+/// (confirming the hit landed), or if a status move's reactions contain none of the
+/// failure signals (`Missed`, `Immune`, `MoveFailed`, `Blocked`) for `target`.
+///
+/// `is_damaging` selects which check to apply.
+fn move_hit_target(event: &InformationEvent, target: &FieldSlot, is_damaging: bool) -> bool {
+    if is_damaging {
+        event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
+        })
+    } else {
+        !event.reactions.iter().any(|r| {
+            matches!(
+                &r.kind,
+                EventKind::Missed { target: t }
+                | EventKind::Immune { target: t }
+                | EventKind::MoveFailed { slot: t }
+                | EventKind::Blocked { target: t }
+                if t == target
+            )
+        })
+    }
 }
 
 // ── Pass 2c: Prankster-immunity reveal ────────────────────────────────────────
@@ -2971,14 +3082,7 @@ fn pass2_prankster_immunity(
         }
 
         // Check that the reaction includes Immune/MoveFailed/Blocked for this target.
-        let failed_on_target = event.reactions.iter().any(|r| {
-            matches!(
-                &r.kind,
-                EventKind::Immune { target: t } | EventKind::MoveFailed { slot: t } | EventKind::Blocked { target: t }
-                if t == target
-            )
-        });
-        if !failed_on_target {
+        if !move_blocked_on_target(event, target) {
             continue;
         }
 
@@ -3027,14 +3131,7 @@ fn pass2_powder_immunity(
         }
 
         // Did the move fail/be immune on this target?
-        let failed = event.reactions.iter().any(|r| {
-            matches!(
-                &r.kind,
-                EventKind::Immune { target: t } | EventKind::MoveFailed { slot: t } | EventKind::Blocked { target: t }
-                if t == target
-            )
-        });
-        if !failed {
+        if !move_blocked_on_target(event, target) {
             continue;
         }
 
@@ -3101,24 +3198,7 @@ fn pass2_guaranteed_status_absence(
         };
 
         // Did the move actually hit? (Missed / Blocked / Immune = no status applies.)
-        let hit = if is_damaging {
-            event.reactions.iter().any(|r| {
-                matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
-            })
-        } else {
-            // Status-category moves: no `Missed` and no `MoveFailed`/`Immune`.
-            !event.reactions.iter().any(|r| {
-                matches!(
-                    &r.kind,
-                    EventKind::Missed { target: t }
-                    | EventKind::Immune { target: t }
-                    | EventKind::MoveFailed { slot: t }
-                    | EventKind::Blocked { target: t }
-                    if t == target
-                )
-            })
-        };
-        if !hit {
+        if !move_hit_target(event, target, is_damaging) {
             continue;
         }
 

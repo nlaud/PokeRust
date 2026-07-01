@@ -5468,3 +5468,250 @@ fn test_eot_sand_immunity_not_emitted_without_sandstorm() {
         "Sand-immunity clause must NOT be emitted when there is no Sandstorm"
     );
 }
+
+// ── G2 regressions: soundness fixes for absence-based inferences ──────────────
+//
+// Both tests encode a scenario where the observable signal (−1 Atk / contact chip)
+// is absent for a reason *other* than the ability being absent.  Before the fixes
+// the engine wrongly excluded the ability; after the fixes it must remain possible.
+
+/// **C1 regression** — contact move hits an unknown target, attacker may have Magic Guard.
+///
+/// Magic Guard prevents Rough Skin *and* Iron Barbs chip (all contact indirect damage).
+/// When the attacker's Magic Guard is not excluded, absence of chip cannot prove the
+/// target lacks Rough Skin / Iron Barbs.
+#[test]
+fn test_contact_absence_magic_guard_attacker_does_not_exclude_rough_skin_iron_barbs() {
+    use crate::state::dex_data::MoveFlag;
+
+    // Attacker (P1): item Known(None), ability Unknown::Not([LongReach]) — LongReach ruled out
+    // but Magic Guard is NOT ruled out.  Protective Pads also not excluded.
+    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    p1_mon.item = Unknown::Known(Item::None);
+    // Exclude LongReach and ProtectivePads so those escape-routes are not the cause,
+    // but leave Magic Guard possible.
+    p1_mon.possible_abilities = Unknown::Not(vec![Ability::LongReach]);
+
+    // Defender (P2): unknown species / ability — Rough Skin and Iron Barbs are possible.
+    let p2_mon = unknown_mon();
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    let mut contact_move = normal_physical_move(PokemonMove::Tackle, 40);
+    contact_move.flags.push(MoveFlag::Contact);
+    move_dex.insert(PokemonMove::Tackle, contact_move);
+
+    // Contact move hits (DamageDealt present), but no chip reaction for P2.
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(75) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // Rough Skin and Iron Barbs must remain POSSIBLE (not excluded) because the attacker
+    // may have Magic Guard, which also prevents chip from these abilities.
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
+        "RoughSkin must remain possible when attacker may have Magic Guard (C1)"
+    );
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::IronBarbs),
+        "IronBarbs must remain possible when attacker may have Magic Guard (C1)"
+    );
+}
+
+/// **C1 regression (control)** — same scenario but attacker's Magic Guard is excluded.
+///
+/// When Magic Guard is definitively ruled out on the attacker, the absence of chip
+/// *does* prove the target lacks Rough Skin / Iron Barbs — the exclusion is valid.
+#[test]
+fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
+    use crate::state::dex_data::MoveFlag;
+
+    // Attacker: Magic Guard excluded; LongReach excluded; item None (no Protective Pads).
+    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    p1_mon.item = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Not(vec![Ability::LongReach, Ability::MagicGuard]);
+
+    let p2_mon = unknown_mon();
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    let mut contact_move = normal_physical_move(PokemonMove::Tackle, 40);
+    contact_move.flags.push(MoveFlag::Contact);
+    move_dex.insert(PokemonMove::Tackle, contact_move);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(75) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // Now that Magic Guard is excluded, absence of chip proves no Rough Skin / Iron Barbs.
+    assert!(
+        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
+        "RoughSkin must be excluded when Magic Guard is also excluded (C1 control)"
+    );
+    assert!(
+        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::IronBarbs),
+        "IronBarbs must be excluded when Magic Guard is also excluded (C1 control)"
+    );
+}
+
+/// Minimal dex for C2 tests: a single species whose known ability pool includes
+/// Intimidate (and a filler) but NOT NeutralizingGas.  Using a bounded ability list
+/// is essential so that `pass1_ability_absence_inference` is not gated out by the
+/// "NeutralizingGas might be on the field" suppression check — which fires when the
+/// entering mon's abilities are fully unknown (`Not([])`).
+fn intimidate_species_dex() -> HashMap<Species, PokemonData> {
+    use crate::state::pokemon::PokemonGender;
+    let mut dex = HashMap::new();
+    // Reuse Species::Garchomp as the "Intimidate user" species.
+    // Abilities: [Intimidate, SandVeil] — includes Intimidate, excludes NeutralizingGas.
+    dex.insert(Species::Garchomp, PokemonData {
+        species:       Species::Garchomp,
+        types:         vec![PokemonType::Dragon, PokemonType::Ground],
+        base_stats:    [108, 130, 95, 80, 85, 102],
+        weight:        950,
+        primary_ability: Some(Ability::Intimidate),
+        abilities:     vec![Ability::Intimidate, Ability::SandVeil],
+        base_species:  None,
+        forme:         None,
+        required_item: None,
+        battle_only:   None,
+        default_gender: PokemonGender::Male,
+    });
+    dex
+}
+
+/// Helper: build an `UnknownPokemonState` for the entering P2 Garchomp (from `intimidate_species_dex`),
+/// placed in the back-mon list so `pass1_switch` can promote it to active.
+fn p2_back_with_intimidate_possible(dex: &HashMap<Species, PokemonData>) -> Vec<UnknownPokemonState> {
+    vec![UnknownPokemonState::from_opponent_species(Species::Garchomp, dex, 50)]
+}
+
+/// Common switch event used in C2 tests: P2's Garchomp enters, no BoostChanged{Atk,−1}.
+fn p2_switch_event() -> InformationEvent {
+    event(EventKind::SimultaneousSwitch {
+        switches: vec![SwitchState {
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }],
+    })
+}
+
+/// **C2 regression** — opponent's Pokémon enters the field, but our own active mon
+/// has Clear Body (blocks Intimidate's −1 Atk drop silently).
+///
+/// Because Clear Body swallows the Intimidate drop without emitting a BoostChanged{−1},
+/// the absence of a −1 boost does NOT prove the entrant lacks Intimidate.
+#[test]
+fn test_intimidate_not_excluded_when_own_mon_has_clear_body() {
+    // Our mon (P1): ability Known(ClearBody), so it would silently block Intimidate.
+    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    p1_mon.possible_abilities = Unknown::Known(Ability::ClearBody);
+    p1_mon.boosts = [0; 7];
+
+    let dex = intimidate_species_dex();
+    // P2's Garchomp is in the back — `pass1_switch` will promote it to active slot.
+    let mut state = battle_nvn(vec![p1_mon], vec![]);
+    state.p2_known_back_mons = p2_back_with_intimidate_possible(&dex);
+
+    // No BoostChanged{Atk,−1} for P1 in reactions.
+    let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
+
+    // Intimidate must remain POSSIBLE: Clear Body silently swallows the −1.
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
+        "Intimidate must remain possible when own active mon has Clear Body (C2)"
+    );
+}
+
+/// **C2 control** — same scenario but own mon has no Intimidate blocker.
+///
+/// With SandVeil (no block) and Atk boost above −6, the absence of a −1 drop
+/// correctly proves the entrant lacks Intimidate.
+#[test]
+fn test_intimidate_excluded_when_own_mon_unprotected() {
+    // Our mon (P1): ability Known(SandVeil) — not a blocker.
+    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    p1_mon.possible_abilities = Unknown::Known(Ability::SandVeil);
+    p1_mon.boosts = [0; 7];
+
+    let dex = intimidate_species_dex();
+    let mut state = battle_nvn(vec![p1_mon], vec![]);
+    state.p2_known_back_mons = p2_back_with_intimidate_possible(&dex);
+
+    let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
+
+    // Intimidate MUST be excluded: SandVeil doesn't block the −1, Atk is not at −6.
+    assert!(
+        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
+        "Intimidate must be excluded when own mon has no Intimidate-blocking ability (C2 control)"
+    );
+}
+
+/// **C2 regression** — own mon has Guard Dog: converts Intimidate's −1 into +1.
+///
+/// Guard Dog raises the holder's own Atk by +1 when Intimidate would drop it.
+/// No `BoostChanged { Atk, −1 }` for our mon even with Intimidate on the opponent.
+#[test]
+fn test_intimidate_not_excluded_when_own_mon_has_guard_dog() {
+    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    p1_mon.possible_abilities = Unknown::Known(Ability::GuardDog);
+    p1_mon.boosts = [0; 7];
+
+    let dex = intimidate_species_dex();
+    let mut state = battle_nvn(vec![p1_mon], vec![]);
+    state.p2_known_back_mons = p2_back_with_intimidate_possible(&dex);
+
+    let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
+
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
+        "Intimidate must remain possible when own active mon has Guard Dog (C2)"
+    );
+}
+
+/// **C2 regression** — own mon's Atk boost is at −6 (Intimidate is a no-op clamp).
+///
+/// If the target's Atk is already clamped at −6, Intimidate's drop produces
+/// no visible `BoostChanged` — absence of the event does not prove absence of Intimidate.
+#[test]
+fn test_intimidate_not_excluded_when_own_mon_atk_at_minus_six() {
+    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    p1_mon.possible_abilities = Unknown::Known(Ability::SandVeil); // not a blocker
+    p1_mon.boosts = [-6, 0, 0, 0, 0, 0, 0]; // Atk already at min
+
+    let dex = intimidate_species_dex();
+    let mut state = battle_nvn(vec![p1_mon], vec![]);
+    state.p2_known_back_mons = p2_back_with_intimidate_possible(&dex);
+
+    let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
+
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
+        "Intimidate must remain possible when own mon's Atk is already at −6 (C2)"
+    );
+}
