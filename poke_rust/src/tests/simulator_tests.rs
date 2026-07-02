@@ -2020,7 +2020,6 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            // Mimeikyu: Attacker (Swords Dance, Shadow Claw)
             let p1_mon_initial = build_pokemon_state(
                 Species::Mimikyu,
                 &pokemon_dex,
@@ -2042,7 +2041,6 @@ mod tests {
                 true,
             );
 
-            // Aerodactyl: Target (Splash, move out)
             let p2_mon_initial = build_pokemon_state(
                 Species::Aerodactyl,
                 &pokemon_dex,
@@ -2064,8 +2062,6 @@ mod tests {
                 true,
             );
 
-            // --- START OF TURN 1: Swords Dance (Mimikyu) vs Splash (Aerodactyl)
-
             let initial_state = battle_state_from_lists(
                 vec![p1_mon_initial],
                 vec![],
@@ -2073,7 +2069,6 @@ mod tests {
                 vec![],
             );
 
-            // Commands for Turn 1
             let p1_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Swords Dance
             let p2_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
 
@@ -2096,19 +2091,11 @@ mod tests {
 
             let state_t1: &BattleState = &state_t1;
 
-            // Check if Swords Dance was applied (Attack stat increase for P1)
             assert_eq!(state_t1.p1_active_mons[0].boosts[0], 2);
-
-            // Check for state changes
             assert!(state_t1.turn_number == 1);
 
-            // Get the state after Turn 1
             let state_after_t1 = state_t1.clone();
 
-
-            // --- START OF TURN 2: Shadow Claw (Mimikyu) vs Splash (Aerodactyl)
-
-            // Commands for Turn 2
             let p1_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P1, vec![3])); //Shadow Claw
             let p2_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); //
 
@@ -2124,7 +2111,6 @@ mod tests {
 
             assert!(!outcomes_t2.is_empty());
 
-            // Final probability check
             let total_probability_t2: f64 = outcomes_t2.iter().map(|(_, p)|*p).sum();
             assert!((total_probability_t2 - 1.0).abs() < 1e-9);
 
@@ -2182,8 +2168,6 @@ mod tests {
                 true,
             );
 
-            // --- START OF TURN 1: Swords Dance (Mimikyu) vs Splash (Aerodactyl)
-
             let initial_state = battle_state_from_lists(
                 vec![p1_mon],
                 vec![],
@@ -2191,8 +2175,6 @@ mod tests {
                 vec![],
             );
 
-
-            // Commands for Turn 1
             let p1_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Dragon Dance
             let p2_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
 
@@ -2215,20 +2197,12 @@ mod tests {
 
             let state_t1: &BattleState = &state_t1;
 
-            // Check for stat increases
             assert_eq!(state_t1.p1_active_mons[0].boosts[0], 1);
             assert_eq!(state_t1.p1_active_mons[0].boosts[4], 1);
-
-            // Check for state changes
             assert!(state_t1.turn_number == 1);
 
-            // Get the state after Turn 1
             let state_after_t1 = state_t1.clone();
 
-
-            // --- START OF TURN 2: Shadow Claw (Mimikyu) vs Splash (Aerodactyl)
-
-            // Commands for Turn 2
             let p1_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P1, vec![1])); //Superpower
             let p2_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P2, vec![1])); //Superpower
 
@@ -2244,7 +2218,6 @@ mod tests {
 
             assert!(!outcomes_t2.is_empty());
 
-            // Final probability check
             let total_probability_t2: f64 = outcomes_t2.iter().map(|(_, p)|*p).sum();
             assert!((total_probability_t2 - 1.0).abs() < 1e-9);
 
@@ -2483,7 +2456,6 @@ mod tests {
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
             let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
-            // Volatile applied.
             assert!(simulator_helpers::has_status_volatile(&state.p1_active_mons[0], &VolatileStatus::FocusEnergy));
             // +2 crit stages: a base-1 ratio becomes 3.
             assert_eq!(simulator_helpers::effective_crit_ratio(&state, &state.p1_active_mons[0], 1), 3);
@@ -2558,7 +2530,6 @@ mod tests {
         fn minimize_doubles_body_slam_and_never_misses() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            // Control: Body Slam into a non-minimized Snorlax.
             let atk = build_mon(Species::Snorlax, [Some(PokemonMove::BodySlam), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
             let def = build_mon(Species::Snorlax, [Some(PokemonMove::Minimize), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
             let initial = battle_state_from_lists(vec![atk], vec![], vec![def], vec![]);
@@ -2568,7 +2539,6 @@ mod tests {
             let control_dmg = *damage_distribution(&control, full_hp).keys().max().unwrap();
             assert!(control_dmg > 0);
 
-            // Minimize first, then Body Slam.
             let minimized = first_state(run(&initial, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1));
             let after = run(&minimized, vec![0], vec![1], &move_dex, &pokemon_dex, false, 1);
             // Always hits a minimized target.
@@ -2638,7 +2608,6 @@ mod tests {
             let full_hp = initial.p2_active_mons[0].hp;
 
             let out = run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1);
-            // No damage dealt.
             assert!(damage_distribution(&out, full_hp).keys().max().copied().unwrap_or(0) == 0);
         }
 
@@ -5668,15 +5637,10 @@ mod tests {
 
         #[test]
         fn ate_liquid_voice_no_power_boost() {
-            // Liquid Voice converts sound moves to Water-type but grants NO power boost.
-            //
-            // Target: Machamp (pure Fighting) — both Normal and Water are 1× neutral vs Fighting,
-            // so the only difference between LiquidVoice and no-ability should be zero (same BP,
-            // same type effectiveness, no STAB for Incineroar on either type).
-            // NOTE: Dragon resists Water (0.5×), so Dragonite would give a misleading result.
-            //
-            // We also contrast with Pixilate: Fairy is 2× vs Fighting, so with +1.2× boost
-            // the damage should be well over 2× the baseline.
+            // Liquid Voice re-types sound moves as Water but adds no power boost. Machamp (pure
+            // Fighting) is neutral to both Normal and Water, so any damage difference would be
+            // the boost itself, not type effectiveness (Dragonite would mislead since it resists
+            // Water). Pixilate is included as contrast: Fairy is super-effective vs Fighting.
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -5744,14 +5708,8 @@ mod tests {
 
         #[test]
         fn ate_weather_ball_not_converted_by_ate() {
-            // Bulbapedia explicitly states -ate abilities do NOT affect Weather Ball in any
-            // condition. Whether clear or rainy, Pixilate must leave Weather Ball's type and
-            // power unchanged.
-            //
-            // Assertions:
-            //   no_weather + Pixilate:   same as no_weather + no_ability (no conversion)
-            //   rain + Pixilate:         same as rain + no_ability (no conversion in rain either)
-            //   rain genuinely increases damage vs no weather (sanity check)
+            // -ate abilities never affect Weather Ball, per Bulbapedia — Pixilate must leave its
+            // type/power unchanged in both clear and rainy weather.
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -6682,10 +6640,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            // Build a Magmar attacker (decent SpA, uses Ember).  We override its
-            // speed stat directly to control turn order without needing different
-            // EV spreads across species with incompatible base speeds.
-            // Defender is Blissey with speed stat 100.
+            // Speed is overridden directly to control turn order without juggling EV spreads
+            // across species with incompatible base speeds.
             let make_attacker = |ability: Ability, spe_stat: u16| {
                 let mut mon = build_pokemon_state(
                     Species::Magmar, &pokemon_dex, &move_dex, Some(50),
@@ -9650,7 +9606,6 @@ mod tests {
                 simulator_helpers::add_side_condition(&mut state, player, SideCondition::AuroraVeil, 5);
             }
 
-            // Now switch the Screen Cleaner in (replaces Clefable).
             let state = switch_p1_out(state);
 
             // All three screens on both sides should be gone.
@@ -9910,7 +9865,6 @@ mod tests {
                 vec![],
             );
             let transformed = &state.p1_active_mons[0];
-            // Species, types, and moves should be copied.
             assert_eq!(transformed.species, Species::Snorlax);
             // Moves copied; PP capped at 5.
             assert_eq!(transformed.moves[0], Some(PokemonMove::Earthquake));
@@ -9948,7 +9902,6 @@ mod tests {
                 vec![target],
                 vec![],
             );
-            // Confirm transformed.
             assert_eq!(initial.p1_active_mons[0].species, Species::Snorlax);
 
             let after = switch_p1_out(initial);
@@ -11546,14 +11499,9 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            // Splash has base power 0 and no DamageOverride. Category is Status so
-            // move_offensive_stat returns None → 0. To test the bp==0.0 path we
-            // need a Physical/Special move with bp 0. Use Seismic Toss but swap
-            // its override by verifying the path separately via a manually-constructed
-            // MoveData. Instead, use Dragon Rage's base move but confirm 0-bp
-            // Physical moves through the actual data: SeismicToss has basePower=0
-            // and DamageOverride::Level — the override fires first. We confirm the
-            // intent via a hand-built MoveData that is Physical, bp=0, no override.
+            // No real move exercises the bp==0.0 Physical/Special path: Splash is Status
+            // (offensive stat lookup short-circuits to None) and SeismicToss's DamageOverride
+            // fires before bp is checked. Use a hand-built MoveData instead.
             use crate::state::dex_data::{DamageOverride, MoveCategory, MoveData, MoveTarget};
 
             let attacker = build_pokemon_state(
@@ -11807,7 +11755,6 @@ mod tests {
                 vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
             );
 
-            // Turn 1 step 1: U-turn fires
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let after_uturn = single_battle_state(&run_single_turn(
@@ -11815,25 +11762,17 @@ mod tests {
             ));
             assert!(after_uturn.self_switch_pending.is_some());
 
-            // Turn 1 step 2: send in Slowpoke (bench index 0)
             let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
             let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
             let after_switch = single_battle_state(&run_single_turn(
                 &MatchState::BattleState(after_uturn), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
             ));
 
-            // self_switch_pending cleared
             assert!(after_switch.self_switch_pending.is_none(), "pending should be cleared after switch-in");
-
-            // Slowpoke is now the active mon for P1
             assert_eq!(after_switch.p1_active_mons[0].species, Species::Slowpoke,
                 "Slowpoke should be active after U-turn switch");
-
-            // Jolteon is on bench
             assert_eq!(after_switch.p1_back_mons[0].species, Species::Jolteon,
                 "Jolteon should be on the bench");
-
-            // Turn ended normally: both flags reset for next turn
             assert!(!after_switch.turn_started, "turn should be fully over");
             assert!(!after_switch.turn_ended, "turn should be fully over");
         }
@@ -11849,7 +11788,6 @@ mod tests {
                 Species::Jolteon, &pokemon_dex, &move_dex, None,
                 Some(u_turn_set()), None, None, None, None, None, None, None, false,
             );
-            // No bench mons
             let p2_active = build_pokemon_state(
                 Species::Shuckle, &pokemon_dex, &move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
@@ -11867,7 +11805,6 @@ mod tests {
             let bs = single_battle_state(&outcomes);
 
             assert!(bs.self_switch_pending.is_none(), "no bench → no switch pending");
-            // Turn completed normally
             assert!(!bs.turn_started);
             assert!(!bs.turn_ended);
         }
@@ -12128,7 +12065,6 @@ mod tests {
             );
             let bs = single_battle_state(&outcomes);
 
-            // No switch pending
             assert!(bs.self_switch_pending.is_none(),
                 "Shed Tail with existing Substitute should fail — no switch pending");
             // HP cost must NOT have been applied
@@ -12170,7 +12106,6 @@ mod tests {
             );
             let bs = single_battle_state(&outcomes);
 
-            // No switch pending
             assert!(bs.self_switch_pending.is_none(),
                 "Shed Tail with no healthy bench should fail — no switch pending");
             // HP cost must NOT have been applied
@@ -12181,7 +12116,6 @@ mod tests {
                 !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
             );
             assert!(no_sub, "No Substitute should have been created when Shed Tail fails");
-            // Turn completes normally (both flags reset)
             assert!(!bs.turn_started, "turn should be fully over");
             assert!(!bs.turn_ended, "turn should be fully over");
         }
@@ -12430,11 +12364,9 @@ mod tests {
         }
 
         // ── Sitrus × Shed Tail interaction ────────────────────────────────────
-        // These tests verify two invariants together:
-        //   (a) Shed Tail costs ceil(max_hp/2), which always leaves HP ≤ floor(max_hp/2),
-        //       so Sitrus always activates after a successful Shed Tail.
-        //   (b) Even though Sitrus pushes HP back above threshold, the switch still triggers
-        //       (baseline-comparison proxy in apply_post_damage_move_effects).
+        // Shed Tail's ceil(max_hp/2) cost always leaves HP ≤ floor(max_hp/2), so Sitrus always
+        // activates afterward — and the switch must still trigger even though Sitrus then heals
+        // HP back above the threshold (switch uses a pre-heal baseline comparison).
 
         #[test]
         fn sitrus_activates_after_shed_tail_even_hp() {
@@ -12538,11 +12470,9 @@ mod tests {
         }
 
         // ── Focus Sash / Focus Band tests ─────────────────────────────────────
-        // Setup trick: set target stats[0] = 1, hp = 1 so the holder is at
-        // "full HP" (for Sash's condition) and any damaging move deals ≥ 2
-        // (from the +2 floor in the damage formula), guaranteeing a lethal hit.
-        // Both crit and non-crit branches KO the target, so they all trigger the
-        // same endure logic and coalesce to a single outcome (prob 1.0).
+        // stats[0] = hp = 1 puts the holder at "full HP" for Sash's condition while any hit
+        // (≥2 damage from the formula's +2 floor) is guaranteed lethal, so crit and non-crit
+        // branches both trigger Sash identically and coalesce to one outcome.
 
         #[test]
         fn focus_sash_survives_lethal_hit_at_full_hp() {
@@ -13920,7 +13850,6 @@ mod tests {
                 &move_dex, &pokemon_dex,
             )).0;
 
-            // Confirm locked.
             let locked = get_possible_commands_for_active_slot(
                 &after_t1, Player::P1, 0, &move_dex, &pokemon_dex,
             );
@@ -13967,13 +13896,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            // Both mons at 1 HP with Tackle. Whoever moves first KOs the other.
-            // P1 is slower but holds Quick Claw; P2 is faster and has no item.
-            //
-            // - QC fires   (0.2): P1 goes first → KOs P2 → GameOverState { winner: P1 }
-            // - QC inactive(0.8): P2 goes first → KOs P1 → GameOverState { winner: P2 }
-            //
-            // Probability P1 wins = probability QC fired.
+            // Both mons at 1 HP with Tackle, so whoever moves first wins. P1 is slower but holds
+            // Quick Claw (20% to move first anyway), so P(P1 wins) == P(Quick Claw fired).
             let mut slow_qc = build_pokemon_state(
                 Species::Golem, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
@@ -14736,7 +14660,6 @@ mod tests {
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
                 &mdex, &pdex,
             );
-            // Check on the hit branches
             let _ = outcomes;
             for (s, _) in &outcomes2 {
                 if let MatchState::BattleState(bs) = s {
@@ -17003,10 +16926,8 @@ mod contact_reactive_abilities {
 
 // ── Priority manipulation abilities ────────────────────────────────────────────
 //
-// Turn-order probe pattern: both mons at hp=1/stats[0]=1 with Tackle.
-// Whoever goes first KOs the other → observable as GameOverState { winner }.
-// Paralysis-fail probe: P1 at high HP with Thunder Wave, P2 at high HP with Tackle;
-// if Prankster fires → Thunder Wave goes first → P2 paralyzed → 12.5% fail → P1 undamaged.
+// Turn order is probed via mutual-KO setups (both at hp=1, whoever moves first wins) and via
+// Prankster + Thunder Wave (if it lands first, P2's 12.5% paralysis-fail becomes observable).
 mod priority_abilities {
     use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
@@ -22706,10 +22627,8 @@ mod stat_manipulation {
             &move_dex(), &pokemon_dex(),
         );
         let (after_swap, _) = extract_battle_state(swap_outcomes);
-        // Confirm the swap happened.
         assert_eq!(after_swap.p1_active_mons[0].stats[5], 80,  "Speed Swap: user should have target's speed");
         assert_eq!(after_swap.p2_active_mons[0].stats[5], 200, "Speed Swap: target should have user's speed");
-        // Now switch out P1's Snorlax.
         let switch_outcomes = run_single_turn(
             &MatchState::BattleState(after_swap),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
@@ -23068,10 +22987,8 @@ mod self_fainting_and_crash_moves {
 
     #[test]
     fn healing_wish_replacement_is_healed_and_cured_on_entry() {
-        // Two-turn test:
-        //   Turn 1 — Healing Wish: user faints, slot condition set.
-        //   Turn 2 (replacement phase) — Clefable enters injured+burned → healed to full and
-        //                                status cured by the slot condition.
+        // Turn 1: Healing Wish faints the user and sets a slot condition. Turn 2 (replacement):
+        // injured/burned Clefable enters and is healed + cured by that slot condition.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -27769,24 +27686,15 @@ mod new_moves_session {
         );
         assert_eq!(turn1.len(), 1, "Turn 1 should produce exactly 1 outcome (Tackle has 1 roll in single-roll mode)");
         let (turn1_state, _) = turn1.into_iter().next().unwrap();
-        // Verify P2's Tackle hit P1 (last_move_on_field is now Tackle, P1 took some damage).
         if let MatchState::BattleState(ref bs) = turn1_state {
             assert!(bs.p1_active_mons[0].hp < initial_p1_hp, "P2 Tackle should have damaged P1 in turn 1");
             assert_eq!(bs.last_move_on_field, Some(PokemonMove::Splash),
                 "last_move_on_field after turn 1 should be Splash (P1 moved last due to lower speed)");
         }
 
-        // Turn 2: P1 uses Copycat (slot 0). last_move_on_field = Splash (from P1's Splash).
-        // Actually Splash is the last move set since P1 (slower) moves last. Let's verify Copycat
-        // in this case copies Splash and does nothing meaningful, or set it up differently.
-        //
-        // To properly test cross-turn copying of a damaging move, we need P2 to be the LAST mover.
-        // Restructure: make P2 slower so P1 Splash goes first, then P2 Tackle goes last.
-        // After turn 1: last_move_on_field = Tackle (P2 moved last).
-        // Turn 2: P1 uses Copycat → copies Tackle → damages P2.
-        //
-        // The current state from above has last_move_on_field = Splash (P1 slower, moved last).
-        // Re-run with P1 FASTER so P1 Splash executes first, P2 Tackle executes second (last).
+        // To test cross-turn copying of a damaging move, P2 must be the last mover (so
+        // last_move_on_field is Tackle, not Splash): re-run with P1 faster so P1's Splash
+        // resolves first and P2's Tackle resolves last.
         let mut p1b = build_pokemon_state(
             Species::Smeargle, &pdex, &mdex, Some(50),
             Some([Some(PokemonMove::Copycat), Some(PokemonMove::Splash), None, None]),
@@ -29793,7 +29701,6 @@ mod new_abilities_batch {
         // Chlorophyll doubles Speed in real sun. Without actual sun, ally_speed should be base.
         let ally_speed = state.p2_active_mons[0].stats[5]; // compare against p2 speed
         let _ = ally_speed;
-        // Check that p1_active_mons[1] (Chlorophyll ally) has the same speed as without sun.
         let chloro_speed = state.p1_active_mons[1].stats[5];
         let base_speed = ally.stats[5];
         assert_eq!(chloro_speed, base_speed,
@@ -30307,7 +30214,6 @@ mod todo_refactor_mechanic_tests {
         let mut p1_no = mon(Species::Haxorus, PokemonMove::Tackle, Ability::None);
         // Both P1s move first.
         p1_mb.stats[5] = 500; p1_no.stats[5] = 500;
-        // Set +6 Attack on both P1s.
         p1_mb.boosts[0] = 6; p1_no.boosts[0] = 6;
 
         let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Unaware);
@@ -30407,7 +30313,7 @@ mod todo_refactor_mechanic_tests {
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let outcomes = run(state);
 
-        // P2 should have lost some HP from the drain on hit branches (Leech Seed has 90% accuracy).
+        // Leech Seed is 90% accurate, so only some branches drain — hence .any, not .all.
         let p2_drained = outcomes.iter().any(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < p2_max));
         assert!(p2_drained, "Leech Seed should drain HP from a non-Magic-Guard target");
@@ -30417,7 +30323,6 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn long_reach_blocks_rough_skin_recoil() {
-        // Long Reach user uses Tackle — no Rough Skin recoil (contact removed).
         let mut p1_lr = mon(Species::Decidueye, PokemonMove::Tackle, Ability::LongReach);
         let mut p1_no = mon(Species::Decidueye, PokemonMove::Tackle, Ability::None);
         p1_lr.stats[5] = 200; p1_no.stats[5] = 200;
@@ -30439,8 +30344,6 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn long_reach_blocks_spiky_shield_chip() {
-        // Long Reach user uses Tackle into Spiky Shield — no chip damage (contact removed).
-        // P1 uses Spiky Shield, P2 (Long Reach) attacks into it.
         let p1 = build_pokemon_state(
             Species::Clefable, pokemon_dex(), move_dex(), Some(50),
             Some([Some(PokemonMove::SpikyShield), None, None, None]),
@@ -30456,7 +30359,6 @@ mod todo_refactor_mechanic_tests {
         let state_lr = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_lr], vec![]);
         let state_no = battle_state_from_lists(vec![p1], vec![], vec![p2_no], vec![]);
 
-        // In state_lr / state_no: P2 attacks first, hits Spiky Shield.
         let outcomes_lr = run_single_turn(
             &MatchState::BattleState(state_lr),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
@@ -30483,7 +30385,6 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn protective_pads_blocks_rough_skin_recoil() {
-        // Protective Pads user uses Tackle — no Rough Skin recoil.
         let mut p1_pp = mon_item(Species::Snorlax, PokemonMove::Tackle, Ability::None, Item::ProtectivePads);
         let mut p1_no = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None);
         p1_pp.stats[5] = 200; p1_no.stats[5] = 200;
@@ -30505,14 +30406,12 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn protective_pads_retains_tough_claws_damage_boost() {
-        // Tough Claws + Protective Pads: the move still "makes contact" for ToughClaws (1.3×),
-        // even though Protective Pads blocks the incoming punishment.
-        // Compare damage: ToughClaws + PP vs ToughClaws alone (no item).
+        // The move still "makes contact" for Tough Claws (1.3×) even though Protective
+        // Pads blocks the incoming punishment.
         let mut p1_tc_pp = mon_item(Species::Snorlax, PokemonMove::Tackle, Ability::ToughClaws, Item::ProtectivePads);
         let mut p1_tc    = mon(Species::Snorlax, PokemonMove::Tackle, Ability::ToughClaws);
         p1_tc_pp.stats[5] = 200; p1_tc.stats[5] = 200;
 
-        // Make them identical in all damage-relevant stats.
         p1_tc_pp.stats[1] = 150; p1_tc.stats[1] = 150;
 
         let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
@@ -30524,8 +30423,6 @@ mod todo_refactor_mechanic_tests {
         let dmg_pp = avg_dmg_p2(&run(state_pp), 500);
         let dmg_no = avg_dmg_p2(&run(state_no), 500);
 
-        // Both should deal similar damage (PP does not affect ToughClaws boost).
-        // Allow a small rounding margin.
         let ratio = if dmg_no > 0.0 { dmg_pp / dmg_no } else { 1.0 };
         assert!((ratio - 1.0).abs() < 0.05,
             "Protective Pads should not reduce Tough Claws boost; dmg_pp={dmg_pp:.1} vs dmg_no={dmg_no:.1}");
@@ -30535,16 +30432,14 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn berserk_does_not_trigger_under_neutralizing_gas() {
-        // P1 has Berserk, HP just above 50% → a strong hit crosses the threshold.
-        // P2 has Neutralizing Gas (suppresses all abilities on the field).
-        // Expected: Berserk does NOT fire → P1's SpA stays at 0.
+        // HP is set just above 50% so a strong hit crosses the Berserk threshold.
         let mut p1 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Berserk);
         let max_hp = p1.stats[0];
         p1.hp = max_hp / 2 + 1;
 
         let mut p2_gas = mon(Species::WeezingGalar, PokemonMove::Tackle, Ability::NeutralizingGas);
         let mut p2_no  = mon(Species::WeezingGalar, PokemonMove::Tackle, Ability::None);
-        // P2 attacks first with high SpDef-piercing physical damage.
+        // P2 outspeeds and hits hard so the crossing is guaranteed to happen this turn.
         p2_gas.stats[5] = 500; p2_gas.stats[1] = 300;
         p2_no.stats[5]  = 500; p2_no.stats[1]  = 300;
 
@@ -30554,10 +30449,8 @@ mod todo_refactor_mechanic_tests {
         let outcomes_gas = run(state_gas);
         let outcomes_no  = run(state_no);
 
-        // With Neutralizing Gas: no branch should have P1 SpA boost.
         let berserk_under_gas = outcomes_gas.iter().any(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] >= 1));
-        // Without Neutralizing Gas: some branches where the hit crosses 50% should show +1 SpA.
         let berserk_without_gas = outcomes_no.iter().any(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] >= 1));
 
@@ -30611,7 +30504,6 @@ mod doubles_faint_redirection {
 
         let foe1_initial_hp = foe1.hp;
 
-        // Pre-faint foe slot 0
         foe0.hp = 0;
         foe0.fainted = true;
 
@@ -30620,7 +30512,6 @@ mod doubles_faint_redirection {
             vec![foe0, foe1], vec![],
         );
 
-        // P1 slot 0 explicitly targets foe slot 0 (which is fainted)
         let p1_cmd = PlayerCommand::Battle(vec![
             targeted_attack(0, Some(FieldSlot { player: Player::P2, slot_index: 0 })),
             targeted_attack(0, None), // ally splashes
@@ -30636,8 +30527,6 @@ mod doubles_faint_redirection {
 
         assert!(!outcomes.is_empty(), "must produce at least one outcome");
 
-        // In every branch: foe slot 1 (survivor) should have taken damage,
-        // and foe slot 0 (the corpse) should remain at hp = 0 (untouched).
         let foe1_took_damage_prob: f64 = outcomes.iter()
             .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
                 if bs.p2_active_mons.get(1).map(|m| m.hp < foe1_initial_hp).unwrap_or(false)))
@@ -30681,15 +30570,12 @@ mod doubles_faint_redirection {
             vec![foe0, foe1], vec![back_mon],
         );
 
-        // P1 slot 0 explicitly targets foe slot 0 (fainted), both P2 active mons down
         let p1_cmd = PlayerCommand::Battle(vec![
             targeted_attack(0, Some(FieldSlot { player: Player::P2, slot_index: 0 })),
             targeted_attack(0, None),
         ]);
-        // P2 can't act with both active mons fainted — but a SwitchAction would normally be
-        // forced; for this test we just supply no command and rely on the no-op path.
-        // Omit P2 command by issuing Splash from the (fainted) slot — the battle system
-        // should handle fainted-target checks itself and not crash.
+        // Both P2 mons are fainted, so a real switch would normally be forced; issuing
+        // Splash anyway exercises the fainted-target no-op path without one.
         let p2_cmd = PlayerCommand::Battle(vec![
             targeted_attack(0, None),
             targeted_attack(0, None),
@@ -30718,7 +30604,6 @@ mod doubles_faint_redirection {
         let pdex = pokemon_dex();
         let mdex = move_dex();
 
-        // Use Rhyperior (high Attack) with Rock Slide.
         // Blissey targets are bulky enough that neither will faint in one hit.
         let attacker = build_pokemon_state(
             Species::Rhyperior, &pdex, &mdex, Some(50),
@@ -30747,7 +30632,6 @@ mod doubles_faint_redirection {
             &MatchState::BattleState(state_two),
             &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
-        // Average damage dealt to foe slot 0 across all outcome branches
         let avg_dmg_two: f64 = out_two.iter().map(|(s, p)| {
             let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => initial_hp };
             (initial_hp.saturating_sub(hp) as f64) * p
@@ -30771,7 +30655,6 @@ mod doubles_faint_redirection {
             (initial_hp.saturating_sub(hp) as f64) * p
         }).sum();
 
-        // Single-target case must deal strictly more damage than spread case
         assert!(
             avg_dmg_one > avg_dmg_two,
             "Spread: damage with 1 foe ({avg_dmg_one:.1}) must exceed damage with 2 foes ({avg_dmg_two:.1})"
@@ -30837,16 +30720,13 @@ mod season2_items_and_abilities {
 
     #[test]
     fn fire_mane_boosts_fire_moves_by_1_5x() {
-        // Fire Mane: holder's Fire-type moves deal ~1.5× more damage (always, no HP condition).
-        // Use a Water-type target (Vaporeon) so Fire is resisted (×0.5); this prevents
-        // the boosted version from overkilling the target and masking the ratio.
+        // Vaporeon resists Fire (×0.5) so the boosted run doesn't overkill and mask the ratio.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
         let target = mon(Species::Vaporeon, PokemonMove::Splash, Ability::None, None);
         let snorlax_hp = target.stats[0];
 
-        // Control: Flareon with no notable ability, uses Flamethrower.
         let base = mon(Species::Flareon, PokemonMove::Flamethrower, Ability::None, None);
         let outcomes_base = run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
@@ -30856,7 +30736,6 @@ mod season2_items_and_abilities {
         );
         let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
 
-        // Fire Mane: same Flareon with FireMane ability.
         let boosted = mon(Species::Flareon, PokemonMove::Flamethrower, Ability::FireMane, None);
         let outcomes_boosted = run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![boosted], vec![], vec![target.clone()], vec![])),
@@ -30875,7 +30754,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn fire_mane_does_not_boost_non_fire_moves() {
-        // Fire Mane only boosts Fire-type moves; non-Fire moves should be unaffected.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -30935,10 +30813,8 @@ mod season2_items_and_abilities {
 
     #[test]
     fn eelevate_grants_highest_stat_boost_on_ko() {
-        // Eelevate: when the holder KOs a foe with a damaging move, it gets +1 in its highest
-        // non-HP stat. We compute the expected boost index from natural stats (no speed tweak)
-        // so the test validates Eelektross's actual highest stat.
-        // Turn order doesn't matter: the 1-HP Snorlax uses Splash and is KO'd either way.
+        // Compute the expected boost index from natural stats so the test validates
+        // Eelektross's actual highest stat, not a hardcoded guess.
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let attacker = mon(Species::Eelektross, PokemonMove::Thunderbolt, Ability::Eelevate, None);
@@ -30953,7 +30829,6 @@ mod season2_items_and_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex,
         );
-        // All branches should KO the target and give +1 in the highest stat.
         let all_boosted = outcomes.iter().all(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[expected_boost_idx] == 1)
         );
@@ -30971,7 +30846,6 @@ mod season2_items_and_abilities {
         let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
         let snorlax_hp = target.stats[0];
 
-        // Control: Gengar with no item uses Psychic.
         let base = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, None);
         let max_hp_base = base.stats[0];
         let outcomes_base = run_single_turn(
@@ -30982,7 +30856,6 @@ mod season2_items_and_abilities {
         );
         let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
 
-        // Life Orb: Gengar with Life Orb uses Psychic.
         let orb = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, Some(Item::LifeOrb));
         let max_hp_orb = orb.stats[0];
         let outcomes_orb = run_single_turn(
@@ -30993,7 +30866,6 @@ mod season2_items_and_abilities {
         );
         let dmg_orb = avg_damage(&outcomes_orb, snorlax_hp);
 
-        // Damage ratio should be ~1.3×.
         let ratio = dmg_orb / dmg_base;
         assert!(
             (ratio - 1.3).abs() < 0.05,
@@ -31017,7 +30889,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn life_orb_no_recoil_with_magic_guard() {
-        // Magic Guard blocks Life Orb recoil entirely.
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
@@ -31043,7 +30914,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn expert_belt_boosts_super_effective_moves() {
-        // Expert Belt: +20% to super-effective moves only.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -31078,7 +30948,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn expert_belt_no_boost_on_neutral_moves() {
-        // Expert Belt does NOT boost neutral-effectiveness moves.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -31178,7 +31047,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn muscle_band_does_not_boost_special_moves() {
-        // Muscle Band only boosts physical; should be neutral on special moves.
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
@@ -31213,10 +31081,9 @@ mod season2_items_and_abilities {
 
     #[test]
     fn metronome_item_ramps_damage_on_consecutive_uses() {
-        // Metronome item: first use is baseline (×1.0), second is ×1.2, third ×1.4, etc.
-        // We compare turn-1 damage vs turn-2 damage using the same move.
-        // Use Tackle (no secondary, 100% accurate) + no_consider_crit=true so each turn
-        // produces exactly one branch, allowing extract_battle_state to carry state over.
+        // Metronome: first use ×1.0, second ×1.2, third ×1.4, etc. Tackle (no secondary,
+        // 100% accurate) with no crit / 1 roll keeps each turn a single deterministic
+        // branch so extract_battle_state can carry state to the next turn.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -31241,15 +31108,13 @@ mod season2_items_and_abilities {
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Turn 1: first Tackle (streak=0, so multiplier=×1.0).
-        // run_single_turn uses consider_crit=false + damage_rolls=1: one deterministic branch.
         let state1 = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
         let outcomes1 = run_single_turn(
             &MatchState::BattleState(state1), &p1_cmd, &p2_cmd, mdex, pdex,
         );
         let dmg1 = avg_damage(&outcomes1, target_hp);
 
-        // Simulate turn 2 from the actual state (carry over last_used_move + consecutive_move_count).
+        // Carries over last_used_move + consecutive_move_count into turn 2.
         let (bs1, _) = extract_battle_state(outcomes1);
         let t2_target_hp = bs1.p2_active_mons[0].hp;
         let outcomes2 = run_single_turn(
@@ -31257,7 +31122,6 @@ mod season2_items_and_abilities {
         );
         let dmg2 = avg_damage(&outcomes2, t2_target_hp);
 
-        // Second use should be ~1.2× the first.
         let ratio = dmg2 / dmg1;
         assert!(
             (ratio - 1.2).abs() < 0.07,
@@ -31267,9 +31131,8 @@ mod season2_items_and_abilities {
 
     #[test]
     fn metronome_item_resets_on_different_move() {
-        // Switching moves resets the streak: damage on turn 3 (after turn-1 Tackle,
-        // turn-2 Splash, turn-3 Tackle) should equal turn-1 damage (×1.0).
-        // Use no_consider_crit=true + damage_rolls=1 so each turn produces exactly one branch.
+        // Switching moves resets the streak, so turn-3 Tackle (after turn-1 Tackle,
+        // turn-2 Splash) should equal turn-1 damage.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -31294,8 +31157,6 @@ mod season2_items_and_abilities {
         let p1_splash = PlayerCommand::Battle(simple_attack(Player::P1, vec![1]));
         let p2_cmd   = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Turn 1: Tackle (streak=0, ×1.0 baseline).
-        // run_single_turn: consider_crit=false + damage_rolls=1 → single deterministic branch.
         let state1 = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
         let outcomes1 = run_single_turn(
             &MatchState::BattleState(state1), &p1_tackle, &p2_cmd, mdex, pdex,
@@ -31327,7 +31188,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn iron_ball_halves_speed() {
-        // Iron Ball cuts the holder's speed by 50%.
         let pdex = pokemon_dex();
         let mdex = move_dex();
         let base = mon(Species::Raticate, PokemonMove::Splash, Ability::None, None);
@@ -31344,7 +31204,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn iron_ball_grounds_flying_type_for_earthquake() {
-        // Iron Ball: Flying-type (normally immune to Ground) becomes susceptible.
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let mut target = mon(Species::Pidgeot, PokemonMove::Splash, Ability::None, Some(Item::IronBall));
@@ -31360,7 +31219,6 @@ mod season2_items_and_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex,
         );
-        // The Flying-type should take damage from Earthquake (not immune).
         let any_damage = outcomes.iter().any(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp < initial_hp)
         );
@@ -31371,12 +31229,9 @@ mod season2_items_and_abilities {
 
     #[test]
     fn heat_rock_extends_sunny_day_to_8_turns() {
-        // Heat Rock: Sunny Day lasts 8 turns instead of 5. We set the weather via a move
-        // and check weather_turns after the turn resolves.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
-        // Control: Sunny Day without Heat Rock → 5 turns.
         let base = mon(Species::Charizard, PokemonMove::SunnyDay, Ability::None, None);
         let state_base = battle_state_from_lists(vec![base], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
         let (bs_base, _) = extract_battle_state(run_single_turn(
@@ -31389,7 +31244,6 @@ mod season2_items_and_abilities {
         // 5-turn initial → after one turn elapses during EOT processing it becomes 4.
         assert_eq!(bs_base.weather_turns, Some(4), "Control: Sunny Day (no rock) should have 4 turns left");
 
-        // Heat Rock: Sunny Day → 8 turns.
         let rock = mon(Species::Charizard, PokemonMove::SunnyDay, Ability::None, Some(Item::HeatRock));
         let state_rock = battle_state_from_lists(vec![rock], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
         let (bs_rock, _) = extract_battle_state(run_single_turn(
@@ -31498,7 +31352,6 @@ mod new_moves {
 
     #[test]
     fn barb_barrage_doubles_power_vs_poison() {
-        // Clean target vs poisoned: average damage ratio should be ~2.0.
         let mut attacker = mon(Species::Toxapex, PokemonMove::BarbBarrage, Ability::None, None);
         attacker.stats[5] = 300; // move first
         let clean = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
@@ -31527,9 +31380,8 @@ mod new_moves {
 
     #[test]
     fn barb_barrage_doubles_power_vs_toxic_poison() {
-        // Use Ability::MagicGuard on both targets so EOT poison chip is suppressed entirely —
-        // this isolates the pure Barb Barrage damage doubling without EOT contamination.
-        // Clefable (Normal type, Magic Guard) is ideal: not Poison-immune, no type immunity.
+        // Magic Guard suppresses EOT poison chip on both targets, isolating the pure
+        // Barb Barrage damage doubling. Clefable is Poison-susceptible with no type immunity.
         let mut attacker = mon(Species::Toxapex, PokemonMove::BarbBarrage, Ability::None, None);
         attacker.stats[5] = 300;
         let clean = mon(Species::Clefable, PokemonMove::Splash, Ability::MagicGuard, None);
@@ -31647,7 +31499,6 @@ mod new_moves {
         let opp = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
 
         let state = battle_state_from_lists(vec![annihilape], vec![bench], vec![opp], vec![]);
-        // Switch P1 slot 0 -> bench index 0 (Snorlax comes in, Annihilape goes to back)
         let p1_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
         let outcomes = run_single_turn(
@@ -31668,10 +31519,9 @@ mod new_moves {
 
     #[test]
     fn lucky_chant_suppresses_crit_branching() {
-        // Must use simulate_turn directly with consider_crit=true — run_single_turn
-        // always passes consider_crit=false, so crits never branch there.
-        // Slash has a high crit ratio (4/8 at stage 2 counting critical_hit_ratio).
-        // With Lucky Chant: 1 branch (no crit). Without: 2 branches (crit + no-crit).
+        // run_single_turn hardcodes consider_crit=false, so crits never branch there —
+        // must call simulate_turn directly. Slash's high crit ratio (4/8) means Lucky
+        // Chant collapses what would be 2 branches (crit + no-crit) into 1.
         let mut attacker = mon(Species::Snorlax, PokemonMove::Slash, Ability::None, None);
         attacker.stats[5] = 300;
         let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
@@ -31686,7 +31536,6 @@ mod new_moves {
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Use simulate_turn with consider_crit=true and 1 damage roll so branches are crit/no-crit only.
         let outcomes_chant: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state_chant), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
@@ -31694,8 +31543,6 @@ mod new_moves {
             &MatchState::BattleState(state_none), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
-        // With Lucky Chant: only 1 branch (no crits possible).
-        // Without: Slash's high crit ratio produces a crit branch + a non-crit branch.
         assert_eq!(outcomes_chant.len(), 1,
             "Lucky Chant should produce exactly 1 branch (no crit); got {}", outcomes_chant.len());
         assert!(outcomes_none.len() > 1,
@@ -31772,7 +31619,6 @@ mod new_moves {
 
     #[test]
     fn focus_punch_fails_when_hit_first() {
-        // P2 attacks first (higher speed) -> P1 gets hit -> Focus Punch fails.
         let mut p1 = mon(Species::Snorlax, PokemonMove::FocusPunch, Ability::None, None);
         p1.stats[5] = 1;
         let mut p2 = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None, None);
@@ -31852,7 +31698,7 @@ mod new_moves {
     fn dream_eater_heals_user_from_sleeping_target() {
         let mut p1 = mon(Species::Gengar, PokemonMove::DreamEater, Ability::None, None);
         p1.stats[5] = 300;
-        p1.hp = p1.stats[0] / 2; // start at half HP
+        p1.hp = p1.stats[0] / 2;
         let p1_start_hp = p1.hp;
         let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
         p2.status = Some(Status::Sleep(2));
@@ -31932,8 +31778,8 @@ mod new_moves {
         let mut p1 = mon(Species::Sableye, PokemonMove::TopsyTurvy, Ability::None, None);
         p1.stats[5] = 300;
         let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
-        p2.boosts[0] = 2;   // +2 Atk -> -2
-        p2.boosts[1] = -1;  // -1 Def -> +1
+        p2.boosts[0] = 2;
+        p2.boosts[1] = -1;
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let (bs, _) = extract_battle_state(run_single_turn(
@@ -31951,7 +31797,6 @@ mod new_moves {
         let mut p1 = mon(Species::Sableye, PokemonMove::TopsyTurvy, Ability::None, None);
         p1.stats[5] = 300;
         let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
-        // All boosts == 0 -> should fail with no effect.
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let (bs, _) = extract_battle_state(run_single_turn(
@@ -31988,8 +31833,6 @@ mod new_moves {
         use crate::state::battle::BattleCommand;
         use crate::simulator::get_possible_commands_for_active_slot;
 
-        // P1 has Imprison active + knows Splash in slot 1; P2 knows Splash.
-        // P2 should not be able to select Splash.
         let mut p1 = mon(Species::Snorlax, PokemonMove::Imprison, Ability::None, None);
         p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Imprison, 100));
         // slot 1 = Splash (our mon() helper sets slot 0 = Imprison, slot 1 = Splash)
@@ -32032,9 +31875,8 @@ mod new_moves {
 
     #[test]
     fn make_it_rain_drops_user_spa_by_two() {
-        // Make It Rain has 95% accuracy — there are 2 outcome branches (hit + miss).
-        // The self-SpA drop applies regardless of whether the move hits.
-        // Use find_map instead of extract_battle_state to handle multiple branches.
+        // 95% accuracy means hit and miss both branch; use find_map (not extract_battle_state)
+        // to pick out the hit branch, since only a successful hit triggers the self-secondary.
         let mut p1 = mon(Species::Gholdengo, PokemonMove::MakeItRain, Ability::None, None);
         p1.stats[5] = 300;
         let start_spa = p1.boosts[2];
@@ -32048,8 +31890,6 @@ mod new_moves {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             &move_dex(), &pokemon_dex(),
         );
-        // Find a branch where the move hit (P2 took damage) and verify SpA dropped -2.
-        // The self-secondary fires on a successful hit.
         let hit_bs = outcomes.iter().find_map(|(ms, _)| {
             if let MatchState::BattleState(bs) = ms {
                 if bs.p2_active_mons[0].hp < p2_initial_hp { Some(bs) } else { None }
@@ -32146,7 +31986,6 @@ mod rollout {
 
     #[test]
     fn defense_curl_volatile_does_not_stack() {
-        // Using Defense Curl a second time should not add a second volatile.
         let p1 = simple_mon(Species::Snorlax, PokemonMove::DefenseCurl, Ability::None);
         let p2 = simple_mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
 
@@ -32156,9 +31995,7 @@ mod rollout {
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Turn 1
         let after_t1 = one_turn(&ms, &p1_cmd, &p2_cmd);
-        // Turn 2 — use Defense Curl again
         let after_t2 = one_turn(&after_t1, &p1_cmd, &p2_cmd);
 
         if let MatchState::BattleState(ref bs) = after_t2 {
@@ -32166,7 +32003,6 @@ mod rollout {
             let curl_count = p1m.volatiles.iter().filter(|vs| matches!(vs,
                 VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, _))).count();
             assert_eq!(curl_count, 1, "DefenseCurl volatile should not stack");
-            // But Def boost should have risen twice (+1 each turn)
             assert_eq!(p1m.boosts[1], 2, "Def boost should be +2 after two Defense Curls");
         } else {
             panic!("expected BattleState");
@@ -32202,7 +32038,6 @@ mod rollout {
             ms = next_ms;
         }
 
-        // Now fire once more and measure the average damage.
         let initial_hp = if let MatchState::BattleState(bs) = &ms {
             bs.p2_active_mons[0].hp
         } else { panic!() };
@@ -32217,9 +32052,8 @@ mod rollout {
 
     #[test]
     fn rollout_power_doubles_each_turn() {
-        // Bulky Snorlax (Normal; no Rock weakness). We compare relative damage across
-        // consecutive turns — absolute values depend on the damage roll, but the ratio
-        // should be ≈2.0 ± tolerance.
+        // Compare relative damage across consecutive turns; absolute values depend on the
+        // damage roll, but the ratio should be ≈2.0 ± tolerance.
         let p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::ThickFat);
         // Use Chansey as target — massive HP so it doesn't faint mid-run.
         let p2 = build_pokemon_state(
@@ -32250,11 +32084,8 @@ mod rollout {
 
     #[test]
     fn rollout_lock_clears_after_5_turns() {
-        // Inject the lock at n=4 (4 turns already completed) and fire once more.
-        // Turn 5 (cur=5) should deterministically end the run: no BattleState branch
-        // should retain the LockedMove volatile, and no branch should confuse the user.
-        // (GameOverState branches from a one-shot KO are also valid end-states — the
-        // lock and confusion checks only apply to live BattleStates.)
+        // Inject the lock at n=4 so this turn is turn 5, the final Rollout turn: no live
+        // BattleState should retain the lock or gain Confusion (GameOverState is fine too).
         let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
         p1.volatiles.push(VolatileStatusState::MoveStatus(
             VolatileStatus::LockedMove(PokemonMove::Rollout), 4
@@ -32271,7 +32102,6 @@ mod rollout {
             &move_dex(), &pokemon_dex(),
         );
 
-        // Every live BattleState branch must have no LockedMove and no Confusion.
         for (state, _) in &outcomes {
             if let MatchState::BattleState(bs) = state {
                 assert!(!has_locked(&bs.p1_active_mons[0]),
@@ -32286,8 +32116,8 @@ mod rollout {
 
     #[test]
     fn rollout_no_confusion_on_end() {
-        // Contrasted with Thrash: a Rollout run that completes its 5 turns must never confuse.
-        // Inject n=4 (4 turns completed) and verify no BattleState branch adds Confusion.
+        // Unlike Thrash, Rollout must never confuse when its 5-turn run ends; inject n=4
+        // so this turn is the final one.
         let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
         p1.volatiles.push(VolatileStatusState::MoveStatus(
             VolatileStatus::LockedMove(PokemonMove::Rollout), 4
@@ -32310,7 +32140,6 @@ mod rollout {
             &move_dex(), &pokemon_dex(),
         );
 
-        // Every live BattleState branch should have no Confusion.
         for (state, _) in &outcomes {
             if let MatchState::BattleState(bs) = state {
                 assert!(!is_confused(&bs.p1_active_mons[0]),
@@ -32321,19 +32150,15 @@ mod rollout {
 
     #[test]
     fn rollout_no_confusion_on_disruption() {
-        // A paralysis-disrupted Rollout (pre-action fail) should also never confuse.
-        // We set up the user with full paralysis locked into Rollout at n=2 (turn 3 would
-        // be the "final turn" threshold for Thrash-family). Then simulate a paralysis fail.
+        // A paralysis-disrupted Rollout (pre-action fail) should also never confuse, even
+        // at n=2 where turn 3 would be the Thrash-family "final turn" threshold.
         let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
-        // Manually inject the LockedMove volatile at n=2 (two turns already completed).
         p1.volatiles.push(VolatileStatusState::MoveStatus(
             VolatileStatus::LockedMove(PokemonMove::Rollout), 2
         ));
-        // Full paralysis — 100% fail.
         p1.status = Some(crate::state::dex_data::Status::Paralysis);
-        // Patch speed to 0 so full-paralysis branch fires deterministically (status check
-        // uses a 25% chance, but we can't force it; just check that *any* paralysis-fail
-        // branch that does appear does not confuse).
+        // The 25% full-paralysis chance can't be forced, so this just checks that any
+        // paralysis-fail branch that does appear does not confuse.
         let p2 = simple_mon(Species::Chansey, PokemonMove::Splash, Ability::None);
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
@@ -32348,7 +32173,7 @@ mod rollout {
 
         for (state, _) in &outcomes {
             if let MatchState::BattleState(bs) = state {
-                // On any paralysis-fail branch the Rollout lock should be gone and no confusion.
+                // Only check branches where paralysis actually failed the move (lock gone).
                 if !has_locked(&bs.p1_active_mons[0]) {
                     assert!(!is_confused(&bs.p1_active_mons[0]),
                         "Rollout disruption should never cause confusion");
@@ -32523,7 +32348,6 @@ mod event_round_trip {
             None, Some(Ability::None), None, None, None, None, None, false,
         );
 
-        // Defender: Snorlax at half HP carrying Leftovers, uses Splash.
         let mut p2 = build_pokemon_state(
             Species::Snorlax, pd, md, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
@@ -32543,7 +32367,6 @@ mod event_round_trip {
         let (_, events_opt, _) = branches.remove(0);
         let events = events_opt.expect("observer set, events must be Some");
 
-        // MoveUsed for P1 slot 0 must have DamageDealt for P2 slot 0 as a reaction.
         let tackle_ev = find_move_used(&events, p1s0())
             .expect("MoveUsed for P1 slot 0 not found");
         assert!(
@@ -32562,7 +32385,6 @@ mod event_round_trip {
             "opponent's HP should be Percent from P1's perspective, got {:?}", damage_dealt.kind
         );
 
-        // EndOfTurn must exist and its reactions must include Healed for P2 slot 0.
         let eot_ev = events.iter().find(|e| matches!(e.kind, EventKind::EndOfTurn))
             .expect("EndOfTurn event not found");
         assert!(
@@ -32583,7 +32405,7 @@ mod event_round_trip {
         let pd = pokemon_dex();
         let md = move_dex();
 
-        // UrshifuRapidStrike with Surging Strikes. Ability::None to avoid side-effects.
+        // Ability::None avoids side-effects that could confound the reaction ordering.
         let p1 = build_pokemon_state(
             Species::UrshifuRapidStrike, pd, md, Some(50),
             Some([Some(PokemonMove::SurgingStrikes), Some(PokemonMove::Splash), None, None]),
@@ -32609,7 +32431,6 @@ mod event_round_trip {
             &state, &p1_cmd, &p2_cmd, md, pd, Player::P1, true, 1,
         );
         assert!(!branches.is_empty(), "expected at least one branch");
-        // Surging Strikes always crits → only one crit branch (prob 1.0).
         assert_eq!(branches.len(), 1, "Surging Strikes always crits: expect 1 branch");
         let (_, events_opt, _) = branches.remove(0);
         let events = events_opt.expect("observer set, events must be Some");
@@ -32648,7 +32469,6 @@ mod event_round_trip {
         let pd = pokemon_dex();
         let md = move_dex();
 
-        // P1 has Taunt active and tries to use Growl (a Status move).
         let mut p1 = build_pokemon_state(
             Species::Shuckle, pd, md, Some(50),
             Some([Some(PokemonMove::Growl), Some(PokemonMove::Splash), None, None]),
@@ -32675,21 +32495,17 @@ mod event_round_trip {
         let (_, events_opt, _) = branches.remove(0);
         let events = events_opt.expect("observer set, events must be Some");
 
-        // There must be a top-level Cant for P1 slot 0 with reason Taunt.
         let cant_ev = events.iter().find(|e| {
             matches!(&e.kind, EventKind::Cant { slot, reason: CantReason::Taunt } if *slot == p1s0())
         });
         assert!(cant_ev.is_some(),
             "expected top-level Cant {{ slot: P1s0, reason: Taunt }}, events = {events:#?}");
 
-        // The Cant event must NOT be wrapped under any MoveUsed parent
-        // (i.e., no top-level MoveUsed for P1 slot 0 should exist).
         let p1_move_used = find_move_used(&events, p1s0());
         assert!(p1_move_used.is_none(),
             "MoveUsed for P1 slot 0 should not exist when Taunt fires, \
              got {p1_move_used:#?}");
 
-        // Cant event itself has no reactions.
         assert!(cant_ev.unwrap().reactions.is_empty(),
             "Cant event should have no reactions");
     }
@@ -32727,11 +32543,10 @@ mod event_round_trip {
         let (_, events_opt, _) = branches.remove(0);
         let events = events_opt.expect("observer set, events must be Some");
 
-        // P1's MoveUsed must exist (Protect block ≠ Cant; the move was attempted).
+        // Protect block ≠ Cant: the move was attempted, so MoveUsed must still exist.
         let tackle_ev = find_move_used(&events, p1s0())
             .expect("MoveUsed for P1 slot 0 not found after Protect block");
 
-        // Blocked must appear as a reaction, not a top-level event.
         assert!(
             any_kind(&tackle_ev.reactions, |k| matches!(k,
                 EventKind::Blocked { target } if *target == p2s0()
@@ -32775,7 +32590,6 @@ mod event_round_trip {
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Run once from P1's perspective.
         let p1_events = {
             let mut branches = run_single_turn_with_events(
                 &state, &p1_cmd, &p2_cmd, md, pd, Player::P1,
@@ -32783,7 +32597,6 @@ mod event_round_trip {
             let (_, evs, _) = branches.remove(0);
             evs.unwrap()
         };
-        // Run once from P2's perspective.
         let p2_events = {
             let mut branches = run_single_turn_with_events(
                 &state, &p1_cmd, &p2_cmd, md, pd, Player::P2,
@@ -32804,12 +32617,10 @@ mod event_round_trip {
         let p1_view = damage_dealt_kind(&p1_events, p2s0());
         let p2_view = damage_dealt_kind(&p2_events, p2s0());
 
-        // From P1's view, P2 is the opponent → Percent.
         assert!(
             matches!(&p1_view, EventKind::DamageDealt { new_hp: PokemonHP::Percent(_), .. }),
             "observer=P1 should see P2's HP as Percent, got {p1_view:?}"
         );
-        // From P2's view, P2 is self → Number.
         assert!(
             matches!(&p2_view, EventKind::DamageDealt { new_hp: PokemonHP::Number(_), .. }),
             "observer=P2 should see P2's HP as Number, got {p2_view:?}"
@@ -32853,7 +32664,6 @@ mod event_round_trip {
             "expect at least 2 branches (crit + non-crit) with consider_crit=true, got {}",
             branches.len());
 
-        // Find whether each branch has a Crit reaction in P1's MoveUsed.
         let has_crit_event = |events: &[InformationEvent]| -> bool {
             find_move_used(events, p1s0())
                 .map(|mv| any_kind(&mv.reactions, |k| matches!(k, EventKind::Crit { .. })))
@@ -32909,7 +32719,6 @@ mod event_round_trip {
 
         let branches = run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
 
-        // Every branch — flinch and no-flinch — must have no VolatileStart{Flinch}.
         for (_, evs, _) in &branches {
             let events = evs.as_deref().expect("observer set, events must be Some");
             assert!(
@@ -32921,7 +32730,7 @@ mod event_round_trip {
             );
         }
 
-        // The flinch branch (10% probability) must have Cant{Flinch} at the top level.
+        // Tackle has no flinch secondary, so the 10% flinch chance comes only from King's Rock.
         let flinch_branch = branches.iter().find(|(_, evs, _)| {
             evs.as_deref().map(|ev| {
                 ev.iter().any(|e| matches!(&e.kind, EventKind::Cant {
@@ -32966,7 +32775,6 @@ mod event_round_trip {
 
         let branches = run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
 
-        // Flinch branch: Cant{Flinch} present, no VolatileStart{Flinch}, boost is present.
         let flinch_branch = branches.iter().find(|(_, evs, _)| {
             evs.as_deref().map(|ev| {
                 ev.iter().any(|e| matches!(&e.kind, EventKind::Cant {
@@ -32976,7 +32784,6 @@ mod event_round_trip {
         }).expect("Expected a flinch branch");
         let flinch_events = flinch_branch.1.as_deref().unwrap();
 
-        // No VolatileStart{Flinch} anywhere.
         assert!(
             !any_event_deep(flinch_events, |k| matches!(k,
                 EventKind::VolatileStart { volatile: VolatileStatus::Flinch, .. }
@@ -32985,7 +32792,6 @@ mod event_round_trip {
              events = {:#?}", flinch_events
         );
 
-        // Steadfast +1 Spe boost for P2 IS present somewhere in the event tree.
         assert!(
             any_event_deep(flinch_events, |k| matches!(k,
                 EventKind::BoostChanged {
@@ -33059,8 +32865,6 @@ mod event_round_trip {
         let (state_t1, events_t1_opt, _) = branches_t1.remove(0);
         let events_t1 = events_t1_opt.expect("observer set — events must be Some (turn 1)");
 
-        // Regenerator must be completely silent: no Healed for P1 slot 0 and no
-        // AbilityRevealed anywhere in the event tree.
         assert!(
             !any_event_deep(&events_t1, |k| matches!(k,
                 EventKind::Healed { target, .. }
@@ -33089,7 +32893,6 @@ mod event_round_trip {
         let (_, events_t2_opt, _) = branches_t2.remove(0);
         let events_t2 = events_t2_opt.expect("observer set — events must be Some (turn 2)");
 
-        // The Switch event for P1 slot 0 must report the healed HP.
         // Observer is P2, so P1's HP is Percent-encoded.
         let switch_ev = events_t2
             .iter()

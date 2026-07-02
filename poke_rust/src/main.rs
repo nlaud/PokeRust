@@ -67,26 +67,21 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    // Initialize global verbosity
     let _ = VERBOSITY.set(args.verbosity);
     SHARED_MULTIHIT_DAMAGE_ROLLS.store(args.shared_multihit_damage_rolls, Ordering::Relaxed);
 
     if args.verbosity >= 2 { println!("{}", format!("Got paths: {}, {}", args.p1, args.p2).cyan()) }
 
-    //Put dex data into a hashmap
     let pokemon_dex = state::dex_data::parse_pokemon_dex(&args.poke_dex);
 
-    //Put move data into a hashmap
     let move_dex = state::dex_data::parse_move_dex(&args.move_dex);
 
-    // Put ability metadata into a hashmap (used by inference engine for ability absence/priority)
+    // Used by the inference engine for ability absence/priority reasoning
     let ability_dex = state::dex_data::parse_ability_dex(&args.ability_dex);
 
-    // Parse learnset data (used by inference engine for Illusion narrowing)
+    // Used by the inference engine for Illusion narrowing
     let learnset_dex = state::dex_data::parse_learnset_dex(&args.learnset_dex);
 
-    // Print info about a sample move (before printing teamsheets)
-    
     let sample_move = PokemonMove::Roost;
     if let Some(m) = move_dex.get(&sample_move) {
         println!("Data:{:#?}", m)
@@ -102,7 +97,6 @@ fn main() {
         println!("Move Dex: {:#?}", move_dex);
     }
 
-    //Parse teamsheets
     let preview = simulator::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, &move_dex, 2, 4, args.stat_points);
 
     if args.verbosity >= 1 {

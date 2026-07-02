@@ -68,9 +68,8 @@ pub fn battle_state_from_lists(
         event_observer: None,
     };
 
-    // Assign each side a stable, party-unique `mon_id` (active slots first, then bench).
-    // P2's ids are offset by P1's total party count so a single u8 is globally unique across
-    // both teams — required for trapping-volatile source tracking (PartiallyTrapped/Trapped).
+    // P2's mon_id is offset by P1's party count so ids are globally unique across both teams,
+    // which trapping-volatile source tracking (PartiallyTrapped/Trapped) relies on.
     let p1_count = state.p1_active_mons.len() + state.p1_back_mons.len();
     for (idx, mon) in state.p1_active_mons.iter_mut().chain(state.p1_back_mons.iter_mut()).enumerate() {
         mon.mon_id = idx as u8;
@@ -191,9 +190,8 @@ pub fn confusion_turns(mon: &PokemonState) -> Option<u16> {
     })
 }
 
-/// Strip transient tracking fields (`last_used_move`, `original_ability`, `entered_this_turn`)
-/// from every Pokémon in every outcome state so that existing tests can compare states without
-/// caring about fields that are only relevant within a single turn's execution.
+/// Strips per-turn tracking fields from every Pokémon so tests can compare states without
+/// caring about bookkeeping that's only relevant within a single turn's execution.
 pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(MatchState, f64)> {
     fn strip(mon: &mut PokemonState) {
         mon.last_used_move = None;
@@ -201,16 +199,14 @@ pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(Match
         mon.entered_this_turn = false;
         mon.first_move_on_field = false;
         mon.first_turn_on_field_pending = false;
-        // Persists across turns by design (Stomping Tantrum / Micle Berry), but is
-        // transient bookkeeping for state-equality purposes.
+        // Persists across turns by design (Stomping Tantrum / Micle Berry); stripped here only
+        // for state-equality purposes.
         mon.last_move_failed = false;
-        // Tests that compare full states generically (smoke_test, simple_damage, etc.)
-        // should not fail just because the mover's used_moves_this_field changed.
-        // Tests that care about Last Resort gating should check the field explicitly.
+        // Stripped so generic state comparisons don't break on this; Last Resort tests
+        // should check the field explicitly instead.
         mon.used_moves_this_field = [false; 4];
-        // Rage Fist hit counter — stripped so basic damage tests don't need to account
-        // for it. Tests that care about Rage Fist specifically read times_hit directly
-        // from the BattleState rather than using outcomes_permutation.
+        // Rage Fist hit counter; Rage Fist tests should read times_hit directly rather
+        // than relying on outcomes_permutation.
         mon.times_hit = 0;
     }
     outcomes.into_iter().map(|(state, prob)| {
@@ -254,7 +250,7 @@ pub fn run_single_turn_with_events(
 }
 
 /// Like [`run_single_turn_with_events`] but exposes `consider_crit` and `damage_rolls`
-/// for tests that need crit branching (multi-hit crit, crit-branch non-merging, etc.).
+/// for tests needing crit branching.
 pub fn run_single_turn_with_events_opts(
     state: &MatchState,
     p1_cmd: &crate::state::battle::PlayerCommand,
@@ -268,9 +264,8 @@ pub fn run_single_turn_with_events_opts(
     simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, Some(observer))
 }
 
-/// Compare two outcome vectors for permutation-equality after stripping transient tracking
-/// fields (`last_used_move`, `original_ability`) from all states in both sides.
-/// Use this instead of `is_permutation` whenever comparing `Vec<(MatchState, f64)>`.
+/// Like `is_permutation` but strips transient per-turn tracking fields first; use this
+/// whenever comparing `Vec<(MatchState, f64)>`.
 pub fn outcomes_permutation(actual: &[(MatchState, f64)], expected: &[(MatchState, f64)]) -> bool {
     let norm_a = normalize_battle_outcomes(actual.to_vec());
     let norm_e = normalize_battle_outcomes(expected.to_vec());

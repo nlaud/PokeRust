@@ -327,7 +327,6 @@ fn test_choice_not_excluded_for_same_move_twice() {
             }),
         ],
     );
-    // Same move twice — Choice items are still possible.
     assert!(
         !is_item_excluded(&result.p2_active_mons[0], &Item::ChoiceBand),
         "ChoiceBand must NOT be excluded when same move repeated"
@@ -467,7 +466,6 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
         move_dex,
     );
 
-    // LifeOrb should NOT be excluded (the recoil is consistent with it).
     assert!(
         !is_item_excluded(&result.p2_active_mons[0], &Item::LifeOrb),
         "LifeOrb must not be excluded when self-damage reaction is present"
@@ -476,32 +474,24 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
 
 /// Regression for the Bright Powder / Lax Incense soundness bug.
 ///
-/// Scenario: P1 uses a 100%-accurate move in Sandstorm; P2 has no accuracy/evasion
-/// stage modifiers and the move misses.  P2 *might* have Sand Veil (not excluded).
-///
-/// Before the fix, the engine emitted `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]`
-/// — a clause that is *unsound* when Sand Veil caused the miss, because it rules out
-/// the true world where P2 holds no evasion item.  After the fix it must include
-/// `HasAbility(SandVeil)` as a disjunct so BCP cannot force a wrong item.
-///
-/// More concretely: if BCP were then given evidence that rules out BrightPowder and
-/// LaxIncense, a fully-sound engine must *not* panic (no contradiction) — it has the
-/// SandVeil disjunct to fall back on.
+/// P1's 100%-accurate move misses P2 in Sandstorm, with Sand Veil not excluded. The old
+/// engine emitted `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]`, which is unsound: it
+/// rules out the true world where P2 holds no evasion item and Sand Veil caused the miss.
+/// The fix adds `HasAbility(SandVeil)` as a disjunct, so BCP can't force a wrong item even
+/// once BrightPowder and LaxIncense are excluded.
 #[test]
 fn test_brightpowder_clause_includes_sand_veil_in_sandstorm() {
     use crate::information::unknowns::Statement;
 
+    // Sand Veil stays possible: `unknown_mon()` defaults possible_abilities to Not([]),
+    // i.e. all abilities allowed.
     let mut p2_mon = unknown_mon();
-    // P2 might have Sand Veil (Not([]) means all abilities allowed, which is the default
-    // from `unknown_mon`; we just leave it as-is).
 
     let mut state = battle_with_p2(vec![p2_mon]);
-    // Set weather to Sandstorm on the state directly.
     state.weather = Some(Weather::Sandstorm);
 
     let mut move_dex = HashMap::new();
     let mut tackle = normal_physical_move(PokemonMove::Tackle, 40);
-    // 100% accurate, Physical.
     move_dex.insert(PokemonMove::Tackle, tackle);
 
     let result = apply_ex(
@@ -1061,23 +1051,11 @@ fn test_pass3_dir_b_lower_bound_tightened() {
 /// must not cause a contradiction in Pass 3 (no panic, and bounds remain valid min ≤ max).
 #[test]
 fn test_pass3_dir_b_no_contradiction_across_damage_range() {
-    // Garchomp EQ range against P1 (Def=100) at lv50 with neutral nature + IV=31:
-    //   min (IV=31, EV=0, atk=150) → base=68 → roll=85 → 85
-    //   max (IV=31, EV=252, atk=182) → base=82 → roll=100 → floor(82*1.5)=123
-    // (InferenceConfig::default() has force_max_ivs=true, so IV=31 is assumed.)
-    // Sweep starts at 85, not 76.  InferenceConfig::default() has force_max_ivs=true,
-    // which pins IV=31 in Pass 5.  For Garchomp Atk at level 50 with IV=31:
-    //   calc_stat(130, 31, EV=0, 50, 1.0) = floor((260+31)*0.5)+5 = 150
-    // so the minimum achievable BSV is 150.  Damage values 76–84 are only feasible for
-    // BSV ≤ 149, which can't be produced with IV=31.  Those scenarios are physically
-    // impossible under the engine's IV assumption and correctly unreachable in real play.
-    // The min damage for neutral Garchomp (IV=31, EV=0) vs Def=100:
-    //   Atk=150 → base=68 → roll=85 → floor(57*1.5) = 85.
-    // The true Atk BSV for neutral Garchomp (EV=0, IV=31, Hardy) is 150.
-    // Damages 85–102 are achievable from Atk=150 (min roll gives 85, max gives 102).
-    // For those, the soundness invariant requires 150 to lie within the inferred range.
-    // Damages 103–123 require Atk > 150 (only higher EVs can produce them), so we do
-    // NOT assert 150 in-bounds there — that would be unsound in the other direction.
+    // Sweep is 85..=123, not 76..=123: InferenceConfig::default() has force_max_ivs=true,
+    // pinning IV=31, which makes the minimum achievable Atk BSV 150 (calc_stat(130,31,0,50,1)=150)
+    // and its damage range [85,102]. Damage 76-84 would need BSV<150, unreachable under IV=31.
+    // Only assert the true BSV (150) in-bounds for damage <= 102 (its own range); higher
+    // damages require BSV>150, so asserting 150 there would be unsound.
     const TRUE_ATK_BSV: u16 = 150;
     const MAX_FROM_150: u16 = 102; // floor(floor(68*1.0)*1.5) = floor(102) = 102
 
@@ -1233,21 +1211,10 @@ fn test_pass3_dir_b_choice_band_loosens_unconditional_bound() {
     let result_with_band_possible = run_direction_b(p2_mon.clone(), 91);
     let bound_with_band = result_with_band_possible.p2_active_mons[0].max_pre_nature_stat[1];
 
-    // With no item locked, a Choice Band-boosted low-BSV attacker could also produce 91,
-    // so the unconditional upper bound must be ≥ the band-free bound.
-    // (A lower-BSV attacker with ×1.5 from Band could reach the same damage.)
-    // We know the band-free max is 161.  With Band possible, the union includes lower BSVs
-    // that with Band can also hit 91 → the max bound stays 182 (no tightening possible
-    // for any upper bound when Band is possible, since Band on BSV_min is also plausible).
-
-    // The unconditional UPPER bound equals the band-free bound (161): offensive items
-    // only *increase* damage, so the no-item config always permits the highest BSV —
-    // the union's max never exceeds it, and excluding BSVs above 161 is sound (they
-    // over-deal 91 with or without the Band). The Band's real effect is on the LOWER
-    // side: a low-BSV attacker with the ×1.5 Band can also produce 91, so the min
-    // must stay at the species floor while the Band is possible.
-    // (The previous `<= 182` assertion was tautological — 182 is the species max the
-    // bound is initialized to and never raised above.)
+    // Offensive items only *increase* damage, so the no-item config always permits the
+    // highest BSV — the unconditional max never exceeds the band-free bound (161).
+    // Band's real effect is on the LOWER side: a low-BSV attacker with ×1.5 Band could
+    // also produce 91, so the min must stay at the species floor while Band is possible.
     assert_eq!(
         bound_with_band, 161,
         "unconditional max BSV must equal the band-free bound"
@@ -3014,23 +2981,13 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
 // ── Regression: E1 — Binary-search preserves precision of linear scan ────────
 
 /// The binary-search implementation of `find_feasible_bsv_range_b` (Direction B) must
-/// return the same BSV bounds as the former linear scan.  Equivalence is implicitly
-/// confirmed by the full test suite (all existing pass3_dir_b_* tests pass).  This
-/// test adds an explicit regression: P2 attacks P1 with an exact damage number and
-/// P2's Atk BSV range must be narrowed (proving the binary search found a non-trivial
-/// lower/upper bound matching the true feasibility interval).
+/// return the same BSV bounds as the former linear scan; this is an explicit regression
+/// on top of the implicit coverage from the rest of the pass3_dir_b_* suite.
 ///
-/// Damage arithmetic (no items, no STAB, 1× effectiveness, IV=31 pinned by default config):
-///   base_dmg(Atk, Def=65, bp=40, lv=50)
-///     = floor(floor(22 × 40 × Atk / 65) / 50 + 2)
-///   Atk=148: base=42 → rolls [35..42]   (max roll 100 → 42; min roll 85 → 35)
-///   Atk=147: base=41 → rolls [34..41]   (max 41 < 42 — infeasible for dmg=42)
-///   Atk=180: base=50 → rolls [42..50]   (min roll 85 → floor(50×0.85)=42 ✓)
-///   Atk=181: base=51 → rolls [43..51]   (min 43 > 42 — infeasible for dmg=42)
-/// With IV=31 pinned, Garchomp's min Atk BSV is 150 (ev=0,iv=31). Observing
-/// exactly 42 HP damage (new_hp=158) must tighten:
-///   min_pre_nature_stat[1]: 135 → 148  (raised — Atk<148 can't produce 42)
-///   max_pre_nature_stat[1]: 182 → 180  (lowered — Atk>180 can't produce 42)
+/// With Def=65, bp=40, lv=50 (no items/STAB/type effects), Atk=148 is the lowest value
+/// whose max roll (100%) reaches damage 42, and Atk=180 is the highest whose min roll
+/// (85%) still reaches it — so observing exactly 42 damage must tighten
+/// min_pre_nature_stat[1] from 135 to 148 and max_pre_nature_stat[1] from 182 to 180.
 #[test]
 fn test_e1_binary_search_direction_b_preserves_precision() {
     use crate::state::pokemon::Nature;
@@ -3452,29 +3409,16 @@ fn test_item_clause_bcp_cascade() {
 
 // ── S-B: Direction-A HP sampling — EV-lattice enumeration ────────────────────
 
-/// **S-B regression test.** Direction A back-solves the defender's defensive BSV
-/// from a percent-HP observation by sampling possible max-HP candidates.  The old
-/// `step_by(4)` loop started at `hp_lo` and skipped every 4 integers, which means
-/// `hp_hi` (and values close to it) were often not sampled.  Because feasible-BSV
-/// lower-bounds are non-increasing in `hp_cand`, the highest sampled `hp_cand`
-/// determines the global minimum.  Skipping `hp_hi` can raise `min_pre_nature_stat`
-/// above the true value — an unsound exclusion.
+/// **S-B regression test.** Direction A back-solves the defender's BSV from a percent-HP
+/// observation by sampling max-HP candidates. The old `step_by(4)` loop started at `hp_lo`
+/// and could skip `hp_hi` entirely; since feasible-BSV lower bounds are non-increasing in
+/// `hp_cand`, missing the highest candidate can raise `min_pre_nature_stat` above the true
+/// value (unsound exclusion).
 ///
-/// **Setup:** Attacker SpA=300, 100 BP Special move.  Defender Garchomp with HP
-/// artificially pinned to `[183, 186]` (four consecutive EV-lattice HP values at
-/// level 50 with EV=0/4/12/20).  `step_by(4)` starting at 183 gives only `{183}`;
-/// the EV-lattice enumerator gives all four.
-///
-/// **Math:** With SpA=300, bp=100, SpD_stat=121:
-///   inner = floor(660000/121) = 5454; base_dmg = floor(5454/50)+2 = 111
-///   oracle_min = floor(111×0.85) = 94; oracle_max = 111
-///
-/// At `hp_cand=186`, `d_hi = ceil(50.5×186/100) = 94` → 94 ∈ [92, 94] → **feasible**.
-/// At `hp_cand=183`, `d_hi = ceil(50.5×183/100) = 93` → 94 > 93 → **infeasible**.
-///
-/// So BSV=121 is feasible only at hp≥186.  The old code (sampling only hp=183) finds
-/// `found_lo(183) ≥ 124` and raises `min_pre_nature_stat[4]` above 121, excluding the
-/// true value.  The new code samples hp=186 and keeps BSV=121 feasible.
+/// Setup pins defender HP to the 4-value EV-lattice window `[183, 186]` — `step_by(4)` from
+/// 183 only ever samples 183. At SpD_stat=121, hp_cand=186 makes BSV=121 feasible but
+/// hp_cand=183 does not, so the old code raises the min bound past 121 while the EV-lattice
+/// enumerator (which also samples 186) keeps it feasible.
 #[test]
 fn test_pass3_dir_a_ev_lattice_hp_does_not_exclude_true_bsv() {
     use crate::state::pokemon::Nature;
@@ -3700,7 +3644,6 @@ fn test_primordial_weather_timer_is_known_0() {
 #[test]
 fn test_tailwind_timer_decrements_correctly() {
     let mut state = battle_with_p2(vec![unknown_mon()]);
-    // Set Tailwind.
     state = apply(
         state,
         vec![event(EventKind::SideConditionStart {
@@ -3710,7 +3653,6 @@ fn test_tailwind_timer_decrements_correctly() {
     );
     assert_eq!(result_p2_sc_turns(&state), vec![Unknown::Known(4)]);
 
-    // Advance 3 end-of-turn steps.
     for expected in [3u8, 2, 1] {
         state = apply(state, vec![event(EventKind::EndOfTurn)]);
         let turns = &state.p2_side_condition_turns;
@@ -3757,28 +3699,13 @@ fn test_item_gained_does_not_exclude_teammate() {
 /// stat bounds tightened by BCP's `force_literal` (EVIVStatGE) are reflected in
 /// nature exclusion.
 ///
-/// **Setup**: Garchomp at level 50, max IVs, base Atk=130.
-///   Observed Atk range: minStats[1]=150, maxStats[1]=170.
-///   Pre-injected unit predicate: EVIVStatGE{Atk, 156} — simulates a disjunctive
-///   clause that BCP resolved to its unit literal (all other disjuncts were proven
-///   false, e.g. by a subsequent item reveal).
-///
-/// **Math** (force_max_ivs=true, so IV=31 throughout):
-///   EV=36 → BSV = floor((2×130+31+9)×50÷100)+5 = 155; +Atk stat = floor(155×1.1)=170 ≤ 170 ✓
-///   EV=44 → BSV = 156;                              +Atk stat = floor(156×1.1)=171 > 170 ✗
-///
-/// **First Pass 5** (before BCP, min_pre_nature_stat[Atk]=135):
-///   EV=36 (BSV=155 ≥ 135): +Atk stat=170 ✓ → +Atk nature FEASIBLE → not excluded.
-///
-/// **BCP** forces EVIVStatGE{Atk, 156} → min_pre_nature_stat[Atk] raised to 156.
-///
-/// **Second Pass 5** (after BCP, min_pre_nature_stat[Atk]=156):
-///   EV=36 (BSV=155 < 156): SKIPPED.
-///   EV=44 (BSV=156): +Atk stat=171 > 170 ✗ — ALL higher EVs also infeasible.
-///   → +Atk natures EXCLUDED.
-///
-/// Without the second Pass 5 re-run, +Atk natures would survive despite the BSV
-/// floor raised by BCP, leaving a strictly weaker inference result.
+/// Setup: Garchomp lv50, max IVs, Atk observed in [150,170], with a pre-injected unit
+/// predicate EVIVStatGE{Atk,156} (simulating BCP resolving a disjunctive clause to this
+/// literal). Before BCP, min_pre_nature_stat[Atk]=135 lets EV=36 (BSV=155) produce a
+/// feasible +Atk stat of 170, so +Atk nature isn't excluded. After BCP raises the floor
+/// to 156, EV=36 is skipped and EV=44 (BSV=156) gives +Atk stat=171 > 170 — infeasible —
+/// so +Atk natures must now be excluded. Without a second Pass 5 run after BCP, this
+/// tighter exclusion would be missed.
 #[test]
 fn test_ib_pass5_reruns_after_bcp_narrows_nature_via_pre_nature_stat() {
     use crate::state::dex_data::PokemonStat;
@@ -3837,25 +3764,12 @@ fn test_ib_pass5_reruns_after_bcp_narrows_nature_via_pre_nature_stat() {
 
 /// Regression test for I-A: when a `Possibly([5,8])` weather/terrain/screen timer
 /// collapses to `Known(3)` after 5 end-of-turns, the extended (8-turn) branch is
-/// the only remaining candidate.  At that point the setter's rock/extender item
-/// is **guaranteed** and must be recorded as `Known`.
+/// the only remaining candidate, so the setter's rock/extender item is guaranteed
+/// and must be recorded as `Known`.
 ///
-/// **Setup**: Rain is set by the opponent Garchomp via a Rain Dance move.
-///   The initial timer is `Possibly([5,8])` (base 5 or extended 8 with Damp Rock).
-///
-/// **Timer evolution** through 5 `EndOfTurn` events:
-///   Start:          Possibly([5,8])
-///   After EOT 1:   Possibly([4,7])
-///   After EOT 2:   Possibly([3,6])
-///   After EOT 3:   Possibly([2,5])
-///   After EOT 4:   Possibly([1,4])
-///   After EOT 5:   Possibly → filter(n>1) → [3] → Known(3)  ← collapse!
-///
-/// The 5-turn entry (would become 0) is filtered out; only the 8-turn entry (→3)
-/// remains.  At this point rain is confirmed extended → Garchomp has `DampRock`.
-///
-/// **Without I-A**, the item remains unknown after 5 EOTs.  **With I-A**, it is
-/// forced to `Known(DampRock)` by `emit_extension_item_if_collapsed`.
+/// Rain set via Rain Dance starts at `Possibly([5,8])`; after 5 EOT decrements the
+/// 5-turn branch would hit 0 and is filtered out, leaving only the 8-turn branch
+/// (now at 3) — so `emit_extension_item_if_collapsed` must force `Known(DampRock)`.
 fn weather_move_dex() -> HashMap<PokemonMove, MoveData> {
     let mut rd = poke_status_move(PokemonMove::RainDance);
     rd.pokemon_type = PokemonType::Water;
@@ -4138,14 +4052,12 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
         "item must start fully unknown"
     );
 
-    // Build a simple 1v1 state: p1 is empty; p2 has Garchomp.
-    // (We use battle_with_p2 so p2 mon_idx = 0.)
+    // battle_with_p2 puts p2 at mon_idx=0 (p1 is empty).
     let state = battle_with_p2(vec![p2_mon]);
 
     // Minimal Rain Dance move entry (shared with the turn-count clause tests above).
     let move_dex = weather_move_dex();
 
-    // Turn 1: Garchomp (P2 slot 0) uses Rain Dance.
     // The WeatherChanged reaction sets weather_turns = Possibly([5,8]) and records
     // weather_setter_mon_idx = mon_idx of p2(0) = 0.
     let rain_dance_turn = vec![event_with(
@@ -4159,7 +4071,6 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
 
     let mut cur_state = apply_ex(state, rain_dance_turn, HashMap::new(), move_dex);
 
-    // Verify the timer starts as Possibly([5,8]).
     assert_eq!(
         cur_state.weather_turns,
         Some(Unknown::Possibly(vec![5, 8])),
@@ -4170,7 +4081,6 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
         cur_state.weather_setter_mon_idx, Some(0),
         "setter must be mon_idx=0 (Garchomp at p2 slot 0)"
     );
-    // Item still unknown after the move.
     assert!(
         matches!(cur_state.p2_active_mons[0].item, Unknown::Not(ref v) if v.is_empty()),
         "item must still be unknown after Rain Dance"
@@ -4357,7 +4267,6 @@ fn test_sc_allowlist_completeness_cross_validation() {
     let mut failures: Vec<String> = Vec::new();
 
     for probe in &probes {
-        // Build the probe move.
         let mut move_data = normal_physical_move(PokemonMove::Tackle, probe.move_bp);
         move_data.category = probe.move_cat;
         move_data.pokemon_type = probe.move_type.clone();
@@ -4646,16 +4555,13 @@ fn test_lb_multiscale_hp_gate_and_timer_sentinel() {
     let atk_stats: [u16; 6] = [200, 250, 100, 100, 100, 100];
     let def_stats: [u16; 6] = [300, 80, 100, 80, 100, 80];
 
-    // Attacker: physical, Normal type (STAB).
     let mut atk_unk = unknown_mon_species(Species::Garchomp);
     atk_unk.possible_types = Unknown::Known(vec![PokemonType::Normal]);
     let atk_ps = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
 
-    // Move: 80-BP Physical contact Normal.
     let move_data = normal_physical_move(PokemonMove::Tackle, 80);
 
-    // Defender template: known Dragon/Flying so Normal is SE (×1.0, not immune).
-    // Actually Normal vs Dragon is neutral; use Normal vs Normal for simplicity.
+    // Defender is Normal-type too: keeps the matchup neutral so type effectiveness doesn't confound the Multiscale ratio check.
     let mut def_unk = unknown_mon_species(Species::Garchomp);
     def_unk.possible_types = Unknown::Known(vec![PokemonType::Normal]);
 
@@ -4724,7 +4630,6 @@ fn test_frisk_reveals_item() {
     foe.item = Unknown::Not(vec![]); // unknown item
     let state = battle_1v1(unknown_mon(), foe);
 
-    // Build the event: AbilityRevealed{Frisk, p1(0)} with nested ItemRevealed{p2(0), Leftovers}.
     let events = vec![event_with(
         EventKind::AbilityRevealed { slot: p1(0), ability: Ability::Frisk },
         vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
@@ -4747,7 +4652,6 @@ fn test_frisk_reveals_multiple_foes() {
     let mut foe1 = unknown_mon();
     foe1.item = Unknown::Not(vec![]);
     let mut state = battle_with_p2(vec![foe0, foe1]);
-    // Add a trivial P1 mon
     state.active_per_side = 2;
     state.p1_active_mons = vec![unknown_mon(), unknown_mon()];
     state.p1_slot_conditions = vec![vec![], vec![]];
@@ -5708,7 +5612,6 @@ mod roundtrip_soundness {
 
         let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
 
-        // Build P1's fog-of-war state.
         // Use the minimal Garchomp dex ([Intimidate, SandVeil]) so that:
         //   - Intimidate is in Garchomp's possible abilities (makes the exclusion test meaningful)
         //   - NeutralizingGas is excluded (suppression guard won't silently skip absence inference)
@@ -6103,7 +6006,6 @@ fn test_team_preview_switch_updates_hp_and_level() {
         p2_mons: vec![p2_garchomp, p2_snorlax],
     });
 
-    // P2 leads with Garchomp at 80% HP, level 50.
     let events = vec![event(EventKind::Switch(SwitchState {
         slot:      p2(0),
         species:   Species::Garchomp,
@@ -6229,11 +6131,9 @@ fn test_team_preview_simultaneous_switch_two_leads() {
 fn test_terrain_timer_collapse_reveals_terrain_extender() {
     use crate::information::unknowns::Unknown;
 
-    // P2 Garchomp sets Electric Terrain.
     let p2_mon = unknown_mon_species(Species::Garchomp);
     let state = battle_with_p2(vec![p2_mon]);
 
-    // Turn 1: a move-effect sets Electric Terrain.
     let mut move_dex = HashMap::new();
     move_dex.insert(
         PokemonMove::ElectricTerrain,
@@ -6251,7 +6151,6 @@ fn test_terrain_timer_collapse_reveals_terrain_extender() {
 
     let mut cur_state = apply_ex(state, set_terrain_turn, HashMap::new(), move_dex);
 
-    // Timer must start as Possibly([5, 8]).
     assert_eq!(
         cur_state.terrain_turns,
         Some(Unknown::Possibly(vec![5, 8])),
@@ -6362,7 +6261,6 @@ fn test_eot_sand_immunity_not_emitted_for_innately_immune_type() {
 
     let result = apply(state, vec![event(EventKind::EndOfTurn)]);
 
-    // No sand-immunity clause should appear for a Steel-type.
     let has_clause = result.predicates.iter().any(|clause| {
         clause.iter().any(|s| matches!(
             s,
@@ -6387,7 +6285,6 @@ fn test_eot_sand_immunity_not_emitted_without_sandstorm() {
     let mut p2_mon = unknown_mon();
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
 
-    // No weather — not sandstorm.
     let state = battle_with_p2(vec![p2_mon]);
 
     let result = apply(state, vec![event(EventKind::EndOfTurn)]);
@@ -6453,8 +6350,6 @@ fn test_contact_absence_magic_guard_attacker_does_not_exclude_rough_skin_iron_ba
         move_dex,
     );
 
-    // Rough Skin and Iron Barbs must remain POSSIBLE (not excluded) because the attacker
-    // may have Magic Guard, which also prevents chip from these abilities.
     assert!(
         !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
         "RoughSkin must remain possible when attacker may have Magic Guard (C1)"
@@ -6507,7 +6402,6 @@ fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
         move_dex,
     );
 
-    // Now that Magic Guard is excluded, absence of chip proves no Rough Skin / Iron Barbs.
     assert!(
         unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
         "RoughSkin must be excluded when Magic Guard is also excluded (C1 control)"
@@ -6637,7 +6531,6 @@ fn test_intimidate_not_excluded_when_own_mon_has_clear_body() {
     // No BoostChanged{Atk,−1} for P1 in reactions.
     let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
 
-    // Intimidate must remain POSSIBLE: Clear Body silently swallows the −1.
     assert!(
         !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
         "Intimidate must remain possible when own active mon has Clear Body (C2)"
@@ -6722,7 +6615,6 @@ fn test_b1_bench_hp_preserved_across_switch_out() {
     state.active_per_side = 1;
     state.back_mons_per_side = 5;
 
-    // Snorlax switches into P1 slot 0 → Garchomp displaced to bench.
     let switch_ev = event(EventKind::Switch(SwitchState {
         slot: p1(0),
         species: Species::Snorlax,

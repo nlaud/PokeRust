@@ -44,21 +44,21 @@ pub enum MoveCategory {
 
 #[derive(Debug, PartialEq)]
 pub enum MoveTarget {
-    AdjacentAlly,       //Targets Teammates
-    AdjacentAllyOrSelf, //Targets teammates or self
-    AdjacentFoe,        //Targets enemies
-    All,                //Targets the whole field at once
-    AllAdjacent,        //Targets all pokemon except self (teammates and foes)
-    AllAdjacentFoes,    //Targets all pokemon on enemy side
-    Allies,             //Targets all pokemon on your side
-    AllySide,           //Targets all pokemon on your side
-    AllyTeam,           //Targets all pokemon on your side (same as above)
-    Any,                //Can target any individual mon on the field
-    FoeSide,            //Targets all opposing pokemon at once
-    Normal,             // Can target any individual mon, excluding self
-    RandomNormal,       //Chooses a target at random
-    Scripted, //Ignore this for now, moves that reflect damage that the user takes (mirror armor etc.)
-    SelfTarget, //Must target itself
+    AdjacentAlly,
+    AdjacentAllyOrSelf,
+    AdjacentFoe,
+    All,
+    AllAdjacent,
+    AllAdjacentFoes,
+    Allies,
+    AllySide,
+    AllyTeam, // Duplicate of AllySide; both exist because Showdown data uses both target ids
+    Any,
+    FoeSide,
+    Normal, // Single target, adjacent-only in doubles
+    RandomNormal, // Single target, chosen at random
+    Scripted, // Not a real target; moves that reflect damage the user takes (Mirror Armor, etc.)
+    SelfTarget,
 }
 
 #[derive(Debug, Clone)]
@@ -135,12 +135,9 @@ pub enum SelfDestructType {
 pub enum Status {
     Burn,
     Poison,
-    // ToxicPoison stores the number of turns it has been active (starts at 0)
     ToxicPoison(u8),
     Paralysis,
-    // Sleep stores number of turns asleep (starts at 0)
     Sleep(u8),
-    // Frozen stores number of turns frozen (starts at 0)
     Frozen(u8),
 }
 
@@ -290,7 +287,6 @@ pub enum SlotCondition {
     /// items are used on the defensive side.
     FutureMove {
         move_name: PokemonMove,
-        /// True when the attacker is Player 1.
         attacker_is_p1: bool,
         attacker_slot_index: u8,
         /// mon_id of the attacker; lets the resolver verify if the same mon is still in slot.
@@ -779,7 +775,6 @@ fn extract_self_subblock(text: &str) -> (String, Option<String>) {
         };
         let after = text[abs_pos + 5..].trim_start();
         if (!prev_char.is_alphanumeric() && prev_char != '_') && after.starts_with('{') {
-            // Find the matching closing brace
             let brace_start = abs_pos + 5 + text[abs_pos + 5..].find('{').unwrap();
             let mut depth = 0i32;
             let mut end_pos = brace_start;
@@ -1021,19 +1016,12 @@ fn parse_primary_ability_from_text(text: &str) -> Option<Ability> {
 }
 
 /// Extract all three ability slots (0, 1, H) from an `abilities: { … }` inline
-/// object, returning them deduplicated.  Handles both quoted and bare key forms.
-///
-/// The Showdown dex encodes the block on a single line, e.g.:
-///   `abilities: { 0: "Overgrow", H: "Chlorophyll" }`
-/// We scan for each of the three slot keys and extract the first quoted value
-/// after each one.
+/// object (e.g. `{ 0: "Overgrow", H: "Chlorophyll" }`), deduplicated.
 fn parse_all_abilities_from_text(text: &str) -> Vec<Ability> {
     let mut abilities: Vec<Ability> = Vec::new();
 
-    // Slot keys to look for, in order.  We try the quoted form first because
-    // bare "0:" would also match "10:" or "100:" if we're not careful.
-    // For slot 1, the bare form "1:" must not be preceded by a digit so that
-    // we don't match " H: ".  We rely on the quoted form taking priority.
+    // Quoted form tried first: bare "0:"/"1:" would also match "10:"/"100:", and
+    // bare "H:" would match "pH:", if not for the quoted keys taking priority.
     let slot_keys: &[&[&str]] = &[
         &["\"0\":", "0:"],  // primary
         &["\"1\":", " 1:"], // secondary (space-prefixed bare form avoids "10:")
@@ -1049,7 +1037,7 @@ fn parse_all_abilities_from_text(text: &str) -> Vec<Ability> {
                     if !abilities.contains(&ab) {
                         abilities.push(ab);
                     }
-                    break 'key_search; // found this slot; move to the next slot
+                    break 'key_search;
                 }
             }
         }
@@ -1074,7 +1062,6 @@ fn split_entries(content: &str) -> Vec<(String, Vec<String>)> {
         let close = trimmed.chars().filter(|&c| c == '}').count() as i32;
 
         if depth == 0 && trimmed.contains(": {") && !trimmed.starts_with("//") {
-            // Entry start
             let key = trimmed
                 .split(':')
                 .next()
@@ -1094,7 +1081,6 @@ fn split_entries(content: &str) -> Vec<(String, Vec<String>)> {
 
         if in_entry {
             if depth <= 0 {
-                // Entry end
                 entries.push((current_key.clone(), current_lines.clone()));
                 in_entry = false;
                 depth = 0;
@@ -1153,13 +1139,8 @@ fn parse_secondary_block(
 ) {
     let (block_text, end_idx) = collect_block(lines, start_idx);
 
-    // Parse chance
     let chance: u8 = extract_int(&block_text, "chance").unwrap_or(0);
-
-    // Separate self: { ... } from the rest
     let (target_text, self_text) = extract_self_subblock(&block_text);
-
-    // Parse target effects
     let target_effect = parse_effect_from_text(&target_text);
     // Random `this.sample([...])` choices inside an onHit (e.g. Tri Attack, Dire Claw).
     let target_random = parse_sample_effects(&target_text);
@@ -1183,7 +1164,6 @@ fn parse_secondary_block(
         None
     };
 
-    // Parse self effects
     let self_sec = if let Some(st) = self_text {
         let self_effect = parse_effect_from_text(&st);
         let self_random = parse_sample_effects(&st);
@@ -1214,7 +1194,6 @@ fn parse_secondary_block(
 
 // --- Public Dex Parsing ---
 
-/// Parse one entry from the Pokémon dex lines into a `(species, PokemonData)` pair.
 fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
     let mut species: Option<Species> = None;
     let mut types: Vec<PokemonType> = Vec::new();
@@ -1341,7 +1320,6 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
             } else if f_ratio > m_ratio {
                 default_gender = crate::state::pokemon::PokemonGender::Female;
             } else {
-                // Default to Male if equal
                 default_gender = crate::state::pokemon::PokemonGender::Male;
             }
         }
@@ -1379,7 +1357,6 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<Species, PokemonData> {
     result
 }
 
-/// Parse a single entry (slice of lines) from the move dex into a `(move, MoveData)` pair.
 fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
     let mut name: Option<PokemonMove> = None;
     let mut accuracy = AccuracyType::Percent(100);
@@ -1434,16 +1411,13 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
         let line = &lines[i];
         let trimmed = line.trim();
 
-        // Track depth from nested braces
         let open = trimmed.chars().filter(|&c| c == '{').count() as i32;
         let close = trimmed.chars().filter(|&c| c == '}').count() as i32;
 
-        // Skip function bodies
         if is_function_line(trimmed) {
             let restore_depth = depth;
             depth += open - close;
             i += 1;
-            // Skip until we return to restore_depth
             while i < lines.len() {
                 let l = &lines[i];
                 depth += l.chars().filter(|&c| c == '{').count() as i32;
@@ -1456,7 +1430,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             continue;
         }
 
-        // If we are skipping a nested block, track depth and skip
         if let Some(target_depth) = skip_until_depth {
             depth += open - close;
             if depth <= target_depth {
@@ -1512,8 +1485,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                 target = parse_target(&t);
             }
         } else if trimmed.starts_with("flags:") {
-            // flags might be on one line: flags: { contact: 1, protect: 1 },
-            // or might span multiple lines
+            // May be on one line or span multiple lines.
             if trimmed.contains('}') {
                 flags = parse_flags_from_text(trimmed);
             } else if trimmed.contains('{') {
@@ -1692,7 +1664,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                 }
             }
         } else if trimmed.starts_with("volatileStatus:") && depth <= 1 {
-            // Top-level volatileStatus: always-apply 100% secondary
             if let Some(s) = extract_quoted(trimmed, "volatileStatus") {
                 if let Some(vs) = parse_volatile(&s) {
                     let mut e = empty_hit_effect();
@@ -1745,7 +1716,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             && !trimmed.starts_with("selfdestruct")
             && depth <= 1
         {
-            // Top-level self: { ... } block — always-apply 100% self-secondary
+            // Top-level self: { ... } block, converted to a self-secondary.
             let (block, end) = collect_block(lines, i);
             if let Some(ob) = block.find('{') {
                 if let Some(cb) = block.rfind('}') {
@@ -1818,9 +1789,8 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
         }
     }
 
-    // Ceaseless Edge and Stone Axe set an entry hazard on hit via JS code the parser cannot read.
-    // Inject the equivalent always-on foe-side secondary so they flow through the normal
-    // side-condition pipeline (and stack with existing layers / record the Sticky Web setter).
+    // Ceaseless Edge and Stone Axe set a hazard via JS the parser can't read; inject the
+    // equivalent secondary so it flows through the normal side-condition pipeline.
     match &name {
         Some(PokemonMove::CeaselessEdge) => {
             let mut e = empty_hit_effect();
@@ -1944,8 +1914,7 @@ fn parse_ability_entry(lines: &[String]) -> Option<(Ability, AbilityData)> {
 
         depth += opens - closes;
 
-        // Only parse scalar fields at top level (depth == 0 after processing braces
-        // so that we don't mis-read fields inside nested function bodies).
+        // Only parse scalar fields at top level, so nested function bodies aren't mis-read.
         if depth == 0 {
             if trimmed.starts_with("name:") {
                 if let Some(v) = extract_first_quoted_value(trimmed) {
@@ -2067,7 +2036,6 @@ pub fn parse_learnset_dex(file_path: &str) -> HashMap<Species, HashSet<PokemonMo
                 continue;
             }
 
-            // Count braces to track depth inside the learnset block.
             let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
             let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
             depth += opens - closes;

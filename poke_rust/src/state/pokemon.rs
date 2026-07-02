@@ -287,10 +287,8 @@ impl PartialEq for PokemonState {
             && self.original_ability == other.original_ability
             && self.last_used_move == other.last_used_move
             && self.consecutive_move_count == other.consecutive_move_count
-            // For non-fainted Pokémon, move-usage history affects Last Resort availability and
-            // must distinguish branches. For fainted Pokémon it is irrelevant (they can't act).
-            // At this point self.fainted == other.fainted is already established above, so
-            // checking `self.fainted` is equivalent to checking "are both fainted?".
+            // Move-usage history affects Last Resort but is moot once fainted; skip the
+            // comparison for fainted mons (self.fainted == other.fainted already holds above).
             && (self.fainted || self.used_moves_this_field == other.used_moves_this_field)
             && self.one_time_ability_used == other.one_time_ability_used
             && self.ate_berry_this_battle == other.ate_berry_this_battle
