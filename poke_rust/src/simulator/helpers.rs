@@ -595,7 +595,6 @@ pub fn effective_stat(
         val,
     );
 
-    // Light Ball: doubles Pikachu's Attack and Special Attack.
     let val = if item_is_active(state, mon)
         && mon.item == Item::LightBall
         && matches!(
@@ -625,7 +624,6 @@ pub fn effective_stat(
         val
     };
 
-    // Choice Band: 1.5× Attack.
     let val =
         if item_is_active(state, mon) && mon.item == Item::ChoiceBand && stat == PokemonStat::Atk {
             val * 1.5
@@ -633,7 +631,6 @@ pub fn effective_stat(
             val
         };
 
-    // Choice Specs: 1.5× Special Attack.
     let val = if item_is_active(state, mon)
         && mon.item == Item::ChoiceSpecs
         && stat == PokemonStat::SpA
@@ -1205,14 +1202,12 @@ pub fn resolve_move_targets(
     };
 
     match target {
-        // Single-target foe — fallback: first healthy opponent
         MoveTarget::AdjacentFoe | MoveTarget::Normal | MoveTarget::Any => {
             collect_active_slots(state, foe, None)
                 .into_iter()
                 .take(1)
                 .collect()
         }
-        // All adjacent foes / foe side
         MoveTarget::AllAdjacentFoes | MoveTarget::FoeSide => collect_active_slots(state, foe, None),
         // Whole-side effects (side conditions like Reflect / Tailwind / Quick Guard / Wide Guard):
         // the user is on the protected side, so include self. Without this, these moves resolve to
@@ -1220,11 +1215,9 @@ pub fn resolve_move_targets(
         MoveTarget::AllySide | MoveTarget::AllyTeam => {
             collect_active_slots(state, user_slot.player, None)
         }
-        // Partner-targeting moves: exclude the user itself.
         MoveTarget::Allies | MoveTarget::AdjacentAlly => {
             collect_active_slots(state, user_slot.player, Some(user_slot.slot_index))
         }
-        // All adjacent (exclude self) or all (include self)
         MoveTarget::All | MoveTarget::AllAdjacent => {
             let exclude_self = matches!(target, MoveTarget::AllAdjacent);
             let mut slots = collect_active_slots(
@@ -1239,11 +1232,9 @@ pub fn resolve_move_targets(
             slots.extend(collect_active_slots(state, foe, None));
             slots
         }
-        // Self-target
         MoveTarget::SelfTarget | MoveTarget::AdjacentAllyOrSelf => {
             vec![user_slot]
         }
-        // Fallback: first healthy opponent
         _ => collect_active_slots(state, foe, None)
             .into_iter()
             .take(1)
@@ -1874,7 +1865,6 @@ fn effective_base_power(
 
     // Move-flag-based ability boosts. Suppression guard is shared.
     if !pokemon_ability_is_suppressed(state, attacker) {
-        // Iron Fist: 1.2× punching moves.
         if attacker.ability == Ability::IronFist && move_has_flag(move_data, &MoveFlag::Punch) {
             bp = (bp * 1.2).floor();
         }
@@ -1888,19 +1878,15 @@ fn effective_base_power(
         {
             bp = (bp * 1.3).floor();
         }
-        // Strong Jaw: 1.5× biting moves.
         if attacker.ability == Ability::StrongJaw && move_has_flag(move_data, &MoveFlag::Bite) {
             bp = (bp * 1.5).floor();
         }
-        // Sharpness: 1.5× slicing moves.
         if attacker.ability == Ability::Sharpness && move_has_flag(move_data, &MoveFlag::Slicing) {
             bp = (bp * 1.5).floor();
         }
-        // Mega Launcher: 1.5× pulse/aura moves.
         if attacker.ability == Ability::MegaLauncher && move_has_flag(move_data, &MoveFlag::Pulse) {
             bp = (bp * 1.5).floor();
         }
-        // Water Bubble: ×2 power for Water-type moves used by the holder.
         if attacker.ability == Ability::WaterBubble
             && matches!(
                 effective_move_type(state, attacker, move_data),
@@ -1909,7 +1895,6 @@ fn effective_base_power(
         {
             bp = (bp * 2.0).floor();
         }
-        // Sand Force: ×1.3 for Rock/Ground/Steel moves in sandstorm.
         if attacker.ability == Ability::SandForce
             && weather_is_sandstorm(state)
             && matches!(
@@ -1926,12 +1911,11 @@ fn effective_base_power(
         }
     }
 
-    // HydroSteam in sun: BP boost (no accompanying damage-type penalty)
+    // HydroSteam in sun: BP boost (no accompanying damage-type penalty).
     if move_data.name == PokemonMove::HydroSteam && weather_is_sunlight_for(state, attacker) {
         bp = (bp * 1.5).floor();
     }
 
-    // Helping Hand boosts the user's next move by 50%
     if attacker.volatiles.iter().any(|v| {
         matches!(
             v,
@@ -6024,15 +6008,12 @@ pub fn process_pokemon_send_out(
 /// - Target is already transformed.
 /// - Target has Illusion or Imposter ability.
 pub fn transform_into(transformer: &mut PokemonState, target: &PokemonState) -> bool {
-    // Fail if target is behind a Substitute.
     if has_status_volatile(target, &VolatileStatus::Substitute(0)) {
         return false;
     }
-    // Fail if target is already transformed.
     if target.pre_transform.is_some() {
         return false;
     }
-    // Fail if target's ability is Illusion or Imposter.
     if matches!(target.ability, Ability::Illusion | Ability::Imposter) {
         return false;
     }
@@ -6042,23 +6023,21 @@ pub fn transform_into(transformer: &mut PokemonState, target: &PokemonState) -> 
         transformer.pre_transform = Some(Box::new(transformer.clone()));
     }
 
-    // Copy species and appearance.
     transformer.species = target.species.clone();
     transformer.types = target.types.clone();
     transformer.gender = target.gender;
     transformer.weight_hg = target.weight_hg;
 
-    // Copy non-HP stats (index 0 = max HP, which stays own).
+    // index 0 (max HP) is intentionally skipped — HP is not copied.
     transformer.stats[1] = target.stats[1];
     transformer.stats[2] = target.stats[2];
     transformer.stats[3] = target.stats[3];
     transformer.stats[4] = target.stats[4];
     transformer.stats[5] = target.stats[5];
 
-    // Copy stat stages.
     transformer.boosts = target.boosts;
 
-    // Copy moves, capping PP at 5 per move (Transform/Imposter rule).
+    // PP capped at 5 per move (Transform/Imposter rule).
     transformer.moves = target.moves.clone();
     for i in 0..4 {
         let capped = target.max_pp[i].min(5);
@@ -6066,7 +6045,6 @@ pub fn transform_into(transformer: &mut PokemonState, target: &PokemonState) -> 
         transformer.max_pp[i] = capped;
     }
 
-    // Copy ability.
     transformer.ability = target.ability.clone();
 
     // Note: hp, stats[0], level, item, status, nature, evs, ivs, tera_type, is_tera
@@ -6152,7 +6130,6 @@ fn apply_send_out_only_ability_effects(
     let items_suppressed = items_are_suppressed(state);
 
     match ability {
-        // ── Curious Medicine ──────────────────────────────────────────────────────────
         // Reset all stat stages of every ally (not self) to zero.
         Ability::CuriousMedicine => {
             for ally_slot in collect_active_slots(state, own_player, Some(slot.slot_index)) {
@@ -6162,7 +6139,6 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // ── Hospitality ───────────────────────────────────────────────────────────────
         // Heal each ally by ¼ of that ally's max HP.
         Ability::Hospitality => {
             for ally_slot in collect_active_slots(state, own_player, Some(slot.slot_index)) {
@@ -6178,7 +6154,6 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // ── Screen Cleaner ────────────────────────────────────────────────────────────
         // Remove Light Screen, Reflect, and Aurora Veil from BOTH sides.
         Ability::ScreenCleaner => {
             for player in [Player::P1, Player::P2] {
@@ -6188,7 +6163,6 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // ── Supersweet Syrup ──────────────────────────────────────────────────────────
         // Once per battle: lower all opponents' evasiveness by 1.
         Ability::SupersweetSyrup => {
             let already_used = get_pokemon_at_slot(state, slot)
@@ -6214,7 +6188,6 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // ── Supreme Overlord ──────────────────────────────────────────────────────────
         // Snapshot fainted ally count (1–5) into a permanent volatile at switch-in.
         Ability::SupremeOverlord => {
             let (active, back) = match own_player {
@@ -6246,7 +6219,6 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // ── Trace ────────────────────────────────────────────────────────────────────
         // Copy the first traceable opponent's ability; revert on switch-out via
         // the existing `original_ability` mechanism.
         Ability::Trace => {
@@ -6291,7 +6263,6 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // ── Imposter ─────────────────────────────────────────────────────────────────
         // Transform into the directly-opposite opponent on entry.
         Ability::Imposter => {
             // In singles (and as the default for doubles), the directly-opposite slot
@@ -6314,16 +6285,13 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // ── Mimicry ───────────────────────────────────────────────────────────────
         // On switch-in, immediately adopt the type matching the active terrain (if any).
         Ability::Mimicry => {
             update_mimicry_forms(state);
         }
 
-        // ── Frisk ─────────────────────────────────────────────────────────────────
-        // Reveal every opposing active Pokémon's held item. No message if a foe holds
-        // no item (only emit ItemRevealed for item-holders). Gen VI+ behaviour: reveals
-        // ALL opposing active mons' items, left-to-right.
+        // Reveal every opposing active Pokémon's held item (Gen VI+: all of them, not just one).
+        // No message for foes holding no item.
         Ability::Frisk => {
             // Collect (slot, item) pairs for foes that hold an item.
             let opp_items: Vec<(FieldSlot, Item)> = collect_active_slots(state, opp_player, None)
@@ -6353,16 +6321,10 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // ── Anticipation ─────────────────────────────────────────────────────────
-        // Shudder on switch-in if any opposing active Pokémon knows a move that is
-        // super-effective against the holder's types, or an OHKO move.
-        // Message-only: no battle-state change (full-information sim).
-        //
-        // Type rules per Bulbapedia: use the move's declared pokemon_type field.
-        // Overrides: Revelation Dance / Multi-Attack → Normal; Flying Press → Fighting;
-        // Aura Wheel → Electric; Freeze-Dry → ordinary Ice.
-        // Self-Destruct / Explosion are Normal and only trigger if SE.
-        // Does NOT account for attacker's type-changing abilities (Aerilate, etc.).
+        // Shudder on switch-in if any opposing move is super-effective against the holder's
+        // types or is an OHKO move; message-only, no state change. Uses each move's declared
+        // type per Bulbapedia (with named overrides below) and ignores attacker type-changing
+        // abilities like Aerilate.
         Ability::Anticipation => {
             let holder_types: Vec<PokemonType> = get_pokemon_at_slot(state, slot)
                 .map(|m| m.types.clone())
@@ -7370,13 +7332,11 @@ pub fn end_turn(
     // Symbiosis reactions before Pickup resolves in Phase 4.
     let item_snapshot = snapshot_active_items(state);
 
-    // Decrement effect timers (weather, pseudo-weather, side conditions).
     decrement_effect_timers(state);
 
     // Weather may have just expired — re-evaluate Castform's Forecast form.
     update_forecast_forms(state);
 
-    // Advance the battle turn counter.
     state.turn_number = state.turn_number.saturating_add(1);
 
     // Phase 1: weather/terrain/item healing (deterministic, &mut in-place).
@@ -8263,13 +8223,10 @@ fn apply_future_move_damage(
                 continue;
             }
             // Check Dark-type immunity (Future Sight only; Doom Desire is Steel)
-            let attack_type = effective_move_type(&state, target, move_data); // uses move_data.move_type
+            let attack_type = effective_move_type(&state, target, move_data);
             let effectiveness = {
-                // Build the move type from the snapshot (not from attacker mon — this is what
-                // effective_move_type does using the move's own type, not the attacker's type).
-                // Future Sight's type is Psychic, fixed in move_data. Electrify can change it
-                // but that volatile is on the target here; normally it applies to the attacker.
-                // For simplicity, use the move_data type directly (Psychic for FS, Steel for DD).
+                // Uses move_data's fixed type directly (Psychic for FS, Steel for DD) rather than
+                // the attacker's, since the attacker is gone by the time this fires.
                 move_type_effectiveness(&state, &move_data.pokemon_type, target)
             };
             if effectiveness == 0.0 {
@@ -10554,7 +10511,6 @@ pub fn apply_stench_flinch(
         return branches;
     }
 
-    // Check that the attacker has Stench and ability is active (not suppressed).
     let eligible = branches.first().map_or(false, |(bs, _)| {
         get_pokemon_at_slot(bs, attacker_slot).map_or(false, |m| {
             !pokemon_ability_is_suppressed(bs, m) && m.ability == Ability::Stench
@@ -11738,7 +11694,6 @@ pub fn apply_contact_hit_reactions(
             branches
                 .into_iter()
                 .map(|(mut bs, prob)| {
-                    // Check attacker's ability can be swapped
                     let (atk_ability, excluded) = {
                         let Some(atk) = get_pokemon_at_slot(&bs, attacker_slot) else {
                             return (bs, prob);
@@ -12547,7 +12502,7 @@ pub fn apply_secondary_effects(
     branches.into_iter().filter(|(_, p)| *p > 0.0).collect()
 }
 
-/// Clear all volatile statuses and non-volatile statuses from a PokÃ©mon when it faints.
+/// Clear all volatile statuses and non-volatile statuses from a Pokémon when it faints.
 pub fn clear_pokemon_on_faint(mon: &mut PokemonState) {
     mon.volatiles.clear();
     mon.status = None;
@@ -12555,8 +12510,8 @@ pub fn clear_pokemon_on_faint(mon: &mut PokemonState) {
     mon.times_hit = 0;
 }
 
-/// Check if a PokÃ©mon is immune to Rage Powder based on type, ability, or item.
-/// Grass-types, PokÃ©mon with Overcoat ability, and those holding Safety Googles are immune.
+/// Check if a Pokémon is immune to Rage Powder based on type, ability, or item.
+/// Grass-types, Pokémon with Overcoat ability, and those holding Safety Googles are immune.
 /// Returns true when `mon` is immune to powder/spore moves.
 ///
 /// `attacker` — pass the attacking Pokémon to enable Mold Breaker bypass: a Mold Breaker /

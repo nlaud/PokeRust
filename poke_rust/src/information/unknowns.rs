@@ -29,7 +29,7 @@ pub struct UnknownPokemonState {
     pub possible_mon_id: Unknown<u8>, //1:1 with species if there is only 1 of each pokemon
     pub fainted: bool,
     pub possible_species: Unknown<Species>,
-    pub possible_types: Unknown<Vec<PokemonType>>, //These two fields correspont 1:1
+    pub possible_types: Unknown<Vec<PokemonType>>, //These two fields correspond 1:1
     pub is_tera: bool,
     pub is_mega: bool,
 
@@ -108,7 +108,7 @@ pub struct UnknownPokemonState {
     pub boosts: PokemonBoostTable,
     pub status: Option<Status>,
 
-    pub volatiles: Vec<VolatileStatusState>, //If this might be unkown, replace it with Unknown<Vec<VolatileStatusState>>
+    pub volatiles: Vec<VolatileStatusState>, //If this might be unknown, replace it with Unknown<Vec<VolatileStatusState>>
 
     pub possible_original_abilities: Unknown<Ability>,
     pub possible_abilities: Unknown<Ability>,
@@ -321,18 +321,12 @@ pub enum Statement {
         stat: PokemonStat,
         value: u16,
     },
-    /// Cross-mon effective-speed comparison in the same priority bracket.
-    ///
-    /// Invariant: `base_spe(fast_idx) * fast_mult >= base_spe(slow_idx) * slow_mult`
-    ///
-    /// `fast_mult` and `slow_mult` encode the product of all *observable* speed
-    /// multipliers (boost stages, paralysis, Tailwind, weather-speed abilities, etc.)
-    /// at the moment the ordering was observed, scaled to a common integer denominator.
-    /// Trick Room is already handled by swapping `fast_idx`/`slow_idx`.
-    ///
-    /// Worlds where hidden speed items (Iron Ball, Choice Scarf) or random sources
-    /// (Quick Claw, Quick Draw) could explain the ordering are emitted as **separate
-    /// disjunctive clauses** alongside this one, not folded into the multipliers here.
+    /// Cross-mon effective-speed comparison in the same priority bracket:
+    /// `base_spe(fast_idx) * fast_mult >= base_spe(slow_idx) * slow_mult`, where the
+    /// mults are the product of all *observable* speed modifiers at observation time
+    /// (Trick Room already handled by swapping fast/slow). Hidden-item or random-source
+    /// explanations (Iron Ball, Quick Claw, etc.) are emitted as separate disjunctive
+    /// clauses, not folded into these multipliers.
     SpeedComparison {
         fast_idx: usize,
         slow_idx: usize,
@@ -428,13 +422,8 @@ impl UnknownPokemonState {
             maxIvs: mon.ivs,
             minStats: mon.stats,
             maxStats: mon.stats,
-            // Pre-nature BSV bounds.
-            // For own (fully-known) Pokémon, PokemonState does not store base stats, so we
-            // cannot compute BSV exactly without the dex. Since EVIVStatGE/LE predicates are
-            // only ever emitted for *opponent* mons, these bounds on own mons are never used
-            // by BCP or Pass 3 to constrain anything — we set a maximally wide range that is
-            // vacuously sound.  If tighter own-mon BSV bounds are later needed, thread the
-            // dex through here and compute calc_stat(base, iv, ev, level, 1.0).
+            // EVIVStatGE/LE predicates are only ever emitted for *opponent* mons, so these
+            // bounds are never used to constrain own mons — a maximally wide range is fine.
             min_pre_nature_stat: [0u16; 6],
             max_pre_nature_stat: [u16::MAX; 6],
             boosts: mon.boosts,
@@ -509,11 +498,8 @@ impl UnknownPokemonState {
             calc_stat(base[4], 31, 252, level, 1.1),
             calc_stat(base[5], 31, 252, level, 1.1),
         ];
-        // Pre-nature BSV bounds (nature-independent: calc_stat with mod=1.0).
-        // HP (index 0) has no nature modifier, so BSV == final stat.
-        // For non-HP stats, BSV range is wider than the post-nature range because nature is
-        // stripped: the minimum BSV (0 EV/IV, no nature boost) and maximum BSV (31 IV/252 EV,
-        // no nature nerf) span the achievable pre-nature lattice.
+        // Pre-nature BSV bounds (calc_stat with mod=1.0). HP has no nature modifier so
+        // BSV == final stat; other stats get a wider range since nature scaling is stripped.
         let min_pre_nature: PokemonStatsTable = [
             calc_hp(base[0], 0, 0, level),
             calc_stat(base[1], 0, 0, level, 1.0),

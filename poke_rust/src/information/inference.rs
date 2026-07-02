@@ -1598,7 +1598,6 @@ fn pass1_apply_event(
                         };
                         mon.possible_original_abilities = new_abilities.clone();
                         mon.possible_abilities = new_abilities;
-                        // Refresh weight.
                         mon.possible_weight_hg = Unknown::Known(data.weight);
                     }
                 }
@@ -3217,8 +3216,7 @@ fn pass2_contact_absence(
             continue;
         };
 
-        // Was the hit actually landed? (Check that a DamageDealt reaction exists for
-        // the defender — if the move missed / was blocked, no contact reaction fires.)
+        // A missed/blocked move fires no DamageDealt reaction, so this doubles as the hit check.
         let hit_landed = event.reactions.iter().any(|r| {
             matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
         });
@@ -3226,10 +3224,8 @@ fn pass2_contact_absence(
             continue;
         }
 
-        // Did a Rocky Helmet reveal appear? (nested under DamageDealt or directly.)
+        // Reveal may be nested under DamageDealt or appear directly in reactions.
         let helmet_revealed = reaction_contains_item_reveal(event, target, &Item::RockyHelmet);
-
-        // Did a Rough Skin / Iron Barbs reveal appear?
         let rough_skin_revealed =
             reaction_contains_ability_reveal(event, target, &Ability::RoughSkin);
         let iron_barbs_revealed =
@@ -3510,7 +3506,6 @@ fn pass2_powder_immunity(
             continue;
         }
 
-        // Did the move fail/be immune on this target?
         if !move_blocked_on_target(event, target) {
             continue;
         }
@@ -3968,7 +3963,6 @@ fn pass_eot_sand_immunity(
             continue;
         }
 
-        // Did the mon take an EOT sand chip?
         let took_sand_chip = event.reactions.iter().any(|r| {
             matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == &field_slot)
         });
@@ -4136,7 +4130,6 @@ fn pass2_ground_immune_clause(
             continue;
         }
 
-        // Did the move actually result in Immune for this target?
         let immune_on_target = event.reactions.iter().any(|r| {
             matches!(&r.kind, EventKind::Immune { target: t } if t == target)
         });
@@ -4301,7 +4294,6 @@ fn pass3_damage_to_stats(
         return;
     };
 
-    // Determine attacker / target mon_idx.
     let Some(user_idx) = mon_idx_for_active_slot(state, user) else {
         return;
     };
@@ -6470,7 +6462,6 @@ pub fn pass5_back_solve(
     // Invariant: Σ_i evs[i] ≤ cap  →  evs[i] ≤ cap − Σ_{j≠i} minEvs[j].
     if let Some(cap) = config.ev_total_cap {
         let cap = cap as u16;
-        // Collect per-stat EV floor sum.
         let min_ev_sum: u16 = (0..6).map(|i| mon.minEvs[i] as u16).sum();
         let ev_lattice = if config.use_stat_points { Some(ev_candidates) } else { None };
 

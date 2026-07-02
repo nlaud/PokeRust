@@ -44,21 +44,21 @@ pub enum MoveCategory {
 
 #[derive(Debug, PartialEq)]
 pub enum MoveTarget {
-    AdjacentAlly,       //Targets Teammates
-    AdjacentAllyOrSelf, //Targets teammates or self
-    AdjacentFoe,        //Targets enemies
-    All,                //Targets the whole field at once
-    AllAdjacent,        //Targets all pokemon except self (teammates and foes)
-    AllAdjacentFoes,    //Targets all pokemon on enemy side
-    Allies,             //Targets all pokemon on your side
-    AllySide,           //Targets all pokemon on your side
-    AllyTeam,           //Targets all pokemon on your side (same as above)
-    Any,                //Can target any individual mon on the field
-    FoeSide,            //Targets all opposing pokemon at once
-    Normal,             // Can target any individual mon, excluding self
-    RandomNormal,       //Chooses a target at random
-    Scripted, //Ignore this for now, moves that reflect damage that the user takes (mirror armor etc.)
-    SelfTarget, //Must target itself
+    AdjacentAlly,
+    AdjacentAllyOrSelf,
+    AdjacentFoe,
+    All,
+    AllAdjacent,
+    AllAdjacentFoes,
+    Allies,
+    AllySide,
+    AllyTeam, // Duplicate of AllySide; both exist because Showdown data uses both target ids
+    Any,
+    FoeSide,
+    Normal, // Single target, adjacent-only in doubles
+    RandomNormal, // Single target, chosen at random
+    Scripted, // Not a real target; moves that reflect damage the user takes (Mirror Armor, etc.)
+    SelfTarget,
 }
 
 #[derive(Debug, Clone)]
@@ -1016,19 +1016,12 @@ fn parse_primary_ability_from_text(text: &str) -> Option<Ability> {
 }
 
 /// Extract all three ability slots (0, 1, H) from an `abilities: { … }` inline
-/// object, returning them deduplicated.  Handles both quoted and bare key forms.
-///
-/// The Showdown dex encodes the block on a single line, e.g.:
-///   `abilities: { 0: "Overgrow", H: "Chlorophyll" }`
-/// We scan for each of the three slot keys and extract the first quoted value
-/// after each one.
+/// object (e.g. `{ 0: "Overgrow", H: "Chlorophyll" }`), deduplicated.
 fn parse_all_abilities_from_text(text: &str) -> Vec<Ability> {
     let mut abilities: Vec<Ability> = Vec::new();
 
-    // Slot keys to look for, in order.  We try the quoted form first because
-    // bare "0:" would also match "10:" or "100:" if we're not careful.
-    // For slot 1, the bare form "1:" must not be preceded by a digit so that
-    // we don't match " H: ".  We rely on the quoted form taking priority.
+    // Quoted form tried first: bare "0:"/"1:" would also match "10:"/"100:", and
+    // bare "H:" would match "pH:", if not for the quoted keys taking priority.
     let slot_keys: &[&[&str]] = &[
         &["\"0\":", "0:"],  // primary
         &["\"1\":", " 1:"], // secondary (space-prefixed bare form avoids "10:")
@@ -1921,8 +1914,7 @@ fn parse_ability_entry(lines: &[String]) -> Option<(Ability, AbilityData)> {
 
         depth += opens - closes;
 
-        // Only parse scalar fields at top level (depth == 0 after processing braces
-        // so that we don't mis-read fields inside nested function bodies).
+        // Only parse scalar fields at top level, so nested function bodies aren't mis-read.
         if depth == 0 {
             if trimmed.starts_with("name:") {
                 if let Some(v) = extract_first_quoted_value(trimmed) {
@@ -2044,7 +2036,6 @@ pub fn parse_learnset_dex(file_path: &str) -> HashMap<Species, HashSet<PokemonMo
                 continue;
             }
 
-            // Count braces to track depth inside the learnset block.
             let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
             let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
             depth += opens - closes;

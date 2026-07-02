@@ -332,7 +332,6 @@ fn handle_charging_first_turn(
     attacker.volatiles.push(crate::state::pokemon::VolatileStatusState::Charging(action.move_name.clone(), targets));
     write_back_volatiles(next_state, action.user_slot, attacker.volatiles.clone());
 
-    // Decrement PP on the charge turn
     if let Some(pp_idx) = attacker.moves.iter().position(|m| m.as_ref() == Some(&action.move_name)) {
         if let Some(mon) = mon_at_slot_mut(next_state, action.user_slot) {
             if let Some(pp) = mon.move_pp.get_mut(pp_idx) { *pp = pp.saturating_sub(1); }
@@ -807,9 +806,8 @@ fn apply_single_hit_branch(
                 simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::SkyDrop);
             }
 
-            // Smack Down: knock the target out of Fly/Bounce invulnerability, remove
-            // MagnetRise and Telekinesis. The SmackDown grounded volatile is applied
-            // through the normal secondaries pipeline.
+            // Smack Down knocks the target out of Fly/Bounce invulnerability and removes
+            // MagnetRise/Telekinesis; the grounded volatile itself is applied via secondaries.
             if *move_name == PokemonMove::SmackDown && eff_damage > 0 {
                 let was_airborne = target_mon.volatiles.iter().any(|v| matches!(v,
                     crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(m), _)
@@ -855,10 +853,8 @@ fn apply_single_hit_branch(
             }
         }
 
-        // Illusion disguise break: any direct damaging hit (eff_damage > 0) dispels Illusion.
-        // This is a mechanical state change and must happen regardless of whether there is an
-        // observer — keeping it observer-gated would mean the disguise persists when no one is
-        // watching, which could cause stale state if illusion_disguise is ever read mechanically.
+        // Any direct damaging hit dispels Illusion. This must happen unconditionally (not
+        // observer-gated) since illusion_disguise may be read mechanically elsewhere.
         // Grab the true species before the mutable clear so the borrows don't overlap.
         let illusion_species: Option<Species> = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
             .and_then(|m| m.illusion_disguise.as_ref().map(|_| m.species.clone()));
@@ -891,8 +887,7 @@ fn apply_single_hit_branch(
             simulator_helpers::handle_pokemon_faint(&mut bs, target_slot.player, target_slot.slot_index);
             simulator_helpers::emit(&mut bs, EventKind::Faint { slot: target_slot });
 
-            // Moxie: +1 Attack when the attacker directly KOs a target with a damaging move.
-            // Only fires if the attacker is still alive (doesn't trigger on recoil-KO).
+            // Moxie: +1 Attack on a direct KO, only if the attacker survived (no recoil-KO trigger).
             // Stacks naturally across multi-target / multi-hit KOs.
             let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
             let attacker_alive = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
@@ -1031,16 +1026,15 @@ fn resolve_multihit_move_for_target(
     let skill_link_active = !simulator_helpers::abilities_are_suppressed(state) && attacker.ability == Ability::SkillLink;
     let shared_rolls = simulator_helpers::shared_multihit_damage_rolls_enabled();
     let hit_count_branches = multihit_hit_count_branches(state, attacker, attack_slot, move_name, move_data);
-    // True for moves that inherently strike multiple times (Beat Up, Bullet Seed, etc.).
-    // Used to decide whether to emit HitCount after the per-hit loop.
+    // Gates whether HitCount is emitted after the per-hit loop.
     let is_genuinely_multihit = *move_name == PokemonMove::BeatUp
         || move_data.multihit_range[0] > 0
         || move_data.multihit_range[1] > 0;
     let mut final_outcomes: Vec<(BattleState, f64)> = Vec::new();
 
     for (hit_count, hit_probability) in hit_count_branches {
-        // Tuple: (state, probability, shared_roll, hits_landed)
-        // hits_landed tracks damaging hits per branch for King's Rock combined-chance flinch.
+        // (state, probability, shared_roll, hits_landed) — hits_landed feeds King's Rock's
+        // combined-chance flinch calc.
         let mut sequence_branches: Vec<(BattleState, f64, Option<u8>, u32)> = vec![(state.clone(), hit_probability, None, 0)];
 
         for hit_index in 0..hit_count {
@@ -1077,7 +1071,6 @@ fn resolve_multihit_move_for_target(
                 };
 
                 if hit_accuracy_probability < 1.0 {
-                    // Miss branch: emit Missed on the branch copy, then push.
                     let mut miss_state = branch_state.clone();
                     simulator_helpers::emit(&mut miss_state, EventKind::Missed { target: target_slot });
                     next_sequence_branches.push((miss_state, branch_probability * (1.0 - hit_accuracy_probability), shared_roll, hits_landed));
@@ -1253,10 +1246,9 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(next_state), 1.0)];
     };
 
-    // RandomNormal targeting: select a random live opponent each use (e.g. Outrage/Thrash in
-    // doubles). If no concrete target was provided and there are multiple live foes, fork into one
-    // equally-weighted branch per foe so the simulator properly represents the random pick.
-    // The recursive calls carry a concrete `target_slot`, so this block runs only once per action.
+    // RandomNormal targeting (e.g. Outrage/Thrash in doubles): if no concrete target was given
+    // and multiple foes are alive, fork into one equally-weighted branch per foe. The recursive
+    // calls carry a concrete `target_slot`, so this block runs only once per action.
     if move_data.target == crate::state::dex_data::MoveTarget::RandomNormal && action.target_slot.is_none() {
         let foe_player = match action.user_slot.player {
             Player::P1 => Player::P2,
@@ -1292,13 +1284,10 @@ fn possible_damage_outcomes_for_move(
     // Save pre-move state for potential failure branches (paralysis, sleep, freeze)
     let pre_move_state = next_state.clone();
 
-    // Metronome item: pre-update consecutive_move_count *before* damage branches are created,
-    // so user_power_item_multiplier (called inside the damage function) sees the current-turn
-    // streak. `attacker` is a clone from line above; damage calculation reads it directly, so
-    // we must update both `attacker` and `next_state` (so branches also carry the new count).
-    // Uses last_used_move from the *previous* turn (set by decrement_move_pp post-damage).
-    // Failure branches (paralysis/sleep) use pre_move_state (old count) — correct, since the
-    // move did not execute. The miss reset later nulls last_used_move to break the streak.
+    // Metronome item: pre-update consecutive_move_count *before* damage branches are created, so
+    // user_power_item_multiplier sees the current-turn streak. Must update both the `attacker`
+    // clone and `next_state` since damage calc reads the former directly. Failure branches
+    // (paralysis/sleep) intentionally use pre_move_state's old count, since the move never executed.
     if action.move_name != PokemonMove::Struggle {
         let new_count = if attacker.last_used_move.as_ref() == Some(&action.move_name) {
             attacker.consecutive_move_count.saturating_add(1)
@@ -1323,8 +1312,8 @@ fn possible_damage_outcomes_for_move(
     }
 
     // Moves with the CantUseTwice flag (Gigaton Hammer, Blood Moon) cannot be selected on
-    // consecutive turns. Apply the blocking volatile on every use attempt (hit, miss, or
-    // blocked) per Bulbapedia. Driven by MoveFlag::CantUseTwice rather than a move name list.
+    // consecutive turns; the blocking volatile is applied on every use attempt (hit, miss, or
+    // blocked) per Bulbapedia.
     if simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::CantUseTwice) {
         if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
             let already_blocked = mon.volatiles.iter().any(|v| matches!(
@@ -1347,9 +1336,7 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
-    // Check Flinch
     if attacker.volatiles.iter().any(|v| matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Flinch, _))) {
-        // Find and remove charging and semi-invulnerable volatiles
         if let Some(pos) = attacker.volatiles.iter().position(|v| matches!(v, crate::state::pokemon::VolatileStatusState::Charging(_, _) | crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _))) {
             attacker.volatiles.remove(pos);
             write_back_volatiles(&mut next_state, action.user_slot, attacker.volatiles.clone());
@@ -1383,11 +1370,11 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
-    // Move-restriction enforcement at execution time: a move that became illegal AFTER it was
-    // selected — a faster Taunt or Throat Chop applied this turn, or a Disable from Cursed Body —
-    // fails here. Mirrors flinch handling: the move is prevented, counts as failed, and consumes no
-    // PP. Struggle is exempt; Torment and Encore are intentionally NOT checked here (Torment still
-    // permits the move selected the turn it lands, and Encore forces a move rather than failing one).
+    // Move-restriction enforcement at execution time: a move that became illegal AFTER selection
+    // (a faster Taunt/Throat Chop this turn, or a Disable from Cursed Body) fails here like a
+    // flinch — prevented, counts as failed, consumes no PP. Struggle is exempt; Torment and Encore
+    // are intentionally not checked here (Torment still permits the move selected when it lands,
+    // and Encore forces a move rather than failing one).
     if action.move_name != PokemonMove::Struggle {
         let blocked_by_taunt = matches!(move_data.category, MoveCategory::Status)
             && simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::Taunt);
@@ -1443,12 +1430,10 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
-    // Handle charging and semi-invulnerability mechanics
     if let Some(outcomes) = handle_charging_and_semi_invulnerability(&state, &mut attacker, action, move_data, &mut next_state) {
         return outcomes;
     }
 
-    // Check if the move has the Recharge flag
     let move_has_recharge = simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Recharge);
 
     // Struggle has no moveset slot — it's forced when no usable move exists.
@@ -1557,7 +1542,6 @@ fn possible_damage_outcomes_for_move(
                 matches!(pre.species, Species::Morpeko | Species::MorpekoHangry)
             });
         if !is_morpeko {
-            // Move fails: no PP cost, no boost.
             simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Failed);
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
@@ -1567,13 +1551,11 @@ fn possible_damage_outcomes_for_move(
     // Capture current status once (owned) so emit calls can use it without borrow conflicts.
     let pre_move_status = attacker.status.clone();
 
-    // Handle moves that thaw the user on use: thaw before attempt
     if let Some(Status::Frozen(_)) = attacker.status {
         if simulator_helpers::weather_is_sunlight(&next_state)
             || simulator_helpers::move_thaws_user_on_use(&move_data)
             || attacker.ability == Ability::MagmaArmor
         {
-            // thaw user
             if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                 mon.status = None;
             }
@@ -1589,7 +1571,6 @@ fn possible_damage_outcomes_for_move(
     if let Some(status) = &attacker.status {
         match status {
             Status::Frozen(n) => {
-                // If already handled (thawed), skip
                 if *n >= 2 {
                     // guaranteed thaw — copy counter before borrow is released by the mutation
                     let frozen_n_copy = *n;
@@ -1601,11 +1582,8 @@ fn possible_damage_outcomes_for_move(
                 } else {
                     // 25% chance to thaw and execute
                     status_fail_prob = 0.75;
-                    // increment counter in pre_move_state for failure branch
                     if let Some(_mon) = match action.user_slot.player { Player::P1 => pre_move_state.p1_active_mons.get(action.user_slot.slot_index as usize), Player::P2 => pre_move_state.p2_active_mons.get(action.user_slot.slot_index as usize) } {
-                        // we'll adjust failure branch later
                     }
-                    // For success branch, remove status in next_state
                     let frozen_status_copy = Status::Frozen(*n);
                     if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                         mon.status = None;
@@ -1630,14 +1608,13 @@ fn possible_damage_outcomes_for_move(
                 } else {
                     // If the move is usable while asleep (Snore), allow it to execute regardless of wake roll
                     if move_data.sleep_usable {
-                        // do not set a fail probability; status remains unchanged
                     } else {
                         // First action after sleep always fails; second action has a 1/3 wake chance.
                         status_fail_prob = if *n == 0 { 1.0 } else { 2.0 / 3.0 };
                         if *n > 0 {
                             let sleep_status_copy = Status::Sleep(*n);
                             if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
-                                mon.status = None; // success branch
+                                mon.status = None;
                             }
                             attacker.status = None;
                             simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: action.user_slot, status: sleep_status_copy });
@@ -1718,12 +1695,10 @@ fn possible_damage_outcomes_for_move(
     if action.move_name == PokemonMove::SleepTalk {
         let original_sleep_status = attacker.status.clone();
 
-        // Collect candidate moves (exclude SleepTalk itself)
         let mut candidates: Vec<PokemonMove> = Vec::new();
         for mov_opt in attacker.moves.iter() {
             if let Some(mv) = mov_opt {
                 if *mv == PokemonMove::SleepTalk { continue; }
-                // Skip charge moves or moves flagged NoSleepTalk if we can inspect them
                 if let Some(md) = move_dex.get(mv) {
                     let is_charge = simulator_helpers::move_has_flag(md, &crate::state::dex_data::MoveFlag::Charge);
                     let no_sleep_talk = simulator_helpers::move_has_flag(md, &crate::state::dex_data::MoveFlag::NoSleepTalk);
@@ -1734,7 +1709,6 @@ fn possible_damage_outcomes_for_move(
         }
 
         if candidates.is_empty() {
-            // Consume SleepTalk PP and do nothing
             let mut fail_state = next_state.clone();
             if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                 if let Some(idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
@@ -1758,18 +1732,15 @@ fn possible_damage_outcomes_for_move(
                 } {
                     mon.status = None;
                 }
-                // Recursively simulate chosen move
                 let branches = possible_damage_outcomes_for_move(&sleep_talk_state, &new_action, cand_data, config, move_dex, pokemon_dex, true);
                 for (mut bs, p) in branches {
                     // For each returned state, revert PP consumption of the chosen move and consume SleepTalk PP instead
                     if let MatchState::BattleState(ref mut bstate) = bs {
                         if let Some(mon) = match action.user_slot.player { Player::P1 => bstate.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => bstate.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                             mon.status = original_sleep_status.clone();
-                            // Find candidate move index and increment PP back
                             if let Some(cand_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(cand)) {
                                 mon.move_pp[cand_idx] = mon.move_pp[cand_idx].saturating_add(1);
                             }
-                            // Decrement SleepTalk PP
                             if let Some(sleep_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
                                 mon.move_pp[sleep_idx] = mon.move_pp[sleep_idx].saturating_sub(1);
                             }
@@ -1797,11 +1768,9 @@ fn possible_damage_outcomes_for_move(
     }
 
     // Stalling protect-family moves (Protect/Detect/Endure/King's Shield/Spiky Shield/Baneful
-    // Bunker). The shared "stall" counter makes consecutive uses succeed with probability
-    // 1/3^streak; the roll happens here. These moves are +4 priority, so they resolve before the
-    // attacks they block — once the volatile is set, blocking is deterministic for the turn.
-    // Resolving here (before target/effect processing) avoids double-adding the volatile via the
-    // generic self_secondary path.
+    // Bunker): the shared "stall" counter makes consecutive uses succeed with probability
+    // 1/3^streak, rolled here. Resolving before target/effect processing (rather than via the
+    // generic self_secondary path) avoids double-adding the volatile.
     if move_data.stalling_move {
         if let Some(vol) = simulator_helpers::protect_volatile_for_move(&move_name) {
             let counter = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
@@ -1956,11 +1925,10 @@ fn possible_damage_outcomes_for_move(
         // Single-target move: use action.target_slot if available
         match action.target_slot {
             Some(slot) => {
-                // Faint redirection (doubles): if the chosen target has fainted before this
-                // move executes, single-target moves automatically retarget to a remaining
-                // valid target. The move only fails when NO valid target remains.
-                // (Bulbapedia, Double Battle: a move fails for lack of target only when all
-                // eligible targets are knocked out before it attacks.)
+                // Faint redirection (doubles): if the chosen target fainted before this move
+                // executes, retarget to a remaining valid target; fail only if none remain
+                // (Bulbapedia: a move fails for lack of target only when all eligible targets
+                // are already down).
                 let target_fainted = simulator_helpers::get_pokemon_at_slot(&next_state, slot)
                     .map_or(true, |m| m.fainted);
                 if target_fainted {
@@ -2067,10 +2035,9 @@ fn possible_damage_outcomes_for_move(
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
     }
 
-    // Counter / Mirror Coat / Metal Burst / Comeuppance: fail if no qualifying damage was
-    // received this turn. The damage computation in calculate_damage_outcomes_for_target
-    // reads `attacker.last_*_damage_taken`; that field is 0 when no hit was received.
-    // We gate here so the move is cleanly flagged as failed (sets last_move_failed, costs PP).
+    // Counter / Mirror Coat / Metal Burst / Comeuppance fail if no qualifying damage was
+    // received this turn (`attacker.last_*_damage_taken` is 0). Gated here so the move is
+    // cleanly flagged as failed (sets last_move_failed, costs PP).
     {
         let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
         let fails = match move_name {
@@ -2105,14 +2072,10 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
-    // Focus Punch: fails (no damage, no PP consumed) if the user was hit by a damaging move
-    // before their action this turn. Detected via `damaged_this_turn` (set whenever any
-    // direct hit deals effective damage). Status moves and Substitute-absorbed hits do NOT
-    // break focus (Substitute absorbs the hit before the attacker's mon records damage).
-    // Gen V+: PP is not consumed on a broken focus — return the pre-move state unchanged.
+    // Focus Punch fails (no damage, no PP consumed, Gen V+) if the user was hit by a damaging
+    // move before acting this turn (`damaged_this_turn`). Status moves and Substitute-absorbed
+    // hits do NOT break focus, since Substitute absorbs the hit before damage is recorded.
     if move_name == PokemonMove::FocusPunch {
-        // FocusPunchCharging is present only if the user was alive at turn-start and selected
-        // Focus Punch. If damaged_this_turn is set, focus was broken.
         let focus_broken = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
             .map(|m| m.damaged_this_turn
                 && simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusPunchCharging))
@@ -2131,10 +2094,9 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
-    // Dream Eater: only works against a sleeping target (or Comatose, which permanently acts as
-    // if asleep). If the target is not asleep and does not have Comatose, the move fails
-    // completely (no damage, sets last_move_failed). Abilities suppression via Mold Breaker is
-    // NOT considered here — Comatose's pseudo-sleep makes the move work even when sleep is faked.
+    // Dream Eater only works against a sleeping target or Comatose (permanent pseudo-sleep).
+    // Mold Breaker/ability suppression is intentionally not considered — Comatose still works
+    // even when sleep is otherwise faked.
     if move_name == PokemonMove::DreamEater {
         let target_slot = target_slots[0];
         let target_ok = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
@@ -2146,13 +2108,10 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
-    // Memento: lower target's Attack and Sp. Atk by 2 stages each, then the user faints.
-    // User does NOT faint if the move fails (Protect, no target — the is_empty check above
-    // handles the no-target case). In newest-gen, Substitute does not block status moves that
-    // cause stat drops, so the drops pass through; the user still faints regardless of whether
-    // the drops were neutralised by Clear Body / White Smoke / etc.
-    // Magic Bounce: Memento is uniquely NOT reflected by Magic Bounce (even once implemented),
-    // so no Magic Bounce check is needed here.
+    // Memento: -2 Atk/-2 SpA on the target, then the user faints. The user doesn't faint if the
+    // move fails (Protect, or no target). Substitute doesn't block this status move's stat drops,
+    // and the user faints regardless of whether the drops were neutralised by Clear Body etc.
+    // Memento is uniquely never reflected by Magic Bounce, so no check is needed here.
     if move_name == PokemonMove::Memento {
         let target_slot = target_slots[0];
         let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned();
@@ -2187,9 +2146,8 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
-    // Healing Wish: user faints; the Pokémon that enters its slot is fully healed and
-    // status-cured. The move fails (user does NOT faint) if there is no healthy benched
-    // Pokémon to send in as a replacement.
+    // Healing Wish: user faints; the Pokémon that replaces it is fully healed and status-cured.
+    // Fails (user doesn't faint) if there's no healthy benched Pokémon to send in.
     if move_name == PokemonMove::HealingWish {
         if !has_healthy_bench(&next_state, action.user_slot.player) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -2209,7 +2167,6 @@ fn possible_damage_outcomes_for_move(
             slot: action.user_slot,
             condition: crate::state::dex_data::SlotCondition::HealingWish,
         });
-        // Faint the user.
         let user_player = action.user_slot.player;
         let user_slot_index = action.user_slot.slot_index;
         if let Some(user_mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
@@ -2223,8 +2180,7 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
-    // Attract move: apply infatuation to the target.
-    // Magic Bounce: Attract targeting an opponent can be bounced back.
+    // Attract targeting an opponent can be bounced back by Magic Bounce.
     if move_name == PokemonMove::Attract {
         let target_slot = target_slots[0];
         if target_slot.player != action.user_slot.player
@@ -2288,9 +2244,8 @@ fn possible_damage_outcomes_for_move(
     }
 
     // Type-changing moves (Soak, Magic Powder, Forest's Curse, Trick-or-Treat, Reflect Type,
-    // Electrify). Each mutates a Pokémon's active types — or, for Electrify, the type of the
-    // target's move this turn — and follows the standard status-move shape: apply via a
-    // helper, decrement PP and coalesce on success, else `no_effect_outcome`.
+    // Electrify) mutate a Pokémon's active types — or, for Electrify, the target's move type
+    // this turn — via a helper, then follow the standard status-move success/no_effect shape.
     if matches!(
         move_name,
         PokemonMove::Soak
@@ -2609,7 +2564,6 @@ fn possible_damage_outcomes_for_move(
     }
 
     // Spite: remove 4 PP from the target's most recently used move.
-    // Status-move path: apply effect and return (no damage).
     if move_name == PokemonMove::Spite {
         let target_slot = target_slots[0];
         // Protect check: Spite is a status move and does NOT bypass Protect.
@@ -5097,7 +5051,6 @@ fn possible_damage_outcomes_for_move(
                 }
             }
 
-            // Increment sleep/frozen counters on failure
             if let Some(st) = &mon.status {
                 match st {
                     crate::state::dex_data::Status::Frozen(n) => {

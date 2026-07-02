@@ -2530,7 +2530,6 @@ mod tests {
         fn minimize_doubles_body_slam_and_never_misses() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            // Control: Body Slam into a non-minimized Snorlax.
             let atk = build_mon(Species::Snorlax, [Some(PokemonMove::BodySlam), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
             let def = build_mon(Species::Snorlax, [Some(PokemonMove::Minimize), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
             let initial = battle_state_from_lists(vec![atk], vec![], vec![def], vec![]);
@@ -2540,7 +2539,6 @@ mod tests {
             let control_dmg = *damage_distribution(&control, full_hp).keys().max().unwrap();
             assert!(control_dmg > 0);
 
-            // Minimize first, then Body Slam.
             let minimized = first_state(run(&initial, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1));
             let after = run(&minimized, vec![0], vec![1], &move_dex, &pokemon_dex, false, 1);
             // Always hits a minimized target.
@@ -5639,15 +5637,10 @@ mod tests {
 
         #[test]
         fn ate_liquid_voice_no_power_boost() {
-            // Liquid Voice converts sound moves to Water-type but grants NO power boost.
-            //
-            // Target: Machamp (pure Fighting) — both Normal and Water are 1× neutral vs Fighting,
-            // so the only difference between LiquidVoice and no-ability should be zero (same BP,
-            // same type effectiveness, no STAB for Incineroar on either type).
-            // NOTE: Dragon resists Water (0.5×), so Dragonite would give a misleading result.
-            //
-            // We also contrast with Pixilate: Fairy is 2× vs Fighting, so with +1.2× boost
-            // the damage should be well over 2× the baseline.
+            // Liquid Voice re-types sound moves as Water but adds no power boost. Machamp (pure
+            // Fighting) is neutral to both Normal and Water, so any damage difference would be
+            // the boost itself, not type effectiveness (Dragonite would mislead since it resists
+            // Water). Pixilate is included as contrast: Fairy is super-effective vs Fighting.
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -5715,14 +5708,8 @@ mod tests {
 
         #[test]
         fn ate_weather_ball_not_converted_by_ate() {
-            // Bulbapedia explicitly states -ate abilities do NOT affect Weather Ball in any
-            // condition. Whether clear or rainy, Pixilate must leave Weather Ball's type and
-            // power unchanged.
-            //
-            // Assertions:
-            //   no_weather + Pixilate:   same as no_weather + no_ability (no conversion)
-            //   rain + Pixilate:         same as rain + no_ability (no conversion in rain either)
-            //   rain genuinely increases damage vs no weather (sanity check)
+            // -ate abilities never affect Weather Ball, per Bulbapedia — Pixilate must leave its
+            // type/power unchanged in both clear and rainy weather.
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
@@ -6653,10 +6640,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            // Build a Magmar attacker (decent SpA, uses Ember).  We override its
-            // speed stat directly to control turn order without needing different
-            // EV spreads across species with incompatible base speeds.
-            // Defender is Blissey with speed stat 100.
+            // Speed is overridden directly to control turn order without juggling EV spreads
+            // across species with incompatible base speeds.
             let make_attacker = |ability: Ability, spe_stat: u16| {
                 let mut mon = build_pokemon_state(
                     Species::Magmar, &pokemon_dex, &move_dex, Some(50),
@@ -11515,14 +11500,9 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            // Splash has base power 0 and no DamageOverride. Category is Status so
-            // move_offensive_stat returns None → 0. To test the bp==0.0 path we
-            // need a Physical/Special move with bp 0. Use Seismic Toss but swap
-            // its override by verifying the path separately via a manually-constructed
-            // MoveData. Instead, use Dragon Rage's base move but confirm 0-bp
-            // Physical moves through the actual data: SeismicToss has basePower=0
-            // and DamageOverride::Level — the override fires first. We confirm the
-            // intent via a hand-built MoveData that is Physical, bp=0, no override.
+            // No real move exercises the bp==0.0 Physical/Special path: Splash is Status
+            // (offensive stat lookup short-circuits to None) and SeismicToss's DamageOverride
+            // fires before bp is checked. Use a hand-built MoveData instead.
             use crate::state::dex_data::{DamageOverride, MoveCategory, MoveData, MoveTarget};
 
             let attacker = build_pokemon_state(
@@ -12385,11 +12365,9 @@ mod tests {
         }
 
         // ── Sitrus × Shed Tail interaction ────────────────────────────────────
-        // These tests verify two invariants together:
-        //   (a) Shed Tail costs ceil(max_hp/2), which always leaves HP ≤ floor(max_hp/2),
-        //       so Sitrus always activates after a successful Shed Tail.
-        //   (b) Even though Sitrus pushes HP back above threshold, the switch still triggers
-        //       (baseline-comparison proxy in apply_post_damage_move_effects).
+        // Shed Tail's ceil(max_hp/2) cost always leaves HP ≤ floor(max_hp/2), so Sitrus always
+        // activates afterward — and the switch must still trigger even though Sitrus then heals
+        // HP back above the threshold (switch uses a pre-heal baseline comparison).
 
         #[test]
         fn sitrus_activates_after_shed_tail_even_hp() {
@@ -12493,11 +12471,9 @@ mod tests {
         }
 
         // ── Focus Sash / Focus Band tests ─────────────────────────────────────
-        // Setup trick: set target stats[0] = 1, hp = 1 so the holder is at
-        // "full HP" (for Sash's condition) and any damaging move deals ≥ 2
-        // (from the +2 floor in the damage formula), guaranteeing a lethal hit.
-        // Both crit and non-crit branches KO the target, so they all trigger the
-        // same endure logic and coalesce to a single outcome (prob 1.0).
+        // stats[0] = hp = 1 puts the holder at "full HP" for Sash's condition while any hit
+        // (≥2 damage from the formula's +2 floor) is guaranteed lethal, so crit and non-crit
+        // branches both trigger Sash identically and coalesce to one outcome.
 
         #[test]
         fn focus_sash_survives_lethal_hit_at_full_hp() {
@@ -13921,13 +13897,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            // Both mons at 1 HP with Tackle. Whoever moves first KOs the other.
-            // P1 is slower but holds Quick Claw; P2 is faster and has no item.
-            //
-            // - QC fires   (0.2): P1 goes first → KOs P2 → GameOverState { winner: P1 }
-            // - QC inactive(0.8): P2 goes first → KOs P1 → GameOverState { winner: P2 }
-            //
-            // Probability P1 wins = probability QC fired.
+            // Both mons at 1 HP with Tackle, so whoever moves first wins. P1 is slower but holds
+            // Quick Claw (20% to move first anyway), so P(P1 wins) == P(Quick Claw fired).
             let mut slow_qc = build_pokemon_state(
                 Species::Golem, &pokemon_dex, &move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
@@ -14690,7 +14661,6 @@ mod tests {
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
                 &mdex, &pdex,
             );
-            // Check on the hit branches
             let _ = outcomes;
             for (s, _) in &outcomes2 {
                 if let MatchState::BattleState(bs) = s {
@@ -16957,10 +16927,8 @@ mod contact_reactive_abilities {
 
 // ── Priority manipulation abilities ────────────────────────────────────────────
 //
-// Turn-order probe pattern: both mons at hp=1/stats[0]=1 with Tackle.
-// Whoever goes first KOs the other → observable as GameOverState { winner }.
-// Paralysis-fail probe: P1 at high HP with Thunder Wave, P2 at high HP with Tackle;
-// if Prankster fires → Thunder Wave goes first → P2 paralyzed → 12.5% fail → P1 undamaged.
+// Turn order is probed via mutual-KO setups (both at hp=1, whoever moves first wins) and via
+// Prankster + Thunder Wave (if it lands first, P2's 12.5% paralysis-fail becomes observable).
 mod priority_abilities {
     use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
@@ -22660,10 +22628,8 @@ mod stat_manipulation {
             &move_dex(), &pokemon_dex(),
         );
         let (after_swap, _) = extract_battle_state(swap_outcomes);
-        // Confirm the swap happened.
         assert_eq!(after_swap.p1_active_mons[0].stats[5], 80,  "Speed Swap: user should have target's speed");
         assert_eq!(after_swap.p2_active_mons[0].stats[5], 200, "Speed Swap: target should have user's speed");
-        // Now switch out P1's Snorlax.
         let switch_outcomes = run_single_turn(
             &MatchState::BattleState(after_swap),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
@@ -23022,10 +22988,8 @@ mod self_fainting_and_crash_moves {
 
     #[test]
     fn healing_wish_replacement_is_healed_and_cured_on_entry() {
-        // Two-turn test:
-        //   Turn 1 — Healing Wish: user faints, slot condition set.
-        //   Turn 2 (replacement phase) — Clefable enters injured+burned → healed to full and
-        //                                status cured by the slot condition.
+        // Turn 1: Healing Wish faints the user and sets a slot condition. Turn 2 (replacement):
+        // injured/burned Clefable enters and is healed + cured by that slot condition.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -27723,24 +27687,15 @@ mod new_moves_session {
         );
         assert_eq!(turn1.len(), 1, "Turn 1 should produce exactly 1 outcome (Tackle has 1 roll in single-roll mode)");
         let (turn1_state, _) = turn1.into_iter().next().unwrap();
-        // Verify P2's Tackle hit P1 (last_move_on_field is now Tackle, P1 took some damage).
         if let MatchState::BattleState(ref bs) = turn1_state {
             assert!(bs.p1_active_mons[0].hp < initial_p1_hp, "P2 Tackle should have damaged P1 in turn 1");
             assert_eq!(bs.last_move_on_field, Some(PokemonMove::Splash),
                 "last_move_on_field after turn 1 should be Splash (P1 moved last due to lower speed)");
         }
 
-        // Turn 2: P1 uses Copycat (slot 0). last_move_on_field = Splash (from P1's Splash).
-        // Actually Splash is the last move set since P1 (slower) moves last. Let's verify Copycat
-        // in this case copies Splash and does nothing meaningful, or set it up differently.
-        //
-        // To properly test cross-turn copying of a damaging move, we need P2 to be the LAST mover.
-        // Restructure: make P2 slower so P1 Splash goes first, then P2 Tackle goes last.
-        // After turn 1: last_move_on_field = Tackle (P2 moved last).
-        // Turn 2: P1 uses Copycat → copies Tackle → damages P2.
-        //
-        // The current state from above has last_move_on_field = Splash (P1 slower, moved last).
-        // Re-run with P1 FASTER so P1 Splash executes first, P2 Tackle executes second (last).
+        // To test cross-turn copying of a damaging move, P2 must be the last mover (so
+        // last_move_on_field is Tackle, not Splash): re-run with P1 faster so P1's Splash
+        // resolves first and P2's Tackle resolves last.
         let mut p1b = build_pokemon_state(
             Species::Smeargle, &pdex, &mdex, Some(50),
             Some([Some(PokemonMove::Copycat), Some(PokemonMove::Splash), None, None]),
@@ -29747,7 +29702,6 @@ mod new_abilities_batch {
         // Chlorophyll doubles Speed in real sun. Without actual sun, ally_speed should be base.
         let ally_speed = state.p2_active_mons[0].stats[5]; // compare against p2 speed
         let _ = ally_speed;
-        // Check that p1_active_mons[1] (Chlorophyll ally) has the same speed as without sun.
         let chloro_speed = state.p1_active_mons[1].stats[5];
         let base_speed = ally.stats[5];
         assert_eq!(chloro_speed, base_speed,
@@ -30261,7 +30215,6 @@ mod todo_refactor_mechanic_tests {
         let mut p1_no = mon(Species::Haxorus, PokemonMove::Tackle, Ability::None);
         // Both P1s move first.
         p1_mb.stats[5] = 500; p1_no.stats[5] = 500;
-        // Set +6 Attack on both P1s.
         p1_mb.boosts[0] = 6; p1_no.boosts[0] = 6;
 
         let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Unaware);
