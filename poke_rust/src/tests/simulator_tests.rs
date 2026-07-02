@@ -31082,10 +31082,9 @@ mod season2_items_and_abilities {
 
     #[test]
     fn metronome_item_ramps_damage_on_consecutive_uses() {
-        // Metronome item: first use is baseline (×1.0), second is ×1.2, third ×1.4, etc.
-        // We compare turn-1 damage vs turn-2 damage using the same move.
-        // Use Tackle (no secondary, 100% accurate) + no_consider_crit=true so each turn
-        // produces exactly one branch, allowing extract_battle_state to carry state over.
+        // Metronome: first use ×1.0, second ×1.2, third ×1.4, etc. Tackle (no secondary,
+        // 100% accurate) with no crit / 1 roll keeps each turn a single deterministic
+        // branch so extract_battle_state can carry state to the next turn.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -31110,15 +31109,13 @@ mod season2_items_and_abilities {
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Turn 1: first Tackle (streak=0, so multiplier=×1.0).
-        // run_single_turn uses consider_crit=false + damage_rolls=1: one deterministic branch.
         let state1 = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
         let outcomes1 = run_single_turn(
             &MatchState::BattleState(state1), &p1_cmd, &p2_cmd, mdex, pdex,
         );
         let dmg1 = avg_damage(&outcomes1, target_hp);
 
-        // Simulate turn 2 from the actual state (carry over last_used_move + consecutive_move_count).
+        // Carries over last_used_move + consecutive_move_count into turn 2.
         let (bs1, _) = extract_battle_state(outcomes1);
         let t2_target_hp = bs1.p2_active_mons[0].hp;
         let outcomes2 = run_single_turn(
@@ -31126,7 +31123,6 @@ mod season2_items_and_abilities {
         );
         let dmg2 = avg_damage(&outcomes2, t2_target_hp);
 
-        // Second use should be ~1.2× the first.
         let ratio = dmg2 / dmg1;
         assert!(
             (ratio - 1.2).abs() < 0.07,
