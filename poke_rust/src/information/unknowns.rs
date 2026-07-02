@@ -279,24 +279,21 @@ pub enum Statement {
         mon_idx: usize,
         item: Item,
     },
-    HasStatus {
-        mon_idx: usize,
-        status: Status,
-    },
-    HasMove {
-        mon_idx: usize,
-        pokemon_move: PokemonMove,
-    },
     HasAbility {
         mon_idx: usize,
         ability: Ability,
     },
+    /// The active weather lasts exactly `turns` more end-of-turns. Emitted as a clause
+    /// pair tying the setter's extension rock to the duration; the `turns` payload is
+    /// decremented in sync with the field timer each end-of-turn.
     WeatherTurns {
         turns: usize,
     },
-    PseudoWeatherTurns {
+    /// The active terrain lasts exactly `turns` more end-of-turns (Terrain Extender pair).
+    TerrainTurns {
         turns: usize,
     },
+    /// The given side condition lasts exactly `turns` more end-of-turns (Light Clay pair).
     SideConditionTurns {
         side: Player,
         side_condition: SideCondition,

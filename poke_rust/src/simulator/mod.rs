@@ -572,14 +572,24 @@ fn apply_single_hit_branch(
             let env = simulator_helpers::berry_env(&branch_state, target_slot);
             let as_ = simulator_helpers::abilities_are_suppressed(&branch_state);
             let mut busted_fainted = false;
+            let mut chip_hp_max = (0u16, 1u16);
             if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, target_slot) {
                 mon.species = Species::MimikyuBusted;
                 let chip = (mon.stats[0] / 8).max(1);
                 simulator_helpers::take_damage(mon, chip, env, as_);
+                chip_hp_max = (mon.hp, mon.stats[0].max(1));
                 if mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(mon);
                     busted_fainted = true;
                 }
+            }
+            // The bust chip is visible in-game ("Its disguise served it as a decoy!" +
+            // HP drop), so emit it — previously silent, which desynced observed HP.
+            if let Some(observer) = branch_state.event_observer {
+                let new_hp = simulator_helpers::observed_hp_value(
+                    observer, target_slot.player, chip_hp_max.0, chip_hp_max.1,
+                );
+                simulator_helpers::emit(&mut branch_state, EventKind::DamageDealt { target: target_slot, new_hp });
             }
             simulator_helpers::emit(&mut branch_state, EventKind::FormeChange {
                 slot: target_slot,
@@ -588,6 +598,7 @@ fn apply_single_hit_branch(
             });
             if busted_fainted {
                 simulator_helpers::handle_pokemon_faint(&mut branch_state, target_slot.player, target_slot.slot_index);
+                simulator_helpers::emit(&mut branch_state, EventKind::Faint { slot: target_slot });
             }
         }
     }
@@ -904,6 +915,7 @@ fn apply_single_hit_branch(
 
         if target_fainted {
             simulator_helpers::handle_pokemon_faint(&mut bs, target_slot.player, target_slot.slot_index);
+            simulator_helpers::emit(&mut bs, EventKind::Faint { slot: target_slot });
 
             // Moxie: +1 Attack when the attacker directly KOs a target with a damaging move.
             // Only fires if the attacker is still alive (doesn't trigger on recoil-KO).
@@ -964,6 +976,9 @@ fn apply_single_hit_branch(
                 .unwrap_or(false);
             if attacker_destiny_bonded {
                 simulator_helpers::handle_pokemon_faint(&mut bs, attack_slot.player, attack_slot.slot_index);
+                // A self-faint shows no damage line in-game — Faint alone conveys HP 0
+                // (the inference Faint handler zeroes HP).
+                simulator_helpers::emit(&mut bs, EventKind::Faint { slot: attack_slot });
             }
         }
 
@@ -1521,6 +1536,9 @@ fn possible_damage_outcomes_for_move(
                 Some(move_type)
             });
         if let Some(new_type) = protean_result {
+            let protean_ability = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| m.ability.clone())
+                .unwrap_or(Ability::Protean);
             if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
                 mon.types = vec![new_type.clone()];
                 mon.volatiles.retain(|v| !matches!(v,
@@ -1529,6 +1547,12 @@ fn possible_damage_outcomes_for_move(
                 ));
                 mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ProteanActivated, 0));
             }
+            // The in-game message attributes the type change to the ability
+            // ("[from] ability: Protean"), so reveal it alongside.
+            simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed {
+                slot: action.user_slot,
+                ability: protean_ability,
+            });
             simulator_helpers::emit(&mut next_state, EventKind::TypeChanged {
                 slot: action.user_slot,
                 new_types: vec![new_type],
@@ -1993,6 +2017,9 @@ fn possible_damage_outcomes_for_move(
     {
         target_slots = simulator_helpers::check_and_apply_redirection(&next_state, action.user_slot, target_slots, Some(move_data));
     }
+    // Record the resolved targets for the MoveUsed wrapper (the command's target_slot is
+    // None for auto-targeted moves, so the wrapper cannot reconstruct them itself).
+    next_state.resolved_move_targets = target_slots.clone();
 
     // Substitute: lose ¼ max HP to create a dummy that absorbs incoming damage.
     // Fails if the user already has a Substitute, HP ≤ cost, or max HP < 4 (Shedinja / tiny).
@@ -2012,12 +2039,25 @@ fn possible_damage_outcomes_for_move(
             }
             let attacker_env = simulator_helpers::berry_env(&next_state, attacker_slot);
             let as_ = simulator_helpers::abilities_are_suppressed(&next_state);
+            let mut post = (0u16, 1u16);
             if let Some(m) = mon_at_slot_mut(&mut next_state, attacker_slot) {
                 simulator_helpers::take_damage(m, cost, attacker_env, as_);
                 m.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(
                     VolatileStatus::Substitute(cost), 0,
                 ));
+                post = (m.hp, m.stats[0].max(1));
             }
+            // "X put in a substitute!" — the ¼ HP cost and the sub are both visible.
+            // The volatile payload is emitted as 0: the sub's exact HP is not
+            // player-visible (it would leak max HP); inference matches the discriminant.
+            if let Some(observer) = next_state.event_observer {
+                let new_hp = simulator_helpers::observed_hp_value(observer, attacker_slot.player, post.0, post.1);
+                simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: attacker_slot, new_hp });
+            }
+            simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+                target: attacker_slot,
+                volatile: VolatileStatus::Substitute(0),
+            });
         }
         decrement_move_pp(&mut next_state, attacker_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
@@ -2087,6 +2127,7 @@ fn possible_damage_outcomes_for_move(
         };
         if let Some(slot) = override_slot {
             target_slots = vec![slot];
+            next_state.resolved_move_targets = target_slots.clone();
         }
     }
 
@@ -2167,6 +2208,7 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::clear_pokemon_on_faint(user_mon);
         }
         simulator_helpers::handle_pokemon_faint(&mut next_state, user_player, user_slot_index);
+        simulator_helpers::emit(&mut next_state, EventKind::Faint { slot: action.user_slot });
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
@@ -2202,6 +2244,7 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::clear_pokemon_on_faint(user_mon);
         }
         simulator_helpers::handle_pokemon_faint(&mut next_state, user_player, user_slot_index);
+        simulator_helpers::emit(&mut next_state, EventKind::Faint { slot: action.user_slot });
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
@@ -3383,10 +3426,25 @@ fn possible_damage_outcomes_for_move(
         let cost = max_hp / 2;
         let env = simulator_helpers::berry_env(&next_state, action.user_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&next_state);
+        let mut post = (0u16, 1u16, 0i8);
         if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
             simulator_helpers::take_damage(mon, cost, env, as_);
+            let before = mon.boosts[0];
             if mon.boosts[0] < 6 { mon.stats_raised_this_turn = true; }
             mon.boosts[0] = 6;
+            post = (mon.hp, mon.stats[0].max(1), 6 - before);
+        }
+        // "X cut its own HP and maximized its Attack!" — both effects are visible.
+        if let Some(observer) = next_state.event_observer {
+            let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, post.0, post.1);
+            simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp });
+        }
+        if post.2 != 0 {
+            simulator_helpers::emit(&mut next_state, EventKind::BoostChanged {
+                target: action.user_slot,
+                boost_idx: 0,
+                stages: post.2,
+            });
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
@@ -3405,10 +3463,17 @@ fn possible_damage_outcomes_for_move(
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
         let env = simulator_helpers::berry_env(&next_state, action.user_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&next_state);
+        let mut cs_post = (0u16, 1u16);
         let belly_drum_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
             simulator_helpers::take_damage(mon, cost, env, as_);
+            cs_post = (mon.hp, mon.stats[0].max(1));
             simulator_helpers::apply_stat_boost_external(mon, &[1, 1, 1, 1, 1, 0, 0], items_suppressed)
         } else { [0i8; 7] };
+        // The ⅓ HP cost is visible in-game (the boosts are emitted below).
+        if let Some(observer) = next_state.event_observer {
+            let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, cs_post.0, cs_post.1);
+            simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp });
+        }
         for (boost_idx, &stages) in belly_drum_delta.iter().enumerate() {
             if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
         }
@@ -3827,19 +3892,38 @@ fn possible_damage_outcomes_for_move(
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
             // Cost: ½ max HP (move still completes even if this faints the user).
+            let mut user_post = (0u16, 1u16, false);
             {
                 let user_env = simulator_helpers::berry_env(&next_state, action.user_slot);
                 let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&next_state);
                 if let Some(user) = mon_at_slot_mut(&mut next_state, action.user_slot) {
                     let cost = (user.stats[0].max(1) / 2).max(1);
                     simulator_helpers::take_damage(user, cost, user_env, abilities_suppressed);
+                    user_post = (user.hp, user.stats[0].max(1), user.fainted);
                     if user.fainted { simulator_helpers::clear_pokemon_on_faint(user); }
+                }
+            }
+            // "X cut its own HP and laid a curse on Y!" — the cost (and a self-KO) is
+            // visible; run the faint hooks the bare take_damage skipped.
+            if user_post.2 {
+                simulator_helpers::handle_pokemon_faint(&mut next_state, action.user_slot.player, action.user_slot.slot_index);
+            }
+            if let Some(observer) = next_state.event_observer {
+                let shown = if user_post.2 { 0 } else { user_post.0 };
+                let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, shown, user_post.1);
+                simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp });
+                if user_post.2 {
+                    simulator_helpers::emit(&mut next_state, EventKind::Faint { slot: action.user_slot });
                 }
             }
             // Apply Curse volatile to the target (TurnStatus, permanent — Baton Pass carries TurnStatus(Curse,_)).
             if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
                 target.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Curse, 0));
             }
+            simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+                target: target_slot,
+                volatile: VolatileStatus::Curse,
+            });
         } else {
             // Non-Ghost: +1 Atk / +1 Def / −1 Spe — routed through the normal boost helpers so
             // Contrary / Simple apply, but does NOT require a target.
@@ -4464,6 +4548,8 @@ fn possible_damage_outcomes_for_move(
         if move_data.priority > 0
             && simulator_helpers::pokemon_is_on_terrain(&next_state, &target, &crate::state::dex_data::Terrain::PsychicTerrain)
         {
+            // Visible in-game ("X surrounds itself with psychic terrain!" / move fails).
+            simulator_helpers::emit(&mut next_state, EventKind::MoveFailed { slot: *target_slot });
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -4482,6 +4568,12 @@ fn possible_damage_outcomes_for_move(
             && action.user_slot.player != target_slot.player
             && target_has_priority_block_ability
         {
+            // In-game the blocking ability is announced ("X cannot use Y!").
+            simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed {
+                slot: *target_slot,
+                ability: target.ability.clone(),
+            });
+            simulator_helpers::emit(&mut next_state, EventKind::MoveFailed { slot: *target_slot });
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -4496,6 +4588,10 @@ fn possible_damage_outcomes_for_move(
             && action.user_slot.player != target_slot.player
             && simulator_helpers::pokemon_has_type(&target, &PokemonType::Dark)
         {
+            // "It doesn't affect X…" — the Dark-type bounce is visible in-game.
+            // (Previously silent, which left the Prankster inference pass dead on
+            // real event streams.)
+            simulator_helpers::emit(&mut next_state, EventKind::Immune { target: *target_slot });
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5795,7 +5891,37 @@ fn apply_forced_switch(
         for idx in bench {
             let mut clone = bs.clone();
             perform_switch_out_in(&mut clone, target_slot, idx, pokemon_dex);
+            // Emit the forced entrant's Switch event (previously missing entirely — the
+            // observer never learned the dragged-in mon). Same shape as the voluntary
+            // SwitchAction path: pre-send-out state captured, send-out effects nested as
+            // reactions; the whole Switch nests under the forcing MoveUsed via the
+            // pending stream.
+            let switch_state: Option<InfoSwitchState> = clone.event_observer.and_then(|observer| {
+                simulator_helpers::get_pokemon_at_slot(&clone, target_slot).map(|mon| InfoSwitchState {
+                    slot: target_slot,
+                    species: if target_slot.player != observer {
+                        simulator_helpers::compute_illusion_disguise(&clone, target_slot)
+                            .unwrap_or_else(|| mon.species.clone())
+                    } else {
+                        mon.species.clone()
+                    },
+                    level: mon.level,
+                    hp: simulator_helpers::observed_hp_value(observer, target_slot.player, mon.hp, mon.stats[0]),
+                    status: mon.status.clone(),
+                    tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
+                })
+            });
+            let item_snapshot = simulator_helpers::snapshot_active_items(&clone);
+            let sendout_start = clone.pending_events.len();
             simulator_helpers::process_pokemon_send_out(&mut clone, target_slot, move_dex);
+            simulator_helpers::process_item_loss_events(&mut clone, &item_snapshot);
+            if let Some(switch_state) = switch_state {
+                let reactions = clone.pending_events.split_off(sendout_start);
+                clone.pending_events.push(InformationEvent {
+                    kind: EventKind::Switch(switch_state),
+                    reactions,
+                });
+            }
             // The switched-out target's still-queued action (e.g. a slower −7 move) must not run for
             // the replacement that just entered.
             clone.action_queue.retain(|a| action_user_slot(a) != target_slot);
@@ -5819,9 +5945,13 @@ fn apply_post_damage_move_effects(
     bs.sub_damage_dealt = 0; // consumed here
     let total_effective_dmg = total_dmg + sub_dmg; // for recoil / last_move_failed / move_connected
     let opponent_wiped = !simulator_helpers::team_has_remaining_pokemon(&bs, opposing_player) && total_dmg > 0;
-    // Collect (slot, post-hp, max-hp) tuples for Healed events; emitted after the attacker_mon
-    // borrow ends (iter_mut borrow pattern — NLL prevents inline emit inside the block).
-    let mut attacker_healed: Vec<(FieldSlot, u16, u16)> = Vec::new();
+    // Attacker HP-change events, in chronological order: (post-change hp, is_damage, reveal).
+    // Collected while the attacker_mon borrow is live (NLL prevents inline emit) and emitted
+    // after it ends. Order matters: a Liquid Ooze backlash can precede a Shell Bell heal, so
+    // heals and damage must share one batch or observed HP desyncs. Damage entries carry the
+    // source-attribution event a real player sees: Life Orb chip announces the item, Liquid
+    // Ooze announces the ability; plain recoil (incl. Struggle / Mind Blown) reveals nothing.
+    let mut attacker_hp_events: Vec<(u16, bool, Option<EventKind>)> = Vec::new();
     let attacker_item_active = simulator_helpers::get_pokemon_at_slot(&bs, attacker_slot)
         .map(|m| simulator_helpers::item_is_active(&bs, m))
         .unwrap_or(false);
@@ -5831,13 +5961,19 @@ fn apply_post_damage_move_effects(
     // Capture whether any active opposing mon carries Liquid Ooze before the attacker borrow.
     // If so, drain heals are reversed into damage on the attacker (mirrors Strength Sap and
     // Leech Seed). Checked before the mutable borrow of attacker_mon to avoid borrow conflicts.
-    let drain_target_has_liquid_ooze = !abilities_suppressed && {
+    let liquid_ooze_slot: Option<FieldSlot> = if abilities_suppressed {
+        None
+    } else {
         let opp_mons = match opposing_player {
             Player::P1 => &bs.p1_active_mons,
             Player::P2 => &bs.p2_active_mons,
         };
-        opp_mons.iter().any(|m| !m.fainted && m.ability == Ability::LiquidOoze)
+        opp_mons
+            .iter()
+            .position(|m| !m.fainted && m.ability == Ability::LiquidOoze)
+            .map(|i| FieldSlot { player: opposing_player, slot_index: i as u8 })
     };
+    let drain_target_has_liquid_ooze = liquid_ooze_slot.is_some();
     let mut forced_winner: Option<Player> = None;
     let mut attacker_fainted = false;
     // (cur, end_prob, disrupt_now, can_confuse) — set inside the attacker_mon block below.
@@ -5877,8 +6013,7 @@ fn apply_post_damage_move_effects(
                 let before = attacker_mon.hp;
                 simulator_helpers::gain_hp(attacker_mon, heal, attacker_env);
                 if attacker_mon.hp != before {
-                    let (hp, mx) = (attacker_mon.hp, max_hp);
-                    attacker_healed.push((attacker_slot, hp, mx));
+                    attacker_hp_events.push((attacker_mon.hp, false, None));
                 }
             }
         }
@@ -5891,6 +6026,15 @@ fn apply_post_damage_move_effects(
             if heal > 0 {
                 if drain_target_has_liquid_ooze {
                     simulator_helpers::take_damage(attacker_mon, heal, attacker_env, abilities_suppressed);
+                    // "It sucked up the liquid ooze!" — the backlash announces the ability.
+                    attacker_hp_events.push((
+                        attacker_mon.hp,
+                        true,
+                        liquid_ooze_slot.map(|s| EventKind::AbilityRevealed {
+                            slot: s,
+                            ability: Ability::LiquidOoze,
+                        }),
+                    ));
                     if attacker_mon.fainted {
                         simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                         attacker_fainted = true;
@@ -5900,8 +6044,7 @@ fn apply_post_damage_move_effects(
                     let before = attacker_mon.hp;
                     simulator_helpers::gain_hp(attacker_mon, heal, attacker_env);
                     if attacker_mon.hp != before {
-                        let (hp, mx) = (attacker_mon.hp, max_hp);
-                        attacker_healed.push((attacker_slot, hp, mx));
+                        attacker_hp_events.push((attacker_mon.hp, false, None));
                     }
                 }
             }
@@ -5921,8 +6064,7 @@ fn apply_post_damage_move_effects(
                 let before = attacker_mon.hp;
                 simulator_helpers::gain_hp(attacker_mon, heal, attacker_env);
                 if attacker_mon.hp != before {
-                    let (hp, mx) = (attacker_mon.hp, max_hp);
-                    attacker_healed.push((attacker_slot, hp, mx));
+                    attacker_hp_events.push((attacker_mon.hp, false, None));
                 }
             }
         }
@@ -5946,6 +6088,7 @@ fn apply_post_damage_move_effects(
             let recoil = ((max_hp as u32 + 1) / 2) as u16; // ceil(max_hp / 2)
             if recoil > 0 {
                 simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
+                attacker_hp_events.push((attacker_mon.hp, true, None));
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
@@ -5963,6 +6106,7 @@ fn apply_post_damage_move_effects(
 
             if recoil > 0 {
                 simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
+                attacker_hp_events.push((attacker_mon.hp, true, None));
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
@@ -5989,6 +6133,15 @@ fn apply_post_damage_move_effects(
             if !sheer_force_suppresses && !magic_guard_blocks {
                 let recoil = (max_hp as u32 / 10).max(1) as u16;
                 simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
+                // "X was hurt by its Life Orb!" — the chip announces the item in-game.
+                attacker_hp_events.push((
+                    attacker_mon.hp,
+                    true,
+                    Some(EventKind::ItemRevealed {
+                        slot: attacker_slot,
+                        item: crate::data::item::Item::LifeOrb,
+                    }),
+                ));
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
@@ -6116,6 +6269,8 @@ fn apply_post_damage_move_effects(
                 attacker_mon.fainted = true;
                 simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                 attacker_fainted = true;
+                // No damage entry: a self-faint shows no damage line in-game; the
+                // Faint emitted below (attacker_fainted) conveys HP 0.
                 if opponent_wiped { forced_winner = Some(attacker_slot.player); }
             }
         }
@@ -6124,9 +6279,28 @@ fn apply_post_damage_move_effects(
     if attacker_fainted {
         simulator_helpers::handle_pokemon_faint(&mut bs, attacker_slot.player, attacker_slot.slot_index);
     }
-    // Emit Healed events for drain/Shell Bell/unconditional heals (collected while attacker_mon
-    // borrow was live; now emitted after it is released).
-    simulator_helpers::emit_healed_batch(&mut bs, &attacker_healed);
+    // Emit the attacker's HP-change events (heals AND recoil-class damage) in chronological
+    // order, now that the attacker_mon borrow is released. Faint hooks already ran above,
+    // matching the emit ordering of apply_hp_damage_to_attacker / emit_eot_hp_deltas.
+    if let Some(observer) = bs.event_observer {
+        let atk_max_hp = simulator_helpers::get_pokemon_at_slot(&bs, attacker_slot)
+            .map(|m| m.stats[0].max(1))
+            .unwrap_or(1);
+        for (hp, is_damage, reveal) in attacker_hp_events {
+            if let Some(kind) = reveal {
+                simulator_helpers::emit(&mut bs, kind);
+            }
+            let new_hp = simulator_helpers::observed_hp_value(observer, attacker_slot.player, hp, atk_max_hp);
+            if is_damage {
+                simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: attacker_slot, new_hp });
+            } else {
+                simulator_helpers::emit(&mut bs, EventKind::Healed { target: attacker_slot, new_hp });
+            }
+        }
+        if attacker_fainted {
+            simulator_helpers::emit(&mut bs, EventKind::Faint { slot: attacker_slot });
+        }
+    }
     // Emit BoostChanged for Spit Up's Stockpile discharge (also collected while borrow was live).
     for (boost_idx, &stages) in spit_up_delta.iter().enumerate() {
         if stages != 0 { simulator_helpers::emit(&mut bs, EventKind::BoostChanged { target: attacker_slot, boost_idx, stages }); }
@@ -6439,6 +6613,11 @@ fn execute_action(
                                 simulator_helpers::process_item_loss_events(bs, &item_snapshot);
                                 // Weather / ability-altering moves may change Castform's form.
                                 simulator_helpers::update_forecast_forms(bs);
+                                // Take the engine-resolved targets (auto-targeting, redirection)
+                                // unconditionally so the transient field never lingers; fall back
+                                // to the command's explicit target for moves handled before the
+                                // targeting step.
+                                let resolved = std::mem::take(&mut bs.resolved_move_targets);
                                 // Wrap all events emitted during this move as reactions of MoveUsed,
                                 // UNLESS the Pokémon couldn't act (Cant) — in that case Showdown
                                 // emits `|cant|` with no `|move|`, so we emit the children flat.
@@ -6449,11 +6628,16 @@ fn execute_action(
                                         // push it back flat so it appears as a top-level sibling.
                                         bs.pending_events.extend(reactions);
                                     } else {
+                                        let targets = if resolved.is_empty() {
+                                            move_targets.clone()
+                                        } else {
+                                            resolved
+                                        };
                                         bs.pending_events.push(InformationEvent {
                                             kind: EventKind::MoveUsed {
                                                 user: move_user,
                                                 move_used: move_name.clone(),
-                                                targets: move_targets.clone(),
+                                                targets,
                                             },
                                             reactions,
                                         });
@@ -6469,32 +6653,50 @@ fn execute_action(
         }
         Action::SwitchAction(s) => {
             perform_switch_out_in(&mut state, s.user_slot, s.switch_index, pokemon_dex);
+            // Capture the entrant's visible state BEFORE send-out effects run: the in-game
+            // switch message shows the bench HP, and hazard chip / entry-ability reveals
+            // follow as *reactions* of the Switch event. Emitting them as pre-Switch
+            // siblings (the old shape) made the inference engine attribute them to the
+            // outgoing mon still occupying the slot. Matches the SimultaneousSwitch path.
+            let switch_state: Option<InfoSwitchState> = state.event_observer.and_then(|observer| {
+                simulator_helpers::get_pokemon_at_slot(&state, s.user_slot).map(|mon| InfoSwitchState {
+                    slot: s.user_slot,
+                    // Illusion disguise is only installed inside process_pokemon_send_out
+                    // (not yet run) — compute the disguise species from party composition
+                    // directly, as the SimultaneousSwitch path does.
+                    species: if s.user_slot.player != observer {
+                        simulator_helpers::compute_illusion_disguise(&state, s.user_slot)
+                            .unwrap_or_else(|| mon.species.clone())
+                    } else {
+                        mon.species.clone()
+                    },
+                    level: mon.level,
+                    hp: simulator_helpers::observed_hp_value(observer, s.user_slot.player, mon.hp, mon.stats[0]),
+                    status: mon.status.clone(),
+                    // Only reveal tera type if the mon has already Terastallized;
+                    // matches the SimultaneousSwitch path.
+                    tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
+                })
+            });
+            // Item-loss ledger across the entry effects (pinch berry eaten from hazard
+            // chip, terrain seed consumed on entry) — mirrors the MoveAction path.
+            let item_snapshot = simulator_helpers::snapshot_active_items(&state);
+            let sendout_start = state.pending_events.len();
             simulator_helpers::process_pokemon_send_out(&mut state, s.user_slot, move_dex);
+            simulator_helpers::process_item_loss_events(&mut state, &item_snapshot);
             if simulator_helpers::get_verbosity() >= 2 {
                 let user = simulator_helpers::get_pokemon_at_slot(&state, s.user_slot)
                     .map(|p| simulator_helpers::species_name_sim(&p.species))
                     .unwrap_or_else(|| format!("{:?} slot {}", s.user_slot.player, s.user_slot.slot_index + 1));
                 println!("{}", format!("Executed Switch: new active at slot {} is {}", s.user_slot.slot_index + 1, user).bright_green());
             }
-            // Emit Switch event.
-            if let Some(observer) = state.event_observer {
-                if let Some(mon) = simulator_helpers::get_pokemon_at_slot(&state, s.user_slot) {
-                    let hp = simulator_helpers::observed_hp_value(observer, s.user_slot.player, mon.hp, mon.stats[0]);
-                    let switch_state = InfoSwitchState {
-                        slot: s.user_slot,
-                        species: simulator_helpers::observed_species(mon, s.user_slot, observer),
-                        level: mon.level,
-                        hp,
-                        status: mon.status.clone(),
-                        // Only reveal tera type if the mon has already Terastallized;
-                        // matches the SimultaneousSwitch path (mod.rs:7118).
-                        tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
-                    };
-                    state.pending_events.push(InformationEvent {
-                        kind: EventKind::Switch(switch_state),
-                        reactions: vec![],
-                    });
-                }
+            // Emit the Switch event with the send-out effects nested as reactions.
+            if let Some(switch_state) = switch_state {
+                let reactions = state.pending_events.split_off(sendout_start);
+                state.pending_events.push(InformationEvent {
+                    kind: EventKind::Switch(switch_state),
+                    reactions,
+                });
             }
             vec![(MatchState::BattleState(state), 1.0)]
         }
@@ -7188,6 +7390,7 @@ fn battle_state_from_preview_branching(
         sub_damage_dealt: 0,
         round_used_this_turn: false,
         move_was_prevented: false,
+        resolved_move_targets: vec![],
         pending_events: vec![],
         event_observer: None,
     };

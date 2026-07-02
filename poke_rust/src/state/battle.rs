@@ -174,6 +174,14 @@ pub struct BattleState {
     /// every `possible_damage_outcomes_for_move`. Excluded from PartialEq/Hash.
     pub move_was_prevented: bool,
 
+    /// The target slots the engine actually resolved for the current move (auto-targeting,
+    /// redirection, Sucker-Punch-style overrides). The command's `target_slot` is `None`
+    /// for auto-targeted moves, so the `MoveUsed` wrapper reads this to populate
+    /// `MoveUsed::targets` — without it the event stream reports empty targets and the
+    /// inference passes keyed on targets never fire. Consumed (taken) by the wrapper.
+    /// Excluded from PartialEq/Hash.
+    pub resolved_move_targets: Vec<FieldSlot>,
+
     /// Flat push-stream of events observed this turn. Wrapped into causal `reactions`
     /// trees by `execute_action` and `step_action_queue` using the split_off trick.
     /// Excluded from `PartialEq`/`Hash` so internal coalescing is unchanged.

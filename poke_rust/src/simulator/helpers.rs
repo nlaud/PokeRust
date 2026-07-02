@@ -5571,6 +5571,34 @@ pub fn set_weather(state: &mut BattleState, weather: Weather, duration: u8) {
 /// order Sticky Web → Stealth Rock → Spikes → Toxic Spikes, short-circuiting as soon as the
 /// entrant faints (so a mon KO'd by Stealth Rock is not also poisoned by Toxic Spikes; the
 /// "skip the switch-in ability" half of that interaction lives in `process_pokemon_send_out`).
+/// Post-chip bookkeeping + emission for one entry-hazard damage instance: clears the
+/// entrant and runs the on-faint hooks if the chip KO'd it, then emits the chip's
+/// `DamageDealt` (+ `Faint`). The events nest under the enclosing Switch /
+/// SimultaneousSwitch via the caller's reaction wrapping. Previously the chip was
+/// fully silent (and a hazard KO skipped the faint hooks entirely).
+fn finish_hazard_chip(state: &mut BattleState, slot: FieldSlot, max_hp: u16) {
+    let mut fainted = false;
+    let mut post_hp = 0u16;
+    if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+        post_hp = m.hp;
+        if m.fainted {
+            clear_pokemon_on_faint(m);
+            fainted = true;
+        }
+    }
+    if fainted {
+        handle_pokemon_faint(state, slot.player, slot.slot_index);
+    }
+    if let Some(observer) = state.event_observer {
+        let shown = if fainted { 0 } else { post_hp };
+        let new_hp = observed_hp_value(observer, slot.player, shown, max_hp);
+        emit(state, EventKind::DamageDealt { target: slot, new_hp });
+        if fainted {
+            emit(state, EventKind::Faint { slot });
+        }
+    }
+}
+
 fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
     let Some(mon) = get_pokemon_at_slot(state, slot) else {
         return;
@@ -5655,6 +5683,7 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
         if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
             take_damage(m, dmg, env, as_);
         }
+        finish_hazard_chip(state, slot, max_hp);
     }
     if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) {
         return;
@@ -5677,6 +5706,7 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
             if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
                 take_damage(m, dmg, env, as_);
             }
+            finish_hazard_chip(state, slot, max_hp);
         }
     }
     if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) {
@@ -5691,8 +5721,13 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
         {
             if is_poison_type {
                 // A grounded Poison-type soaks up Toxic Spikes entirely (the layer payload is
-                // ignored by the discriminant-based removal).
+                // ignored by the discriminant-based removal). Announced in-game
+                // ("The poison spikes disappeared…"), so emit the removal.
                 remove_side_condition(state, slot.player, &SideCondition::ToxicSpikes(0));
+                emit(state, EventKind::SideConditionEnd {
+                    side: slot.player,
+                    condition: SideCondition::ToxicSpikes(*layers),
+                });
             } else {
                 let status = if *layers >= 2 {
                     Status::ToxicPoison(0)
@@ -8795,7 +8830,11 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                             )
                         } else { [0; 7] }
                     } else { [0; 7] };
-                    // Emit after the get_pokemon_at_slot_mut borrow ends.
+                    // Emit after the get_pokemon_at_slot_mut borrow ends. The in-game
+                    // message attributes the boost to the ability, so reveal it too.
+                    if delta.iter().any(|&s| s != 0) {
+                        emit(bs, EventKind::AbilityRevealed { slot: *slot, ability: Ability::SpeedBoost });
+                    }
                     for (boost_idx, &stages) in delta.iter().enumerate() {
                         if stages != 0 {
                             emit(bs, EventKind::BoostChanged { target: *slot, boost_idx, stages });
@@ -8945,7 +8984,10 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                 });
 
                 // A Harvest-restored berry no longer counts as "used this turn" — remove it
-                // from the Pickup pool in the branches where the restore fired.
+                // from the Pickup pool in the branches where the restore fired. The restore
+                // is announced in-game ("X harvested its Sitrus Berry!"), so those branches
+                // also emit the attribution + the item gain (a None→item transition the
+                // item-loss sweep cannot see).
                 for (bs, _) in result.iter_mut() {
                     let restored = get_pokemon_at_slot(bs, *slot)
                         .map(|m| m.item == berry_item && m.consumed_item.is_none())
@@ -8958,6 +9000,8 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                         {
                             bs.items_consumed_this_turn.remove(pos);
                         }
+                        emit(bs, EventKind::AbilityRevealed { slot: *slot, ability: Ability::Harvest });
+                        emit(bs, EventKind::ItemGained { slot: *slot, item: berry_item.clone() });
                     }
                 }
             }
@@ -8988,6 +9032,8 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                     } else {
                         BerryCure::none()
                     };
+                    // "X found one Y!" — Pickup is announced with the gain.
+                    emit(bs, EventKind::AbilityRevealed { slot: *slot, ability: Ability::Pickup });
                     emit(bs, EventKind::ItemGained { slot: *slot, item });
                     emit_berry_cure(bs, *slot, &cure);
                 }
@@ -11064,8 +11110,6 @@ pub fn try_apply_encore(
 /// Indirect HP damage paid by the attacker after using a move: Rough Skin / Iron Barbs recoil,
 /// Rocky Helmet, crash damage, entry hazards, etc.  Blocked by Magic Guard.
 /// Handles faint bookkeeping.
-///
-/// Note: Life Orb recoil (1/10 max HP) is not yet implemented (feature gap).
 pub(crate) fn apply_hp_damage_to_attacker(
     bs: &mut BattleState,
     attacker_slot: FieldSlot,
@@ -11136,8 +11180,10 @@ fn apply_flat_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSl
     }
     let env = berry_env(bs, attacker_slot);
     let mut fainted = false;
+    let mut post = (0u16, 1u16);
     if let Some(atk) = get_pokemon_at_slot_mut(bs, attacker_slot) {
         take_damage(atk, amount, env, abilities_suppressed);
+        post = (atk.hp, atk.stats[0].max(1));
         if atk.fainted {
             clear_pokemon_on_faint(atk);
             fainted = true;
@@ -11145,6 +11191,16 @@ fn apply_flat_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSl
     }
     if fainted {
         handle_pokemon_faint(bs, attacker_slot.player, attacker_slot.slot_index);
+    }
+    // Emit the chip (and faint) like the fraction variant above — the Innards Out
+    // backlash is visible in-game and must not desync observed HP.
+    if let Some(observer) = bs.event_observer {
+        let shown_hp = if fainted { 0 } else { post.0 };
+        let new_hp = observed_hp_value(observer, attacker_slot.player, shown_hp, post.1);
+        emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp });
+        if fainted {
+            emit(bs, EventKind::Faint { slot: attacker_slot });
+        }
     }
 }
 
@@ -11834,30 +11890,60 @@ pub(crate) fn try_absorb_move(
     let move_type = effective_move_type(state, attacker, move_data);
     let target_env = berry_env(state, target_slot);
 
+    // Every absorb is announced in-game ("X's Volt Absorb restored its HP!" etc.), so
+    // each arm reveals the ability and emits its visible effect — previously all silent.
     let absorbs = match (&move_type, &target_ability) {
         (PokemonType::Electric, Ability::VoltAbsorb)
         | (PokemonType::Water, Ability::WaterAbsorb)
         | (PokemonType::Water, Ability::DrySkin)
         | (PokemonType::Ground, Ability::EarthEater) => {
+            let mut healed_to: Option<(u16, u16)> = None;
             if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                let before = mon.hp;
                 let heal = (mon.stats[0].max(1) as u32 / 4) as u16;
                 gain_hp(mon, heal, target_env);
+                if mon.hp != before {
+                    healed_to = Some((mon.hp, mon.stats[0].max(1)));
+                }
+            }
+            emit(state, EventKind::AbilityRevealed {
+                slot: target_slot,
+                ability: target_ability.clone(),
+            });
+            if let (Some(observer), Some((hp, max))) = (state.event_observer, healed_to) {
+                let new_hp = observed_hp_value(observer, target_slot.player, hp, max);
+                emit(state, EventKind::Healed { target: target_slot, new_hp });
             }
             true
         }
         (PokemonType::Grass, Ability::SapSipper) => {
-            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false);
-            }
+            let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false)
+            } else {
+                [0i8; 7]
+            };
+            emit(state, EventKind::AbilityRevealed {
+                slot: target_slot,
+                ability: Ability::SapSipper,
+            });
+            emit_boost_deltas(state, target_slot, &delta);
             true
         }
         (PokemonType::Electric, Ability::MotorDrive) => {
-            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false);
-            }
+            let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false)
+            } else {
+                [0i8; 7]
+            };
+            emit(state, EventKind::AbilityRevealed {
+                slot: target_slot,
+                ability: Ability::MotorDrive,
+            });
+            emit_boost_deltas(state, target_slot, &delta);
             true
         }
         (PokemonType::Fire, Ability::FlashFire) => {
+            let mut started = false;
             if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
                 if !has_status_volatile(mon, &VolatileStatus::FlashFire) {
                     mon.volatiles
@@ -11865,7 +11951,18 @@ pub(crate) fn try_absorb_move(
                             VolatileStatus::FlashFire,
                             0,
                         ));
+                    started = true;
                 }
+            }
+            emit(state, EventKind::AbilityRevealed {
+                slot: target_slot,
+                ability: Ability::FlashFire,
+            });
+            if started {
+                emit(state, EventKind::VolatileStart {
+                    target: target_slot,
+                    volatile: VolatileStatus::FlashFire,
+                });
             }
             true
         }
@@ -11873,6 +11970,16 @@ pub(crate) fn try_absorb_move(
     };
 
     absorbs
+}
+
+/// Emit `BoostChanged` for each nonzero entry of an applied boost delta
+/// (the `[i8; 7]` returned by `apply_stat_boosts_to_pokemon` / `apply_stat_boost_external`).
+pub(crate) fn emit_boost_deltas(state: &mut BattleState, target: FieldSlot, delta: &[i8; 7]) {
+    for (boost_idx, &stages) in delta.iter().enumerate() {
+        if stages != 0 {
+            emit(state, EventKind::BoostChanged { target, boost_idx, stages });
+        }
+    }
 }
 
 /// Draw-in negation: Lightning Rod (Electric) and Storm Drain (Water) pull a single-target
@@ -11904,9 +12011,17 @@ pub(crate) fn try_drawin_negate(
     let negated = match (&move_type, &target_ability) {
         (PokemonType::Electric, Ability::LightningRod)
         | (PokemonType::Water, Ability::StormDrain) => {
-            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[0, 0, 1, 0, 0, 0, 0], items_suppressed, false);
-            }
+            let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                apply_stat_boosts_to_pokemon(mon, &[0, 0, 1, 0, 0, 0, 0], items_suppressed, false)
+            } else {
+                [0i8; 7]
+            };
+            // "X took the attack!" + the Sp. Atk boost are announced in-game.
+            emit(state, EventKind::AbilityRevealed {
+                slot: target_slot,
+                ability: target_ability.clone(),
+            });
+            emit_boost_deltas(state, target_slot, &delta);
             true
         }
         _ => false,
@@ -12073,10 +12188,18 @@ pub fn apply_secondary_effects(
             // HP cost: ceil(max_hp / 2)
             for (bs, _) in branches.iter_mut() {
                 let as_ = abilities_are_suppressed(bs);
+                let mut post = (0u16, 1u16);
                 if let Some(m) = get_pokemon_at_slot_mut(bs, attacker_slot) {
                     let max_hp = m.stats[0].max(1);
                     let cost = (max_hp + 1) / 2;
                     take_damage(m, cost, attacker_env, as_);
+                    post = (m.hp, max_hp);
+                }
+                // The ½ HP cost is visible in-game; the Substitute's own event comes
+                // from the secondaries path that creates it.
+                if let Some(observer) = bs.event_observer {
+                    let new_hp = observed_hp_value(observer, attacker_slot.player, post.0, post.1);
+                    emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp });
                 }
             }
         }

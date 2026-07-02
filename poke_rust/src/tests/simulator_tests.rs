@@ -33323,4 +33323,423 @@ mod event_round_trip {
              reactions = {:#?}", eot.reactions
         );
     }
+
+    // ── Test 11: attacker recoil-class damage is now emitted ──────────────────
+    //
+    // Life Orb chip, move recoil, and Liquid Ooze backlash were previously silent
+    // (bare take_damage): no DamageDealt for the attacker and no Faint on a recoil
+    // KO. The inference engine keyed "no attacker DamageDealt after a damaging hit"
+    // to exclude Life Orb, so a real holder had its own item unsoundly excluded.
+    // (Inference-side regression: inference_tests.rs roundtrip_h_life_orb_….)
+
+    /// Double-Edge recoil KOs the 1-HP attacker: the MoveUsed reactions must contain
+    /// the attacker's DamageDealt and a Faint for the attacker's slot.
+    #[test]
+    fn recoil_ko_emits_attacker_damage_and_faint() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::DoubleEdge), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        p1.hp = 1; // any recoil KOs the attacker
+        // A healthy back mon keeps the branch a BattleState after the recoil KO.
+        let p1_back = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![p1_back], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 must be present");
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == p1s0())),
+            "recoil must emit the attacker's DamageDealt under MoveUsed;\n\
+             reactions = {:#?}", mv.reactions
+        );
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::Faint { slot } if *slot == p1s0())),
+            "a recoil KO must emit Faint for the attacker;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
+
+    /// A Life Orb holder's chip announces the item: ItemRevealed + DamageDealt for
+    /// the holder must appear under its MoveUsed. Observer is the opponent (P1).
+    #[test]
+    fn life_orb_chip_emits_item_reveal_and_damage() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None,
+            Some(crate::data::item::Item::LifeOrb), None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p2s0())
+            .expect("MoveUsed for P2 slot 0 must be present");
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::ItemRevealed { slot, item }
+                if *slot == p2s0() && *item == crate::data::item::Item::LifeOrb)),
+            "Life Orb chip must emit ItemRevealed for the holder;\n\
+             reactions = {:#?}", mv.reactions
+        );
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == p2s0())),
+            "Life Orb chip must emit the holder's DamageDealt;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
+
+    // ── Test 13: voluntary-switch send-out effects nest under Switch ───────────
+    //
+    // The old emission shape pushed entry-ability reveals (and would have pushed the
+    // hazard chip) as top-level siblings BEFORE the Switch event, so the inference
+    // engine attributed them to the outgoing mon still occupying the slot. They must
+    // be reactions of the Switch event, which carries the PRE-hazard bench HP
+    // (matching the SimultaneousSwitch path and the in-game display order).
+
+    /// The incoming mon's Intimidate reveal must be nested under its Switch event,
+    /// not emitted as a preceding sibling.
+    #[test]
+    fn switch_in_ability_reveal_nests_under_switch() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_lead = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_back = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Intimidate), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2_lead], vec![p2_back]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let sw = events.iter()
+            .find(|e| matches!(&e.kind, EventKind::Switch(s) if s.slot == p2s0()))
+            .expect("Switch event for P2 slot 0 must be present");
+        assert!(
+            any_kind(&sw.reactions, |k| matches!(k,
+                EventKind::AbilityRevealed { slot, ability: Ability::Intimidate } if *slot == p2s0())),
+            "Intimidate reveal must be nested under the Switch event;\n\
+             switch reactions = {:#?}", sw.reactions
+        );
+        // And no stray top-level AbilityRevealed before the Switch.
+        let sw_pos = events.iter()
+            .position(|e| matches!(&e.kind, EventKind::Switch(_)))
+            .unwrap();
+        assert!(
+            !events[..sw_pos].iter().any(|e| matches!(e.kind, EventKind::AbilityRevealed { .. })),
+            "no ability reveal may precede the Switch event as a sibling;\n\
+             events = {:#?}", events
+        );
+    }
+
+    /// Switching in over Stealth Rock: the Switch event carries the pre-hazard bench
+    /// HP, and the chip arrives as a nested DamageDealt (previously fully silent).
+    #[test]
+    fn switch_over_stealth_rock_emits_nested_chip() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_lead = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_back = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::SandVeil), None, None, None, None, None, false,
+        );
+        let mut battle = battle_state_from_lists(vec![p1], vec![], vec![p2_lead], vec![p2_back]);
+        battle.p2_side_conditions.push(crate::state::dex_data::SideCondition::StealthRock);
+        let state = MatchState::BattleState(battle);
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let sw = events.iter()
+            .find(|e| matches!(&e.kind, EventKind::Switch(s) if s.slot == p2s0()))
+            .expect("Switch event for P2 slot 0 must be present");
+        // Pre-hazard bench HP in the Switch payload.
+        assert!(
+            matches!(&sw.kind, EventKind::Switch(s) if s.hp == PokemonHP::Percent(100)),
+            "Switch payload must carry the pre-hazard bench HP;\nkind = {:#?}", sw.kind
+        );
+        // Chip nested as a reaction, HP below 100%.
+        assert!(
+            any_kind(&sw.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p) }
+                if *target == p2s0() && *p < 100)),
+            "Stealth Rock chip must emit a DamageDealt nested under Switch;\n\
+             reactions = {:#?}", sw.reactions
+        );
+    }
+
+    // ── Test 14: Prankster-boosted move bounced by a Dark type emits Immune ────
+    //
+    // Previously the block produced no event at all (and MoveUsed carried no
+    // targets), leaving the inference Prankster pass dead on real streams.
+    #[test]
+    fn prankster_dark_bounce_emits_immune_with_targets() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Umbreon, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Murkrow, pd, md, Some(50),
+            Some([Some(PokemonMove::ThunderWave), None, None, None]),
+            None, Some(Ability::Prankster), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p2s0())
+            .expect("MoveUsed for P2 slot 0 must be present");
+        assert!(
+            matches!(&mv.kind, EventKind::MoveUsed { targets, .. } if targets.contains(&p1s0())),
+            "MoveUsed must carry the resolved target;\nkind = {:#?}", mv.kind
+        );
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::Immune { target } if *target == p1s0())),
+            "the Dark bounce must emit Immune;\nreactions = {:#?}", mv.reactions
+        );
+    }
+
+    /// Water Absorb: the absorb announces the ability alongside the Immune.
+    #[test]
+    fn water_absorb_emits_reveal_and_immune() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::WaterGun), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::WaterAbsorb), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 must be present");
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::AbilityRevealed { slot, ability: Ability::WaterAbsorb } if *slot == p2s0())),
+            "Water Absorb must be revealed when it absorbs;\nreactions = {:#?}", mv.reactions
+        );
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::Immune { target } if *target == p2s0())),
+            "the absorb must emit Immune;\nreactions = {:#?}", mv.reactions
+        );
+    }
+
+    /// Belly Drum: the ½-HP cut and the +6 Attack are both visible in-game.
+    #[test]
+    fn belly_drum_emits_damage_and_boost() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::BellyDrum), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p2s0())
+            .expect("MoveUsed for P2 slot 0 must be present");
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p) }
+                if *target == p2s0() && *p <= 50)),
+            "Belly Drum's HP cut must emit DamageDealt (≤50%);\nreactions = {:#?}", mv.reactions
+        );
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::BoostChanged { target, boost_idx: 0, stages: 6 } if *target == p2s0())),
+            "Belly Drum's +6 Atk must emit BoostChanged;\nreactions = {:#?}", mv.reactions
+        );
+    }
+
+    // ── Test 15: forced switches emit a nested Switch event ────────────────────
+    //
+    // Roar / Whirlwind / Dragon Tail previously ran the whole drag-out with no Switch
+    // event at all — the observer never learned the dragged-in mon, and the fog state
+    // kept attributing later events to the departed one.
+    #[test]
+    fn forced_switch_emits_nested_switch_event() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Roar), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_lead = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_back = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::SandVeil), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2_lead], vec![p2_back]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 (Roar) must be present");
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::Switch(sw) if sw.slot == p2s0() && sw.species == Species::Garchomp)),
+            "the dragged-in mon must appear as a nested Switch under the forcing move;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
+
+    // ── Test 12: a main-path move KO emits Faint ───────────────────────────────
+    //
+    // Previously only the DamageDealt-to-0 was emitted; without an explicit Faint
+    // the inference engine never set `fainted`, silently defeating its fainted-guards
+    // (pass_eot_sand_immunity, ability-suppression scans).
+    #[test]
+    fn move_ko_emits_target_faint() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        // Level-5 target guarantees the OHKO; a healthy back mon keeps the branch
+        // a BattleState.
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(5),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_back = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![p2_back]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 must be present");
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::Faint { slot } if *slot == p2s0())),
+            "a move KO must emit Faint for the target under MoveUsed;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
 }

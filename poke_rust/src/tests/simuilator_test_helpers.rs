@@ -63,6 +63,7 @@ pub fn battle_state_from_lists(
         sub_damage_dealt: 0,
         round_used_this_turn: false,
         move_was_prevented: false,
+        resolved_move_targets: vec![],
         pending_events: vec![],
         event_observer: None,
     };

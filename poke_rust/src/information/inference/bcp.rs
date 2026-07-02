@@ -207,14 +207,6 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
             super::get_mon_by_idx(state, *mon_idx)
                 .map_or(false, |m| super::unknown_is_excluded(&m.item, item))
         }
-        Statement::HasStatus { mon_idx, status } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| m.status.as_ref().map_or(true, |s| s != status)),
-        Statement::HasMove { mon_idx, pokemon_move } => {
-            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
-                let full = m.known_moves.iter().all(|s| s.is_some());
-                full && !m.known_moves.iter().any(|s| s.as_ref() == Some(pokemon_move))
-            })
-        }
         Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
             .map_or(false, |m| super::unknown_is_excluded(&m.possible_abilities, ability)),
         Statement::NatureBoostsStat { mon_idx, stat } => {
@@ -242,17 +234,18 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
                 super::get_mon_by_idx(state, *slow_idx).map_or(0u64, |m| m.minStats[5] as u64);
             fast_max * (*fast_mult as u64) < slow_min * (*slow_mult as u64)
         }
+        // Turn-count literals: while the effect is live, false-confirmed only when the
+        // timer unknown excludes the value. An ABSENT effect is deliberately `false`
+        // (inert), never false-confirmed — a stale clause surviving a purge must not
+        // unit-force its partner literal.
         Statement::WeatherTurns { turns } => state
             .weather_turns
             .as_ref()
-            .map_or(true, |wt| super::unknown_is_excluded(wt, &(*turns as u8))),
-        Statement::PseudoWeatherTurns { turns } => {
-            if state.pseudo_weather_turns.len() == 1 {
-                super::unknown_is_excluded(&state.pseudo_weather_turns[0], &(*turns as u8))
-            } else {
-                false
-            }
-        }
+            .map_or(false, |wt| super::unknown_is_excluded(wt, &(*turns as u8))),
+        Statement::TerrainTurns { turns } => state
+            .terrain_turns
+            .as_ref()
+            .map_or(false, |tt| super::unknown_is_excluded(tt, &(*turns as u8))),
         Statement::SideConditionTurns { side, side_condition, turns } => {
             let (conditions, turns_vec) = match side {
                 Player::P1 => (&state.p1_side_conditions, &state.p1_side_condition_turns),
@@ -261,10 +254,10 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
             conditions
                 .iter()
                 .position(|c| c == side_condition)
-                .map_or(true, |i| {
+                .map_or(false, |i| {
                     turns_vec
                         .get(i)
-                        .map_or(true, |ct| super::unknown_is_excluded(ct, &(*turns as u8)))
+                        .map_or(false, |ct| super::unknown_is_excluded(ct, &(*turns as u8)))
                 })
         }
         // KnowsThreateningMove is a persistent relational constraint — never pruned
@@ -278,12 +271,6 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
         Statement::Not(inner) => eval_false(state, inner),
         Statement::HasItem { mon_idx, item } => super::get_mon_by_idx(state, *mon_idx)
             .map_or(false, |m| super::unknown_is_known_as(&m.item, item)),
-        Statement::HasStatus { mon_idx, status } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| m.status.as_ref() == Some(status)),
-        Statement::HasMove { mon_idx, pokemon_move } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| {
-                m.known_moves.iter().any(|s| s.as_ref() == Some(pokemon_move))
-            }),
         Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
             .map_or(false, |m| super::unknown_is_known_as(&m.possible_abilities, ability)),
         Statement::EVIVStatGE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
@@ -321,13 +308,10 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
             .weather_turns
             .as_ref()
             .map_or(false, |wt| matches!(wt, Unknown::Known(v) if *v == *turns as u8)),
-        Statement::PseudoWeatherTurns { turns } => {
-            if state.pseudo_weather_turns.len() == 1 {
-                matches!(&state.pseudo_weather_turns[0], Unknown::Known(v) if *v == *turns as u8)
-            } else {
-                false
-            }
-        }
+        Statement::TerrainTurns { turns } => state
+            .terrain_turns
+            .as_ref()
+            .map_or(false, |tt| matches!(tt, Unknown::Known(v) if *v == *turns as u8)),
         Statement::SideConditionTurns { side, side_condition, turns } => {
             let (conditions, turns_vec) = match side {
                 Player::P1 => (&state.p1_side_conditions, &state.p1_side_condition_turns),
@@ -374,16 +358,6 @@ fn force_literal(state: &mut UnknownBattleState, lit: &Statement, allow_repeat_i
                 );
             }
         }
-        Statement::HasMove { mon_idx, pokemon_move } => {
-            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
-                super::reveal_move_on_mon(mon, pokemon_move);
-            }
-        }
-        Statement::HasStatus { mon_idx, status } => {
-            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
-                mon.status = Some(status.clone());
-            }
-        }
         Statement::EVIVStatGE { mon_idx, stat, value } => {
             if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
                 let si = stat_to_stats_idx(stat);
@@ -424,13 +398,15 @@ fn force_literal(state: &mut UnknownBattleState, lit: &Statement, allow_repeat_i
                 );
             }
         }
-        Statement::PseudoWeatherTurns { turns } => {
-            if state.pseudo_weather_turns.len() == 1 {
-                let t = *turns as u8;
-                super::unknown_set_known(
-                    &mut state.pseudo_weather_turns[0],
-                    t,
-                    "bcp-pseudo-weather-turns",
+        Statement::TerrainTurns { turns } => {
+            let t = *turns as u8;
+            if let Some(tt) = &mut state.terrain_turns {
+                super::unknown_set_known(tt, t, "bcp-terrain-turns");
+            } else {
+                inference_contradiction!(
+                    "bcp-terrain-turns",
+                    "TerrainTurns forced to {} but no terrain is active",
+                    turns
                 );
             }
         }
