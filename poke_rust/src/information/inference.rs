@@ -816,10 +816,8 @@ fn process_battle_event(
         ctx.switch_slot = Some(sw.slot.clone());
     }
 
-    // Pass 1 — direct facts.
     pass1_apply_event(state, event, ctx);
 
-    // Recurse.
     for reaction in &event.reactions {
         process_battle_event(state, reaction, ctx);
     }
@@ -3595,7 +3593,6 @@ fn pass2_guaranteed_status_absence(
             continue;
         }
 
-        // Was a status inflicted (on this target)?
         let status_inflicted = event.reactions.iter().any(|r| {
             matches!(&r.kind, EventKind::StatusInflicted { target: t, .. } if t == target)
         });
@@ -3624,7 +3621,6 @@ fn pass2_guaranteed_status_absence(
             continue;
         }
 
-        // Has Substitute?
         if has_sub {
             continue;
         }

@@ -9186,7 +9186,6 @@ fn apply_volatile_to_pokemon(
     volatile: &VolatileStatus,
     attacker_mold_break: bool,
 ) -> Vec<VolatileStatus> {
-    // Check if pokemon already has this volatile status
     let already_has = has_status_volatile(mon, volatile);
 
     if !already_has {
@@ -12621,12 +12620,10 @@ pub fn check_and_apply_redirection(
 
     let target_slot = target_slots[0];
 
-    // Get the target's effective speed for tiebreaking
     let Some(_target_mon) = get_pokemon_at_slot(state, target_slot) else {
         return target_slots;
     };
 
-    // Get the opposing team
     let opposing_mons = match user_slot.player {
         Player::P1 => &state.p2_active_mons,
         Player::P2 => &state.p1_active_mons,
@@ -12653,7 +12650,7 @@ pub fn check_and_apply_redirection(
             continue;
         }
 
-        // Check for FollowMe (not a powder move, so not affected by powder immunity)
+        // FollowMe is not a powder move, so powder immunity doesn't apply to it.
         if has_status_volatile(mon, &VolatileStatus::FollowMe) {
             redirectors.push((
                 FieldSlot {
@@ -12665,7 +12662,6 @@ pub fn check_and_apply_redirection(
             continue;
         }
 
-        // Check for RagePowder (skipped if the attacker is immune to powder)
         if has_status_volatile(mon, &VolatileStatus::RagePowder) {
             if !attacker_immune_to_powder {
                 redirectors.push((

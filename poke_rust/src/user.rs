@@ -40,7 +40,6 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
     print_team_section(&"P2 Back:".magenta().to_string(), &state.p2_back_mons);
     println!("{}", format!("P2 Has Tera: {} | Has Mega: {}", state.p2_has_tera, state.p2_has_mega).magenta());
 
-    // Field / global effects
     let mut printed_field = false;
     let mut print_field_header = || {
         if !printed_field {
@@ -69,7 +68,6 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
         println!("  Pseudo-weathers: {:?}", state.pseudo_weathers);
     }
 
-    // Side conditions (only print if present)
     if !state.p1_side_conditions.is_empty() || !state.p2_side_conditions.is_empty() {
         print_field_header();
         if !state.p1_side_conditions.is_empty() {
@@ -82,7 +80,6 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
         }
     }
 
-    // Slot-specific conditions (only print slots that have conditions)
     let mut any_slot_conds = false;
     for conds in state.p1_slot_conditions.iter().chain(state.p2_slot_conditions.iter()) { if !conds.is_empty() { any_slot_conds = true; break; } }
     if any_slot_conds {
@@ -97,7 +94,6 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
         }
     }
 
-    // Weathers/turns small (only if non-empty)
     if state.weather_turns.is_some() {
         print_field_header();
         println!("  Weather turns: {:?}", state.weather_turns);
@@ -107,7 +103,6 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
         println!("  Pseudo-weather turns: {:?}\n", state.pseudo_weather_turns);
     }
 
-    // Action queue and turn flags (only print queue if non-empty)
     println!("{}", "Turn & Queue:".yellow().bold());
     println!("  Turn number: {} | Started: {} | Ended: {}", state.turn_number, state.turn_started, state.turn_ended);
     if !state.action_queue.is_empty() {
@@ -275,14 +270,13 @@ pub fn choose_team_preview_command(preview: &crate::state::battle::TeamPreviewSt
         let prompt = format!("Select active Pokémon {}/{}:", chosen_active.len() + 1, active_n);
         let pick = prompt_choice(&prompt, &options);
 
-        // Map pick back to global index (skipping already-chosen indices)
+        // Map the picked option index back to its global index in `mons`
         let available_indices: Vec<usize> = (0..total_mons).filter(|i| !chosen_active.contains(i)).collect();
         let chosen_index = available_indices[pick];
         chosen_active.push(chosen_index);
         println!("{}", format!("Chosen: {}", species_name(&mons[chosen_index].species)).green());
     }
 
-    // Choose remaining brought (back) slots from the remaining team members
     let mut chosen_brought: Vec<usize> = chosen_active.clone();
     let need_back = brought.saturating_sub(chosen_brought.len());
     if need_back > 0 {
@@ -303,7 +297,7 @@ pub fn choose_team_preview_command(preview: &crate::state::battle::TeamPreviewSt
         }
     }
 
-    // Back indices are the chosen brought ones that are not active
+    // Back = chosen brought minus active
     let back_indices: Vec<usize> = chosen_brought.iter().filter(|i| !chosen_active.contains(i)).cloned().collect();
 
     TeamPreviewCommand { active_indices: chosen_active, back_indices }
@@ -417,9 +411,8 @@ fn choose_normal_battle_commands(
     }
 }
 
-/// Build the commands for the self-switch replacement prompt.
-/// The player who owns `pending_slot` must choose a healthy bench mon for that slot.
-/// All other slots (including all slots of the opposing player) pass.
+/// The player who owns `pending_slot` picks a bench replacement; every other slot,
+/// including all of the opposing player's, passes.
 fn choose_self_switch_commands(state: &BattleState, player: Player, pending_slot: FieldSlot) -> PlayerCommand {
     let active_len = match player {
         Player::P1 => state.p1_active_mons.len(),
@@ -428,7 +421,6 @@ fn choose_self_switch_commands(state: &BattleState, player: Player, pending_slot
     let commands: Vec<BattleCommand> = (0..active_len).map(|slot_idx| {
         let this_slot = FieldSlot { player, slot_index: slot_idx as u8 };
         if this_slot == pending_slot {
-            // Prompt for a replacement from the healthy bench.
             let back_mons = match player {
                 Player::P1 => &state.p1_back_mons,
                 Player::P2 => &state.p2_back_mons,
@@ -438,8 +430,7 @@ fn choose_self_switch_commands(state: &BattleState, player: Player, pending_slot
                 .map(|(i, _)| i)
                 .collect();
             if healthy_bench.is_empty() {
-                // No target — should not happen because self_switch_pending is cleared in this case,
-                // but guard defensively.
+                // Shouldn't happen — self_switch_pending is cleared when there's no valid target — but guard defensively.
                 return BattleCommand::Pass;
             }
             let leaving_mon = match player {
@@ -531,10 +522,8 @@ pub fn simulate_battle(
                     continue;
                 }
 
-                // For verbosity 3, suppress damage logs temporarily, then show only the selected outcome
                 let prev_verbosity = crate::VERBOSITY.get().copied().unwrap_or(1);
 
-                // Sample from outcomes
                 let weights = next_states.iter().map(|(_, _, probability)| *probability).collect::<Vec<_>>();
                 let distribution = WeightedIndex::new(&weights).expect("At least one positive probability is required");
                 let mut rng = thread_rng();

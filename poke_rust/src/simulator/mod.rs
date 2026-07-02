@@ -25,12 +25,10 @@ pub struct DamageConfig {
     pub damage_rolls: u8,
 }
 
-/// Get a mutable reference to the active Pokémon at `slot`.
 fn mon_at_slot_mut(state: &mut BattleState, slot: FieldSlot) -> Option<&mut PokemonState> {
     simulator_helpers::get_pokemon_at_slot_mut(state, slot)
 }
 
-/// Copy `volatiles` into the slot in-place (write-back after local mutation).
 fn write_back_volatiles(state: &mut BattleState, slot: FieldSlot, volatiles: Vec<crate::state::pokemon::VolatileStatusState>) {
     if let Some(mon) = mon_at_slot_mut(state, slot) {
         mon.volatiles = volatiles;
@@ -44,7 +42,6 @@ fn opposing_player(player: Player) -> Player {
     }
 }
 
-/// True if any fainted active Pokémon has a healthy bench-mate to replace it.
 fn replacement_needed(state: &BattleState) -> bool {
     for mon in &state.p1_active_mons {
         if mon.fainted && state.p1_back_mons.iter().any(|m| !m.fainted) {
@@ -59,10 +56,8 @@ fn replacement_needed(state: &BattleState) -> bool {
     false
 }
 
-/// Handles invulnerability status on the target Pokemon.
-/// Returns (multiplier, should_continue) where:
-/// - multiplier: damage multiplier (1.0 normal, 2.0 double damage, 0.0 blocked)
-/// - should_continue: if false, move is blocked and we should return early with 0 damage
+/// Returns (multiplier, should_continue); should_continue=false means the move is blocked
+/// (0 damage), otherwise multiplier scales the damage (0x/1x/2x).
 fn check_invulnerability_status(
     attacker: &PokemonState,
     target: &PokemonState,
@@ -99,10 +94,8 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             && simulator_helpers::get_pokemon_at_slot(next_state, user_slot)
                 .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::DestinyBond))
                 .unwrap_or(false);
-        // Pressure: drain 1 extra PP when an unsuppressed active opponent holds Pressure,
-        // but only when the move targets opponents OR has the MustPressure flag (Imprison,
-        // Snatch, Spikes, Stealth Rock, Toxic Spikes, Tera Blast). Self-targeting and
-        // ally-targeting moves do not consume extra PP.
+        // Pressure drains 1 extra PP for moves that target foes or carry MustPressure
+        // (Imprison, Snatch, Spikes, Stealth Rock, Toxic Spikes, Tera Blast); self/ally moves don't.
         let pressure_extra = {
             let any_pressure_opp = {
                 let opp_mons = match user_slot.player {
@@ -118,7 +111,6 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             if !any_pressure_opp {
                 false
             } else if let Some(md) = move_data_opt {
-                // Correct: only trigger if the move targets foes or has MustPressure.
                 let self_or_ally_only = matches!(
                     md.target,
                     MoveTarget::SelfTarget
@@ -131,8 +123,7 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
                 !self_or_ally_only
                     || simulator_helpers::move_has_flag(md, &MoveFlag::MustPressure)
             } else {
-                // move_data unavailable (e.g. confusion self-hit, no-effect early exit):
-                // fall back to always-trigger to preserve prior behavior.
+                // move_data unavailable (e.g. confusion self-hit, no-effect early exit): default to always-trigger.
                 true
             }
         };
@@ -145,9 +136,8 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
             }
             simulator_helpers::try_consume_leppa_berry(mon, &leppa_env);
 
-            // Choice items: lock the holder into the first move it uses.
-            // Struggle is excluded — a PP-depleted mon shouldn't be locked into Struggle.
-            // If already locked, no-op (lock was set by the first use this send-in).
+            // Choice items lock the holder into its first move; Struggle is excluded (a PP-depleted
+            // mon shouldn't lock into it). Re-locking is a no-op if already locked this send-in.
             let is_choice = matches!(mon.item, Item::ChoiceBand | Item::ChoiceScarf | Item::ChoiceSpecs);
             let already_locked = mon.volatiles.iter().any(|v|
                 matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(_), _))
@@ -157,9 +147,8 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
                     VolatileStatus::ChoiceLock(move_name.clone()), 0,
                 ));
             }
-            // Track the last move used (for Disable targeting); Struggle is excluded.
-            // consecutive_move_count is pre-updated in possible_damage_outcomes_for_move
-            // (before branches are created) so the Metronome item sees the correct streak.
+            // Tracks the last move used (for Disable targeting); Struggle excluded.
+            // consecutive_move_count is pre-updated before branching so Metronome sees the correct streak.
             if *move_name != PokemonMove::Struggle {
                 mon.last_used_move = Some(move_name.clone());
             }
@@ -169,8 +158,8 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
                 if slot < 4 { mon.used_moves_this_field[slot] = true; }
             }
 
-            // Destiny Bond: remove the volatile at the start of any subsequent action
-            // that is not Destiny Bond itself (mirrors Showdown's onBeforeMove removal).
+            // Destiny Bond ends on any subsequent action besides Destiny Bond itself
+            // (mirrors Showdown's onBeforeMove removal).
             if *move_name != PokemonMove::DestinyBond {
                 simulator_helpers::remove_status_volatile(mon, &VolatileStatus::DestinyBond);
             }
@@ -218,14 +207,12 @@ fn resolve_confusion_self_hit_outcomes(
     outcomes
 }
 
-/// Before any action resolves this turn, give Beak Blast users a `BeakBlastCharging` volatile
-/// and Focus Punch users a `FocusPunchCharging` volatile.
-/// Both auto-expire at end-of-turn (TurnStatus, duration 1).
+/// Before any action resolves this turn, tags Beak Blast/Focus Punch users with a charging
+/// volatile (TurnStatus, duration 1, so it auto-expires at end of turn).
 fn apply_priority_charge_volatiles(bs: &mut BattleState) {
     use crate::state::dex_data::VolatileStatus;
     use crate::state::pokemon::VolatileStatusState;
 
-    // Collect slots for Beak Blast and Focus Punch in a single pass.
     let mut beak_blast_users: Vec<FieldSlot> = Vec::new();
     let mut focus_punch_users: Vec<FieldSlot> = Vec::new();
     for a in &bs.action_queue {
@@ -258,8 +245,7 @@ fn apply_priority_charge_volatiles(bs: &mut BattleState) {
         }
     }
 
-    // Focus Punch: set FocusPunchCharging so the damage-landing path can check it.
-    // If the holder takes direct damage from an opponent before their action, the move fails.
+    // FocusPunchCharging lets the damage-landing path know: if hit before acting, Focus Punch fails.
     for slot in focus_punch_users {
         let mut newly_set = false;
         if let Some(mon) = mon_at_slot_mut(bs, slot) {
@@ -360,9 +346,8 @@ fn handle_charging_first_turn(
     Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)])
 }
 
-/// Handles semi-invulnerable and charging move mechanics.
-/// Returns Some(outcomes) if the action is fully handled (charging/invulnerable mechanics),
-/// None if normal damage calculation should proceed.
+/// Handles semi-invulnerable and charging move mechanics. Returns Some(outcomes) if the action
+/// is fully handled; None if normal damage calculation should proceed.
 fn handle_charging_and_semi_invulnerability(
     state: &BattleState,
     attacker: &mut PokemonState,
@@ -411,21 +396,19 @@ fn handle_charging_and_semi_invulnerability(
         }
     }
 
-    // Semi-invulnerable: first turn → enter invulnerability
     if move_causes_invulnerability && !is_semi_invulnerable {
         return handle_semi_invulnerable_first_turn(attacker, action, move_data, next_state);
     }
 
-    // Semi-invulnerable: second turn → remove volatile, then fall through to normal damage
+    // Second turn: remove the invulnerability volatile, then fall through to normal damage.
     if is_semi_invulnerable {
         simulator_helpers::remove_invulnerable_volatile(attacker, &action.move_name);
         write_back_volatiles(next_state, action.user_slot, attacker.volatiles.clone());
     }
 
-    // Power Herb: skip the charge turn for any two-turn charging move. The herb is consumed
-    // immediately, and the move executes in the same turn (fall through to damage).
-    // Charge-turn stat boosts (ElectroShot/MeteorBeam/Skull Bash, handled above) still apply
-    // because they are gated on `charging_data.is_none()`, which is true on the Power Herb turn.
+    // Power Herb skips the charge turn: the herb is consumed immediately and the move executes
+    // this same turn (falls through to damage). Charge-turn boosts above still apply since
+    // they're gated on `charging_data.is_none()`, which is also true on the Power Herb turn.
     if move_has_charge && charging_data.is_none() && !move_causes_invulnerability {
         let items_suppressed = simulator_helpers::items_are_suppressed(next_state);
         let has_power_herb = !items_suppressed
@@ -453,7 +436,7 @@ fn handle_charging_and_semi_invulnerability(
         }
     }
 
-    // Charging: second turn → validate target, remove volatile, fall through
+    // Charging move's second turn: validate the stored target, then remove the volatile.
     if let Some((volatile_state, stored_targets)) = charging_data {
         if let Some(target_slot) = action.target_slot {
             if !stored_targets.contains(&target_slot) {
@@ -466,7 +449,7 @@ fn handle_charging_and_semi_invulnerability(
         write_back_volatiles(next_state, action.user_slot, attacker.volatiles.clone());
     }
 
-    None // Continue with normal damage calculation
+    None
 }
 
 fn multihit_hit_count_branches(
@@ -553,12 +536,10 @@ fn apply_single_hit_branch(
 ) -> Vec<(BattleState, f64)> {
     let mut outcomes = Vec::new();
 
-    // Disguise: an undamaged Mimikyu's disguise absorbs the damage of the first damaging
-    // hit. The hit deals 0 damage; Mimikyu loses 1/8 max HP and busts to MimikyuBusted
-    // (same stats/types). Secondary effects of the blocked move still apply downstream.
-    // Doesn't activate when the form was copied via Transform/Imposter (pre_transform set).
-    // Multi-hit moves only have their first strike blocked — the species check fails for
-    // later strikes once busted.
+    // Disguise: an undamaged Mimikyu's disguise absorbs the first damaging hit (0 damage,
+    // busts to MimikyuBusted; secondary effects still apply downstream). Doesn't trigger if
+    // the form was copied via Transform/Imposter. Multi-hit moves only block the first
+    // strike — the species check fails once busted.
     if damage > 0 {
         let disguise_blocks = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
             .map(|m| m.species == Species::Mimikyu
@@ -583,8 +564,8 @@ fn apply_single_hit_branch(
                     busted_fainted = true;
                 }
             }
-            // The bust chip is visible in-game ("Its disguise served it as a decoy!" +
-            // HP drop), so emit it — previously silent, which desynced observed HP.
+            // The bust chip is visible in-game ("Its disguise served it as a decoy!" + HP drop),
+            // so it must be emitted (previously silent, causing observed HP to desync).
             if let Some(observer) = branch_state.event_observer {
                 let new_hp = simulator_helpers::observed_hp_value(
                     observer, target_slot.player, chip_hp_max.0, chip_hp_max.1,
@@ -602,12 +583,11 @@ fn apply_single_hit_branch(
             }
         }
     }
-    // Substitute absorption: if the target has a Substitute and this attack doesn't bypass
-    // it, route all damage into the sub. Sub breaks when its HP hits 0; for single-hit moves
-    // excess damage is lost (does NOT fall through to the mon). For multi-hit, the sub breaking
-    // on one hit is reflected in the state, and subsequent per-hit calls see no sub.
-    // This block returns early: no secondary effects, no contact abilities, no endure/sash.
-    // Recoil still fires — tracked via `sub_damage_dealt` consumed by apply_post_damage_move_effects.
+    // Substitute absorption: if the target has a Substitute and the attack doesn't bypass it,
+    // route damage into the sub instead of the mon. Excess damage on a breaking hit is lost
+    // (doesn't spill onto the mon); multi-hit calls see the sub already broken on later hits.
+    // Returns early: no secondary effects, contact abilities, or endure/sash. Recoil still
+    // fires, tracked via `sub_damage_dealt` for apply_post_damage_move_effects.
     if damage > 0 && attack_slot.player != target_slot.player {
         let sub_hp = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
             .map(|m| simulator_helpers::get_substitute_hp(m))
@@ -620,7 +600,6 @@ fn apply_single_hit_branch(
             let sub_broke = damage >= sub_hp;
             if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, target_slot) {
                 if sub_broke {
-                    // Sub breaks; remove it
                     simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Substitute(0));
                 } else {
                     simulator_helpers::set_substitute_hp(mon, sub_hp - damage);

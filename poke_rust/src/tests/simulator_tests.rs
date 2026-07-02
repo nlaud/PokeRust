@@ -2020,7 +2020,6 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            // Mimeikyu: Attacker (Swords Dance, Shadow Claw)
             let p1_mon_initial = build_pokemon_state(
                 Species::Mimikyu,
                 &pokemon_dex,
@@ -2042,7 +2041,6 @@ mod tests {
                 true,
             );
 
-            // Aerodactyl: Target (Splash, move out)
             let p2_mon_initial = build_pokemon_state(
                 Species::Aerodactyl,
                 &pokemon_dex,
@@ -2064,8 +2062,6 @@ mod tests {
                 true,
             );
 
-            // --- START OF TURN 1: Swords Dance (Mimikyu) vs Splash (Aerodactyl)
-
             let initial_state = battle_state_from_lists(
                 vec![p1_mon_initial],
                 vec![],
@@ -2073,7 +2069,6 @@ mod tests {
                 vec![],
             );
 
-            // Commands for Turn 1
             let p1_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Swords Dance
             let p2_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
 
@@ -2096,19 +2091,11 @@ mod tests {
 
             let state_t1: &BattleState = &state_t1;
 
-            // Check if Swords Dance was applied (Attack stat increase for P1)
             assert_eq!(state_t1.p1_active_mons[0].boosts[0], 2);
-
-            // Check for state changes
             assert!(state_t1.turn_number == 1);
 
-            // Get the state after Turn 1
             let state_after_t1 = state_t1.clone();
 
-
-            // --- START OF TURN 2: Shadow Claw (Mimikyu) vs Splash (Aerodactyl)
-
-            // Commands for Turn 2
             let p1_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P1, vec![3])); //Shadow Claw
             let p2_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); //
 
@@ -2124,7 +2111,6 @@ mod tests {
 
             assert!(!outcomes_t2.is_empty());
 
-            // Final probability check
             let total_probability_t2: f64 = outcomes_t2.iter().map(|(_, p)|*p).sum();
             assert!((total_probability_t2 - 1.0).abs() < 1e-9);
 
@@ -2182,8 +2168,6 @@ mod tests {
                 true,
             );
 
-            // --- START OF TURN 1: Swords Dance (Mimikyu) vs Splash (Aerodactyl)
-
             let initial_state = battle_state_from_lists(
                 vec![p1_mon],
                 vec![],
@@ -2191,8 +2175,6 @@ mod tests {
                 vec![],
             );
 
-
-            // Commands for Turn 1
             let p1_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Dragon Dance
             let p2_cmd_t1 = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
 
@@ -2215,20 +2197,12 @@ mod tests {
 
             let state_t1: &BattleState = &state_t1;
 
-            // Check for stat increases
             assert_eq!(state_t1.p1_active_mons[0].boosts[0], 1);
             assert_eq!(state_t1.p1_active_mons[0].boosts[4], 1);
-
-            // Check for state changes
             assert!(state_t1.turn_number == 1);
 
-            // Get the state after Turn 1
             let state_after_t1 = state_t1.clone();
 
-
-            // --- START OF TURN 2: Shadow Claw (Mimikyu) vs Splash (Aerodactyl)
-
-            // Commands for Turn 2
             let p1_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P1, vec![1])); //Superpower
             let p2_cmd_t2 = PlayerCommand::Battle(simple_attack(Player::P2, vec![1])); //Superpower
 
@@ -2244,7 +2218,6 @@ mod tests {
 
             assert!(!outcomes_t2.is_empty());
 
-            // Final probability check
             let total_probability_t2: f64 = outcomes_t2.iter().map(|(_, p)|*p).sum();
             assert!((total_probability_t2 - 1.0).abs() < 1e-9);
 
@@ -2483,7 +2456,6 @@ mod tests {
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
             let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
-            // Volatile applied.
             assert!(simulator_helpers::has_status_volatile(&state.p1_active_mons[0], &VolatileStatus::FocusEnergy));
             // +2 crit stages: a base-1 ratio becomes 3.
             assert_eq!(simulator_helpers::effective_crit_ratio(&state, &state.p1_active_mons[0], 1), 3);
@@ -2638,7 +2610,6 @@ mod tests {
             let full_hp = initial.p2_active_mons[0].hp;
 
             let out = run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1);
-            // No damage dealt.
             assert!(damage_distribution(&out, full_hp).keys().max().copied().unwrap_or(0) == 0);
         }
 
@@ -9910,7 +9881,6 @@ mod tests {
                 vec![],
             );
             let transformed = &state.p1_active_mons[0];
-            // Species, types, and moves should be copied.
             assert_eq!(transformed.species, Species::Snorlax);
             // Moves copied; PP capped at 5.
             assert_eq!(transformed.moves[0], Some(PokemonMove::Earthquake));
@@ -9948,7 +9918,6 @@ mod tests {
                 vec![target],
                 vec![],
             );
-            // Confirm transformed.
             assert_eq!(initial.p1_active_mons[0].species, Species::Snorlax);
 
             let after = switch_p1_out(initial);
@@ -12128,7 +12097,6 @@ mod tests {
             );
             let bs = single_battle_state(&outcomes);
 
-            // No switch pending
             assert!(bs.self_switch_pending.is_none(),
                 "Shed Tail with existing Substitute should fail — no switch pending");
             // HP cost must NOT have been applied
@@ -12170,7 +12138,6 @@ mod tests {
             );
             let bs = single_battle_state(&outcomes);
 
-            // No switch pending
             assert!(bs.self_switch_pending.is_none(),
                 "Shed Tail with no healthy bench should fail — no switch pending");
             // HP cost must NOT have been applied
@@ -12181,7 +12148,6 @@ mod tests {
                 !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
             );
             assert!(no_sub, "No Substitute should have been created when Shed Tail fails");
-            // Turn completes normally (both flags reset)
             assert!(!bs.turn_started, "turn should be fully over");
             assert!(!bs.turn_ended, "turn should be fully over");
         }
@@ -13920,7 +13886,6 @@ mod tests {
                 &move_dex, &pokemon_dex,
             )).0;
 
-            // Confirm locked.
             let locked = get_possible_commands_for_active_slot(
                 &after_t1, Player::P1, 0, &move_dex, &pokemon_dex,
             );

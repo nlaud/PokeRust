@@ -496,12 +496,10 @@ fn test_brightpowder_clause_includes_sand_veil_in_sandstorm() {
     // from `unknown_mon`; we just leave it as-is).
 
     let mut state = battle_with_p2(vec![p2_mon]);
-    // Set weather to Sandstorm on the state directly.
     state.weather = Some(Weather::Sandstorm);
 
     let mut move_dex = HashMap::new();
     let mut tackle = normal_physical_move(PokemonMove::Tackle, 40);
-    // 100% accurate, Physical.
     move_dex.insert(PokemonMove::Tackle, tackle);
 
     let result = apply_ex(
@@ -3700,7 +3698,6 @@ fn test_primordial_weather_timer_is_known_0() {
 #[test]
 fn test_tailwind_timer_decrements_correctly() {
     let mut state = battle_with_p2(vec![unknown_mon()]);
-    // Set Tailwind.
     state = apply(
         state,
         vec![event(EventKind::SideConditionStart {
@@ -3710,7 +3707,6 @@ fn test_tailwind_timer_decrements_correctly() {
     );
     assert_eq!(result_p2_sc_turns(&state), vec![Unknown::Known(4)]);
 
-    // Advance 3 end-of-turn steps.
     for expected in [3u8, 2, 1] {
         state = apply(state, vec![event(EventKind::EndOfTurn)]);
         let turns = &state.p2_side_condition_turns;
@@ -4357,7 +4353,6 @@ fn test_sc_allowlist_completeness_cross_validation() {
     let mut failures: Vec<String> = Vec::new();
 
     for probe in &probes {
-        // Build the probe move.
         let mut move_data = normal_physical_move(PokemonMove::Tackle, probe.move_bp);
         move_data.category = probe.move_cat;
         move_data.pokemon_type = probe.move_type.clone();
@@ -4747,7 +4742,6 @@ fn test_frisk_reveals_multiple_foes() {
     let mut foe1 = unknown_mon();
     foe1.item = Unknown::Not(vec![]);
     let mut state = battle_with_p2(vec![foe0, foe1]);
-    // Add a trivial P1 mon
     state.active_per_side = 2;
     state.p1_active_mons = vec![unknown_mon(), unknown_mon()];
     state.p1_slot_conditions = vec![vec![], vec![]];
@@ -5708,7 +5702,6 @@ mod roundtrip_soundness {
 
         let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
 
-        // Build P1's fog-of-war state.
         // Use the minimal Garchomp dex ([Intimidate, SandVeil]) so that:
         //   - Intimidate is in Garchomp's possible abilities (makes the exclusion test meaningful)
         //   - NeutralizingGas is excluded (suppression guard won't silently skip absence inference)
@@ -6229,11 +6222,9 @@ fn test_team_preview_simultaneous_switch_two_leads() {
 fn test_terrain_timer_collapse_reveals_terrain_extender() {
     use crate::information::unknowns::Unknown;
 
-    // P2 Garchomp sets Electric Terrain.
     let p2_mon = unknown_mon_species(Species::Garchomp);
     let state = battle_with_p2(vec![p2_mon]);
 
-    // Turn 1: a move-effect sets Electric Terrain.
     let mut move_dex = HashMap::new();
     move_dex.insert(
         PokemonMove::ElectricTerrain,

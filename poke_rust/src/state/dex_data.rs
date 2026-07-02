@@ -135,12 +135,9 @@ pub enum SelfDestructType {
 pub enum Status {
     Burn,
     Poison,
-    // ToxicPoison stores the number of turns it has been active (starts at 0)
     ToxicPoison(u8),
     Paralysis,
-    // Sleep stores number of turns asleep (starts at 0)
     Sleep(u8),
-    // Frozen stores number of turns frozen (starts at 0)
     Frozen(u8),
 }
 
@@ -290,7 +287,6 @@ pub enum SlotCondition {
     /// items are used on the defensive side.
     FutureMove {
         move_name: PokemonMove,
-        /// True when the attacker is Player 1.
         attacker_is_p1: bool,
         attacker_slot_index: u8,
         /// mon_id of the attacker; lets the resolver verify if the same mon is still in slot.
@@ -779,7 +775,6 @@ fn extract_self_subblock(text: &str) -> (String, Option<String>) {
         };
         let after = text[abs_pos + 5..].trim_start();
         if (!prev_char.is_alphanumeric() && prev_char != '_') && after.starts_with('{') {
-            // Find the matching closing brace
             let brace_start = abs_pos + 5 + text[abs_pos + 5..].find('{').unwrap();
             let mut depth = 0i32;
             let mut end_pos = brace_start;
@@ -1074,7 +1069,6 @@ fn split_entries(content: &str) -> Vec<(String, Vec<String>)> {
         let close = trimmed.chars().filter(|&c| c == '}').count() as i32;
 
         if depth == 0 && trimmed.contains(": {") && !trimmed.starts_with("//") {
-            // Entry start
             let key = trimmed
                 .split(':')
                 .next()
@@ -1094,7 +1088,6 @@ fn split_entries(content: &str) -> Vec<(String, Vec<String>)> {
 
         if in_entry {
             if depth <= 0 {
-                // Entry end
                 entries.push((current_key.clone(), current_lines.clone()));
                 in_entry = false;
                 depth = 0;
@@ -1153,13 +1146,8 @@ fn parse_secondary_block(
 ) {
     let (block_text, end_idx) = collect_block(lines, start_idx);
 
-    // Parse chance
     let chance: u8 = extract_int(&block_text, "chance").unwrap_or(0);
-
-    // Separate self: { ... } from the rest
     let (target_text, self_text) = extract_self_subblock(&block_text);
-
-    // Parse target effects
     let target_effect = parse_effect_from_text(&target_text);
     // Random `this.sample([...])` choices inside an onHit (e.g. Tri Attack, Dire Claw).
     let target_random = parse_sample_effects(&target_text);
@@ -1183,7 +1171,6 @@ fn parse_secondary_block(
         None
     };
 
-    // Parse self effects
     let self_sec = if let Some(st) = self_text {
         let self_effect = parse_effect_from_text(&st);
         let self_random = parse_sample_effects(&st);
@@ -1214,7 +1201,6 @@ fn parse_secondary_block(
 
 // --- Public Dex Parsing ---
 
-/// Parse one entry from the Pokémon dex lines into a `(species, PokemonData)` pair.
 fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
     let mut species: Option<Species> = None;
     let mut types: Vec<PokemonType> = Vec::new();
@@ -1341,7 +1327,6 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
             } else if f_ratio > m_ratio {
                 default_gender = crate::state::pokemon::PokemonGender::Female;
             } else {
-                // Default to Male if equal
                 default_gender = crate::state::pokemon::PokemonGender::Male;
             }
         }
@@ -1379,7 +1364,6 @@ pub fn parse_pokemon_dex(file_path: &str) -> HashMap<Species, PokemonData> {
     result
 }
 
-/// Parse a single entry (slice of lines) from the move dex into a `(move, MoveData)` pair.
 fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
     let mut name: Option<PokemonMove> = None;
     let mut accuracy = AccuracyType::Percent(100);
@@ -1434,16 +1418,13 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
         let line = &lines[i];
         let trimmed = line.trim();
 
-        // Track depth from nested braces
         let open = trimmed.chars().filter(|&c| c == '{').count() as i32;
         let close = trimmed.chars().filter(|&c| c == '}').count() as i32;
 
-        // Skip function bodies
         if is_function_line(trimmed) {
             let restore_depth = depth;
             depth += open - close;
             i += 1;
-            // Skip until we return to restore_depth
             while i < lines.len() {
                 let l = &lines[i];
                 depth += l.chars().filter(|&c| c == '{').count() as i32;
