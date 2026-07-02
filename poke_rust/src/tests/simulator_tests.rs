@@ -32004,7 +32004,6 @@ mod rollout {
             let curl_count = p1m.volatiles.iter().filter(|vs| matches!(vs,
                 VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, _))).count();
             assert_eq!(curl_count, 1, "DefenseCurl volatile should not stack");
-            // But Def boost should have risen twice (+1 each turn)
             assert_eq!(p1m.boosts[1], 2, "Def boost should be +2 after two Defense Curls");
         } else {
             panic!("expected BattleState");
@@ -32040,7 +32039,6 @@ mod rollout {
             ms = next_ms;
         }
 
-        // Now fire once more and measure the average damage.
         let initial_hp = if let MatchState::BattleState(bs) = &ms {
             bs.p2_active_mons[0].hp
         } else { panic!() };
@@ -32055,9 +32053,8 @@ mod rollout {
 
     #[test]
     fn rollout_power_doubles_each_turn() {
-        // Bulky Snorlax (Normal; no Rock weakness). We compare relative damage across
-        // consecutive turns — absolute values depend on the damage roll, but the ratio
-        // should be ≈2.0 ± tolerance.
+        // Compare relative damage across consecutive turns; absolute values depend on the
+        // damage roll, but the ratio should be ≈2.0 ± tolerance.
         let p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::ThickFat);
         // Use Chansey as target — massive HP so it doesn't faint mid-run.
         let p2 = build_pokemon_state(
