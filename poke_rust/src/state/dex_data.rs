@@ -1044,7 +1044,7 @@ fn parse_all_abilities_from_text(text: &str) -> Vec<Ability> {
                     if !abilities.contains(&ab) {
                         abilities.push(ab);
                     }
-                    break 'key_search; // found this slot; move to the next slot
+                    break 'key_search;
                 }
             }
         }
@@ -1437,7 +1437,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             continue;
         }
 
-        // If we are skipping a nested block, track depth and skip
         if let Some(target_depth) = skip_until_depth {
             depth += open - close;
             if depth <= target_depth {
@@ -1493,8 +1492,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                 target = parse_target(&t);
             }
         } else if trimmed.starts_with("flags:") {
-            // flags might be on one line: flags: { contact: 1, protect: 1 },
-            // or might span multiple lines
+            // May be on one line or span multiple lines.
             if trimmed.contains('}') {
                 flags = parse_flags_from_text(trimmed);
             } else if trimmed.contains('{') {
@@ -1673,7 +1671,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                 }
             }
         } else if trimmed.starts_with("volatileStatus:") && depth <= 1 {
-            // Top-level volatileStatus: always-apply 100% secondary
             if let Some(s) = extract_quoted(trimmed, "volatileStatus") {
                 if let Some(vs) = parse_volatile(&s) {
                     let mut e = empty_hit_effect();
@@ -1726,7 +1723,7 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             && !trimmed.starts_with("selfdestruct")
             && depth <= 1
         {
-            // Top-level self: { ... } block — always-apply 100% self-secondary
+            // Top-level self: { ... } block, converted to a self-secondary.
             let (block, end) = collect_block(lines, i);
             if let Some(ob) = block.find('{') {
                 if let Some(cb) = block.rfind('}') {
@@ -1799,9 +1796,8 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
         }
     }
 
-    // Ceaseless Edge and Stone Axe set an entry hazard on hit via JS code the parser cannot read.
-    // Inject the equivalent always-on foe-side secondary so they flow through the normal
-    // side-condition pipeline (and stack with existing layers / record the Sticky Web setter).
+    // Ceaseless Edge and Stone Axe set a hazard via JS the parser can't read; inject the
+    // equivalent secondary so it flows through the normal side-condition pipeline.
     match &name {
         Some(PokemonMove::CeaselessEdge) => {
             let mut e = empty_hit_effect();

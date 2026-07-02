@@ -4641,16 +4641,13 @@ fn test_lb_multiscale_hp_gate_and_timer_sentinel() {
     let atk_stats: [u16; 6] = [200, 250, 100, 100, 100, 100];
     let def_stats: [u16; 6] = [300, 80, 100, 80, 100, 80];
 
-    // Attacker: physical, Normal type (STAB).
     let mut atk_unk = unknown_mon_species(Species::Garchomp);
     atk_unk.possible_types = Unknown::Known(vec![PokemonType::Normal]);
     let atk_ps = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
 
-    // Move: 80-BP Physical contact Normal.
     let move_data = normal_physical_move(PokemonMove::Tackle, 80);
 
-    // Defender template: known Dragon/Flying so Normal is SE (×1.0, not immune).
-    // Actually Normal vs Dragon is neutral; use Normal vs Normal for simplicity.
+    // Defender is Normal-type too: keeps the matchup neutral so type effectiveness doesn't confound the Multiscale ratio check.
     let mut def_unk = unknown_mon_species(Species::Garchomp);
     def_unk.possible_types = Unknown::Known(vec![PokemonType::Normal]);
 
@@ -6242,7 +6239,6 @@ fn test_terrain_timer_collapse_reveals_terrain_extender() {
 
     let mut cur_state = apply_ex(state, set_terrain_turn, HashMap::new(), move_dex);
 
-    // Timer must start as Possibly([5, 8]).
     assert_eq!(
         cur_state.terrain_turns,
         Some(Unknown::Possibly(vec![5, 8])),

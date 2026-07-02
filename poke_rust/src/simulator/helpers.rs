@@ -6371,7 +6371,7 @@ fn apply_send_out_only_ability_effects(
                 return; // can't check without types
             }
 
-            // Helper: Anticipation-effective type for a move (overrides per Bulbapedia).
+            // Anticipation-effective type for a move (overrides per Bulbapedia).
             let anticipation_type = |move_name: &PokemonMove, md: &MoveData| -> PokemonType {
                 match move_name {
                     PokemonMove::RevelationDance | PokemonMove::MultiAttack => PokemonType::Normal,
@@ -6390,11 +6390,10 @@ fn apply_send_out_only_ability_effects(
                         foe.moves.iter().any(|mv_opt| {
                             let Some(mv_name) = mv_opt else { return false; };
                             let Some(md) = move_dex.get(mv_name) else { return false; };
-                            // Skip status-category moves.
                             if md.category == MoveCategory::Status {
                                 return false;
                             }
-                            // OHKO moves always trigger.
+                            // OHKO moves always trigger Anticipation.
                             if md.ohko {
                                 return true;
                             }
@@ -8947,7 +8946,7 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
             // Harvest: 50% chance to restore a consumed Berry (100% in harsh sunlight).
             // Requires: item slot empty, last consumed item was a Berry.
             Ability::Harvest => {
-                // Check conditions from the first branch (same for all branches at this point).
+                // All branches are identical at this point, so checking the first suffices.
                 let (restorable_berry, in_sun) = if let Some((bs, _)) = result.first() {
                     if let Some(mon) = get_pokemon_at_slot(bs, *slot) {
                         let berry = mon
@@ -9123,7 +9122,6 @@ where
         if prob <= 0.0 {
             continue;
         }
-        // Check whether the ability should fire at all (skip fainted mons).
         let should_check = get_pokemon_at_slot(&bs, slot)
             .map(|m| !m.fainted)
             .unwrap_or(false);

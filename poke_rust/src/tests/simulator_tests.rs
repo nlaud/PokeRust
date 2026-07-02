@@ -11776,7 +11776,6 @@ mod tests {
                 vec![p1_active], vec![p1_bench], vec![p2_active], vec![],
             );
 
-            // Turn 1 step 1: U-turn fires
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let after_uturn = single_battle_state(&run_single_turn(
@@ -11784,25 +11783,17 @@ mod tests {
             ));
             assert!(after_uturn.self_switch_pending.is_some());
 
-            // Turn 1 step 2: send in Slowpoke (bench index 0)
             let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
             let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
             let after_switch = single_battle_state(&run_single_turn(
                 &MatchState::BattleState(after_uturn), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
             ));
 
-            // self_switch_pending cleared
             assert!(after_switch.self_switch_pending.is_none(), "pending should be cleared after switch-in");
-
-            // Slowpoke is now the active mon for P1
             assert_eq!(after_switch.p1_active_mons[0].species, Species::Slowpoke,
                 "Slowpoke should be active after U-turn switch");
-
-            // Jolteon is on bench
             assert_eq!(after_switch.p1_back_mons[0].species, Species::Jolteon,
                 "Jolteon should be on the bench");
-
-            // Turn ended normally: both flags reset for next turn
             assert!(!after_switch.turn_started, "turn should be fully over");
             assert!(!after_switch.turn_ended, "turn should be fully over");
         }
@@ -11818,7 +11809,6 @@ mod tests {
                 Species::Jolteon, &pokemon_dex, &move_dex, None,
                 Some(u_turn_set()), None, None, None, None, None, None, None, false,
             );
-            // No bench mons
             let p2_active = build_pokemon_state(
                 Species::Shuckle, &pokemon_dex, &move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
@@ -11836,7 +11826,6 @@ mod tests {
             let bs = single_battle_state(&outcomes);
 
             assert!(bs.self_switch_pending.is_none(), "no bench → no switch pending");
-            // Turn completed normally
             assert!(!bs.turn_started);
             assert!(!bs.turn_ended);
         }

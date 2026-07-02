@@ -644,10 +644,9 @@ fn apply_single_hit_branch(
         }
     };
 
-    // Type-absorption / react-on-hit abilities: absorb the hit entirely, no secondary effects,
-    // no endure. Covers Volt Absorb, Water Absorb, Earth Eater, Sap Sipper, Motor Drive,
-    // Flash Fire, and Dry Skin (Water).  Lightning Rod / Storm Drain are draw-in abilities
-    // handled earlier (pre-accuracy gate in the per-target loop).
+    // Type-absorption abilities (Volt/Water Absorb, Earth Eater, Sap Sipper, Motor Drive,
+    // Flash Fire, Dry Skin-Water) absorb the hit entirely: no secondary effects, no endure.
+    // Lightning Rod / Storm Drain are draw-in abilities handled earlier (pre-accuracy gate).
     let attacker_for_absorb = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot).cloned();
     if let Some(atk) = attacker_for_absorb {
         let mut branch_state_absorb = branch_state.clone();
@@ -666,9 +665,7 @@ fn apply_single_hit_branch(
         simulator_helpers::emit(&mut branch_state, EventKind::Crit { target: target_slot });
     }
 
-    // Snapshot the holder's HP before endure/damage so Innards Out can report the correct value.
-    // Innards Out deals back the HP the holder had before the killing hit, which is
-    // min(computed_damage, pre_hit_hp). We pass this clamped value as `damage_dealt`.
+    // Snapshot pre-hit HP for Innards Out, which deals back min(computed_damage, pre_hit_hp).
     let target_pre_hit_hp = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
         .map_or(0, |m| m.hp);
 
@@ -692,11 +689,9 @@ fn apply_single_hit_branch(
             |t| simulator_helpers::compute_endure_outcomes(t, damage, items_suppressed, target_ability_suppressed),
         );
 
-    // Sheer Force: a move boosted by Sheer Force must not trigger the target's Berserk.
-    // Berserk lives inside the generic `apply_damage`/`take_damage` HP-loss path (a deliberate
-    // broadened-trigger divergence), so we suppress it here by snapshotting and restoring the
-    // target's Sp. Atk boost around the hit — Berserk is the only effect in that path that
-    // touches `boosts[2]` / `stats_raised_this_turn`, so the restore is targeted.
+    // A Sheer Force-boosted move must not trigger the target's Berserk, which lives in the
+    // generic apply_damage/take_damage HP-loss path (a deliberate broadened-trigger divergence).
+    // We suppress it by snapshotting/restoring boosts[2] and stats_raised_this_turn around the hit.
     let sheer_force_boosted = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot)
         .map_or(false, |a| !simulator_helpers::pokemon_ability_is_suppressed(&branch_state, a)
             && a.ability == Ability::SheerForce
