@@ -2077,6 +2077,23 @@ fn unknown_ability_might_be_suppressed(state: &UnknownBattleState, slot: &FieldS
     false
 }
 
+/// True if any active mon (either side) could have Air Lock or Cloud Nine. Those abilities
+/// suspend weather *effects* — including the sandstorm EOT chip — while the weather itself
+/// stays set (the simulator's `current_weather` returns `None`, but `state.weather` is
+/// unchanged). Used to skip weather-effect absence inference: absence of the sand chip may
+/// simply mean the effect is suspended, not that the mon is immune (sound: might be true).
+fn weather_effects_might_be_suspended(state: &UnknownBattleState) -> bool {
+    state
+        .p1_active_mons
+        .iter()
+        .chain(state.p2_active_mons.iter())
+        .any(|m| {
+            !m.fainted
+                && (!unknown_is_excluded(&m.possible_abilities, &Ability::AirLock)
+                    || !unknown_is_excluded(&m.possible_abilities, &Ability::CloudNine))
+        })
+}
+
 // ── End-of-turn bookkeeping ────────────────────────────────────────────────────
 
 /// Apply internal EOT resets that mirror `end_turn` Phase 5 and
@@ -3637,6 +3654,26 @@ fn pass_eot_heal(
             clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::BlackSludge });
         }
 
+        // Weather-based passive heals produce the same EOT `Healed` signal as Leftovers:
+        // Rain Dish / Dry Skin heal in rain, Ice Body heals in snow. Widen the disjunction
+        // so a weather heal is not misattributed to Leftovers (widening is always sound).
+        let weather_heal_abilities: &[Ability] =
+            if matches!(state.weather, Some(Weather::Rain) | Some(Weather::HeavyRain)) {
+                &[Ability::RainDish, Ability::DrySkin]
+            } else if matches!(state.weather, Some(Weather::Snow)) {
+                &[Ability::IceBody]
+            } else {
+                &[]
+            };
+        for ab in weather_heal_abilities {
+            let excluded = tm_abilities
+                .as_ref()
+                .map_or(false, |pa| unknown_is_excluded(pa, ab));
+            if !excluded {
+                clause.push(Statement::HasAbility { mon_idx: target_idx, ability: ab.clone() });
+            }
+        }
+
         if !clause.is_empty() {
             pending_clauses.push(clause);
         }
@@ -3661,6 +3698,12 @@ fn pass_eot_sand_immunity(
         return;
     }
 
+    // Air Lock / Cloud Nine suspend the sandstorm chip for every mon while weather still
+    // reads Sandstorm — the absence of chip then proves nothing about immunity. Skip (sound).
+    if weather_effects_might_be_suspended(state) {
+        return;
+    }
+
     let legal_ok = |item: &Item| ctx.config.legal_item_ok(item);
 
     // p2 active mons start after all p1 segments.
@@ -3677,16 +3720,25 @@ fn pass_eot_sand_immunity(
             slot_index: slot_i as u8,
         };
 
+        // A fainted mon takes no chip regardless of immunity — skip.
+        if get_mon_by_idx(state, mon_idx).map_or(true, |m| m.fainted) {
+            continue;
+        }
+
         // Extract data into owned values to avoid borrow conflicts.
         let (tm_item, tm_abilities, known_types) = snapshot_item_ability_type(state, mon_idx);
 
+        // Types must be known: an unknown type could be Rock/Ground/Steel (innately immune),
+        // so absence of chip could be explained by typing — no item/ability inference.
+        // (Mirrors the types-known guard in `pass2_ground_immune_clause`.)
+        let Some(types) = known_types.as_ref() else {
+            continue;
+        };
         // Rock, Ground, Steel types are innately immune — no inference.
-        let innately_immune = known_types.as_ref().map_or(false, |ts| {
-            ts.contains(&PokemonType::Rock)
-                || ts.contains(&PokemonType::Ground)
-                || ts.contains(&PokemonType::Steel)
-        });
-        if innately_immune {
+        if types.contains(&PokemonType::Rock)
+            || types.contains(&PokemonType::Ground)
+            || types.contains(&PokemonType::Steel)
+        {
             continue;
         }
 

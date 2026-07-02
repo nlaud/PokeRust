@@ -5198,6 +5198,156 @@ mod roundtrip_soundness {
             p2_active.possible_abilities
         );
     }
+
+    // ── Scenario F: contact-chip reveal round-trip (silent-emit regression) ───
+    //
+    // P1 hits P2 with a contact move. P2 has a contact-punish source. The simulator
+    // now emits the source reveal (AbilityRevealed / ItemRevealed) when the chip
+    // fires, so `pass2_contact_absence` must NOT exclude the true source. Before the
+    // fix the chip was silent, so inference wrongly excluded the true Rough Skin /
+    // Iron Barbs / Rocky Helmet on any contact hit.
+
+    /// P1 Tackle (contact) user. Turn order is irrelevant — the contact chip fires whenever
+    /// the move lands — so we keep legal stats (no Speed hack) to avoid tripping Pass 5's
+    /// "impossible stat line" guard on our own known mon. P2 uses Splash, so P1 always acts.
+    fn fast_tackle_p1() -> PokemonState {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        )
+    }
+
+    #[test]
+    fn roundtrip_f_rough_skin_reveal_not_excluded() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = fast_tackle_p1();
+        // P2: Garchomp with Rough Skin (a real Garchomp ability).
+        let p2 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::RoughSkin), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let fog = fog_1v1(&p1, Species::Garchomp);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        assert!(
+            !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
+            "silent-chip regression: Rough Skin must not be excluded after a contact hit \
+             (the sim now emits AbilityRevealed); possible_abilities = {:?}",
+            result.p2_active_mons[0].possible_abilities
+        );
+    }
+
+    #[test]
+    fn roundtrip_f_iron_barbs_reveal_not_excluded() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = fast_tackle_p1();
+        // P2: Ferrothorn with Iron Barbs.
+        let p2 = build_pokemon_state(
+            Species::Ferrothorn, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::IronBarbs), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let fog = fog_1v1(&p1, Species::Ferrothorn);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        assert!(
+            !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::IronBarbs),
+            "silent-chip regression: Iron Barbs must not be excluded after a contact hit; \
+             possible_abilities = {:?}",
+            result.p2_active_mons[0].possible_abilities
+        );
+    }
+
+    #[test]
+    fn roundtrip_f_rocky_helmet_reveal_not_excluded() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = fast_tackle_p1();
+        // P2: Garchomp holding Rocky Helmet (item), ability Sand Veil.
+        let p2 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::SandVeil), Some(Nature::Hardy), Some(Item::RockyHelmet), None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let fog = fog_1v1(&p1, Species::Garchomp);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        assert!(
+            !unknown_is_excluded(&result.p2_active_mons[0].item, &Item::RockyHelmet),
+            "silent-chip regression: Rocky Helmet must not be excluded after a contact hit \
+             (the sim now emits ItemRevealed); item = {:?}",
+            result.p2_active_mons[0].item
+        );
+    }
+
+    // ── Scenario G: EOT residual damage keeps inferred HP in sync ─────────────
+    //
+    // EOT poison damage was silent, so the fog HP would drift (stay at full). Now that the
+    // sim emits it, the inferred HP must reflect the chip. Guards the latent Pass-3 desync.
+    #[test]
+    fn roundtrip_g_eot_poison_keeps_hp_synced() {
+        use crate::information::unknowns::PokemonHP;
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let mut p2 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::SandVeil), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        p2.status = Some(crate::state::dex_data::Status::Poison);
+
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let fog = fog_1v1(&p1, Species::Garchomp);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        match result.p2_active_mons[0].hp {
+            PokemonHP::Percent(p) => assert!(
+                p < 100,
+                "EOT poison damage must be reflected in inferred HP (was silent before); got Percent({p})"
+            ),
+            ref other => panic!("expected opponent HP as Percent, got {other:?}"),
+        }
+    }
 }
 
 // ── Gap 1: Team-preview inference path ───────────────────────────────────────
@@ -5477,6 +5627,10 @@ fn test_eot_sand_immunity_emits_clause_when_no_chip() {
     // P2 Garchomp — typed as Normal so it is NOT innately immune (Normal ≠ Rock/Ground/Steel).
     let mut p2_mon = unknown_mon();
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    // Species knowledge rules out Air Lock / Cloud Nine (which would suspend the sand chip and
+    // make chip-absence uninformative). With a real ability dex this is implied by the species;
+    // the empty-dex test builder leaves abilities unconstrained, so encode it explicitly.
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::AirLock, Ability::CloudNine]);
 
     let mut state = battle_with_p2(vec![p2_mon]);
     // Sandstorm is active.
@@ -6121,5 +6275,195 @@ fn test_intimidate_not_excluded_when_own_mon_atk_at_minus_six() {
     assert!(
         !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
         "Intimidate must remain possible when own mon's Atk is already at −6 (C2)"
+    );
+}
+
+// ── Audit 2026-07: EOT sand-immunity soundness (Air Lock / types-unknown) ─────
+
+/// 1a regression: when an active mon could have Air Lock / Cloud Nine, the weather
+/// effect (sand chip) may be suspended, so chip-absence proves nothing — the engine
+/// must NOT emit a sand-immunity clause. Here the *P1* mon could have Cloud Nine.
+#[test]
+fn test_sand_immunity_skipped_when_cloud_nine_possible() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::AirLock, Ability::CloudNine]);
+    // P1 mon whose ability is unconstrained → Cloud Nine cannot be ruled out.
+    let mut p1_mon = unknown_mon();
+    p1_mon.possible_abilities = Unknown::Not(vec![]);
+
+    let mut state = battle_nvn(vec![p1_mon], vec![p2_mon]);
+    state.weather = Some(Weather::Sandstorm);
+
+    let result = apply(state, vec![event(EventKind::EndOfTurn)]);
+    let has_clause = result.predicates.iter().any(|c| {
+        c.iter().any(|s| matches!(s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }))
+    });
+    assert!(
+        !has_clause,
+        "sand-immunity inference must be skipped when Air Lock / Cloud Nine is possible \
+         (weather may be suspended); predicates = {:?}", result.predicates
+    );
+}
+
+/// 1a regression: a mon whose types are unknown could be Rock/Ground/Steel (innately
+/// sand-immune), so chip-absence must not force a sand-immunity item/ability.
+#[test]
+fn test_sand_immunity_skipped_when_types_unknown() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Not(vec![]); // types unknown
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::AirLock, Ability::CloudNine]);
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Sandstorm);
+
+    let result = apply(state, vec![event(EventKind::EndOfTurn)]);
+    let has_clause = result.predicates.iter().any(|c| {
+        c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::SafetyGoggles, .. }))
+    });
+    assert!(
+        !has_clause,
+        "sand-immunity inference must be skipped when the mon's types are unknown"
+    );
+}
+
+// ── Audit 2026-07: EOT heal weather widening (Rain Dish / Dry Skin / Ice Body) ─
+
+/// 1b: an opponent EOT `Healed` in rain could be Leftovers OR Rain Dish OR Dry Skin.
+/// The emitted disjunction must include the weather-heal abilities so the heal is not
+/// misattributed to Leftovers (widening a disjunction is always sound).
+#[test]
+fn test_eot_heal_in_rain_includes_rain_dish_and_dry_skin() {
+    let p2_mon = unknown_mon();
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Rain);
+
+    let ev = event_with(
+        EventKind::EndOfTurn,
+        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(90) })],
+    );
+    let result = apply(state, vec![ev]);
+
+    let clause = result
+        .predicates
+        .iter()
+        .find(|c| c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::Leftovers, .. })))
+        .expect("a Leftovers-bearing EOT-heal clause must be emitted");
+    assert!(
+        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::RainDish, .. })),
+        "rain EOT-heal clause must include Rain Dish as a disjunct; clause = {:?}", clause
+    );
+    assert!(
+        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::DrySkin, .. })),
+        "rain EOT-heal clause must include Dry Skin as a disjunct; clause = {:?}", clause
+    );
+}
+
+/// 1b: in snow, the EOT-heal disjunction must include Ice Body.
+#[test]
+fn test_eot_heal_in_snow_includes_ice_body() {
+    let p2_mon = unknown_mon();
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Snow);
+
+    let ev = event_with(
+        EventKind::EndOfTurn,
+        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(90) })],
+    );
+    let result = apply(state, vec![ev]);
+
+    let clause = result
+        .predicates
+        .iter()
+        .find(|c| c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::Leftovers, .. })))
+        .expect("a Leftovers-bearing EOT-heal clause must be emitted");
+    assert!(
+        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::IceBody, .. })),
+        "snow EOT-heal clause must include Ice Body as a disjunct; clause = {:?}", clause
+    );
+}
+
+// ── Audit 2026-07: terrain-setter & Dauntless Shield ability-absence coverage ─
+
+/// Terrain-setting ability absence (previously zero coverage): a mon that switches in
+/// with no `TerrainChanged` reaction cannot have a terrain-setting ability.
+#[test]
+fn test_terrain_setter_excluded_when_no_terrain_change() {
+    let mut p2_back = unknown_mon();
+    // Electric Surge possible; Neutralizing Gas ruled out so the suppression gate passes.
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![p2_back];
+
+    let sw = event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let result = apply(state, vec![sw]);
+
+    assert!(
+        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::ElectricSurge),
+        "Electric Surge must be excluded when no TerrainChanged fires on switch-in; \
+         possible_abilities = {:?}", result.p2_active_mons[0].possible_abilities
+    );
+}
+
+/// Terrain-setter absence must be SKIPPED when Neutralizing Gas is possible (it would
+/// suppress the surge, so the absent TerrainChanged proves nothing).
+#[test]
+fn test_terrain_setter_not_excluded_when_neutralizing_gas_possible() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![]); // NeutralizingGas NOT excluded
+
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![p2_back];
+
+    let sw = event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let result = apply(state, vec![sw]);
+
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::ElectricSurge),
+        "Electric Surge must NOT be excluded when Neutralizing Gas is possible (suppression gate)"
+    );
+}
+
+/// Dauntless Shield ability absence (previously zero coverage): a mon that switches in
+/// with no +1 Def boost cannot have Dauntless Shield (once-per-battle, not yet used).
+#[test]
+fn test_dauntless_shield_excluded_when_no_def_boost_on_entry() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![p2_back];
+
+    let sw = event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let result = apply(state, vec![sw]);
+
+    assert!(
+        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::DauntlessShield),
+        "Dauntless Shield must be excluded when no +1 Def boost appears on switch-in; \
+         possible_abilities = {:?}", result.p2_active_mons[0].possible_abilities
     );
 }

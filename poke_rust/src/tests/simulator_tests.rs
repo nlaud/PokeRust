@@ -9258,6 +9258,18 @@ mod tests {
         }
 
         #[test]
+        fn guard_dog_raises_attack_against_intimidate() {
+            // Guard Dog is immune to Intimidate's -1 Atk and instead gains +1 Attack.
+            let intimidator = mon(Species::Snorlax, Ability::Intimidate, None, None);
+            let target = mon(Species::Snorlax, Ability::GuardDog, None, None);
+            let state = battle_state_from_lists(vec![intimidator], vec![], vec![target], vec![]);
+            assert_eq!(
+                state.p2_active_mons[0].boosts[0], 1,
+                "Guard Dog should raise Attack by 1 when targeted by Intimidate, not lower it"
+            );
+        }
+
+        #[test]
         fn natural_cure_cures_status_on_switch_out() {
             let leaving = mon(Species::Snorlax, Ability::NaturalCure, None, Some(Status::Burn));
             let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
@@ -16195,6 +16207,115 @@ mod contact_reactive_abilities {
             mdex, pdex, false, 1);
         assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp)),
             "Magic Guard should block Rough Skin recoil");
+    }
+
+    // ── Iron Barbs ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn iron_barbs_deals_1_8_damage_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Ferrothorn, [Some(PokemonMove::Splash), None, None, None], Ability::IronBarbs, None,
+        );
+        let attacker_max_hp = attacker.stats[0];
+        let expected = (attacker_max_hp as u32 / 8).max(1) as u16;
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp - expected)),
+            "Iron Barbs: attacker should lose 1/8 max HP on contact");
+    }
+
+    #[test]
+    fn iron_barbs_blocked_by_magic_guard() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::MagicGuard, None,
+        );
+        attacker.stats[5] = 200;
+        let target = make_mon(
+            Species::Ferrothorn, [Some(PokemonMove::Splash), None, None, None], Ability::IronBarbs, None,
+        );
+        let attacker_max_hp = attacker.stats[0];
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp)),
+            "Magic Guard should block Iron Barbs recoil");
+    }
+
+    // ── Rocky Helmet (item) ────────────────────────────────────────────────────
+
+    #[test]
+    fn rocky_helmet_deals_1_6_damage_on_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let mut target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::None, None,
+        );
+        target.item = Item::RockyHelmet;
+        let attacker_max_hp = attacker.stats[0];
+        let expected = (attacker_max_hp as u32 / 6).max(1) as u16;
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp - expected)),
+            "Rocky Helmet: attacker should lose 1/6 max HP on contact");
+    }
+
+    #[test]
+    fn rocky_helmet_blocked_by_magic_guard() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Tackle), None, None, None], Ability::MagicGuard, None,
+        );
+        attacker.stats[5] = 200;
+        let mut target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::None, None,
+        );
+        target.item = Item::RockyHelmet;
+        let attacker_max_hp = attacker.stats[0];
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp)),
+            "Magic Guard should block Rocky Helmet chip");
+    }
+
+    #[test]
+    fn rocky_helmet_no_damage_on_non_contact() {
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut attacker = make_mon(
+            Species::Garchomp, [Some(PokemonMove::Earthquake), None, None, None], Ability::None, None,
+        );
+        attacker.stats[5] = 200;
+        let mut target = make_mon(
+            Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Ability::None, None,
+        );
+        target.item = Item::RockyHelmet;
+        let attacker_max_hp = attacker.stats[0];
+        let state = battle_state_from_lists(vec![attacker], vec![], vec![target], vec![]);
+        let outcomes = simulate_turn(&MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, false, 1);
+        assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp == attacker_max_hp)),
+            "Rocky Helmet should not fire on a non-contact move");
     }
 
     // ── Flame Body ───────────────────────────────────────────────────────────
@@ -32983,6 +33104,223 @@ mod event_round_trip {
             ),
             "Regen holder must re-enter with healed HP (Percent({expected_pct}));\n\
              Switch event = {:#?}", switch_ev.kind
+        );
+    }
+
+    // ── Test 10: end-of-turn residual damage is now emitted ────────────────────
+    //
+    // Poison/burn/toxic/Curse/binding/Salt Cure/Leech Seed EOT damage was previously
+    // silent (no DamageDealt), desyncing the inference engine's HP tracking. These
+    // tests lock in the new emission.
+
+    /// A poisoned opponent's EOT chip emits a `DamageDealt` nested under `EndOfTurn`.
+    #[test]
+    fn eot_poison_damage_is_emitted() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        p2.status = Some(crate::state::dex_data::Status::Poison);
+
+        let state = MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let mut branches = run_single_turn_with_events(&state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), md, pd, Player::P1);
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let eot = events.iter().find(|e| matches!(e.kind, EventKind::EndOfTurn)).expect("EndOfTurn event");
+        assert!(
+            any_kind(&eot.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == p2s0())),
+            "poison EOT damage must emit a DamageDealt nested under EndOfTurn;\n\
+             reactions = {:#?}", eot.reactions
+        );
+    }
+
+    /// Leech Seed at EOT emits the seeded-side `DamageDealt` (opponent) AND the seeder
+    /// `Healed` (our mon) — both were partly/fully silent before.
+    #[test]
+    fn eot_leech_seed_damage_and_heal_are_emitted() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        // P1 (seeder) below full HP so the drain heal is observable.
+        let mut p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        p1.hp = p1.stats[0] / 2;
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        p2.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::LeechSeed, 0));
+
+        let state = MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]));
+        let mut branches = run_single_turn_with_events(&state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), md, pd, Player::P1);
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let eot = events.iter().find(|e| matches!(e.kind, EventKind::EndOfTurn)).expect("EndOfTurn event");
+        assert!(
+            any_kind(&eot.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == p2s0())),
+            "Leech Seed must emit a DamageDealt on the seeded opponent; reactions = {:#?}", eot.reactions
+        );
+        assert!(
+            any_kind(&eot.reactions, |k| matches!(k,
+                EventKind::Healed { target, .. } if *target == p1s0())),
+            "Leech Seed must emit a Healed on the seeder (our mon); reactions = {:#?}", eot.reactions
+        );
+    }
+
+    /// A residual KO (poison finishing a low-HP mon) emits a `Faint` under `EndOfTurn`.
+    #[test]
+    fn eot_residual_ko_emits_faint() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        p2.status = Some(crate::state::dex_data::Status::Poison);
+        p2.hp = 1;
+        // P2 bench mon so the KO doesn't end the game (which would drop the EOT events).
+        let p2_bench = build_pokemon_state(
+            Species::Clefable, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let state = MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![p2_bench]));
+        let mut branches = run_single_turn_with_events(&state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), md, pd, Player::P1);
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let eot = events.iter().find(|e| matches!(e.kind, EventKind::EndOfTurn)).expect("EndOfTurn event");
+        assert!(
+            any_kind(&eot.reactions, |k| matches!(k,
+                EventKind::Faint { slot } if *slot == p2s0())),
+            "a residual KO must emit a Faint under EndOfTurn; reactions = {:#?}", eot.reactions
+        );
+    }
+
+    /// A residual KO runs the on-faint hooks: a Desolate Land holder that faints to poison
+    /// at EOT ends its harsh sunlight (handle_pokemon_faint → primal-weather departure).
+    #[test]
+    fn eot_residual_ko_runs_faint_hooks_primal_weather_ends() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        // P1 holds Desolate Land (sets Extreme Sunlight on send-out), poisoned at 1 HP.
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::DesolateLand), None, None, None, None, None, false,
+        );
+        p1.status = Some(crate::state::dex_data::Status::Poison);
+        p1.hp = 1;
+        let p1_bench = build_pokemon_state(
+            Species::Clefable, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        assert_eq!(initial.weather, Some(crate::state::dex_data::Weather::ExtremeSunlight),
+            "Desolate Land must set Extreme Sunlight on send-out");
+        let state = MatchState::BattleState(initial);
+        let branches = run_single_turn_with_events(&state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), md, pd, Player::P1);
+        // The Desolate Land holder faints to poison at EOT → its weather must end.
+        let (st, _, _) = &branches[0];
+        let weather = match st {
+            MatchState::BattleState(bs) => bs.weather.clone(),
+            _ => None,
+        };
+        assert_ne!(weather, Some(crate::state::dex_data::Weather::ExtremeSunlight),
+            "Desolate Land holder fainting to EOT poison must end its harsh sunlight \
+             (handle_pokemon_faint ran on the residual KO)");
+    }
+
+    // ── Test 11: Future Sight / Doom Desire emit DamageDealt on the firing turn ─
+    //
+    // Phase 1.5 of end_turn (`apply_future_move_damage`) was previously silent.
+    // It branches per damage roll, so emission happens inline per-branch (not via
+    // the snapshot/delta helper used for single-state sub-phases).
+
+    /// Future Sight fires at EOT on turn 3 and emits a `DamageDealt` for the target
+    /// nested under `EndOfTurn`.  With `damage_rolls=1` the turn is deterministic.
+    #[test]
+    fn future_sight_damage_is_emitted_on_fire_turn() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Slowbro, &pd, &md, Some(50),
+            Some([Some(PokemonMove::FutureSight), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, &pd, &md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_fs = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p1_splash = PlayerCommand::Battle(simple_attack(Player::P1, vec![1]));
+        let p2_splash = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // Turn 1: Future Sight queued; no damage yet.
+        let mut t1 = run_single_turn_with_events_opts(
+            &state, &p1_fs, &p2_splash, md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(t1.len(), 1, "turn 1 must be deterministic");
+        let (state_t1, _, _) = t1.remove(0);
+
+        // Turn 2: both splash; FutureMove ticks to turns_remaining=1.
+        let mut t2 = run_single_turn_with_events_opts(
+            &state_t1, &p1_splash, &p2_splash, md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(t2.len(), 1, "turn 2 must be deterministic");
+        let (state_t2, _, _) = t2.remove(0);
+
+        // Turn 3: FutureMove fires at EOT — DamageDealt must be emitted.
+        let mut t3 = run_single_turn_with_events_opts(
+            &state_t2, &p1_splash, &p2_splash, md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(t3.len(), 1, "damage_rolls=1 yields a single deterministic branch");
+        let (_, events_opt, _) = t3.remove(0);
+        let events = events_opt.expect("observer set — events must be Some");
+
+        let eot = events.iter()
+            .find(|e| matches!(e.kind, EventKind::EndOfTurn))
+            .expect("EndOfTurn event must be present on turn 3");
+        assert!(
+            any_kind(&eot.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == p2s0()
+            )),
+            "Future Sight firing must emit DamageDealt for P2 slot 0 under EndOfTurn;\n\
+             reactions = {:#?}", eot.reactions
         );
     }
 }

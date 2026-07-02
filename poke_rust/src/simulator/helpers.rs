@@ -73,6 +73,58 @@ pub fn emit_healed_batch(bs: &mut BattleState, batch: &[(FieldSlot, u16, u16)]) 
     }
 }
 
+/// `(slot, hp, max_hp)` for every active mon on both sides — a pre-sub-phase HP snapshot,
+/// captured before a currently-silent end-of-turn residual so [`emit_eot_hp_deltas`] can
+/// diff and emit afterward.
+pub(crate) fn snapshot_active_hp(state: &BattleState) -> Vec<(FieldSlot, u16, u16)> {
+    let mut out = Vec::with_capacity(state.p1_active_mons.len() + state.p2_active_mons.len());
+    for (i, m) in state.p1_active_mons.iter().enumerate() {
+        out.push((FieldSlot { player: Player::P1, slot_index: i as u8 }, m.hp, m.stats[0].max(1)));
+    }
+    for (i, m) in state.p2_active_mons.iter().enumerate() {
+        out.push((FieldSlot { player: Player::P2, slot_index: i as u8 }, m.hp, m.stats[0].max(1)));
+    }
+    out
+}
+
+/// After an EOT residual sub-phase, emit `DamageDealt` / `Healed` for each active mon whose
+/// HP changed vs the `before` snapshot, and — for any mon that just fainted — run the on-faint
+/// hooks (`handle_pokemon_faint`: Neutralizing Gas lift, Receiver, primal-weather departure,
+/// trap release, Forecast) and emit `Faint`.
+///
+/// Mirrors the move-damage emission ordering (hooks first, then `DamageDealt` + `Faint`). A net
+/// *increase* (a Sitrus/pinch berry firing after the chip) is emitted as `Healed` so observed HP
+/// stays in sync; the berry's `ItemLost` is emitted separately by `process_item_loss_events`.
+/// A mon that was already fainted before the sub-phase has `after == hp_before` and is skipped.
+pub(crate) fn emit_eot_hp_deltas(state: &mut BattleState, before: &[(FieldSlot, u16, u16)]) {
+    for &(slot, hp_before, max_hp) in before {
+        let (after, fainted) = match get_pokemon_at_slot(state, slot) {
+            Some(m) => (m.hp, m.fainted),
+            None => continue,
+        };
+        if after == hp_before {
+            continue; // no change (also covers a mon that was already fainted)
+        }
+        if after < hp_before {
+            if fainted {
+                handle_pokemon_faint(state, slot.player, slot.slot_index);
+            }
+            if let Some(observer) = state.event_observer {
+                let shown = if fainted { 0 } else { after };
+                let new_hp = observed_hp_value(observer, slot.player, shown, max_hp);
+                emit(state, EventKind::DamageDealt { target: slot, new_hp });
+                if fainted {
+                    emit(state, EventKind::Faint { slot });
+                }
+            }
+        } else if let Some(observer) = state.event_observer {
+            // Net heal (residual chip overtaken by a berry heal).
+            let new_hp = observed_hp_value(observer, slot.player, after, max_hp);
+            emit(state, EventKind::Healed { target: slot, new_hp });
+        }
+    }
+}
+
 /// Convert a raw HP value to the display percentage a real player would see.
 /// Matches Showdown's convention: 0 only at faint, 100 only at full HP,
 /// otherwise round(hp × 100 / max_hp) clamped to 1–99.
@@ -6013,6 +6065,26 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
             if immune {
                 continue;
             }
+            // Guard Dog: immune to the Intimidate drop and instead gains +1 Attack.
+            // Intimidate is ability-sourced, so Mold Breaker does not apply (see comment above).
+            let guard_dog = get_pokemon_at_slot(state, target).map_or(false, |m| {
+                !pokemon_ability_is_suppressed(state, m) && m.ability == Ability::GuardDog
+            });
+            if guard_dog {
+                let gd_delta = {
+                    let Some(mon) = get_pokemon_at_slot_mut(state, target) else {
+                        continue;
+                    };
+                    // +1 Attack, non-deferring path (pure positive delta, no White Herb).
+                    apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false)
+                };
+                for (boost_idx, &stages) in gd_delta.iter().enumerate() {
+                    if stages != 0 {
+                        emit(state, EventKind::BoostChanged { target, boost_idx, stages });
+                    }
+                }
+                continue;
+            }
             // apply_opponent_stat_drop handles Clear Body / Hyper Cutter / Mirror Armor /
             // Defiant / Competitive reactions and the new Contrary inversion.
             apply_opponent_stat_drop(
@@ -7064,6 +7136,7 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
         )
         .collect();
 
+    let perish_before = snapshot_active_hp(state);
     for (player, idx) in perish_slots {
         let mons = match player {
             Player::P1 => &mut state.p1_active_mons,
@@ -7078,6 +7151,8 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
             clear_pokemon_on_faint(mon);
         }
     }
+    // Emit the Perish Song KO (DamageDealt→0 + Faint + on-faint hooks).
+    emit_eot_hp_deltas(state, &perish_before);
 }
 
 /// Decrement all TurnStatus volatile counters for `mons`. Volatiles whose counter
@@ -7768,12 +7843,18 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
         })
         .collect();
 
+    // Weather residuals: Rain Dish / Dry Skin (rain) & Ice Body (snow) heals, and
+    // sandstorm / Solar Power / Dry-Skin-in-sun damage. Emit the per-mon HP delta via the
+    // shared helper (Healed / DamageDealt + Faint + on-faint hooks) so the event stream and
+    // the inference engine reflect the change; previously silent.
+    let weather_before = snapshot_active_hp(state);
     for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
         apply_weather_residual(mon, &ctx, p1_envs[i]);
     }
     for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
         apply_weather_residual(mon, &ctx, p2_envs[i]);
     }
+    emit_eot_hp_deltas(state, &weather_before);
 
     // Batch-collect (slot, post-heal hp, max-hp) for Healed event emission after each
     // iter_mut loop (the mutable slice borrow prevents inline emit; emit_healed_batch fires
@@ -7885,7 +7966,14 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
 
     // Leech Seed: drain 1/8 of the seeded mon's max HP to the Pokémon in the seeder's slot
     // (the opposing active mon in singles). Liquid Ooze reverses the heal into damage.
+    // Emit the seeded drain / seeder heal / Liquid Ooze backlash uniformly afterward.
+    let leech_before = snapshot_active_hp(state);
     apply_leech_seed_residual(state, &p1_envs, &p2_envs, ctx.items_suppressed);
+    emit_eot_hp_deltas(state, &leech_before);
+
+    // Curse / binding / Salt Cure are consecutive damage-only sub-phases; snapshot HP once
+    // before them and emit the combined DamageDealt (+ Faint) afterward.
+    let chip_before = snapshot_active_hp(state);
 
     // Curse volatile: cursed Pokémon lose ¼ of their max HP each end of turn.
     // Magic Guard prevents the damage. The volatile persists until the holder switches out or
@@ -7913,7 +8001,7 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
             let magic_guard = !abilities_suppressed && mon.ability == Ability::MagicGuard;
             if !magic_guard {
                 let dmg = (mon.stats[0].max(1) / 4).max(1);
-                take_damage(mon, dmg, env, abilities_suppressed);
+                deal_residual_damage(mon, dmg, env, abilities_suppressed);
             }
         }
         for idx in cursed_p2 {
@@ -7922,7 +8010,7 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
             let magic_guard = !abilities_suppressed && mon.ability == Ability::MagicGuard;
             if !magic_guard {
                 let dmg = (mon.stats[0].max(1) / 4).max(1);
-                take_damage(mon, dmg, env, abilities_suppressed);
+                deal_residual_damage(mon, dmg, env, abilities_suppressed);
             }
         }
     }
@@ -7941,6 +8029,9 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
 
     // Salt Cure chip damage: 1/8 HP (1/4 for Water/Steel). Magic Guard prevents.
     apply_salt_cure_damage(state, &p1_envs, &p2_envs, ctx.abilities_suppressed);
+
+    // Emit the Curse/binding/Salt-Cure chip as DamageDealt (+ Faint & on-faint hooks).
+    emit_eot_hp_deltas(state, &chip_before);
 }
 
 /// Tick pending Wishes on every slot. A Wish set this turn carries `turns_remaining == 2`;
@@ -8191,8 +8282,32 @@ fn apply_future_move_damage(
                 let mut new_state = state.clone();
                 let env = berry_env(&new_state, target_slot);
                 let as_ = abilities_are_suppressed(&new_state);
-                if let Some(t) = get_pokemon_at_slot_mut(&mut new_state, target_slot) {
-                    take_damage(t, dmg, env, as_);
+                let max_hp = get_pokemon_at_slot(&new_state, target_slot)
+                    .map_or(1, |m| m.stats[0].max(1));
+                let fainted = if let Some(t) =
+                    get_pokemon_at_slot_mut(&mut new_state, target_slot)
+                {
+                    deal_residual_damage(t, dmg, env, as_)
+                } else {
+                    false
+                };
+                if fainted {
+                    handle_pokemon_faint(
+                        &mut new_state,
+                        target_slot.player,
+                        target_slot.slot_index,
+                    );
+                }
+                if let Some(observer) = new_state.event_observer {
+                    let post_hp = get_pokemon_at_slot(&new_state, target_slot)
+                        .map_or(0, |m| m.hp);
+                    let shown = if fainted { 0 } else { post_hp };
+                    let new_hp =
+                        observed_hp_value(observer, target_slot.player, shown, max_hp);
+                    emit(&mut new_state, EventKind::DamageDealt { target: target_slot, new_hp });
+                    if fainted {
+                        emit(&mut new_state, EventKind::Faint { slot: target_slot });
+                    }
                 }
                 next_branches.push((new_state, prob * dmg_prob));
             }
@@ -8263,20 +8378,25 @@ fn apply_leech_seed_residual(
         let target_magic_guard = !abilities_suppressed && target_mon.ability == Ability::MagicGuard;
 
         // Apply the drain to the seeded mon (skipped by Magic Guard).
+        // Emission of the DamageDealt is handled by the caller via `emit_eot_hp_deltas`.
         if !target_magic_guard {
             match player {
-                Player::P1 => take_damage(
-                    &mut state.p1_active_mons[idx],
-                    drain,
-                    target_env,
-                    abilities_suppressed,
-                ),
-                Player::P2 => take_damage(
-                    &mut state.p2_active_mons[idx],
-                    drain,
-                    target_env,
-                    abilities_suppressed,
-                ),
+                Player::P1 => {
+                    deal_residual_damage(
+                        &mut state.p1_active_mons[idx],
+                        drain,
+                        target_env,
+                        abilities_suppressed,
+                    );
+                }
+                Player::P2 => {
+                    deal_residual_damage(
+                        &mut state.p2_active_mons[idx],
+                        drain,
+                        target_env,
+                        abilities_suppressed,
+                    );
+                }
             }
         }
 
@@ -8296,21 +8416,12 @@ fn apply_leech_seed_residual(
             continue;
         }
         let amount = apply_big_root(seeder, drain, items_suppressed);
+        // The seeder's heal / Liquid Ooze backlash HP change is emitted by the caller via
+        // `emit_eot_hp_deltas` (uniform with the seeded-side drain).
         if liquid_ooze {
-            take_damage(seeder, amount, seeder_env, abilities_suppressed);
+            deal_residual_damage(seeder, amount, seeder_env, abilities_suppressed);
         } else if !heal_is_blocked(seeder) {
-            let before = seeder.hp;
             gain_hp(seeder, amount, seeder_env);
-            let post_hp = seeder.hp;
-            let max_hp = seeder.stats[0];
-            // NLL: seeder last used above; borrow of state.{p1,p2}_active_mons ends here.
-            if post_hp != before {
-                let seeder_slot = FieldSlot { player: seeder_player, slot_index: idx as u8 };
-                if let Some(observer) = state.event_observer {
-                    let new_hp = observed_hp_value(observer, seeder_slot.player, post_hp, max_hp);
-                    emit(state, EventKind::Healed { target: seeder_slot, new_hp });
-                }
-            }
         }
     }
 }
@@ -8500,12 +8611,14 @@ fn apply_status_damage(state: &mut BattleState) {
             )
         })
         .collect();
+    let before = snapshot_active_hp(state);
     for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
         apply_status_residual(mon, abilities_suppressed, p1_envs[i]);
     }
     for (i, mon) in state.p2_active_mons.iter_mut().enumerate() {
         apply_status_residual(mon, abilities_suppressed, p2_envs[i]);
     }
+    emit_eot_hp_deltas(state, &before);
 }
 
 /// Public wrapper that combines all three deterministic EoT phases (pre-residuals + cure + damage).
@@ -10976,8 +11089,10 @@ pub(crate) fn apply_hp_damage_to_attacker(
     let env = berry_env(bs, attacker_slot);
     let damage = ((max_hp as u32 * numer) / denom).max(1) as u16;
     let mut fainted = false;
+    let mut post_hp = 0u16;
     if let Some(atk) = get_pokemon_at_slot_mut(bs, attacker_slot) {
         take_damage(atk, damage, env, abilities_suppressed);
+        post_hp = atk.hp;
         if atk.fainted {
             clear_pokemon_on_faint(atk);
             fainted = true;
@@ -10985,6 +11100,17 @@ pub(crate) fn apply_hp_damage_to_attacker(
     }
     if fainted {
         handle_pokemon_faint(bs, attacker_slot.player, attacker_slot.slot_index);
+    }
+    // Emit the attacker's chip damage (and faint) so observers / the inference engine
+    // track the HP change. Previously silent — the caller (Rough Skin / Iron Barbs /
+    // Rocky Helmet / Spiky Shield / Aftermath) emits its own source reveal first.
+    if let Some(observer) = bs.event_observer {
+        let shown_hp = if fainted { 0 } else { post_hp };
+        let new_hp = observed_hp_value(observer, attacker_slot.player, shown_hp, max_hp);
+        emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp });
+        if fainted {
+            emit(bs, EventKind::Faint { slot: attacker_slot });
+        }
     }
 }
 
@@ -11138,6 +11264,31 @@ pub fn apply_contact_hit_reactions(
         branches
     };
 
+    // Rocky Helmet (holder-side item): 1/6 max HP to a contact attacker, per hit.
+    // Handled before (and independent of) the holder-ability match, since a mon can hold
+    // Rocky Helmet regardless of its ability. Gated by `contact_punish` (Contact flag +
+    // not Long Reach / Protective Pads). Magic Guard on the attacker is respected inside
+    // `apply_hp_damage_to_attacker`. Fires even if the holder faints from the hit.
+    let branches = {
+        let helmet_active = {
+            let first_bs = &branches[0].0;
+            get_pokemon_at_slot(first_bs, holder_slot)
+                .map_or(false, |m| item_is_active(first_bs, m) && m.item == Item::RockyHelmet)
+        };
+        if contact_punish && helmet_active {
+            branches
+                .into_iter()
+                .map(|(mut bs, prob)| {
+                    emit(&mut bs, EventKind::ItemRevealed { slot: holder_slot, item: Item::RockyHelmet });
+                    apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 6);
+                    (bs, prob)
+                })
+                .collect()
+        } else {
+            branches
+        }
+    };
+
     let mut branches = match holder_ability {
         Ability::RoughSkin => {
             if !contact_punish {
@@ -11146,6 +11297,21 @@ pub fn apply_contact_hit_reactions(
             branches
                 .into_iter()
                 .map(|(mut bs, prob)| {
+                    emit(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::RoughSkin });
+                    apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 8);
+                    (bs, prob)
+                })
+                .collect()
+        }
+        // Iron Barbs: identical to Rough Skin — 1/8 max HP to a contact attacker, per hit.
+        Ability::IronBarbs => {
+            if !contact_punish {
+                return branches;
+            }
+            branches
+                .into_iter()
+                .map(|(mut bs, prob)| {
+                    emit(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::IronBarbs });
                     apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 8);
                     (bs, prob)
                 })
