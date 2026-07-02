@@ -9606,7 +9606,6 @@ mod tests {
                 simulator_helpers::add_side_condition(&mut state, player, SideCondition::AuroraVeil, 5);
             }
 
-            // Now switch the Screen Cleaner in (replaces Clefable).
             let state = switch_p1_out(state);
 
             // All three screens on both sides should be gone.
@@ -32085,11 +32084,8 @@ mod rollout {
 
     #[test]
     fn rollout_lock_clears_after_5_turns() {
-        // Inject the lock at n=4 (4 turns already completed) and fire once more.
-        // Turn 5 (cur=5) should deterministically end the run: no BattleState branch
-        // should retain the LockedMove volatile, and no branch should confuse the user.
-        // (GameOverState branches from a one-shot KO are also valid end-states — the
-        // lock and confusion checks only apply to live BattleStates.)
+        // Inject the lock at n=4 so this turn is turn 5, the final Rollout turn: no live
+        // BattleState should retain the lock or gain Confusion (GameOverState is fine too).
         let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
         p1.volatiles.push(VolatileStatusState::MoveStatus(
             VolatileStatus::LockedMove(PokemonMove::Rollout), 4
@@ -32106,7 +32102,6 @@ mod rollout {
             &move_dex(), &pokemon_dex(),
         );
 
-        // Every live BattleState branch must have no LockedMove and no Confusion.
         for (state, _) in &outcomes {
             if let MatchState::BattleState(bs) = state {
                 assert!(!has_locked(&bs.p1_active_mons[0]),
@@ -32121,8 +32116,8 @@ mod rollout {
 
     #[test]
     fn rollout_no_confusion_on_end() {
-        // Contrasted with Thrash: a Rollout run that completes its 5 turns must never confuse.
-        // Inject n=4 (4 turns completed) and verify no BattleState branch adds Confusion.
+        // Unlike Thrash, Rollout must never confuse when its 5-turn run ends; inject n=4
+        // so this turn is the final one.
         let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
         p1.volatiles.push(VolatileStatusState::MoveStatus(
             VolatileStatus::LockedMove(PokemonMove::Rollout), 4
@@ -32145,7 +32140,6 @@ mod rollout {
             &move_dex(), &pokemon_dex(),
         );
 
-        // Every live BattleState branch should have no Confusion.
         for (state, _) in &outcomes {
             if let MatchState::BattleState(bs) = state {
                 assert!(!is_confused(&bs.p1_active_mons[0]),
@@ -32156,19 +32150,15 @@ mod rollout {
 
     #[test]
     fn rollout_no_confusion_on_disruption() {
-        // A paralysis-disrupted Rollout (pre-action fail) should also never confuse.
-        // We set up the user with full paralysis locked into Rollout at n=2 (turn 3 would
-        // be the "final turn" threshold for Thrash-family). Then simulate a paralysis fail.
+        // A paralysis-disrupted Rollout (pre-action fail) should also never confuse, even
+        // at n=2 where turn 3 would be the Thrash-family "final turn" threshold.
         let mut p1 = simple_mon(Species::Snorlax, PokemonMove::Rollout, Ability::None);
-        // Manually inject the LockedMove volatile at n=2 (two turns already completed).
         p1.volatiles.push(VolatileStatusState::MoveStatus(
             VolatileStatus::LockedMove(PokemonMove::Rollout), 2
         ));
-        // Full paralysis — 100% fail.
         p1.status = Some(crate::state::dex_data::Status::Paralysis);
-        // Patch speed to 0 so full-paralysis branch fires deterministically (status check
-        // uses a 25% chance, but we can't force it; just check that *any* paralysis-fail
-        // branch that does appear does not confuse).
+        // The 25% full-paralysis chance can't be forced, so this just checks that any
+        // paralysis-fail branch that does appear does not confuse.
         let p2 = simple_mon(Species::Chansey, PokemonMove::Splash, Ability::None);
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
@@ -32183,7 +32173,7 @@ mod rollout {
 
         for (state, _) in &outcomes {
             if let MatchState::BattleState(bs) = state {
-                // On any paralysis-fail branch the Rollout lock should be gone and no confusion.
+                // Only check branches where paralysis actually failed the move (lock gone).
                 if !has_locked(&bs.p1_active_mons[0]) {
                     assert!(!is_confused(&bs.p1_active_mons[0]),
                         "Rollout disruption should never cause confusion");
@@ -32358,7 +32348,6 @@ mod event_round_trip {
             None, Some(Ability::None), None, None, None, None, None, false,
         );
 
-        // Defender: Snorlax at half HP carrying Leftovers, uses Splash.
         let mut p2 = build_pokemon_state(
             Species::Snorlax, pd, md, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
@@ -32378,7 +32367,6 @@ mod event_round_trip {
         let (_, events_opt, _) = branches.remove(0);
         let events = events_opt.expect("observer set, events must be Some");
 
-        // MoveUsed for P1 slot 0 must have DamageDealt for P2 slot 0 as a reaction.
         let tackle_ev = find_move_used(&events, p1s0())
             .expect("MoveUsed for P1 slot 0 not found");
         assert!(
@@ -32397,7 +32385,6 @@ mod event_round_trip {
             "opponent's HP should be Percent from P1's perspective, got {:?}", damage_dealt.kind
         );
 
-        // EndOfTurn must exist and its reactions must include Healed for P2 slot 0.
         let eot_ev = events.iter().find(|e| matches!(e.kind, EventKind::EndOfTurn))
             .expect("EndOfTurn event not found");
         assert!(
@@ -32418,7 +32405,7 @@ mod event_round_trip {
         let pd = pokemon_dex();
         let md = move_dex();
 
-        // UrshifuRapidStrike with Surging Strikes. Ability::None to avoid side-effects.
+        // Ability::None avoids side-effects that could confound the reaction ordering.
         let p1 = build_pokemon_state(
             Species::UrshifuRapidStrike, pd, md, Some(50),
             Some([Some(PokemonMove::SurgingStrikes), Some(PokemonMove::Splash), None, None]),
@@ -32444,7 +32431,6 @@ mod event_round_trip {
             &state, &p1_cmd, &p2_cmd, md, pd, Player::P1, true, 1,
         );
         assert!(!branches.is_empty(), "expected at least one branch");
-        // Surging Strikes always crits → only one crit branch (prob 1.0).
         assert_eq!(branches.len(), 1, "Surging Strikes always crits: expect 1 branch");
         let (_, events_opt, _) = branches.remove(0);
         let events = events_opt.expect("observer set, events must be Some");
@@ -32483,7 +32469,6 @@ mod event_round_trip {
         let pd = pokemon_dex();
         let md = move_dex();
 
-        // P1 has Taunt active and tries to use Growl (a Status move).
         let mut p1 = build_pokemon_state(
             Species::Shuckle, pd, md, Some(50),
             Some([Some(PokemonMove::Growl), Some(PokemonMove::Splash), None, None]),
@@ -32510,21 +32495,17 @@ mod event_round_trip {
         let (_, events_opt, _) = branches.remove(0);
         let events = events_opt.expect("observer set, events must be Some");
 
-        // There must be a top-level Cant for P1 slot 0 with reason Taunt.
         let cant_ev = events.iter().find(|e| {
             matches!(&e.kind, EventKind::Cant { slot, reason: CantReason::Taunt } if *slot == p1s0())
         });
         assert!(cant_ev.is_some(),
             "expected top-level Cant {{ slot: P1s0, reason: Taunt }}, events = {events:#?}");
 
-        // The Cant event must NOT be wrapped under any MoveUsed parent
-        // (i.e., no top-level MoveUsed for P1 slot 0 should exist).
         let p1_move_used = find_move_used(&events, p1s0());
         assert!(p1_move_used.is_none(),
             "MoveUsed for P1 slot 0 should not exist when Taunt fires, \
              got {p1_move_used:#?}");
 
-        // Cant event itself has no reactions.
         assert!(cant_ev.unwrap().reactions.is_empty(),
             "Cant event should have no reactions");
     }
@@ -32562,11 +32543,10 @@ mod event_round_trip {
         let (_, events_opt, _) = branches.remove(0);
         let events = events_opt.expect("observer set, events must be Some");
 
-        // P1's MoveUsed must exist (Protect block ≠ Cant; the move was attempted).
+        // Protect block ≠ Cant: the move was attempted, so MoveUsed must still exist.
         let tackle_ev = find_move_used(&events, p1s0())
             .expect("MoveUsed for P1 slot 0 not found after Protect block");
 
-        // Blocked must appear as a reaction, not a top-level event.
         assert!(
             any_kind(&tackle_ev.reactions, |k| matches!(k,
                 EventKind::Blocked { target } if *target == p2s0()
@@ -32610,7 +32590,6 @@ mod event_round_trip {
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Run once from P1's perspective.
         let p1_events = {
             let mut branches = run_single_turn_with_events(
                 &state, &p1_cmd, &p2_cmd, md, pd, Player::P1,
@@ -32618,7 +32597,6 @@ mod event_round_trip {
             let (_, evs, _) = branches.remove(0);
             evs.unwrap()
         };
-        // Run once from P2's perspective.
         let p2_events = {
             let mut branches = run_single_turn_with_events(
                 &state, &p1_cmd, &p2_cmd, md, pd, Player::P2,
@@ -32639,12 +32617,10 @@ mod event_round_trip {
         let p1_view = damage_dealt_kind(&p1_events, p2s0());
         let p2_view = damage_dealt_kind(&p2_events, p2s0());
 
-        // From P1's view, P2 is the opponent → Percent.
         assert!(
             matches!(&p1_view, EventKind::DamageDealt { new_hp: PokemonHP::Percent(_), .. }),
             "observer=P1 should see P2's HP as Percent, got {p1_view:?}"
         );
-        // From P2's view, P2 is self → Number.
         assert!(
             matches!(&p2_view, EventKind::DamageDealt { new_hp: PokemonHP::Number(_), .. }),
             "observer=P2 should see P2's HP as Number, got {p2_view:?}"
@@ -32688,7 +32664,6 @@ mod event_round_trip {
             "expect at least 2 branches (crit + non-crit) with consider_crit=true, got {}",
             branches.len());
 
-        // Find whether each branch has a Crit reaction in P1's MoveUsed.
         let has_crit_event = |events: &[InformationEvent]| -> bool {
             find_move_used(events, p1s0())
                 .map(|mv| any_kind(&mv.reactions, |k| matches!(k, EventKind::Crit { .. })))
@@ -32744,7 +32719,6 @@ mod event_round_trip {
 
         let branches = run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
 
-        // Every branch — flinch and no-flinch — must have no VolatileStart{Flinch}.
         for (_, evs, _) in &branches {
             let events = evs.as_deref().expect("observer set, events must be Some");
             assert!(
@@ -32756,7 +32730,7 @@ mod event_round_trip {
             );
         }
 
-        // The flinch branch (10% probability) must have Cant{Flinch} at the top level.
+        // Tackle has no flinch secondary, so the 10% flinch chance comes only from King's Rock.
         let flinch_branch = branches.iter().find(|(_, evs, _)| {
             evs.as_deref().map(|ev| {
                 ev.iter().any(|e| matches!(&e.kind, EventKind::Cant {
@@ -32801,7 +32775,6 @@ mod event_round_trip {
 
         let branches = run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
 
-        // Flinch branch: Cant{Flinch} present, no VolatileStart{Flinch}, boost is present.
         let flinch_branch = branches.iter().find(|(_, evs, _)| {
             evs.as_deref().map(|ev| {
                 ev.iter().any(|e| matches!(&e.kind, EventKind::Cant {
@@ -32811,7 +32784,6 @@ mod event_round_trip {
         }).expect("Expected a flinch branch");
         let flinch_events = flinch_branch.1.as_deref().unwrap();
 
-        // No VolatileStart{Flinch} anywhere.
         assert!(
             !any_event_deep(flinch_events, |k| matches!(k,
                 EventKind::VolatileStart { volatile: VolatileStatus::Flinch, .. }
@@ -32820,7 +32792,6 @@ mod event_round_trip {
              events = {:#?}", flinch_events
         );
 
-        // Steadfast +1 Spe boost for P2 IS present somewhere in the event tree.
         assert!(
             any_event_deep(flinch_events, |k| matches!(k,
                 EventKind::BoostChanged {
@@ -32894,8 +32865,6 @@ mod event_round_trip {
         let (state_t1, events_t1_opt, _) = branches_t1.remove(0);
         let events_t1 = events_t1_opt.expect("observer set — events must be Some (turn 1)");
 
-        // Regenerator must be completely silent: no Healed for P1 slot 0 and no
-        // AbilityRevealed anywhere in the event tree.
         assert!(
             !any_event_deep(&events_t1, |k| matches!(k,
                 EventKind::Healed { target, .. }
@@ -32924,7 +32893,6 @@ mod event_round_trip {
         let (_, events_t2_opt, _) = branches_t2.remove(0);
         let events_t2 = events_t2_opt.expect("observer set — events must be Some (turn 2)");
 
-        // The Switch event for P1 slot 0 must report the healed HP.
         // Observer is P2, so P1's HP is Percent-encoded.
         let switch_ev = events_t2
             .iter()

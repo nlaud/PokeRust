@@ -327,7 +327,6 @@ fn test_choice_not_excluded_for_same_move_twice() {
             }),
         ],
     );
-    // Same move twice — Choice items are still possible.
     assert!(
         !is_item_excluded(&result.p2_active_mons[0], &Item::ChoiceBand),
         "ChoiceBand must NOT be excluded when same move repeated"
@@ -467,7 +466,6 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
         move_dex,
     );
 
-    // LifeOrb should NOT be excluded (the recoil is consistent with it).
     assert!(
         !is_item_excluded(&result.p2_active_mons[0], &Item::LifeOrb),
         "LifeOrb must not be excluded when self-damage reaction is present"
@@ -476,24 +474,18 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
 
 /// Regression for the Bright Powder / Lax Incense soundness bug.
 ///
-/// Scenario: P1 uses a 100%-accurate move in Sandstorm; P2 has no accuracy/evasion
-/// stage modifiers and the move misses.  P2 *might* have Sand Veil (not excluded).
-///
-/// Before the fix, the engine emitted `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]`
-/// — a clause that is *unsound* when Sand Veil caused the miss, because it rules out
-/// the true world where P2 holds no evasion item.  After the fix it must include
-/// `HasAbility(SandVeil)` as a disjunct so BCP cannot force a wrong item.
-///
-/// More concretely: if BCP were then given evidence that rules out BrightPowder and
-/// LaxIncense, a fully-sound engine must *not* panic (no contradiction) — it has the
-/// SandVeil disjunct to fall back on.
+/// P1's 100%-accurate move misses P2 in Sandstorm, with Sand Veil not excluded. The old
+/// engine emitted `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]`, which is unsound: it
+/// rules out the true world where P2 holds no evasion item and Sand Veil caused the miss.
+/// The fix adds `HasAbility(SandVeil)` as a disjunct, so BCP can't force a wrong item even
+/// once BrightPowder and LaxIncense are excluded.
 #[test]
 fn test_brightpowder_clause_includes_sand_veil_in_sandstorm() {
     use crate::information::unknowns::Statement;
 
+    // Sand Veil stays possible: `unknown_mon()` defaults possible_abilities to Not([]),
+    // i.e. all abilities allowed.
     let mut p2_mon = unknown_mon();
-    // P2 might have Sand Veil (Not([]) means all abilities allowed, which is the default
-    // from `unknown_mon`; we just leave it as-is).
 
     let mut state = battle_with_p2(vec![p2_mon]);
     state.weather = Some(Weather::Sandstorm);
@@ -6269,7 +6261,6 @@ fn test_eot_sand_immunity_not_emitted_for_innately_immune_type() {
 
     let result = apply(state, vec![event(EventKind::EndOfTurn)]);
 
-    // No sand-immunity clause should appear for a Steel-type.
     let has_clause = result.predicates.iter().any(|clause| {
         clause.iter().any(|s| matches!(
             s,
@@ -6294,7 +6285,6 @@ fn test_eot_sand_immunity_not_emitted_without_sandstorm() {
     let mut p2_mon = unknown_mon();
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
 
-    // No weather — not sandstorm.
     let state = battle_with_p2(vec![p2_mon]);
 
     let result = apply(state, vec![event(EventKind::EndOfTurn)]);
@@ -6360,8 +6350,6 @@ fn test_contact_absence_magic_guard_attacker_does_not_exclude_rough_skin_iron_ba
         move_dex,
     );
 
-    // Rough Skin and Iron Barbs must remain POSSIBLE (not excluded) because the attacker
-    // may have Magic Guard, which also prevents chip from these abilities.
     assert!(
         !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
         "RoughSkin must remain possible when attacker may have Magic Guard (C1)"
@@ -6414,7 +6402,6 @@ fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
         move_dex,
     );
 
-    // Now that Magic Guard is excluded, absence of chip proves no Rough Skin / Iron Barbs.
     assert!(
         unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
         "RoughSkin must be excluded when Magic Guard is also excluded (C1 control)"
@@ -6544,7 +6531,6 @@ fn test_intimidate_not_excluded_when_own_mon_has_clear_body() {
     // No BoostChanged{Atk,−1} for P1 in reactions.
     let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
 
-    // Intimidate must remain POSSIBLE: Clear Body silently swallows the −1.
     assert!(
         !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
         "Intimidate must remain possible when own active mon has Clear Body (C2)"
@@ -6629,7 +6615,6 @@ fn test_b1_bench_hp_preserved_across_switch_out() {
     state.active_per_side = 1;
     state.back_mons_per_side = 5;
 
-    // Snorlax switches into P1 slot 0 → Garchomp displaced to bench.
     let switch_ev = event(EventKind::Switch(SwitchState {
         slot: p1(0),
         species: Species::Snorlax,
