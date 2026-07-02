@@ -33,7 +33,6 @@ pub(super) fn run_bcp(state: &mut UnknownBattleState, allow_repeat_items: bool) 
 
         let mut i = 0;
         while i < state.predicates.len() {
-            // Remove literals that are definitely false.
             let still_live: Vec<Statement> = state.predicates[i]
                 .iter()
                 .filter(|lit| !eval_false(state, lit))
@@ -234,10 +233,9 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
                 super::get_mon_by_idx(state, *slow_idx).map_or(0u64, |m| m.minStats[5] as u64);
             fast_max * (*fast_mult as u64) < slow_min * (*slow_mult as u64)
         }
-        // Turn-count literals: while the effect is live, false-confirmed only when the
-        // timer unknown excludes the value. An ABSENT effect is deliberately `false`
-        // (inert), never false-confirmed — a stale clause surviving a purge must not
-        // unit-force its partner literal.
+        // Turn-count literals are false-confirmed only while the effect is live and the timer
+        // excludes the value; an absent effect is inert, never false-confirmed, so a stale
+        // clause surviving a purge can't unit-force its partner literal.
         Statement::WeatherTurns { turns } => state
             .weather_turns
             .as_ref()
