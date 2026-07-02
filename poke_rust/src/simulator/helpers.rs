@@ -3784,7 +3784,6 @@ pub fn apply_damage_and_check_game_over(
             return Some(crate::state::battle::MatchState::GameOverState { winner });
         }
     } else {
-        // Emit DamageDealt for non-faint damage.
         if let Some(observer) = state.event_observer {
             let new_hp = observed_hp_value(observer, target_slot.player, post_hp, max_hp);
             emit(state, EventKind::DamageDealt { target: target_slot, new_hp });
@@ -4113,7 +4112,6 @@ fn try_symbiosis_pass(state: &mut BattleState, receiver_slot: FieldSlot) {
     } else {
         BerryCure::none()
     };
-    // Receiver gained the item.
     emit(state, EventKind::ItemGained { slot: receiver_slot, item: item_copy });
     emit_berry_cure(state, receiver_slot, &cure);
 }
@@ -4580,11 +4578,10 @@ pub fn abilities_are_suppressed(state: &BattleState) -> bool {
 }
 
 pub(crate) fn pokemon_ability_is_suppressed(state: &BattleState, mon: &PokemonState) -> bool {
-    // Field-wide suppression via Neutralizing Gas (does not suppress NeutralizingGas itself).
+    // Neutralizing Gas does not suppress itself.
     if abilities_are_suppressed(state) && mon.ability != Ability::NeutralizingGas {
         return true;
     }
-    // Per-Pokémon suppression via the Gastro Acid volatile.
     has_status_volatile(mon, &VolatileStatus::GastroAcid)
 }
 
@@ -5302,17 +5299,14 @@ fn get_effective_speed(state: &BattleState, mon: &PokemonState) -> f32 {
         speed *= 2.0;
     }
 
-    // Quick Feet: +50% speed if afflicted by any non-volatile status
     if mon.ability == Ability::QuickFeet && mon.status.is_some() {
         speed *= 1.5;
     }
 
-    // Paralysis halves speed unless Quick Feet prevents speed loss
     if matches!(mon.status, Some(Status::Paralysis)) && mon.ability != Ability::QuickFeet {
         speed *= 0.5;
     }
 
-    // Choice Scarf: 1.5× Speed.
     if item_is_active(state, mon) && mon.item == Item::ChoiceScarf {
         speed *= 1.5;
     }
@@ -5790,13 +5784,12 @@ pub fn compute_illusion_disguise(state: &BattleState, slot: FieldSlot) -> Option
     if mon.ability != Ability::Illusion || mon.pre_transform.is_some() {
         return None;
     }
-    // Find the last non-fainted mon in the back. Party order: active first, bench after.
-    // Illusion picks the last non-fainted party member across the whole party.
+    // Party order is active-first, bench-after, so scanning the bench from the end
+    // finds the last non-fainted party member.
     let back = match slot.player {
         Player::P1 => &state.p1_back_mons,
         Player::P2 => &state.p2_back_mons,
     };
-    // Scan from the end of the bench to find the last non-fainted mon.
     back.iter().rev().find(|m| !m.fainted).map(|m| m.species.clone())
 }
 
@@ -5912,7 +5905,6 @@ pub fn process_pokemon_send_out(
                     mon.hp = max_hp;
                     mon.status = None;
                 }
-                // Remove the HealingWish condition from this slot.
                 {
                     let conds = match slot.player {
                         crate::state::battle::Player::P1 => &mut state.p1_slot_conditions,

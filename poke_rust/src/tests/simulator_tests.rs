@@ -30314,7 +30314,7 @@ mod todo_refactor_mechanic_tests {
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let outcomes = run(state);
 
-        // P2 should have lost some HP from the drain on hit branches (Leech Seed has 90% accuracy).
+        // Leech Seed is 90% accurate, so only some branches drain — hence .any, not .all.
         let p2_drained = outcomes.iter().any(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < p2_max));
         assert!(p2_drained, "Leech Seed should drain HP from a non-Magic-Guard target");
@@ -30324,7 +30324,6 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn long_reach_blocks_rough_skin_recoil() {
-        // Long Reach user uses Tackle — no Rough Skin recoil (contact removed).
         let mut p1_lr = mon(Species::Decidueye, PokemonMove::Tackle, Ability::LongReach);
         let mut p1_no = mon(Species::Decidueye, PokemonMove::Tackle, Ability::None);
         p1_lr.stats[5] = 200; p1_no.stats[5] = 200;
@@ -30346,8 +30345,6 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn long_reach_blocks_spiky_shield_chip() {
-        // Long Reach user uses Tackle into Spiky Shield — no chip damage (contact removed).
-        // P1 uses Spiky Shield, P2 (Long Reach) attacks into it.
         let p1 = build_pokemon_state(
             Species::Clefable, pokemon_dex(), move_dex(), Some(50),
             Some([Some(PokemonMove::SpikyShield), None, None, None]),
@@ -30363,7 +30360,6 @@ mod todo_refactor_mechanic_tests {
         let state_lr = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_lr], vec![]);
         let state_no = battle_state_from_lists(vec![p1], vec![], vec![p2_no], vec![]);
 
-        // In state_lr / state_no: P2 attacks first, hits Spiky Shield.
         let outcomes_lr = run_single_turn(
             &MatchState::BattleState(state_lr),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
@@ -30390,7 +30386,6 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn protective_pads_blocks_rough_skin_recoil() {
-        // Protective Pads user uses Tackle — no Rough Skin recoil.
         let mut p1_pp = mon_item(Species::Snorlax, PokemonMove::Tackle, Ability::None, Item::ProtectivePads);
         let mut p1_no = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None);
         p1_pp.stats[5] = 200; p1_no.stats[5] = 200;
@@ -30412,14 +30407,12 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn protective_pads_retains_tough_claws_damage_boost() {
-        // Tough Claws + Protective Pads: the move still "makes contact" for ToughClaws (1.3×),
-        // even though Protective Pads blocks the incoming punishment.
-        // Compare damage: ToughClaws + PP vs ToughClaws alone (no item).
+        // The move still "makes contact" for Tough Claws (1.3×) even though Protective
+        // Pads blocks the incoming punishment.
         let mut p1_tc_pp = mon_item(Species::Snorlax, PokemonMove::Tackle, Ability::ToughClaws, Item::ProtectivePads);
         let mut p1_tc    = mon(Species::Snorlax, PokemonMove::Tackle, Ability::ToughClaws);
         p1_tc_pp.stats[5] = 200; p1_tc.stats[5] = 200;
 
-        // Make them identical in all damage-relevant stats.
         p1_tc_pp.stats[1] = 150; p1_tc.stats[1] = 150;
 
         let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
@@ -30431,8 +30424,6 @@ mod todo_refactor_mechanic_tests {
         let dmg_pp = avg_dmg_p2(&run(state_pp), 500);
         let dmg_no = avg_dmg_p2(&run(state_no), 500);
 
-        // Both should deal similar damage (PP does not affect ToughClaws boost).
-        // Allow a small rounding margin.
         let ratio = if dmg_no > 0.0 { dmg_pp / dmg_no } else { 1.0 };
         assert!((ratio - 1.0).abs() < 0.05,
             "Protective Pads should not reduce Tough Claws boost; dmg_pp={dmg_pp:.1} vs dmg_no={dmg_no:.1}");
@@ -30442,16 +30433,14 @@ mod todo_refactor_mechanic_tests {
 
     #[test]
     fn berserk_does_not_trigger_under_neutralizing_gas() {
-        // P1 has Berserk, HP just above 50% → a strong hit crosses the threshold.
-        // P2 has Neutralizing Gas (suppresses all abilities on the field).
-        // Expected: Berserk does NOT fire → P1's SpA stays at 0.
+        // HP is set just above 50% so a strong hit crosses the Berserk threshold.
         let mut p1 = mon(Species::Snorlax, PokemonMove::Splash, Ability::Berserk);
         let max_hp = p1.stats[0];
         p1.hp = max_hp / 2 + 1;
 
         let mut p2_gas = mon(Species::WeezingGalar, PokemonMove::Tackle, Ability::NeutralizingGas);
         let mut p2_no  = mon(Species::WeezingGalar, PokemonMove::Tackle, Ability::None);
-        // P2 attacks first with high SpDef-piercing physical damage.
+        // P2 outspeeds and hits hard so the crossing is guaranteed to happen this turn.
         p2_gas.stats[5] = 500; p2_gas.stats[1] = 300;
         p2_no.stats[5]  = 500; p2_no.stats[1]  = 300;
 
@@ -30461,10 +30450,8 @@ mod todo_refactor_mechanic_tests {
         let outcomes_gas = run(state_gas);
         let outcomes_no  = run(state_no);
 
-        // With Neutralizing Gas: no branch should have P1 SpA boost.
         let berserk_under_gas = outcomes_gas.iter().any(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] >= 1));
-        // Without Neutralizing Gas: some branches where the hit crosses 50% should show +1 SpA.
         let berserk_without_gas = outcomes_no.iter().any(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] >= 1));
 
@@ -30518,7 +30505,6 @@ mod doubles_faint_redirection {
 
         let foe1_initial_hp = foe1.hp;
 
-        // Pre-faint foe slot 0
         foe0.hp = 0;
         foe0.fainted = true;
 
@@ -30527,7 +30513,6 @@ mod doubles_faint_redirection {
             vec![foe0, foe1], vec![],
         );
 
-        // P1 slot 0 explicitly targets foe slot 0 (which is fainted)
         let p1_cmd = PlayerCommand::Battle(vec![
             targeted_attack(0, Some(FieldSlot { player: Player::P2, slot_index: 0 })),
             targeted_attack(0, None), // ally splashes
@@ -30543,8 +30528,6 @@ mod doubles_faint_redirection {
 
         assert!(!outcomes.is_empty(), "must produce at least one outcome");
 
-        // In every branch: foe slot 1 (survivor) should have taken damage,
-        // and foe slot 0 (the corpse) should remain at hp = 0 (untouched).
         let foe1_took_damage_prob: f64 = outcomes.iter()
             .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
                 if bs.p2_active_mons.get(1).map(|m| m.hp < foe1_initial_hp).unwrap_or(false)))
@@ -30588,15 +30571,12 @@ mod doubles_faint_redirection {
             vec![foe0, foe1], vec![back_mon],
         );
 
-        // P1 slot 0 explicitly targets foe slot 0 (fainted), both P2 active mons down
         let p1_cmd = PlayerCommand::Battle(vec![
             targeted_attack(0, Some(FieldSlot { player: Player::P2, slot_index: 0 })),
             targeted_attack(0, None),
         ]);
-        // P2 can't act with both active mons fainted — but a SwitchAction would normally be
-        // forced; for this test we just supply no command and rely on the no-op path.
-        // Omit P2 command by issuing Splash from the (fainted) slot — the battle system
-        // should handle fainted-target checks itself and not crash.
+        // Both P2 mons are fainted, so a real switch would normally be forced; issuing
+        // Splash anyway exercises the fainted-target no-op path without one.
         let p2_cmd = PlayerCommand::Battle(vec![
             targeted_attack(0, None),
             targeted_attack(0, None),
@@ -30625,7 +30605,6 @@ mod doubles_faint_redirection {
         let pdex = pokemon_dex();
         let mdex = move_dex();
 
-        // Use Rhyperior (high Attack) with Rock Slide.
         // Blissey targets are bulky enough that neither will faint in one hit.
         let attacker = build_pokemon_state(
             Species::Rhyperior, &pdex, &mdex, Some(50),
@@ -30654,7 +30633,6 @@ mod doubles_faint_redirection {
             &MatchState::BattleState(state_two),
             &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
-        // Average damage dealt to foe slot 0 across all outcome branches
         let avg_dmg_two: f64 = out_two.iter().map(|(s, p)| {
             let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => initial_hp };
             (initial_hp.saturating_sub(hp) as f64) * p
@@ -30678,7 +30656,6 @@ mod doubles_faint_redirection {
             (initial_hp.saturating_sub(hp) as f64) * p
         }).sum();
 
-        // Single-target case must deal strictly more damage than spread case
         assert!(
             avg_dmg_one > avg_dmg_two,
             "Spread: damage with 1 foe ({avg_dmg_one:.1}) must exceed damage with 2 foes ({avg_dmg_two:.1})"
@@ -30744,16 +30721,13 @@ mod season2_items_and_abilities {
 
     #[test]
     fn fire_mane_boosts_fire_moves_by_1_5x() {
-        // Fire Mane: holder's Fire-type moves deal ~1.5× more damage (always, no HP condition).
-        // Use a Water-type target (Vaporeon) so Fire is resisted (×0.5); this prevents
-        // the boosted version from overkilling the target and masking the ratio.
+        // Vaporeon resists Fire (×0.5) so the boosted run doesn't overkill and mask the ratio.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
         let target = mon(Species::Vaporeon, PokemonMove::Splash, Ability::None, None);
         let snorlax_hp = target.stats[0];
 
-        // Control: Flareon with no notable ability, uses Flamethrower.
         let base = mon(Species::Flareon, PokemonMove::Flamethrower, Ability::None, None);
         let outcomes_base = run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
@@ -30763,7 +30737,6 @@ mod season2_items_and_abilities {
         );
         let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
 
-        // Fire Mane: same Flareon with FireMane ability.
         let boosted = mon(Species::Flareon, PokemonMove::Flamethrower, Ability::FireMane, None);
         let outcomes_boosted = run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![boosted], vec![], vec![target.clone()], vec![])),
@@ -30782,7 +30755,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn fire_mane_does_not_boost_non_fire_moves() {
-        // Fire Mane only boosts Fire-type moves; non-Fire moves should be unaffected.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -30842,10 +30814,8 @@ mod season2_items_and_abilities {
 
     #[test]
     fn eelevate_grants_highest_stat_boost_on_ko() {
-        // Eelevate: when the holder KOs a foe with a damaging move, it gets +1 in its highest
-        // non-HP stat. We compute the expected boost index from natural stats (no speed tweak)
-        // so the test validates Eelektross's actual highest stat.
-        // Turn order doesn't matter: the 1-HP Snorlax uses Splash and is KO'd either way.
+        // Compute the expected boost index from natural stats so the test validates
+        // Eelektross's actual highest stat, not a hardcoded guess.
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let attacker = mon(Species::Eelektross, PokemonMove::Thunderbolt, Ability::Eelevate, None);
@@ -30860,7 +30830,6 @@ mod season2_items_and_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex,
         );
-        // All branches should KO the target and give +1 in the highest stat.
         let all_boosted = outcomes.iter().all(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[expected_boost_idx] == 1)
         );
@@ -30878,7 +30847,6 @@ mod season2_items_and_abilities {
         let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
         let snorlax_hp = target.stats[0];
 
-        // Control: Gengar with no item uses Psychic.
         let base = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, None);
         let max_hp_base = base.stats[0];
         let outcomes_base = run_single_turn(
@@ -30889,7 +30857,6 @@ mod season2_items_and_abilities {
         );
         let dmg_base = avg_damage(&outcomes_base, snorlax_hp);
 
-        // Life Orb: Gengar with Life Orb uses Psychic.
         let orb = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, Some(Item::LifeOrb));
         let max_hp_orb = orb.stats[0];
         let outcomes_orb = run_single_turn(
@@ -30900,7 +30867,6 @@ mod season2_items_and_abilities {
         );
         let dmg_orb = avg_damage(&outcomes_orb, snorlax_hp);
 
-        // Damage ratio should be ~1.3×.
         let ratio = dmg_orb / dmg_base;
         assert!(
             (ratio - 1.3).abs() < 0.05,
@@ -30924,7 +30890,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn life_orb_no_recoil_with_magic_guard() {
-        // Magic Guard blocks Life Orb recoil entirely.
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
@@ -30950,7 +30915,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn expert_belt_boosts_super_effective_moves() {
-        // Expert Belt: +20% to super-effective moves only.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -30985,7 +30949,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn expert_belt_no_boost_on_neutral_moves() {
-        // Expert Belt does NOT boost neutral-effectiveness moves.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -31085,7 +31048,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn muscle_band_does_not_boost_special_moves() {
-        // Muscle Band only boosts physical; should be neutral on special moves.
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);

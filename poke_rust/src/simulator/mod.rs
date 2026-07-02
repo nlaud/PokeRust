@@ -5151,7 +5151,6 @@ fn possible_damage_outcomes_for_move(
     if final_outcomes.is_empty() {
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
-    // Log all outcomes at verbosity 4
     if simulator_helpers::get_verbosity() >= 4 {
         println!("{}", format!("  [Verbosity 4] {} total damage outcome combinations:", final_outcomes.len()).bright_yellow());
         for (idx, (_, prob)) in final_outcomes.iter().enumerate() {
@@ -5316,7 +5315,6 @@ fn disrupt_rampage_lock(
 /// (relevant in doubles; in singles the sole live foe is selected by the fallback path).
 fn locked_rampage_commands(mon: &PokemonState, locked_move: &PokemonMove, player: Player, state: &BattleState, slot_idx: usize) -> Vec<BattleCommand> {
     let _ = (player, state, slot_idx); // these were only used for target resolution; now None
-    // Validate: rampaging move must still be in the moveset.
     for (i, move_opt) in mon.moves.iter().enumerate() {
         if move_opt.as_ref() == Some(locked_move) {
             // No tera/mega variants while locked — the lock was established without them.
@@ -5418,7 +5416,6 @@ fn generate_commands_for_active(
         item_ok
     };
 
-    // Determine the choice-locked move (if any).
     let choice_locked_move: Option<PokemonMove> = mon.volatiles.iter().find_map(|v| {
         if let crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(m), _) = v {
             Some(m.clone())
@@ -5695,7 +5692,6 @@ fn total_damage_to_opponent(baseline: &BattleState, after: &BattleState, opposin
         + before_back.iter().zip(after_back).map(|(b, a)| b.hp.saturating_sub(a.hp) as u32).sum::<u32>()
 }
 
-/// Apply the attacker's heal/drain/recoil and then resolve game-over after a move lands.
 /// Returns true if `player` has at least one non-fainted Pokémon on the bench.
 fn has_healthy_bench(bs: &BattleState, player: Player) -> bool {
     match player {
@@ -5996,7 +5992,6 @@ fn apply_post_damage_move_effects(
             }
         }
 
-        // Recoil
         // Struggle recoil (¼ max HP) ignores Rock Head and Magic Guard; ordinary recoil does not.
         // Mind Blown / Steel Beam recoil (½ max HP, rounded up) fires unconditionally — even on
         // miss, Protect, or Substitute. Only Magic Guard prevents it; Rock Head does NOT.
@@ -6088,29 +6083,17 @@ fn apply_post_damage_move_effects(
             }
         }
 
-        // Rampaging moves (Thrash / Outrage / Petal Dance / Raging Fury):
+        // Rampaging moves (Thrash / Outrage / Petal Dance / Raging Fury) use a count-up
+        // LockedMove volatile so the 50/50 end-at-turn-2 decision is a real probability
+        // branch instead of a sampled gen_range(2..=3), matching how sleep forks the
+        // outcome tree. Decision parameters are collected here so the fork can happen
+        // AFTER all other post-damage effects (self-destruct, Magician, etc.) have
+        // mutated `bs`; the actual forking happens at the bottom of this function.
         //
-        //  The LockedMove volatile carries a COUNT-UP counter `n` = attacks completed
-        //  so far (0 = no lock yet, not present):
-        //
-        //   cur = n_before + 1  (attacks including the current one)
-        //   cur == 1 (first):   lock starts; no end branching
-        //   cur == 2 (second):  50% end (remove lock + confuse), 50% continue
-        //   cur >= 3 (third+):  always end (remove lock + confuse)
-        //
-        //  This produces a real 50/50 probability branch instead of a sampled
-        //  gen_range(2..=3), matching how sleep forks the outcome tree.
-        //
-        //  Decision parameters are collected here so the fork can happen AFTER all
-        //  other post-damage effects (self-destruct, Magician, etc.) have mutated `bs`.
-        //  The actual forking happens at the bottom of this function.
-        //
-        //  Disruption (total_dmg == 0: miss, immune, Protect, flinch, etc.) ends the
-        //  rampage immediately without confusion — UNLESS this was the guaranteed-final
-        //  3rd turn (cur >= 3), in which case still confuse per game quirk.
-        //  A disruption on the 2nd turn does NOT confuse (conservative approximation;
-        //  the in-cartridge behaviour would be 50%-confuse but forking all five
-        //  fail-branch sites is out of scope).
+        // Disruption (total_dmg == 0) ends the rampage without confusion — unless this
+        // was the guaranteed-final 3rd turn, which still confuses per game quirk (a
+        // 2nd-turn disruption is conservatively never confused, though in-cartridge
+        // it would be 50%; forking all five fail-branch sites is out of scope).
         let is_rampaging_move = matches!(move_data.name,
             PokemonMove::Thrash | PokemonMove::Outrage | PokemonMove::PetalDance | PokemonMove::RagingFury
         );
@@ -6171,20 +6154,12 @@ fn apply_post_damage_move_effects(
         };
 
         // Self-destruct moves: faint the user after damage is dealt.
-        //
-        //  "always" (Explosion, Self-Destruct, Misty Explosion): user always faints,
-        //   even if the move missed or the target was behind Protect. Damp already
-        //   prevented reaching this function when Damp is on the field.
-        //
-        //  "ifHit" (Final Gambit): user faints only when the move actually dealt damage
-        //   (total_dmg > 0). Ghost-immune and missed branches produce total_dmg == 0
-        //   and correctly skip the faint.
-        //
-        //  Memento and Healing Wish carry SelfDestructType::IfHit in the data but are
-        //  Status category moves: they are fully handled as hand-coded blocks in
-        //  execute_move and never reach this function.
-        //
-        //  Sturdy / Focus Sash / Focus Band do NOT protect the self-fainting user.
+        // "always" (Explosion, Self-Destruct, Misty Explosion) faints even on a miss or
+        // through Protect; Damp already prevented reaching this function when active.
+        // "ifHit" (Final Gambit) faints only when total_dmg > 0, so Ghost-immune and
+        // missed branches correctly skip the faint. Memento/Healing Wish carry IfHit in
+        // the data but are Status moves handled as hand-coded blocks in execute_move, so
+        // they never reach here. Sturdy/Focus Sash/Focus Band do not protect this faint.
         if !attacker_fainted {
             let should_faint = match move_data.self_destruct {
                 SelfDestructType::Always => true,
@@ -6617,7 +6592,6 @@ fn execute_action(
                     .unwrap_or_else(|| format!("{:?} slot {}", s.user_slot.player, s.user_slot.slot_index + 1));
                 println!("{}", format!("Executed Switch: new active at slot {} is {}", s.user_slot.slot_index + 1, user).bright_green());
             }
-            // Emit the Switch event with the send-out effects nested as reactions.
             if let Some(switch_state) = switch_state {
                 let reactions = state.pending_events.split_off(sendout_start);
                 state.pending_events.push(InformationEvent {
@@ -6637,7 +6611,6 @@ fn execute_action(
                 // (weather/terrain setters, Intimidate) the same way a Pokémon gaining an
                 // ability mid-battle does.
                 simulator_helpers::process_pokemon_gain_ability(&mut state, m.user_slot);
-                // Emit MegaEvolution event, then reveal the new ability if it changed.
                 if let Some(mega_mon) = simulator_helpers::get_pokemon_at_slot(&state, m.user_slot) {
                     let mega_species = mega_mon.species.clone();
                     let mega_ability = mega_mon.ability.clone();
@@ -6655,7 +6628,6 @@ fn execute_action(
             let mons = match t.user_slot.player { Player::P1 => &mut state.p1_active_mons, Player::P2 => &mut state.p2_active_mons };
             if let Some(mon) = mons.get_mut(slot_idx) { mon.is_tera = true; }
             match t.user_slot.player { Player::P1 => state.p1_has_tera = false, Player::P2 => state.p2_has_tera = false }
-            // Emit Terastallization event.
             if let Some(mon) = simulator_helpers::get_pokemon_at_slot(&state, t.user_slot) {
                 let slot = t.user_slot;
                 let tera_type = mon.tera_type.clone();
@@ -7190,7 +7162,6 @@ fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[
         groups.push(current_group);
     }
 
-    // For each group, get all permutations
     let mut group_perms: Vec<Vec<Vec<FieldSlot>>> = Vec::new();
     for g in &groups {
         if g.len() <= 1 {
@@ -7215,7 +7186,6 @@ fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[
         all_orders = new_orders;
     }
 
-    // Apply send_out effects in each order on a cloned base state
     let mut results: Vec<(BattleState, f64)> = Vec::new();
     for (order, prob) in all_orders {
         let mut st = base_state.clone();
@@ -7255,19 +7225,16 @@ fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[
     results
 }
 
-// Branching version of performing simultaneous switches: returns all possible resulting states with probabilities
 fn perform_simultaneous_switches_branching(
     next_state: &BattleState,
     switches: &[(FieldSlot, usize)],
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
 ) -> Vec<(BattleState, f64)> {
-    // First apply all swaps to a base state
     let mut base = next_state.clone();
     for (slot, bench_index) in switches {
         perform_switch_out_in(&mut base, *slot, *bench_index, pokemon_dex);
     }
-    // collect slots to process send-out effects for (the slots that were switched)
     let slots: Vec<FieldSlot> = switches.iter().map(|(s, _)| *s).collect();
     simulator_helpers::coalesce_branches(process_sendouts_in_speed_order_branching(&base, &slots, move_dex))
 }
@@ -7322,7 +7289,6 @@ fn battle_state_from_preview_branching(
         event_observer: None,
     };
 
-    // Collect all active send-out slots
     let mut slots: Vec<FieldSlot> = Vec::new();
     for slot_idx in 0..state.p1_active_mons.len() {
         slots.push(FieldSlot { player: Player::P1, slot_index: slot_idx as u8 });
@@ -7335,7 +7301,6 @@ fn battle_state_from_preview_branching(
     simulator_helpers::coalesce_branches(branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect())
 }
 
-// Branching apply_player_commands: returns possible MatchStates with probabilities
 fn apply_player_commands_branching(
     state: &MatchState,
     p1_cmd: &PlayerCommand,
@@ -7356,10 +7321,8 @@ fn apply_player_commands_branching(
 
             let mut next_state = battle.clone();
 
-            // Beginning of turn: set turn_started
             if !battle.turn_started && !battle.turn_ended {
                 next_state.turn_started = true;
-                // queue normal battle commands
                 if let PlayerCommand::Battle(p1_battle) = p1_cmd {
                     queue_battle_commands_for_player(battle, Player::P1, p1_battle, move_dex, &mut next_state.action_queue);
                 }
@@ -7398,7 +7361,6 @@ fn apply_player_commands_branching(
             // other active slot sends Pass (which queues no Action).  Once the replacement is in,
             // self_switch_pending is cleared and the remaining action_queue drains as normal.
             if let Some((pending_slot, switch_type)) = battle.self_switch_pending {
-                // Extract the chosen bench index from the owning player's command.
                 let owning_cmd = match pending_slot.player {
                     Player::P1 => p1_cmd,
                     Player::P2 => p2_cmd,
