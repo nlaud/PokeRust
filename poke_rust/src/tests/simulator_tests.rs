@@ -31132,9 +31132,8 @@ mod season2_items_and_abilities {
 
     #[test]
     fn metronome_item_resets_on_different_move() {
-        // Switching moves resets the streak: damage on turn 3 (after turn-1 Tackle,
-        // turn-2 Splash, turn-3 Tackle) should equal turn-1 damage (×1.0).
-        // Use no_consider_crit=true + damage_rolls=1 so each turn produces exactly one branch.
+        // Switching moves resets the streak, so turn-3 Tackle (after turn-1 Tackle,
+        // turn-2 Splash) should equal turn-1 damage.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
@@ -31159,8 +31158,6 @@ mod season2_items_and_abilities {
         let p1_splash = PlayerCommand::Battle(simple_attack(Player::P1, vec![1]));
         let p2_cmd   = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Turn 1: Tackle (streak=0, ×1.0 baseline).
-        // run_single_turn: consider_crit=false + damage_rolls=1 → single deterministic branch.
         let state1 = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
         let outcomes1 = run_single_turn(
             &MatchState::BattleState(state1), &p1_tackle, &p2_cmd, mdex, pdex,
@@ -31192,7 +31189,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn iron_ball_halves_speed() {
-        // Iron Ball cuts the holder's speed by 50%.
         let pdex = pokemon_dex();
         let mdex = move_dex();
         let base = mon(Species::Raticate, PokemonMove::Splash, Ability::None, None);
@@ -31209,7 +31205,6 @@ mod season2_items_and_abilities {
 
     #[test]
     fn iron_ball_grounds_flying_type_for_earthquake() {
-        // Iron Ball: Flying-type (normally immune to Ground) becomes susceptible.
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let mut target = mon(Species::Pidgeot, PokemonMove::Splash, Ability::None, Some(Item::IronBall));
@@ -31225,7 +31220,6 @@ mod season2_items_and_abilities {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             mdex, pdex,
         );
-        // The Flying-type should take damage from Earthquake (not immune).
         let any_damage = outcomes.iter().any(|(s, _)|
             matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp < initial_hp)
         );
@@ -31236,12 +31230,9 @@ mod season2_items_and_abilities {
 
     #[test]
     fn heat_rock_extends_sunny_day_to_8_turns() {
-        // Heat Rock: Sunny Day lasts 8 turns instead of 5. We set the weather via a move
-        // and check weather_turns after the turn resolves.
         let mdex = move_dex();
         let pdex = pokemon_dex();
 
-        // Control: Sunny Day without Heat Rock → 5 turns.
         let base = mon(Species::Charizard, PokemonMove::SunnyDay, Ability::None, None);
         let state_base = battle_state_from_lists(vec![base], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
         let (bs_base, _) = extract_battle_state(run_single_turn(
@@ -31254,7 +31245,6 @@ mod season2_items_and_abilities {
         // 5-turn initial → after one turn elapses during EOT processing it becomes 4.
         assert_eq!(bs_base.weather_turns, Some(4), "Control: Sunny Day (no rock) should have 4 turns left");
 
-        // Heat Rock: Sunny Day → 8 turns.
         let rock = mon(Species::Charizard, PokemonMove::SunnyDay, Ability::None, Some(Item::HeatRock));
         let state_rock = battle_state_from_lists(vec![rock], vec![], vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None)], vec![]);
         let (bs_rock, _) = extract_battle_state(run_single_turn(
@@ -31363,7 +31353,6 @@ mod new_moves {
 
     #[test]
     fn barb_barrage_doubles_power_vs_poison() {
-        // Clean target vs poisoned: average damage ratio should be ~2.0.
         let mut attacker = mon(Species::Toxapex, PokemonMove::BarbBarrage, Ability::None, None);
         attacker.stats[5] = 300; // move first
         let clean = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
@@ -31392,9 +31381,8 @@ mod new_moves {
 
     #[test]
     fn barb_barrage_doubles_power_vs_toxic_poison() {
-        // Use Ability::MagicGuard on both targets so EOT poison chip is suppressed entirely —
-        // this isolates the pure Barb Barrage damage doubling without EOT contamination.
-        // Clefable (Normal type, Magic Guard) is ideal: not Poison-immune, no type immunity.
+        // Magic Guard suppresses EOT poison chip on both targets, isolating the pure
+        // Barb Barrage damage doubling. Clefable is Poison-susceptible with no type immunity.
         let mut attacker = mon(Species::Toxapex, PokemonMove::BarbBarrage, Ability::None, None);
         attacker.stats[5] = 300;
         let clean = mon(Species::Clefable, PokemonMove::Splash, Ability::MagicGuard, None);
@@ -31512,7 +31500,6 @@ mod new_moves {
         let opp = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
 
         let state = battle_state_from_lists(vec![annihilape], vec![bench], vec![opp], vec![]);
-        // Switch P1 slot 0 -> bench index 0 (Snorlax comes in, Annihilape goes to back)
         let p1_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
         let outcomes = run_single_turn(
@@ -31533,10 +31520,9 @@ mod new_moves {
 
     #[test]
     fn lucky_chant_suppresses_crit_branching() {
-        // Must use simulate_turn directly with consider_crit=true — run_single_turn
-        // always passes consider_crit=false, so crits never branch there.
-        // Slash has a high crit ratio (4/8 at stage 2 counting critical_hit_ratio).
-        // With Lucky Chant: 1 branch (no crit). Without: 2 branches (crit + no-crit).
+        // run_single_turn hardcodes consider_crit=false, so crits never branch there —
+        // must call simulate_turn directly. Slash's high crit ratio (4/8) means Lucky
+        // Chant collapses what would be 2 branches (crit + no-crit) into 1.
         let mut attacker = mon(Species::Snorlax, PokemonMove::Slash, Ability::None, None);
         attacker.stats[5] = 300;
         let target = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
@@ -31551,7 +31537,6 @@ mod new_moves {
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Use simulate_turn with consider_crit=true and 1 damage roll so branches are crit/no-crit only.
         let outcomes_chant: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state_chant), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
@@ -31559,8 +31544,6 @@ mod new_moves {
             &MatchState::BattleState(state_none), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
-        // With Lucky Chant: only 1 branch (no crits possible).
-        // Without: Slash's high crit ratio produces a crit branch + a non-crit branch.
         assert_eq!(outcomes_chant.len(), 1,
             "Lucky Chant should produce exactly 1 branch (no crit); got {}", outcomes_chant.len());
         assert!(outcomes_none.len() > 1,
@@ -31637,7 +31620,6 @@ mod new_moves {
 
     #[test]
     fn focus_punch_fails_when_hit_first() {
-        // P2 attacks first (higher speed) -> P1 gets hit -> Focus Punch fails.
         let mut p1 = mon(Species::Snorlax, PokemonMove::FocusPunch, Ability::None, None);
         p1.stats[5] = 1;
         let mut p2 = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None, None);
@@ -31717,7 +31699,7 @@ mod new_moves {
     fn dream_eater_heals_user_from_sleeping_target() {
         let mut p1 = mon(Species::Gengar, PokemonMove::DreamEater, Ability::None, None);
         p1.stats[5] = 300;
-        p1.hp = p1.stats[0] / 2; // start at half HP
+        p1.hp = p1.stats[0] / 2;
         let p1_start_hp = p1.hp;
         let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
         p2.status = Some(Status::Sleep(2));
@@ -31797,8 +31779,8 @@ mod new_moves {
         let mut p1 = mon(Species::Sableye, PokemonMove::TopsyTurvy, Ability::None, None);
         p1.stats[5] = 300;
         let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
-        p2.boosts[0] = 2;   // +2 Atk -> -2
-        p2.boosts[1] = -1;  // -1 Def -> +1
+        p2.boosts[0] = 2;
+        p2.boosts[1] = -1;
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let (bs, _) = extract_battle_state(run_single_turn(
@@ -31816,7 +31798,6 @@ mod new_moves {
         let mut p1 = mon(Species::Sableye, PokemonMove::TopsyTurvy, Ability::None, None);
         p1.stats[5] = 300;
         let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None, None);
-        // All boosts == 0 -> should fail with no effect.
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let (bs, _) = extract_battle_state(run_single_turn(
@@ -31853,8 +31834,6 @@ mod new_moves {
         use crate::state::battle::BattleCommand;
         use crate::simulator::get_possible_commands_for_active_slot;
 
-        // P1 has Imprison active + knows Splash in slot 1; P2 knows Splash.
-        // P2 should not be able to select Splash.
         let mut p1 = mon(Species::Snorlax, PokemonMove::Imprison, Ability::None, None);
         p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Imprison, 100));
         // slot 1 = Splash (our mon() helper sets slot 0 = Imprison, slot 1 = Splash)
@@ -31897,9 +31876,8 @@ mod new_moves {
 
     #[test]
     fn make_it_rain_drops_user_spa_by_two() {
-        // Make It Rain has 95% accuracy — there are 2 outcome branches (hit + miss).
-        // The self-SpA drop applies regardless of whether the move hits.
-        // Use find_map instead of extract_battle_state to handle multiple branches.
+        // 95% accuracy means hit and miss both branch; use find_map (not extract_battle_state)
+        // to pick out the hit branch, since only a successful hit triggers the self-secondary.
         let mut p1 = mon(Species::Gholdengo, PokemonMove::MakeItRain, Ability::None, None);
         p1.stats[5] = 300;
         let start_spa = p1.boosts[2];
@@ -31913,8 +31891,6 @@ mod new_moves {
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
             &move_dex(), &pokemon_dex(),
         );
-        // Find a branch where the move hit (P2 took damage) and verify SpA dropped -2.
-        // The self-secondary fires on a successful hit.
         let hit_bs = outcomes.iter().find_map(|(ms, _)| {
             if let MatchState::BattleState(bs) = ms {
                 if bs.p2_active_mons[0].hp < p2_initial_hp { Some(bs) } else { None }
@@ -32011,7 +31987,6 @@ mod rollout {
 
     #[test]
     fn defense_curl_volatile_does_not_stack() {
-        // Using Defense Curl a second time should not add a second volatile.
         let p1 = simple_mon(Species::Snorlax, PokemonMove::DefenseCurl, Ability::None);
         let p2 = simple_mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
 
@@ -32021,9 +31996,7 @@ mod rollout {
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-        // Turn 1
         let after_t1 = one_turn(&ms, &p1_cmd, &p2_cmd);
-        // Turn 2 — use Defense Curl again
         let after_t2 = one_turn(&after_t1, &p1_cmd, &p2_cmd);
 
         if let MatchState::BattleState(ref bs) = after_t2 {

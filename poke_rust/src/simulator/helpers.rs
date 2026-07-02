@@ -292,7 +292,6 @@ pub fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
     results
 }
 
-/// Check if a move has a specific MoveFlag
 pub fn move_has_flag(move_data: &MoveData, flag: &MoveFlag) -> bool {
     move_data
         .flags
@@ -1385,7 +1384,6 @@ pub(crate) fn effective_move_type(
 fn effective_priority_boost(state: &BattleState, user: &PokemonState, move_data: &MoveData) -> i8 {
     let mut boost = 0i8;
 
-    // Grassy Glide: +1 priority on Grassy Terrain.
     if move_data.name == PokemonMove::GrassyGlide
         && pokemon_is_on_terrain(state, user, &Terrain::GrassyTerrain)
     {
@@ -1393,13 +1391,11 @@ fn effective_priority_boost(state: &BattleState, user: &PokemonState, move_data:
     }
 
     if !pokemon_ability_is_suppressed(state, user) {
-        // Prankster: status moves get +1 priority.
         if user.ability == Ability::Prankster && matches!(move_data.category, MoveCategory::Status)
         {
             boost += 1;
         }
 
-        // Gale Wings: Flying-type moves get +1 priority while the user is at full HP.
         if user.ability == Ability::GaleWings
             && user.hp == user.stats[0].max(1)
             && effective_move_type(state, user, move_data) == PokemonType::Flying
