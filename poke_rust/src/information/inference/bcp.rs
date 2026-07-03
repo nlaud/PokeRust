@@ -87,11 +87,21 @@ pub(super) fn run_bcp(state: &mut UnknownBattleState, allow_repeat_items: bool) 
 /// Collect all valid `SpeedComparison` literals from the predicate set.
 /// Separated from propagation so the caller can cache the list across BCP iterations
 /// and only re-collect when the clause list actually changes.
+///
+/// S17: only **unit** clauses are collected. A `SpeedComparison` that shares its
+/// clause with live escape disjuncts (Quick Claw, Quick Draw, Choice Scarf, Stall,
+/// weather abilities, …) is a *conditional* constraint — the observed move order is
+/// equally explained by any escape. Enforcing it as a hard Spe bound excludes every
+/// escape world (e.g. a Quick Claw proc letting a slow mon move before a fast known
+/// one raised the slow mon's min Spe above its species maximum → contradiction
+/// panic). BCP prunes definitively-false literals every iteration, so a clause whose
+/// escapes have all been excluded collapses to unit and is picked up here then.
 pub(super) fn collect_speed_comparisons(state: &UnknownBattleState) -> Vec<(usize, usize, u32, u32)> {
     let total = super::mons_count_battle(state);
     state
         .predicates
         .iter()
+        .filter(|clause| clause.len() == 1)
         .flat_map(|clause| {
             clause.iter().filter_map(|lit| {
                 if let Statement::SpeedComparison {

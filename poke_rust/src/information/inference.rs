@@ -1157,6 +1157,12 @@ fn pass1_apply_event(
                         );
                     }
                 }
+                // S19: capture the outgoing item before it is overwritten, so the
+                // stale HasItem clauses about this mon can be resolved historically.
+                let outgoing = get_mon_by_idx(state, idx).and_then(|m| match &m.item {
+                    Unknown::Known(i) => Some(i.clone()),
+                    _ => None,
+                });
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.item = Unknown::Known(item.clone());
                     mon.item_lost = false;
@@ -1164,6 +1170,7 @@ fn pass1_apply_event(
                     // ItemRevealed re-confirming it skips the item-clause exclusion (S12).
                     mon.item_was_transferred = true;
                 }
+                resolve_item_clauses_on_item_change(state, idx, outgoing);
             }
         }
         EventKind::ItemLost {
@@ -1182,6 +1189,10 @@ fn pass1_apply_event(
                     }
                     mon.item = Unknown::Known(Item::None);
                 }
+                // S19: the held item just changed — persisted HasItem clauses about
+                // this mon describe the item that was consumed/removed (named by the
+                // event), not the now-empty slot.
+                resolve_item_clauses_on_item_change(state, idx, Some(item.clone()));
             }
         }
 
@@ -1752,6 +1763,10 @@ fn pass1_apply_switch_event(
 ) {
     match &event.kind {
         EventKind::Switch(sw) => {
+            // S18: the active mon_idx identifies a SLOT, not a Pokémon — drop every
+            // persisted clause/setter record about the outgoing occupant before the
+            // slot is re-bound, or they silently constrain the incoming mon.
+            purge_mon_scoped_knowledge(state, &sw.slot);
             apply_switch_out_reset(state, &sw.slot);
             // B1: preserve the outgoing mon to the bench so its state (HP, move reveals,
             // ability/item narrowing) survives for future re-entry inference.
@@ -1761,6 +1776,8 @@ fn pass1_apply_switch_event(
         }
         EventKind::SimultaneousSwitch { switches } => {
             for sw in switches {
+                // S18: see the single-switch arm above.
+                purge_mon_scoped_knowledge(state, &sw.slot);
                 apply_switch_out_reset(state, &sw.slot);
                 // B1: preserve each outgoing mon before any pass1_switch replaces its slot.
                 bench_outgoing_mon(state, &sw.slot);
@@ -1772,6 +1789,147 @@ fn pass1_apply_switch_event(
             pass1_ability_absence_inference(state, &slots, &event.reactions, ctx);
         }
         _ => {}
+    }
+}
+
+/// `true` if `stmt` (recursing through `Not`) constrains the Pokémon at `mon_idx`.
+fn statement_references_mon(stmt: &Statement, idx: usize) -> bool {
+    match stmt {
+        Statement::Not(inner) => statement_references_mon(inner, idx),
+        Statement::HasItem { mon_idx, .. }
+        | Statement::HasAbility { mon_idx, .. }
+        | Statement::NatureBoostsStat { mon_idx, .. }
+        | Statement::NatureNerfsStat { mon_idx, .. }
+        | Statement::EVIVStatGE { mon_idx, .. }
+        | Statement::EVIVStatLE { mon_idx, .. }
+        | Statement::KnowsThreateningMove { mon_idx, .. } => *mon_idx == idx,
+        Statement::SpeedComparison { fast_idx, slow_idx, .. } => {
+            *fast_idx == idx || *slow_idx == idx
+        }
+        Statement::WeatherTurns { .. }
+        | Statement::TerrainTurns { .. }
+        | Statement::SideConditionTurns { .. } => false,
+    }
+}
+
+/// S18: an active `mon_idx` is a *slot* index — stable as a number (see S1), but
+/// re-bound to a different physical Pokémon whenever the slot's occupant switches.
+/// Persisted `Statement`s (SpeedComparison, HasItem/HasAbility disjunctions, EVIV
+/// bounds) and the weather/terrain/screen setter records all store the slot index of
+/// the mon they were observed on; left in place across a switch, BCP and the timer
+/// machinery would evaluate and even *force* them against the incoming Pokémon
+/// (e.g. a SpeedComparison derived from Mon A's move order raising the fresh
+/// switch-in B's min Spe, or a timer collapse revealing A's Heat Rock as Known on B).
+///
+/// Called at the moment the occupant leaves. Dropping a whole clause when any of its
+/// literals references the slot is sound (removing a constraint only widens); the
+/// cost is completeness — knowledge about the benched mon that lived only in the
+/// predicate store is forgotten. Field-level knowledge (item/ability/EV bounds) is
+/// carried to the bench by `bench_outgoing_mon` and survives re-entry.
+fn purge_mon_scoped_knowledge(state: &mut UnknownBattleState, slot: &FieldSlot) {
+    let Some(idx) = mon_idx_for_active_slot(state, slot) else {
+        return; // Initial lead send-out: the slot was never occupied.
+    };
+    state
+        .predicates
+        .retain(|clause| !clause.iter().any(|lit| statement_references_mon(lit, idx)));
+    if state.weather_setter_mon_idx == Some(idx) {
+        state.weather_setter_mon_idx = None;
+    }
+    if state.terrain_setter_mon_idx == Some(idx) {
+        state.terrain_setter_mon_idx = None;
+    }
+    for setter in state
+        .p1_side_condition_setters
+        .iter_mut()
+        .chain(state.p2_side_condition_setters.iter_mut())
+    {
+        if *setter == Some(idx) {
+            *setter = None;
+        }
+    }
+}
+
+/// `true` if `stmt` (recursing through `Not`) is a `HasItem` literal about `mon_idx`.
+fn statement_is_item_literal_for(stmt: &Statement, idx: usize) -> bool {
+    match stmt {
+        Statement::Not(inner) => statement_is_item_literal_for(inner, idx),
+        Statement::HasItem { mon_idx, .. } => *mon_idx == idx,
+        _ => false,
+    }
+}
+
+/// Truth value of an item literal about `mon_idx` *in the holding window that just
+/// ended*, given the mon held `outgoing` throughout it. `None` = not an item literal
+/// about this mon (leave untouched).
+fn historical_item_literal_value(stmt: &Statement, idx: usize, outgoing: &Item) -> Option<bool> {
+    match stmt {
+        Statement::Not(inner) => historical_item_literal_value(inner, idx, outgoing).map(|b| !b),
+        Statement::HasItem { mon_idx, item } if *mon_idx == idx => Some(item == outgoing),
+        _ => None,
+    }
+}
+
+/// S19: `HasItem` clauses encode "held item X *at observation time*", but BCP
+/// evaluates them against the mon's *current* item. Once the held item changes
+/// mid-battle (Knock Off / Thief / Fling → `ItemLost`, berry or gem consumption →
+/// `ItemLost{consumed}`, Trick / Switcheroo / Recycle / Pickup → `ItemGained`),
+/// every persisted clause about this mon's item is stale: a `[HasItem(BrightPowder)
+/// ∨ HasItem(LaxIncense)]` miss-explanation clause became an unsatisfiable-clause
+/// panic when the explaining item was later knocked off (item now `Known(None)`
+/// falsifies both literals), and an `[EVIVStatGE ∨ HasItem(OccaBerry)]` bound got
+/// unit-forced once the berry disjunct was falsified by its own consumption —
+/// raising the stat floor above the true berry-world value.
+///
+/// Every surviving clause was emitted (or last resolved) during the holding window
+/// that just ended — this function maintains that invariant inductively by running
+/// at *every* item-change event. So when the outgoing item is known, each item
+/// literal about this mon has a definite historical truth value: resolve it —
+/// satisfied clauses are dropped, falsified literals pruned (a pruned-to-unit clause
+/// is forced by the next BCP run, e.g. the `[HasItem(DampRock) ∨ WeatherTurns{5}]`
+/// pair correctly collapses to the base-duration branch when the setter turns out to
+/// have held a berry). When the outgoing item is unknown (`ItemGained` onto an
+/// unresolved item), the clauses cannot be resolved and are purged — sound, since
+/// removing a constraint only widens.
+fn resolve_item_clauses_on_item_change(
+    state: &mut UnknownBattleState,
+    idx: usize,
+    outgoing: Option<Item>,
+) {
+    let Some(outgoing) = outgoing else {
+        state
+            .predicates
+            .retain(|clause| !clause.iter().any(|lit| statement_is_item_literal_for(lit, idx)));
+        return;
+    };
+    let mut i = 0;
+    while i < state.predicates.len() {
+        let clause = &state.predicates[i];
+        // A historically-true literal satisfies the whole (disjunctive) clause.
+        if clause
+            .iter()
+            .any(|lit| historical_item_literal_value(lit, idx, &outgoing) == Some(true))
+        {
+            state.predicates.remove(i);
+            continue;
+        }
+        let pruned: Vec<Statement> = clause
+            .iter()
+            .filter(|lit| historical_item_literal_value(lit, idx, &outgoing) != Some(false))
+            .cloned()
+            .collect();
+        if pruned.is_empty() {
+            inference_contradiction!(
+                idx,
+                "clause has no explanation left after resolving item literals against \
+                 the outgoing item {:?}",
+                outgoing
+            );
+        }
+        if pruned.len() != state.predicates[i].len() {
+            state.predicates[i] = pruned;
+        }
+        i += 1;
     }
 }
 
@@ -2247,8 +2405,19 @@ fn narrow_species_by_learnset(
 /// (not cleared on switch-out) so that a Pokémon using a new move after switching back
 /// in is never incorrectly flagged as Choice-locked.
 ///
+/// S20: skipped once the mon's held item arrived via a mid-battle transfer
+/// (`item_was_transferred`, set by `ItemGained` — Trick / Switcheroo / Recycle /
+/// Pickup). Choice lock binds from the first move used *while holding* the Choice
+/// item, so "used move A, was Tricked a Choice Scarf, then legally picked move B" is
+/// a perfectly consistent sequence — excluding the Scarf from the mon's now-`Known`
+/// item was a guaranteed contradiction panic. (An item *loss* mid-stint needs no
+/// guard: `ItemLost` pins the item to `Known(None)`, on which the exclusion no-ops.)
+///
 /// Call AFTER `used_moves_this_field` has been updated for `new_move`.
 fn pass1_choice_exclusion(mon: &mut UnknownPokemonState, new_move: &PokemonMove) {
+    if mon.item_was_transferred {
+        return;
+    }
     // Count how many distinct known moves have been used this field.
     let distinct_used: Vec<&PokemonMove> = mon
         .known_moves
@@ -3064,10 +3233,15 @@ fn pass2_item_from_move(
             .and_then(|i| get_mon_by_idx(state, i))
             .map_or(false, |m| m.fainted);
 
-        if hit_any_opponent && !user_fainted {
+        // S21: the sim gates the LO chip on `item_is_active` — Magic Room (field-wide)
+        // or Klutz on the attacker silences the recoil even when Life Orb IS held, so
+        // absence is only evidence when neither can be in play.
+        let items_suppressed = state.pseudo_weathers.contains(&PseudoWeather::MagicDeluge);
+
+        if hit_any_opponent && !user_fainted && !items_suppressed {
             if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
                 if !has_lo_recoil {
-                    let (could_mg, could_sf, has_secondary) = {
+                    let (could_mg, could_sf, could_klutz, has_secondary) = {
                         let um = get_mon_by_idx(state, user_idx);
                         (
                             um.map_or(false, |m| {
@@ -3076,17 +3250,20 @@ fn pass2_item_from_move(
                             um.map_or(false, |m| {
                                 !unknown_is_excluded(&m.possible_abilities, &Ability::SheerForce)
                             }),
+                            um.map_or(false, |m| {
+                                !unknown_is_excluded(&m.possible_abilities, &Ability::Klutz)
+                            }),
                             !move_data.secondaries.is_empty(),
                         )
                     };
 
-                    if !could_mg && !(could_sf && has_secondary) {
+                    if !could_mg && !(could_sf && has_secondary) && !could_klutz {
                         // Definitively no Life Orb on this mon.
                         if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
                             unknown_exclude(&mut mon.item, &Item::LifeOrb, "no-lo-recoil");
                         }
                     } else {
-                        // Predicate: Not(LifeOrb) ∨ MagicGuard ∨ (SheerForce ∧ secondary)
+                        // Predicate: Not(LifeOrb) ∨ MagicGuard ∨ (SheerForce ∧ secondary) ∨ Klutz
                         let mut clause = vec![Statement::Not(Box::new(Statement::HasItem {
                             mon_idx: user_idx,
                             item: Item::LifeOrb,
@@ -3101,6 +3278,13 @@ fn pass2_item_from_move(
                             clause.push(Statement::HasAbility {
                                 mon_idx: user_idx,
                                 ability: Ability::SheerForce,
+                            });
+                        }
+                        // S21: Klutz silences the LO chip while the orb stays held.
+                        if could_klutz {
+                            clause.push(Statement::HasAbility {
+                                mon_idx: user_idx,
+                                ability: Ability::Klutz,
                             });
                         }
                         state.predicates.push(clause);
@@ -3412,16 +3596,26 @@ fn pass2_contact_absence(
         // Defender-side suppression: if the DEFENDER's ability might be suppressed
         // (Neutralizing Gas possibly on the field, or Gastro Acid on the defender),
         // Rough Skin / Iron Barbs would be silent even if present — excluding them
-        // would be unsound. Rocky Helmet is an item and is unaffected by suppression.
+        // would be unsound. Rocky Helmet is an item and is unaffected by ability
+        // suppression, but IS silenced by item suppression (see below).
         let defender_maybe_suppressed = unknown_ability_might_be_suppressed(state, target);
+
+        // S21: the sim gates the Helmet chip on `item_is_active` — Magic Room
+        // (field-wide) or Klutz on the DEFENDER keeps the Helmet silent while it is
+        // genuinely held, so absence is only evidence when neither can be in play.
+        let items_suppressed = state.pseudo_weathers.contains(&PseudoWeather::MagicDeluge);
 
         let Some(mon) = get_mon_mut_by_idx(state, target_idx) else {
             continue;
         };
+        let defender_klutz_possible =
+            !unknown_is_excluded(&mon.possible_abilities, &Ability::Klutz);
 
         // Rocky Helmet: Magic Guard on the attacker prevents the chip, so Helmet
-        // absence is only certain when Magic Guard is also excluded.
-        if !helmet_revealed && !magic_guard_possible {
+        // absence is only certain when Magic Guard is also excluded — and (S21) when
+        // the Helmet itself cannot have been inert (Magic Room / defender Klutz).
+        if !helmet_revealed && !magic_guard_possible && !items_suppressed && !defender_klutz_possible
+        {
             unknown_exclude(&mut mon.item, &Item::RockyHelmet, "no-helmet-chip");
         }
 
@@ -4521,16 +4715,15 @@ fn pass3_damage_to_stats(
             continue;
         };
 
-        // Collect ALL DamageDealt reactions for this target, in event order.
-        let damage_reactions: Vec<&InformationEvent> = event
+        // Count this target's damaging hits (multi-hit detection).
+        let n_hits = event
             .reactions
             .iter()
             .filter(|r| {
                 matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == target_slot)
             })
-            .collect();
-
-        if damage_reactions.is_empty() {
+            .count();
+        if n_hits == 0 {
             continue;
         }
 
@@ -4547,24 +4740,52 @@ fn pass3_damage_to_stats(
             continue;
         };
 
-        // For multi-hit: use a global crit flag (any hit critted) — sound but slightly
-        // looser than per-hit crit tracking. For single-hit this is exact.
-        let is_crit = move_ctx.is_crit;
-
         // Detect whether this target's HP is a multi-hit sequence.
-        let is_multi = move_data.multihit_range[0] > 0 || damage_reactions.len() > 1;
+        let is_multi = move_data.multihit_range[0] > 0 || n_hits > 1;
 
-        // Running HP tracks the HP value between consecutive hits.
+        // S23: walk the target's reactions IN ORDER, tracking three things the old
+        // DamageDealt-only collection got wrong for multi-hit sequences:
+        //
+        // 1. Per-hit crit — the sim emits `Crit{target}` immediately before the hit's
+        //    own `DamageDealt` (single emit site, gated on damage > 0), so a pending
+        //    flag attributes each crit to exactly its hit. The old global "any hit
+        //    critted" flag applied the crit constraint to NON-crit hits too, whose
+        //    feasible-BSV interval (observed damage ÷ crit multiplier) sits below the
+        //    truth — an unsound exclusion whenever a mixed-crit multi-hit landed.
+        //
+        // 2. Interleaved heals — a pinch berry firing mid-sequence is emitted as its
+        //    own `Healed` between two `DamageDealt`s (see the emission convention in
+        //    the module README). Skipping it left the next hit's baseline at the
+        //    pre-berry value, understating that hit's damage by the heal amount.
+        //
+        // 3. `current_hp` is passed down as each hit's true pre-hit HP so the oracle
+        //    materializes the defender at the HP the hit was actually taken at —
+        //    full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) were
+        //    previously evaluated against the post-move HP (pass 1 has already applied
+        //    the whole reaction tree by the time Pass 3 runs), which disabled them for
+        //    exactly the hit that dropped the defender below full HP.
         let mut current_hp: PokemonHP = pre_hp.clone();
+        let mut pending_crit = false;
+        let mut hit_idx: usize = 0;
 
-        for (hit_idx, dmg_reaction) in damage_reactions.iter().enumerate() {
-            let new_hp = match &dmg_reaction.kind {
-                EventKind::DamageDealt { new_hp, .. } => new_hp,
-                _ => {
-                    current_hp = current_hp.clone();
+        for reaction in &event.reactions {
+            let new_hp = match &reaction.kind {
+                EventKind::Crit { target } if target == target_slot => {
+                    pending_crit = true;
                     continue;
                 }
+                EventKind::Healed { target, new_hp } | EventKind::SetHp { target, new_hp }
+                    if target == target_slot =>
+                {
+                    // Baseline moves without being a damaging hit.
+                    current_hp = new_hp.clone();
+                    continue;
+                }
+                EventKind::DamageDealt { target, new_hp } if target == target_slot => new_hp,
+                _ => continue,
             };
+            let is_crit = pending_crit;
+            pending_crit = false;
 
             // Per-hit BP override for fixed-BP multi-hit moves (Triple Kick etc.).
             // None for normal multi-hit moves (each hit uses move's base_power).
@@ -4578,6 +4799,7 @@ fn pass3_damage_to_stats(
             } else {
                 None
             };
+            hit_idx += 1;
 
             // ── Classify direction ────────────────────────────────────────────
             // Direction B: target HP is Number → exact damage; bound ATTACKER's stat.
@@ -4597,6 +4819,7 @@ fn pass3_damage_to_stats(
                             move_data,
                             &off_stat,
                             is_crit,
+                            &current_hp,
                             exact_damage,
                             bp_override,
                             speed_dep_bp,
@@ -4605,13 +4828,14 @@ fn pass3_damage_to_stats(
                 }
                 (PokemonHP::Percent(pre_pct), PokemonHP::Percent(post_pct)) => {
                     if *post_pct < *pre_pct {
-                        let delta_pct = pre_pct - post_pct;
                         let Some(def_stat) =
                             crate::simulator::helpers::move_defensive_stat(move_data)
                         else {
                             current_hp = new_hp.clone();
                             continue;
                         };
+                        // S22: pass both display percents — the damage band must
+                        // account for the rounding of each endpoint separately.
                         pass3_direction_a(
                             state,
                             event,
@@ -4623,7 +4847,9 @@ fn pass3_damage_to_stats(
                             move_data,
                             &def_stat,
                             is_crit,
-                            delta_pct,
+                            &current_hp,
+                            *pre_pct,
+                            *post_pct,
                             bp_override,
                             speed_dep_bp,
                         );
@@ -4994,6 +5220,54 @@ fn achievable_defender_hp_values(
     vals
 }
 
+/// The exact raw-HP interval that displays as percent `p` for a mon with `max_hp`.
+///
+/// Inverts `hp_to_percent` (round-half-up, 0 only at faint, 100 only at full,
+/// otherwise clamped to 1–99) by direct enumeration — O(max_hp), trivially correct,
+/// and negligible next to the Pass 3 oracle calls. Returns `None` when no raw HP
+/// displays as `p` under this `max_hp` hypothesis (the hypothesis is then
+/// incompatible with the observation and may be skipped — sound, it excludes only a
+/// provably impossible world).
+pub(crate) fn percent_bucket(p: u8, max_hp: u16) -> Option<(u16, u16)> {
+    use crate::simulator::helpers::hp_to_percent;
+    if p == 0 {
+        return Some((0, 0));
+    }
+    if p >= 100 {
+        return Some((max_hp, max_hp));
+    }
+    let mut lo: Option<u16> = None;
+    let mut hi = 0u16;
+    for hp in 1..max_hp {
+        if hp_to_percent(hp, max_hp) == p {
+            if lo.is_none() {
+                lo = Some(hp);
+            }
+            hi = hp;
+        }
+    }
+    lo.map(|l| (l, hi))
+}
+
+/// S22: the sound raw-damage interval for an observed `pre_pct → post_pct` display
+/// transition under the max-HP hypothesis `max_hp`.
+///
+/// The former derivation treated `delta_pct = pre_pct − post_pct` as a single
+/// rounding of the damage (`[(δ−0.5)%, (δ+0.5)%]` of max HP). But both endpoints
+/// carry their own ±0.5% display rounding, so the true band is up to twice as wide —
+/// for a 362-HP Blissey the old band could exclude several achievable damage values,
+/// and with them the true defensive BSV (unsound exclusion). Only a `pre_pct` of 100
+/// (full HP is displayed exactly) or a `post_pct` of 0 (faint is displayed exactly)
+/// shrinks that side's rounding to zero — which the exact bucket intersection below
+/// captures automatically.
+fn percent_delta_damage_band(pre_pct: u8, post_pct: u8, max_hp: u16) -> Option<(u16, u16)> {
+    let (pre_lo, pre_hi) = percent_bucket(pre_pct, max_hp)?;
+    let (post_lo, post_hi) = percent_bucket(post_pct, max_hp)?;
+    let d_lo = pre_lo.saturating_sub(post_hi).max(1);
+    let d_hi = pre_hi.saturating_sub(post_lo);
+    if d_hi == 0 { None } else { Some((d_lo, d_hi)) }
+}
+
 /// Per-nature-class neutral-gear BSV bounds produced by the Pass 3 oracle search.
 /// Shared by both `pass3_direction_b` (attacker's offensive stat) and
 /// `pass3_direction_a` (defender's defensive stat).
@@ -5217,6 +5491,10 @@ fn pass3_direction_b(
     move_data: &crate::state::dex_data::MoveData,
     off_stat: &crate::state::dex_data::PokemonStat,
     is_crit: bool,
+    // S23: the HP the target was at when THIS hit landed (pass 1 has already applied
+    // the whole reaction tree, so the live field holds the post-move HP — wrong for
+    // full-HP-gated reducers like Multiscale on the hit that broke full HP).
+    hit_pre_hp: &PokemonHP,
     exact_damage: u16,
     // Per-hit base power override for multi-hit moves (None = use move's base_power).
     bp_override: Option<u16>,
@@ -5230,9 +5508,11 @@ fn pass3_direction_b(
     let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
         return;
     };
-    let Some(target_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+    let Some(mut target_unk) = get_mon_by_idx(state, target_idx).cloned() else {
         return;
     };
+    // S23: materialize the target at the HP this hit was actually taken at.
+    target_unk.hp = hit_pre_hp.clone();
 
     // Need known attacker species for BSV-based inference.
     let base_stats = match &attacker_unk.possible_species {
@@ -5819,7 +6099,14 @@ fn pass3_direction_a(
     move_data: &crate::state::dex_data::MoveData,
     def_stat: &crate::state::dex_data::PokemonStat,
     is_crit: bool,
-    delta_pct: u8,
+    // S23: the HP the defender was at when THIS hit landed (the live field holds the
+    // post-move HP by the time Pass 3 runs — see pass3_direction_b).
+    hit_pre_hp: &PokemonHP,
+    // S22: pre-hit and post-hit DISPLAY percents. Each carries its own display
+    // rounding; the damage band is derived per max-HP hypothesis from the exact
+    // display buckets, not from the delta alone.
+    pre_pct: u8,
+    post_pct: u8,
     // Per-hit base power override for multi-hit moves.
     bp_override: Option<u16>,
     // True for Gyro Ball / Electro Ball — defender's speed affects BP.
@@ -5843,9 +6130,13 @@ fn pass3_direction_a(
         return;
     }
 
-    let Some(defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+    let Some(mut defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
         return;
     };
+    // S23: materialize the defender at the HP this hit was actually taken at, so
+    // full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) stay live for
+    // the hit that broke full HP.
+    defender_unk.hp = hit_pre_hp.clone();
     let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
         return;
     };
@@ -6015,14 +6306,12 @@ fn pass3_direction_a(
     let hp_candidates =
         achievable_defender_hp_values(base_stats[0], level, ctx.config, &defender_unk);
     for hp_cand in hp_candidates {
-        // Convert percent delta to raw damage interval for this candidate max HP.
-        // Convention: Percent(p) = round(current_hp * 100 / max_hp), so:
-        //   p = round(hp * 100 / max_hp)  →  hp = round(p * max_hp / 100)
-        // Damage interval for delta_pct p: [floor((p-0.5)*max_hp/100), ceil((p+0.5)*max_hp/100)]
-        // clamped to [1, max_hp].  Sound: this is wider than the actual rounding bucket.
-        let hp_c = hp_cand as f64;
-        let d_lo = ((delta_pct as f64 - 0.5) * hp_c / 100.0).floor().max(1.0) as u16;
-        let d_hi = ((delta_pct as f64 + 0.5) * hp_c / 100.0).ceil().min(hp_c) as u16;
+        // S22: exact damage band for this max-HP hypothesis from the display buckets
+        // of BOTH endpoints (each percent carries its own rounding). A `None` band
+        // means this hp_cand cannot display the observed percents at all — skip it.
+        let Some((d_lo, d_hi)) = percent_delta_damage_band(pre_pct, post_pct, hp_cand) else {
+            continue;
+        };
 
         for (class_idx, (nat_mod, _is_boost, _is_nerf)) in nature_classes.iter().enumerate() {
             // Thin wrapper so the two call sites below don't repeat the full argument list.
