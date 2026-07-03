@@ -4027,6 +4027,23 @@ fn pass_eot_heal(
             continue;
         }
 
+        // S6 defensive guard: `emit_eot_hp_deltas` diffs HP across a whole EOT
+        // sub-phase with ONE before/after snapshot — if this mon ALSO took chip
+        // damage (DamageDealt) or consumed a berry (ItemLost{consumed:true}) this
+        // same EndOfTurn, the observed Healed could be the NET result of chip
+        // clobbered by a pinch-berry overheal, not a passive-item heal. That netting
+        // is a real (separately tracked) gap in the emission layer — until it is
+        // fixed there, this pass cannot soundly distinguish "pure Leftovers heal"
+        // from "sandstorm chip masked by Sitrus Berry", so skip rather than risk
+        // pinning the wrong item (or panicking when the true item excludes Leftovers).
+        let has_other_eot_hp_event_same_target = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
+                || matches!(&r.kind, EventKind::ItemLost { slot: t, consumed: true, .. } if t == target)
+        });
+        if has_other_eot_hp_event_same_target {
+            continue;
+        }
+
         let is_poison = known_types
             .as_ref()
             .map_or(false, |ts| ts.contains(&PokemonType::Poison));
@@ -4145,6 +4162,23 @@ fn pass_eot_sand_immunity(
             matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == &field_slot)
         });
         if took_sand_chip {
+            continue;
+        }
+
+        // S6 defensive guard: `emit_eot_hp_deltas` diffs HP across the whole weather
+        // sub-phase with ONE before/after snapshot. If the sand chip fired but was
+        // fully offset by a pinch berry (Sitrus etc.) triggered by that SAME chip
+        // (`deal_residual_damage` calls `take_damage`, which checks berries
+        // internally), the net delta can show as a `Healed` event instead of
+        // `DamageDealt` — or, in the exact-cancel case, no HP-change event at all,
+        // only the berry's `ItemLost`. Either way "no DamageDealt" is NOT reliable
+        // evidence of immunity here; skip rather than risk an unsound sand-immunity
+        // clause (or a later contradiction-panic when the true item conflicts).
+        let chip_masked_by_berry = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::Healed { target: t, .. } if t == &field_slot)
+                || matches!(&r.kind, EventKind::ItemLost { slot: t, consumed: true, .. } if t == &field_slot)
+        });
+        if chip_masked_by_berry {
             continue;
         }
 

@@ -33342,6 +33342,92 @@ mod event_round_trip {
         );
     }
 
+    // ── Regression: S5 — a mid-hit pinch berry must be its own Healed event ────
+    //
+    // Before the S5 fix, a Sitrus/Oran-style berry firing DURING a hit was folded
+    // into the same DamageDealt as the hit itself (take_damage internally applies
+    // damage then immediately checks for a berry trigger, and the caller captured
+    // only the final post-berry HP). This understated the true damage dealt — a
+    // real player (and Pass 3's damage-to-stat inference) sees a DamageDealt line
+    // at the pre-berry HP, THEN a separate Healed line once the berry fires.
+
+    /// A hit that drops the target to/below its Sitrus Berry threshold must emit a
+    /// DamageDealt (pre-berry HP, reflecting the FULL damage dealt) followed by a
+    /// separate Healed event (post-berry HP) — not one combined DamageDealt.
+    #[test]
+    fn mid_hit_pinch_berry_emits_separate_damage_and_heal_events() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None,
+            Some(crate::data::item::Item::SitrusBerry), None, None, None, false,
+        );
+        // Just above the 50% Sitrus threshold — any nonzero hit crosses it.
+        let max_hp = p2.hp;
+        p2.hp = max_hp / 2 + 1;
+
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 must be present");
+
+        // P2 is the opponent from observer P1's perspective, so its HP is reported
+        // as a display Percent, not an exact Number.
+        // DamageDealt must report the PRE-berry HP: at or below the 50% threshold,
+        // not healed back up.
+        let damage_pct: Option<u8> = mv.reactions.iter().find_map(|e| match &e.kind {
+            EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p) }
+                if *target == p2s0() => Some(*p),
+            _ => None,
+        });
+        let damage_pct = damage_pct.expect("DamageDealt for P2 slot 0 must be present");
+        assert!(
+            damage_pct <= 50,
+            "DamageDealt must report the pre-berry HP ({damage_pct}%) at or below the \
+             Sitrus threshold (50%), not a post-heal value"
+        );
+
+        // A separate Healed event for the berry's recovery must ALSO be present,
+        // reporting a HIGHER HP than the DamageDealt (the berry healed the target
+        // back up), and it must not just be equal to the damage HP.
+        let heal_pct: Option<u8> = mv.reactions.iter().find_map(|e| match &e.kind {
+            EventKind::Healed { target, new_hp: PokemonHP::Percent(p) }
+                if *target == p2s0() => Some(*p),
+            _ => None,
+        });
+        let heal_pct = heal_pct.expect("a separate Healed event for the Sitrus Berry must be present");
+        assert!(
+            heal_pct > damage_pct,
+            "the berry's Healed HP ({heal_pct}%) must be strictly greater than the \
+             DamageDealt HP ({damage_pct}%)"
+        );
+
+        // The berry's consumption must also be reflected via ItemLost somewhere in
+        // this move's reaction tree (emitted generically by process_item_loss_events).
+        assert!(
+            any_event_deep(&mv.reactions, |k| matches!(k,
+                EventKind::ItemLost { slot, item, consumed: true }
+                if *slot == p2s0() && *item == crate::data::item::Item::SitrusBerry)),
+            "Sitrus Berry consumption must be reflected via ItemLost;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
+
     // ── Test 13: voluntary-switch send-out effects nest under Switch ───────────
     //
     // The old emission shape pushed entry-ability reveals (and would have pushed the

@@ -29,17 +29,28 @@ the event that caused them**, rather than emitted as a flat sequence with a caus
 This means the cause is always implicit from the parent, and the inference engine can
 read item/ability/secondary effects in context without back-referencing earlier entries.
 
-A Life Orb + resist-berry + drain scenario looks like:
+A Life Orb + pinch-berry + drain scenario looks like:
 
 ```
 MoveUsed { user: P1[0], move: DrainPunch, targets: [P2[0]] }
   ├── Crit { target: P2[0] }
-  ├── DamageDealt { target: P2[0], new_hp: Percent(42) }
-  │     └── ItemLost { slot: P2[0], item: OccaBerry, consumed: true }
-  │           └── Healed { target: P2[0], new_hp: Percent(56) }   ← berry
+  ├── DamageDealt { target: P2[0], new_hp: Percent(38) }          ← PRE-berry HP
+  ├── Healed { target: P2[0], new_hp: Percent(56) }               ← Sitrus Berry heal
+  ├── ItemLost { slot: P2[0], item: SitrusBerry, consumed: true } ← from the item ledger
   ├── Healed { target: P1[0], new_hp: Number(185) }               ← drain
   └── DamageDealt { target: P1[0], new_hp: Number(162) }          ← Life Orb recoil
 ```
+
+A pinch/HP berry (Oran, Sitrus, Figy, …) that fires mid-hit is emitted as its own
+`Healed` reaction reporting the **post-berry** HP, immediately after a `DamageDealt`
+that reports the **pre-berry** HP — never folded into one combined `DamageDealt`,
+which would understate the true damage dealt (Pass 3's damage-to-stat inference reads
+this delta directly). The berry's own `ItemLost` is a separate sibling, emitted
+generically later by a whole-move item-snapshot diff rather than nested under the
+specific `Healed` it explains — a real player sees the same three lines in this order.
+A damage-*reducing* item (a type-resist berry like Occa Berry) is different: it has no
+HP-change event of its own at all, since its effect is baked directly into the single
+damage roll.
 
 The inference engine walks this tree depth-first. Every `DamageDealt` nested under a
 `MoveUsed` automatically carries context (which move, which user, which targets) from

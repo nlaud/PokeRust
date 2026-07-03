@@ -6803,6 +6803,125 @@ fn test_eot_sand_immunity_not_emitted_without_sandstorm() {
     );
 }
 
+// ── Regression: S6 — EOT netting must not produce unsound heal/immunity clauses ──
+//
+// `emit_eot_hp_deltas` diffs HP across a whole EOT sub-phase with ONE before/after
+// snapshot; a sand chip that triggers a pinch berry mid-chip (`deal_residual_damage`
+// calls `take_damage`, which checks berries internally) can net into a `Healed`
+// event, or — in the exact-cancel case — no HP-change event at all (just the
+// berry's `ItemLost`). Both `pass_eot_heal` and `pass_eot_sand_immunity` must
+// recognize this ambiguity and skip rather than draw an unsound conclusion.
+
+/// A target that shows BOTH a `DamageDealt` and a `Healed` for itself in the same
+/// EndOfTurn must not have a Leftovers/BlackSludge clause emitted for the Healed —
+/// the co-occurring chip means the heal could be a chip-then-berry-overheal net
+/// result, not a passive item.
+#[test]
+fn test_eot_heal_not_inferred_when_same_target_also_took_chip_this_eot() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.item = Unknown::Not(vec![]);
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let eot = event_with(
+        EventKind::EndOfTurn,
+        vec![
+            event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(40) }),
+            event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(55) }),
+        ],
+    );
+    let result = apply(state, vec![eot]);
+
+    let has_leftovers_clause = result.predicates.iter().any(|c| {
+        c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::Leftovers, .. }))
+    });
+    assert!(
+        !has_leftovers_clause,
+        "no Leftovers clause should be emitted when the same target also took EOT \
+         chip this turn (chip/berry netting ambiguity)"
+    );
+}
+
+/// A target that shows no sand chip but DOES show a `Healed` event this same EOT
+/// must not have a sand-immunity clause emitted — the "no chip" observation could
+/// be explained by the chip being clobbered by a pinch berry, not immunity.
+#[test]
+fn test_sand_immunity_not_inferred_when_target_healed_this_eot() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::AirLock, Ability::CloudNine]);
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Sandstorm);
+
+    // No DamageDealt (no visible chip), but a Healed for the same mon this EOT —
+    // the netted result of a sand chip clobbered by a pinch berry.
+    let eot = event_with(
+        EventKind::EndOfTurn,
+        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(55) })],
+    );
+    let result = apply(state, vec![eot]);
+
+    let has_sand_immunity_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }
+                | Statement::HasAbility { ability: Ability::SandRush, .. }
+                | Statement::HasAbility { ability: Ability::SandForce, .. }
+                | Statement::HasAbility { ability: Ability::Overcoat, .. }
+                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
+        ))
+    });
+    assert!(
+        !has_sand_immunity_clause,
+        "no sand-immunity clause should be emitted when the same mon was healed \
+         this EOT (chip/berry netting ambiguity)"
+    );
+}
+
+/// A target that shows no sand chip and no Healed, but DID consume a berry this EOT
+/// (the exact-cancel case: chip damage and berry heal net to precisely zero, so
+/// neither DamageDealt nor Healed appears) must also not have a sand-immunity
+/// clause emitted.
+#[test]
+fn test_sand_immunity_not_inferred_when_target_ate_berry_this_eot_exact_cancel() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::AirLock, Ability::CloudNine]);
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Sandstorm);
+
+    // No DamageDealt, no Healed — but ItemLost for a consumed berry is present,
+    // proving the chip fired and was exactly offset.
+    let eot = event_with(
+        EventKind::EndOfTurn,
+        vec![event(EventKind::ItemLost {
+            slot: p2(0),
+            item: Item::SitrusBerry,
+            consumed: true,
+        })],
+    );
+    let result = apply(state, vec![eot]);
+
+    let has_sand_immunity_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }
+                | Statement::HasAbility { ability: Ability::SandRush, .. }
+                | Statement::HasAbility { ability: Ability::SandForce, .. }
+                | Statement::HasAbility { ability: Ability::Overcoat, .. }
+                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
+        ))
+    });
+    assert!(
+        !has_sand_immunity_clause,
+        "no sand-immunity clause should be emitted when the same mon consumed a \
+         berry this EOT, even with no visible HP-change event (exact-cancel case)"
+    );
+}
+
 // ── G2 regressions: soundness fixes for absence-based inferences ──────────────
 //
 // Both tests encode a scenario where the observable signal (−1 Atk / contact chip)

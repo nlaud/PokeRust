@@ -715,6 +715,16 @@ fn apply_single_hit_branch(
         // Captures (new_hp, max_hp) after take_damage so DamageDealt can be emitted once
         // the target_mon borrow has ended (same split pattern as Smack Down volatiles below).
         let mut damage_dealt_hp_info: Option<(u16, u16)> = None;
+        // S5: a pinch/HP berry (Oran, Sitrus, Figy, ...) can fire mid-hit when this
+        // damage drops the target to or below its threshold. Captured separately so
+        // the berry's heal is reported as its OWN Healed event, with DamageDealt
+        // reporting the PRE-berry HP. Folding both into one combined DamageDealt (the
+        // pre-fix behavior) understated the true damage dealt — Pass 3's damage-to-
+        // stat inference reads this delta directly, and a smaller-than-true delta can
+        // exclude the attacker's real offensive stat from the feasible BSV range
+        // (damage is monotone in BSV, so a fictitiously small target damage value can
+        // fall outside the roll range the true stat actually produces).
+        let mut berry_heal_hp_info: Option<(u16, u16)> = None;
         let target_env = simulator_helpers::berry_env(&bs, target_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&bs);
 
@@ -727,10 +737,22 @@ fn apply_single_hit_branch(
             } else {
                 None
             };
-            simulator_helpers::take_damage(target_mon, eff_damage, target_env, as_);
-            // Capture post-damage HP for DamageDealt emission below (after borrow ends).
+            // Split take_damage's two internal steps (apply_damage, then the
+            // on_hp_change berry-trigger check) so the PRE-berry HP can be captured
+            // for DamageDealt before on_hp_change potentially heals the target back up.
+            if eff_damage > 0 {
+                simulator_helpers::apply_damage(target_mon, eff_damage, as_);
+            }
+            // Capture post-damage (pre-berry) HP for DamageDealt emission below.
             if bs.event_observer.is_some() && eff_damage > 0 {
                 damage_dealt_hp_info = Some((target_mon.hp, target_mon.stats[0]));
+            }
+            if eff_damage > 0 && !target_mon.fainted {
+                let pre_berry_hp = target_mon.hp;
+                simulator_helpers::on_hp_change(target_mon, &target_env);
+                if bs.event_observer.is_some() && target_mon.hp > pre_berry_hp {
+                    berry_heal_hp_info = Some((target_mon.hp, target_mon.stats[0]));
+                }
             }
             if let Some((spa_boost, raised)) = berserk_snapshot {
                 // Undo any Berserk Sp. Atk boost the boosted hit just triggered.
@@ -873,6 +895,14 @@ fn apply_single_hit_branch(
         if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, damage_dealt_hp_info) {
             let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
             simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp });
+        }
+        // S5: emit the target's pinch-berry heal (if one fired) as its own Healed
+        // event, separate from the DamageDealt above. The berry's ItemLost is emitted
+        // generically later by process_item_loss_events (item snapshot diff over the
+        // whole move action), so only the HP-change side needs handling here.
+        if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, berry_heal_hp_info) {
+            let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
+            simulator_helpers::emit(&mut bs, EventKind::Healed { target: target_slot, new_hp: pokemon_hp });
         }
 
         // Emit Smack Down's volatile removals now that the target_mon borrow has ended.
