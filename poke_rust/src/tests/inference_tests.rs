@@ -871,6 +871,108 @@ fn test_no_speed_comparison_different_priority() {
     assert_eq!(speed_cmp_count, 0, "no SpeedComparison for different priority brackets");
 }
 
+// ── Regression: S17 — conditional SpeedComparisons must not propagate bounds ────
+
+/// A slow mon with a possible Quick Claw moves before our exactly-known fast mon.
+/// The emitted clause is `[SpeedComparison ∨ HasItem(QuickClaw) ∨ …]` — the order is
+/// fully explained by a Quick Claw proc, so the comparison must NOT be enforced as a
+/// hard Spe bound. Before the S17 fix, `collect_speed_comparisons` harvested
+/// `SpeedComparison` literals out of multi-literal clauses and
+/// `propagate_speed_comparisons` enforced them unconditionally: here that raised the
+/// slow mon's min Spe from its species floor to 150, excluding every true
+/// (slower-with-Quick-Claw) world — and panicking outright whenever the forced min
+/// exceeded the species' maximum.
+#[test]
+fn test_s17_conditional_speed_comparison_not_propagated() {
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    // P1: our mon with exactly-known Spe = 150.
+    let mut p1_mon = unknown_mon_species(Species::Garchomp);
+    p1_mon.minStats[5] = 150;
+    p1_mon.maxStats[5] = 150;
+
+    // P2: item completely unknown → Quick Claw is a live escape.
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+    let p2_min_before = p2_mon.minStats[5];
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    // P2 moves first (Quick Claw proc), P1 second — same priority bracket.
+    let result = apply_ex(
+        state,
+        vec![
+            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::DragonClaw, targets: vec![p2(0)] }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    let p2_after = &result.p2_active_mons[0];
+    assert_eq!(
+        p2_after.minStats[5], p2_min_before,
+        "conditional SpeedComparison (live QuickClaw escape) must not raise the slow \
+         mon's min Spe"
+    );
+    // The conditional clause itself must survive for BCP to resolve later.
+    let clause_present = result.predicates.iter().any(|clause| {
+        clause.len() > 1
+            && clause.iter().any(|s| matches!(s, Statement::SpeedComparison { .. }))
+            && clause.iter().any(|s| matches!(s, Statement::HasItem { item: Item::QuickClaw, .. }))
+    });
+    assert!(clause_present, "the conditional clause must remain in the predicate store");
+}
+
+/// Companion: once every escape in the clause is excluded, BCP collapses it to a unit
+/// SpeedComparison and the bound DOES propagate — the S17 fix must not disable the
+/// intended unit-clause path.
+#[test]
+fn test_s17_unit_speed_comparison_still_propagates() {
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let mut p1_mon = unknown_mon_species(Species::Garchomp);
+    p1_mon.minStats[5] = 100;
+    p1_mon.maxStats[5] = 100;
+
+    // Exclude every possible escape on both sides → the emitted clause is unit.
+    let mut p2_mon = unknown_mon_species(Species::Snorlax);
+    p2_mon.item = Unknown::Not(vec![
+        Item::QuickClaw, Item::ChoiceScarf, Item::CustapBerry,
+    ]);
+    p2_mon.possible_abilities = Unknown::Not(vec![
+        Ability::QuickDraw, Ability::Prankster, Ability::GaleWings, Ability::Triage,
+        Ability::SwiftSwim, Ability::Chlorophyll, Ability::SandRush, Ability::SlushRush,
+        Ability::SurgeSurfer, Ability::Unburden, Ability::QuickFeet,
+    ]);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    // Slow-side escapes live on P1 (the second mover): Stall / Iron Ball / etc.
+    state.p1_active_mons[0].possible_abilities = Unknown::Not(vec![Ability::Stall]);
+    state.p1_active_mons[0].item = Unknown::Not(vec![
+        Item::IronBall, Item::LaggingTail, Item::FullIncense,
+    ]);
+    state.p1_active_mons[0].minStats[5] = 100;
+    state.p1_active_mons[0].maxStats[5] = 100;
+
+    let result = apply_ex(
+        state,
+        vec![
+            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::DragonClaw, targets: vec![p1(0)] }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        result.p2_active_mons[0].minStats[5] >= 100,
+        "unit SpeedComparison must still raise the fast mon's min Spe (got {})",
+        result.p2_active_mons[0].minStats[5]
+    );
+}
+
 // ── Regression: S4 — Pass 4 must use speed-relevant state AS OF the comparison ──
 
 /// A doubles turn where P1's Thunder Wave paralyzes a P2 mon mid-turn, and that
@@ -912,12 +1014,17 @@ fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
 
     // P2a: the mon that gets paralyzed mid-turn (default wide Snorlax Spe range).
     // P2b: its ally, pinned to an exact Spe of 60, moves right before it.
+    // Every escape disjunct on the (fast=P2b, slow=P2a) pairing is excluded so the
+    // emitted clause is a UNIT SpeedComparison — since the S17 fix, only unit
+    // clauses propagate hard Spe bounds.
     let mut p2a = unknown_mon_species(Species::Snorlax);
-    p2a.possible_abilities = Unknown::Not(vec![Ability::QuickFeet]); // no Quick Feet escape muddying the test
+    p2a.possible_abilities = Unknown::Not(vec![Ability::QuickFeet, Ability::Stall]);
+    p2a.item = Unknown::Not(vec![Item::IronBall, Item::LaggingTail, Item::FullIncense]);
     let natural_max_spe = p2a.maxStats[5];
 
     let mut p2b = unknown_mon_species(Species::Snorlax);
-    p2b.possible_abilities = Unknown::Not(vec![Ability::QuickFeet]);
+    p2b.possible_abilities = Unknown::Not(vec![Ability::QuickFeet, Ability::QuickDraw]);
+    p2b.item = Unknown::Not(vec![Item::QuickClaw, Item::ChoiceScarf]);
     p2b.minStats[5] = 60;
     p2b.maxStats[5] = 60;
     p2b.min_pre_nature_stat[5] = 60;

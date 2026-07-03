@@ -628,7 +628,11 @@ because the priority escape was still present.
 #### `propagate_speed_comparisons`
 
 After Pass 4 emits clauses, `propagate_speed_comparisons` walks every
-`SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult }` predicate and applies:
+`SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult }` predicate that sits in
+a **unit clause** and applies (S17: a `SpeedComparison` sharing its clause with live
+escape disjuncts is conditional — the order may be explained by Quick Claw etc. —
+and must not be enforced until BCP has excluded every escape and collapsed the
+clause to unit):
 
 ```
 fast_min × fast_mult ≥ slow_min × slow_mult
