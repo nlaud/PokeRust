@@ -953,6 +953,77 @@ fn test_s18_item_clause_purged_on_switch() {
     assert!(matches!(&result.p2_active_mons[0].item, Unknown::Known(i) if *i == Item::Leftovers));
 }
 
+// ── Regression: S19 — HasItem clauses are resolved when the held item changes ───
+
+/// A miss-explanation clause `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]` is
+/// recorded, then Knock Off removes the mon's Bright Powder — a world fully
+/// consistent with the clause (it held Bright Powder at observation time). Before
+/// the S19 fix, BCP evaluated the stale clause against the now-`Known(None)` item,
+/// falsified both literals, and panicked with an unsatisfiable clause.
+#[test]
+fn test_s19_knock_off_resolves_stale_item_clause() {
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.predicates.push(vec![
+        Statement::HasItem { mon_idx: 1, item: Item::BrightPowder },
+        Statement::HasItem { mon_idx: 1, item: Item::LaxIncense },
+    ]);
+
+    let result = apply(
+        state,
+        vec![event(EventKind::ItemLost {
+            slot: p2(0),
+            item: Item::BrightPowder,
+            consumed: false,
+        })],
+    );
+    // The clause was historically satisfied by the knocked-off item → dropped.
+    assert!(
+        result.predicates.is_empty(),
+        "historically-satisfied item clause must be dropped, got {:?}",
+        result.predicates
+    );
+    assert!(matches!(&result.p2_active_mons[0].item, Unknown::Known(i) if *i == Item::None));
+}
+
+/// Companion precision check: consuming a berry proves the setter never held the
+/// weather rock, so the `[HasItem(DampRock) ∨ WeatherTurns{3}]` pair must collapse
+/// to the base-duration branch (the rock literal is pruned as historically false and
+/// the surviving unit `WeatherTurns{3}` is forced into the timer).
+#[test]
+fn test_s19_berry_consumption_collapses_weather_timer_pair() {
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let p2_mon = unknown_mon_species(Species::Pelipper);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.weather = Some(Weather::Rain);
+    state.weather_turns = Some(Unknown::Possibly(vec![3, 6]));
+    state.weather_setter_mon_idx = Some(1);
+    state.predicates.push(vec![
+        Statement::HasItem { mon_idx: 1, item: Item::DampRock },
+        Statement::WeatherTurns { turns: 3 },
+    ]);
+    state.predicates.push(vec![
+        Statement::Not(Box::new(Statement::HasItem { mon_idx: 1, item: Item::DampRock })),
+        Statement::WeatherTurns { turns: 6 },
+    ]);
+
+    let result = apply(
+        state,
+        vec![event(EventKind::ItemLost {
+            slot: p2(0),
+            item: Item::SitrusBerry,
+            consumed: true,
+        })],
+    );
+    // Held item was Sitrus, not Damp Rock → the 5-turn (base) branch is proven.
+    assert_eq!(
+        result.weather_turns,
+        Some(Unknown::Known(3)),
+        "consuming a non-rock item must collapse the timer to the base-duration branch"
+    );
+}
+
 // ── Regression: S17 — conditional SpeedComparisons must not propagate bounds ────
 
 /// A slow mon with a possible Quick Claw moves before our exactly-known fast mon.

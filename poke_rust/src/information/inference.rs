@@ -1157,6 +1157,12 @@ fn pass1_apply_event(
                         );
                     }
                 }
+                // S19: capture the outgoing item before it is overwritten, so the
+                // stale HasItem clauses about this mon can be resolved historically.
+                let outgoing = get_mon_by_idx(state, idx).and_then(|m| match &m.item {
+                    Unknown::Known(i) => Some(i.clone()),
+                    _ => None,
+                });
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.item = Unknown::Known(item.clone());
                     mon.item_lost = false;
@@ -1164,6 +1170,7 @@ fn pass1_apply_event(
                     // ItemRevealed re-confirming it skips the item-clause exclusion (S12).
                     mon.item_was_transferred = true;
                 }
+                resolve_item_clauses_on_item_change(state, idx, outgoing);
             }
         }
         EventKind::ItemLost {
@@ -1182,6 +1189,10 @@ fn pass1_apply_event(
                     }
                     mon.item = Unknown::Known(Item::None);
                 }
+                // S19: the held item just changed — persisted HasItem clauses about
+                // this mon describe the item that was consumed/removed (named by the
+                // event), not the now-empty slot.
+                resolve_item_clauses_on_item_change(state, idx, Some(item.clone()));
             }
         }
 
@@ -1836,6 +1847,89 @@ fn purge_mon_scoped_knowledge(state: &mut UnknownBattleState, slot: &FieldSlot) 
         if *setter == Some(idx) {
             *setter = None;
         }
+    }
+}
+
+/// `true` if `stmt` (recursing through `Not`) is a `HasItem` literal about `mon_idx`.
+fn statement_is_item_literal_for(stmt: &Statement, idx: usize) -> bool {
+    match stmt {
+        Statement::Not(inner) => statement_is_item_literal_for(inner, idx),
+        Statement::HasItem { mon_idx, .. } => *mon_idx == idx,
+        _ => false,
+    }
+}
+
+/// Truth value of an item literal about `mon_idx` *in the holding window that just
+/// ended*, given the mon held `outgoing` throughout it. `None` = not an item literal
+/// about this mon (leave untouched).
+fn historical_item_literal_value(stmt: &Statement, idx: usize, outgoing: &Item) -> Option<bool> {
+    match stmt {
+        Statement::Not(inner) => historical_item_literal_value(inner, idx, outgoing).map(|b| !b),
+        Statement::HasItem { mon_idx, item } if *mon_idx == idx => Some(item == outgoing),
+        _ => None,
+    }
+}
+
+/// S19: `HasItem` clauses encode "held item X *at observation time*", but BCP
+/// evaluates them against the mon's *current* item. Once the held item changes
+/// mid-battle (Knock Off / Thief / Fling → `ItemLost`, berry or gem consumption →
+/// `ItemLost{consumed}`, Trick / Switcheroo / Recycle / Pickup → `ItemGained`),
+/// every persisted clause about this mon's item is stale: a `[HasItem(BrightPowder)
+/// ∨ HasItem(LaxIncense)]` miss-explanation clause became an unsatisfiable-clause
+/// panic when the explaining item was later knocked off (item now `Known(None)`
+/// falsifies both literals), and an `[EVIVStatGE ∨ HasItem(OccaBerry)]` bound got
+/// unit-forced once the berry disjunct was falsified by its own consumption —
+/// raising the stat floor above the true berry-world value.
+///
+/// Every surviving clause was emitted (or last resolved) during the holding window
+/// that just ended — this function maintains that invariant inductively by running
+/// at *every* item-change event. So when the outgoing item is known, each item
+/// literal about this mon has a definite historical truth value: resolve it —
+/// satisfied clauses are dropped, falsified literals pruned (a pruned-to-unit clause
+/// is forced by the next BCP run, e.g. the `[HasItem(DampRock) ∨ WeatherTurns{5}]`
+/// pair correctly collapses to the base-duration branch when the setter turns out to
+/// have held a berry). When the outgoing item is unknown (`ItemGained` onto an
+/// unresolved item), the clauses cannot be resolved and are purged — sound, since
+/// removing a constraint only widens.
+fn resolve_item_clauses_on_item_change(
+    state: &mut UnknownBattleState,
+    idx: usize,
+    outgoing: Option<Item>,
+) {
+    let Some(outgoing) = outgoing else {
+        state
+            .predicates
+            .retain(|clause| !clause.iter().any(|lit| statement_is_item_literal_for(lit, idx)));
+        return;
+    };
+    let mut i = 0;
+    while i < state.predicates.len() {
+        let clause = &state.predicates[i];
+        // A historically-true literal satisfies the whole (disjunctive) clause.
+        if clause
+            .iter()
+            .any(|lit| historical_item_literal_value(lit, idx, &outgoing) == Some(true))
+        {
+            state.predicates.remove(i);
+            continue;
+        }
+        let pruned: Vec<Statement> = clause
+            .iter()
+            .filter(|lit| historical_item_literal_value(lit, idx, &outgoing) != Some(false))
+            .cloned()
+            .collect();
+        if pruned.is_empty() {
+            inference_contradiction!(
+                idx,
+                "clause has no explanation left after resolving item literals against \
+                 the outgoing item {:?}",
+                outgoing
+            );
+        }
+        if pruned.len() != state.predicates[i].len() {
+            state.predicates[i] = pruned;
+        }
+        i += 1;
     }
 }
 
