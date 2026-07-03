@@ -2045,10 +2045,15 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot) {
                 Player::P2 => state.p2_known_back_mons.push(benched),
             }
         } else {
-            match slot.player {
-                Player::P1 => state.p1_possible_back_mons.push(benched),
-                Player::P2 => state.p2_possible_back_mons.push(benched),
-            }
+            // S29: a non-`Known` species here is an UNRESOLVED Illusion disguise
+            // (`Possibly([shown, Zoroark…])` set by `maybe_widen_for_illusion` and
+            // never collapsed by learnset narrowing). Discard it rather than benching:
+            // `pass1_switch` re-matches bench entries by `Known` species, so it could
+            // never be pulled back out, and benching it alongside the real teammate's
+            // still-present entry would make one physical roster member count as two
+            // in `teammate_indices` / item-clause propagation (the hazard the
+            // `teammate_indices` TODO warns about). Knowledge gained while the identity
+            // was ambiguous is lost — an acceptable trade for a Zoroark edge case.
         }
     }
 }
@@ -2058,8 +2063,33 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     let slot_i = sw.slot.slot_index as usize;
     let species = &sw.species;
 
-    // Find the mon in the back and move it to the active slot.
-    let back_mon: Option<UnknownPokemonState> = {
+    // S29: if an Illusion disguise is possible on this side (a Zoroark forme sits on
+    // this side's known bench) and the incoming "species" is not itself a Zoroark
+    // forme, the shown species may be a disguise. Consuming the matching benched
+    // teammate's entry would move the REAL teammate's accumulated observations into
+    // the active slot and then mutate them with events that physically happen to the
+    // Zoroark — merging two distinct mons. Build a fresh species-only entry instead
+    // and let `maybe_widen_for_illusion` widen it to `Possibly([species, Zoroark…])`.
+    let illusion_possible = {
+        let back = match player {
+            Player::P1 => &state.p1_known_back_mons,
+            Player::P2 => &state.p2_known_back_mons,
+        };
+        let back_species: Vec<Species> = back
+            .iter()
+            .filter_map(|m| match &m.possible_species {
+                Unknown::Known(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        bcp::contains_illusion_forme(&back_species) && !bcp::is_illusion_forme(species)
+    };
+
+    // Find the mon in the back and move it to the active slot — skipped entirely when
+    // an Illusion disguise is possible (S29: never consume a benched entry then).
+    let back_mon: Option<UnknownPokemonState> = if illusion_possible {
+        None
+    } else {
         let known = match player {
             Player::P1 => &mut state.p1_known_back_mons,
             Player::P2 => &mut state.p2_known_back_mons,

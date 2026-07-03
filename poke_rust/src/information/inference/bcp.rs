@@ -173,6 +173,17 @@ pub(super) fn propagate_collected(
     changed
 }
 
+/// `true` if any species in `species` is an Illusion forme (Zoroark line). Used by
+/// `pass1_switch` (S29) to decide whether an incoming "species" might be a disguise.
+pub(super) fn contains_illusion_forme(species: &[Species]) -> bool {
+    species.iter().any(|s| ILLUSION_FORMES.contains(s))
+}
+
+/// `true` if `species` is itself an Illusion forme.
+pub(super) fn is_illusion_forme(species: &Species) -> bool {
+    ILLUSION_FORMES.contains(species)
+}
+
 /// Widen `possible_species` to include Zoroark formes when the opponent's back
 /// contains one and the on-field species is unconfirmed.  Call after a Switch.
 pub(super) fn maybe_widen_for_illusion(

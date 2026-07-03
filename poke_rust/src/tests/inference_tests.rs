@@ -1582,6 +1582,99 @@ fn test_switch_widens_species_for_possible_illusion() {
     }
 }
 
+// ── Regression: S29 — Illusion disguise must not consume a scouted teammate ─────
+
+/// With a Zoroark on the opponent's known bench, a "Garchomp" switch-in might be the
+/// Zoroark in disguise. The real (previously scouted) Garchomp's benched entry must
+/// therefore survive — before the S29 fix `pass1_switch` matched by species and
+/// REMOVED it, moving the real teammate's accumulated fog into the active slot to be
+/// mutated by events that physically happen to the Zoroark (merging two mons).
+#[test]
+fn test_s29_illusion_switch_preserves_benched_teammate() {
+    let garchomp_back =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let zoroark_back =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+
+    let result = apply(
+        state,
+        vec![event(EventKind::Switch(SwitchState {
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }))],
+    );
+
+    // Active species is the ambiguous disguise set.
+    assert!(
+        matches!(&result.p2_active_mons[0].possible_species,
+            Unknown::Possibly(v) if v.contains(&Species::Garchomp) && v.contains(&Species::Zoroark)),
+        "active species must widen to Possibly([Garchomp, Zoroark])"
+    );
+    // The real Garchomp's benched entry must NOT have been consumed.
+    let garchomp_still_benched = result
+        .p2_known_back_mons
+        .iter()
+        .any(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp)));
+    assert!(
+        garchomp_still_benched,
+        "the scouted Garchomp must remain benched (not merged into the disguise); \
+         bench = {:?}",
+        result.p2_known_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+    );
+}
+
+/// When the still-ambiguous disguise switches back out before its identity resolves,
+/// its `Possibly`-species entry must be DISCARDED — not benched. `pass1_switch`
+/// re-matches by `Known` species (so it could never be pulled back), and benching it
+/// beside the real teammate's surviving entry would double-count one physical mon in
+/// `teammate_indices` / item-clause propagation.
+#[test]
+fn test_s29_ambiguous_disguise_discarded_on_switch_out() {
+    let garchomp_back =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let zoroark_back =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+
+    let result = apply(
+        state,
+        vec![
+            // "Garchomp" (possibly the Zoroark) switches in → ambiguous active entry.
+            event(EventKind::Switch(SwitchState {
+                slot: p2(0), species: Species::Garchomp, level: 50,
+                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            })),
+            // …then switches back out for Snorlax before the disguise ever broke.
+            event(EventKind::Switch(SwitchState {
+                slot: p2(0), species: Species::Snorlax, level: 50,
+                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            })),
+        ],
+    );
+
+    // The ambiguous entry was discarded, not pushed to possible_back.
+    assert!(
+        result.p2_possible_back_mons.is_empty(),
+        "the unresolved disguise must be discarded, not benched; possible_back = {:?}",
+        result.p2_possible_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+    );
+    // The real Garchomp entry is still intact on the known bench.
+    assert!(
+        result.p2_known_back_mons.iter().any(|m|
+            matches!(&m.possible_species, Unknown::Known(Species::Garchomp))),
+        "the scouted Garchomp entry must survive the ambiguous mon's switch-out"
+    );
+}
+
 /// `KnowsThreateningMove` satisfaction (previously untested): once the constrained mon
 /// reveals an OHKO move, the clause is satisfied and BCP drops it from the store.
 #[test]

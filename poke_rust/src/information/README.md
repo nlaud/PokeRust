@@ -793,6 +793,23 @@ When a Pokémon's `possible_species` is `Possibly([s1, s2, …])` (typically set
 This is only sound because it only removes species that are provably unable to produce
 the observed move. It never narrows on species that could plausibly learn it.
 
+### Illusion and the bench (S29)
+
+When an Illusion disguise is possible (a Zoroark forme sits on the switching side's
+known bench) and the incoming species is not itself a Zoroark forme, `pass1_switch`
+does **not** consume the benched entry that matches the shown species — the shown
+species may be a disguise, and consuming the real teammate's entry would merge two
+physical mons (the real teammate's accumulated fog would be mutated by events that
+happened to the Zoroark). Instead it builds a fresh species-only active entry and
+`maybe_widen_for_illusion` widens it to `Possibly([shown, Zoroark…])`.
+
+If that still-ambiguous entry switches out before its identity resolves (no
+`IllusionEnded`, no learnset collapse to `Known`), `bench_outgoing_mon` **discards**
+it rather than benching: bench re-entry matches by `Known` species (so it could never
+be pulled back), and benching it beside the real teammate's surviving entry would
+double-count one physical roster member in `teammate_indices` / item-clause
+propagation.
+
 ---
 
 ## The Materialize Bridge (`materialize.rs`)
