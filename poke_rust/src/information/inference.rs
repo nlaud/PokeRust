@@ -682,7 +682,8 @@ fn process_team_preview_event(
         | EventKind::PerishCount { .. }
         | EventKind::EndOfTurn
         | EventKind::AnticipationShudder { .. }
-        | EventKind::IllusionEnded { .. } => {
+        | EventKind::IllusionEnded { .. }
+        | EventKind::Transformed { .. } => {
             panic!(
                 "[inference] illegal event {:?} at team preview",
                 event.kind
@@ -1815,6 +1816,63 @@ fn pass1_apply_event(
             }
         }
 
+        // ── Transformed: overlay the copy source's fog identity (S26) ─────────────
+        // The transformer adopts the copy source's species/types/stats/ability/moves/
+        // boosts; its own HP, max HP, item, status, level, nature, EVs, IVs are kept.
+        // We read the FOG entry at `into_slot`, so copying our own Known mon yields
+        // exact stats and copying a hidden opponent inherits that opponent's bounds.
+        EventKind::Transformed { slot, into_slot, into_species } => {
+            let src_idx = mon_idx_for_active_slot(state, into_slot);
+            let dst_idx = mon_idx_for_active_slot(state, slot);
+            if let (Some(si), Some(di)) = (src_idx, dst_idx) {
+                if let Some(src) = get_mon_by_idx(state, si).cloned() {
+                    if let Some(mon) = get_mon_mut_by_idx(state, di) {
+                        // Save the pre-transform snapshot once (revert on switch-out).
+                        if mon.pre_transform.is_none() {
+                            mon.pre_transform = Some(Box::new(mon.clone()));
+                        }
+                        // Displayed species is authoritative (matches what the player
+                        // sees); everything else is copied from the source's fog view.
+                        mon.possible_species = Unknown::Known(into_species.clone());
+                        mon.possible_types = src.possible_types.clone();
+                        mon.possible_weight_hg = src.possible_weight_hg.clone();
+                        mon.possible_genders = src.possible_genders.clone();
+                        mon.possible_abilities = src.possible_abilities.clone();
+                        mon.possible_original_abilities = src.possible_original_abilities.clone();
+                        mon.boosts = src.boosts;
+                        // Moves copied; PP (and max PP) capped at 5 per Transform rules.
+                        mon.known_moves = src.known_moves.clone();
+                        for i in 0..4 {
+                            if src.max_pp[i] >= 0 {
+                                let capped = src.max_pp[i].min(5);
+                                mon.max_pp[i] = capped;
+                                mon.move_pp[i] = capped;
+                            } else {
+                                mon.max_pp[i] = -1;
+                                mon.move_pp[i] = -1;
+                            }
+                        }
+                        // Stats and their EV/IV/nature back-solve inputs come from the
+                        // source for the five non-HP stats; HP (index 0) is NOT copied.
+                        for i in 1..6 {
+                            mon.minStats[i] = src.minStats[i];
+                            mon.maxStats[i] = src.maxStats[i];
+                            mon.min_pre_nature_stat[i] = src.min_pre_nature_stat[i];
+                            mon.max_pre_nature_stat[i] = src.max_pre_nature_stat[i];
+                        }
+                    }
+                }
+            }
+            // Pre-transform SpeedComparison / EVIV / HasAbility clauses describe the
+            // transformer's OWN pre-copy stats and ability — stale now. Drop them
+            // (predicate purge only; setter records are unaffected by a transform).
+            if let Some(di) = dst_idx {
+                state
+                    .predicates
+                    .retain(|clause| !clause.iter().any(|lit| statement_references_mon(lit, di)));
+            }
+        }
+
         // Events with no direct state update in Pass 1 — all handled by
         // enclosing MoveUsed context in Passes 2/3 or by reactions.
         // When a Pokémon fails to move due to flinch, attempt to attribute the flinch
@@ -2407,6 +2465,20 @@ pub(crate) fn apply_switch_out_reset(state: &mut UnknownBattleState, slot: &Fiel
     };
     let i = slot.slot_index as usize;
     if let Some(mon) = actives.get_mut(i) {
+        // S26: revert a Transform/Imposter copy first (mirrors the sim's
+        // apply_switch_out_ability_effects). Restore the saved pre-transform snapshot
+        // but preserve the live HP / status / fainted flag (damage and status taken
+        // while transformed carry over); the boost/volatile clears below then apply
+        // to the reverted mon exactly as the sim clears them after reverting.
+        if let Some(saved) = mon.pre_transform.take() {
+            let live_hp = mon.hp.clone();
+            let live_status = mon.status.clone();
+            let live_fainted = mon.fainted;
+            *mon = *saved;
+            mon.hp = live_hp;
+            mon.status = live_status;
+            mon.fainted = live_fainted;
+        }
         // Clear all stat boosts (mirrors simulator clear_pokemon_for_switch_out:6206).
         mon.boosts.iter_mut().for_each(|b| *b = 0);
         // Clear all volatile statuses (mirrors simulator:6205).
@@ -5655,6 +5727,12 @@ fn pass3_direction_b(
     let Some(attacker_unk) = attacker_unk else {
         return;
     };
+    // S26: a Transformed attacker's Atk/SpA are COPIED from the copy source, not
+    // derived from its own species base — the BSV inversion here would bound the
+    // wrong thing. Skip (the copy source's own stat inference stands on its own).
+    if attacker_unk.pre_transform.is_some() {
+        return;
+    }
     let target_unk = ctx
         .move_context
         .as_ref()
@@ -6351,6 +6429,11 @@ fn pass3_direction_a(
     // full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) stay live for
     // the hit that broke full HP.
     defender_unk.hp = hit_pre_hp.clone();
+    // S26: a Transformed defender's Def/SpD are copied, not derived from its species
+    // base — skip the BSV inversion (see pass3_direction_b).
+    if defender_unk.pre_transform.is_some() {
+        return;
+    }
     let attacker_unk = ctx
         .move_context
         .as_ref()
@@ -7132,6 +7215,14 @@ pub fn pass5_back_solve(
     config: &InferenceConfig,
     dex: &HashMap<Species, PokemonData>,
 ) {
+    // S26: a Transformed mon's stats are COPIED from the copy source, not derived
+    // from this mon's own species base + EV/IV/nature. Back-solving EVs against the
+    // (now copied) species base would be nonsense — and its own EV/IV/nature bounds
+    // are preserved in `pre_transform` for the switch-out revert. Skip until it
+    // reverts.
+    if mon.pre_transform.is_some() {
+        return;
+    }
     let base: [u16; 6] = match &mon.possible_species {
         Unknown::Known(s) => match dex.get(s) {
             Some(d) => d.base_stats,

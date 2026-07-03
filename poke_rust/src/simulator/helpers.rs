@@ -6261,13 +6261,22 @@ fn apply_send_out_only_ability_effects(
             };
             let target_snapshot = get_pokemon_at_slot(state, opposite).cloned();
             if let Some(target) = target_snapshot {
-                if let Some(transformer) = get_pokemon_at_slot_mut(state, slot) {
-                    let success = transform_into(transformer, &target);
-                    if success {
-                        let new_ability = transformer.ability.clone();
+                let success = get_pokemon_at_slot_mut(state, slot)
+                    .map(|transformer| transform_into(transformer, &target))
+                    .unwrap_or(false);
+                if success {
+                    // S26: announce the Imposter copy (nested under the switch-in).
+                    emit(state, EventKind::Transformed {
+                        slot,
+                        into_slot: opposite,
+                        into_species: target.species.clone(),
+                    });
+                    let new_ability =
+                        get_pokemon_at_slot(state, slot).map(|m| m.ability.clone());
+                    if let Some(ab) = new_ability {
                         // Fire the copied ability's gain effects (Intimidate, weather, etc.).
-                        apply_entry_ability_field_effects(state, slot, &new_ability);
-                        apply_entry_ability_target_effects(state, slot, &new_ability);
+                        apply_entry_ability_field_effects(state, slot, &ab);
+                        apply_entry_ability_target_effects(state, slot, &ab);
                     }
                 }
             }
@@ -12475,6 +12484,12 @@ pub fn apply_secondary_effects(
                     .map(|t| transform_into(t, &target))
                     .unwrap_or(false);
                 if success {
+                    // S26: announce the identity change (nested under this MoveUsed).
+                    emit(bs, EventKind::Transformed {
+                        slot: attacker_slot,
+                        into_slot: opposite,
+                        into_species: target.species.clone(),
+                    });
                     let new_ability =
                         get_pokemon_at_slot(bs, attacker_slot).map(|m| m.ability.clone());
                     if let Some(ab) = new_ability {

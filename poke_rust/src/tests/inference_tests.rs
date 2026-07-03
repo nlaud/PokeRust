@@ -1027,6 +1027,97 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     );
 }
 
+// ── Regression: S26 — Transform overlay and switch-out revert ───────────────────
+
+/// An opponent Ditto uses Transform (a `Transformed` reaction nested under the
+/// `MoveUsed`) to copy our Garchomp, gaining its moves; then switches out. The copied
+/// move (Earthquake) must NOT persist on the benched Ditto after the revert — before
+/// S26 there was no Transform handling at all, so a copied move stayed burned into
+/// the mon's own `known_moves` permanently, corrupting later Choice-lock / learnset
+/// reasoning. The revert also restores the pre-transform species (Ditto).
+#[test]
+fn test_s26_transform_reverts_moves_on_switch_out() {
+    // Our P1 Garchomp with a known move (the copy source's move set).
+    let mut p1_mon = unknown_mon_species(Species::Garchomp);
+    p1_mon.known_moves[0] = Some(PokemonMove::Earthquake);
+    // Opponent Ditto, currently active.
+    let p2_mon = unknown_mon_species(Species::Ditto);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Transform, poke_status_move(PokemonMove::Transform));
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![
+            // Ditto Transforms into our Garchomp: copies its identity + moves.
+            event_with(
+                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Transform, targets: vec![p1(0)] },
+                vec![event(EventKind::Transformed {
+                    slot: p2(0),
+                    into_slot: p1(0),
+                    into_species: Species::Garchomp,
+                })],
+            ),
+            // …then switches out for a fresh Snorlax.
+            event(EventKind::Switch(SwitchState {
+                slot: p2(0), species: Species::Snorlax, level: 50,
+                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            })),
+        ],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // The benched mon must have reverted to Ditto (species restored), with no copied
+    // Earthquake and no lingering pre_transform snapshot.
+    let ditto = result
+        .p2_known_back_mons
+        .iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Ditto)))
+        .expect("the transformed Ditto must revert to Ditto on switch-out");
+    assert!(
+        !ditto.known_moves.iter().any(|m| *m == Some(PokemonMove::Earthquake)),
+        "a move copied while transformed must not persist after the revert"
+    );
+    assert!(ditto.pre_transform.is_none(), "pre_transform must clear on revert");
+}
+
+/// While transformed, the mon's copied stats must NOT be back-solved against its own
+/// (Ditto) species base — Pass 5 is skipped for a transformed mon. This pins that the
+/// overlay + gate run without a contradiction panic even though Garchomp's copied
+/// stats are impossible for Ditto's base stats + EV lattice.
+#[test]
+fn test_s26_transform_skips_pass5_backsolve() {
+    let mut p1_mon = unknown_mon_species(Species::Garchomp);
+    p1_mon.known_moves[0] = Some(PokemonMove::Earthquake);
+    let p2_mon = unknown_mon_species(Species::Ditto);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Transform, poke_status_move(PokemonMove::Transform));
+
+    // Must not panic (pass5 skip) and must display Garchomp with a saved snapshot.
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Transform, targets: vec![p1(0)] },
+            vec![event(EventKind::Transformed {
+                slot: p2(0),
+                into_slot: p1(0),
+                into_species: Species::Garchomp,
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let t = &result.p2_active_mons[0];
+    assert!(matches!(&t.possible_species, Unknown::Known(Species::Garchomp)));
+    assert!(t.pre_transform.is_some(), "pre_transform snapshot must be saved");
+}
+
 // ── Regression: S25 — pinch abilities must be live for a low-HP attacker ────────
 
 /// A Garchomp at 25% display HP with Blaze still possible (and item Known(None), so
@@ -7051,6 +7142,95 @@ mod roundtrip_soundness {
              pre-nature range [{}, {}] — Analytic must be in the union because P2 \
              moved last (after P1's switch)",
             p2_fog.min_pre_nature_stat[1], p2_fog.max_pre_nature_stat[1]
+        );
+    }
+
+    // ── Scenario S26: Transform (Imposter) copies the source's fog identity ──────
+
+    /// P2's Ditto (Imposter) switches in opposite P1's fully-known Garchomp and
+    /// transforms. The real sim emits a `Transformed` event; inference must overlay
+    /// Garchomp's identity onto the Ditto fog entry — and because the copy source is
+    /// the observer's OWN Known mon, the copied non-HP stats become exact.
+    #[test]
+    fn roundtrip_s26_imposter_copies_known_source_exactly() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: known Garchomp (max Atk, Adamant) with Splash.
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::SandVeil), Some(Nature::Adamant), None, None,
+            Some([0, 252, 0, 0, 0, 4]), Some([31u8; 6]), false,
+        );
+        let true_atk = p1.stats[1];
+
+        // P2 lead: Snorlax; back: Ditto with Imposter.
+        let p2_lead = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let p2_ditto = build_pokemon_state(
+            Species::Ditto, pd, md, Some(50),
+            Some([Some(PokemonMove::Transform), None, None, None]),
+            None, Some(Ability::Imposter), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        let battle = battle_state_from_lists(
+            vec![p1.clone()], vec![], vec![p2_lead], vec![p2_ditto],
+        );
+        let state = MatchState::BattleState(battle);
+
+        // P1 Splash; P2 switches to Ditto → Imposter transforms into Garchomp.
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(vec![
+            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+        ]);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+
+        // The event stream must contain a Transformed announcing the copy.
+        fn contains_transformed(evs: &[InformationEvent]) -> bool {
+            use crate::information::information::EventKind;
+            evs.iter().any(|e| {
+                matches!(&e.kind, EventKind::Transformed { into_species, .. }
+                    if *into_species == Species::Garchomp)
+                    || contains_transformed(&e.reactions)
+            })
+        }
+        assert!(contains_transformed(&events), "sim must emit Transformed for Imposter");
+
+        let fog = fog_1v1(&p1, Species::Snorlax);
+        let mut initial_fog = fog;
+        initial_fog.p2_known_back_mons =
+            vec![UnknownPokemonState::from_opponent_species(Species::Ditto, pd, 50)];
+
+        let result = apply_information(
+            UnknownMatchState::Battle(initial_fog),
+            &events, false, pd, md, &HashMap::new(), &InferenceConfig::default(),
+        );
+        let result = match result {
+            UnknownMatchState::Battle(b) => b,
+            _ => panic!("expected Battle state"),
+        };
+
+        let t = &result.p2_active_mons[0];
+        assert!(
+            matches!(&t.possible_species, Unknown::Known(Species::Garchomp)),
+            "transformed Ditto must display Garchomp; got {:?}", t.possible_species
+        );
+        assert!(t.pre_transform.is_some(), "pre_transform snapshot must be saved");
+        // Copy source is our own Known mon → copied Atk is exact.
+        assert_eq!(
+            (t.minStats[1], t.maxStats[1]), (true_atk, true_atk),
+            "copied Atk must be exact (source is the observer's Known Garchomp)"
+        );
+        // Garchomp's move (Splash was P1's; the copy takes P1's move set).
+        assert!(
+            t.known_moves.iter().any(|m| *m == Some(PokemonMove::Splash)),
+            "transformed mon must copy the source's moves"
         );
     }
 

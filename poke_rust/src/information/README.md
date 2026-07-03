@@ -78,7 +78,7 @@ rounding is available.
 | Category | Examples |
 |---|---|
 | Major actions | `MoveUsed`, `Switch`, `SimultaneousSwitch`, `Faint`, `EndOfTurn` |
-| Form changes | `MegaEvolution`, `Terastallization`, `FormeChange`, `TypeChanged` |
+| Form changes | `MegaEvolution`, `Terastallization`, `FormeChange`, `TypeChanged`, `Transformed` |
 | HP changes | `DamageDealt`, `Healed`, `SetHp` |
 | Hit qualifiers | `Crit`, `Immune`, `Missed`, `MoveFailed`, `Blocked`, `HitCount` |
 | Status | `StatusInflicted`, `StatusCured` |
