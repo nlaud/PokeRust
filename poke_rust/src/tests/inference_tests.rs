@@ -333,6 +333,61 @@ fn test_choice_not_excluded_for_same_move_twice() {
     );
 }
 
+// ── Regression: S8 — Struggle must not trip choice-lock / moveslot bookkeeping ──
+
+/// A Choice-locked Pokémon whose locked move runs out of PP is forced into Struggle —
+/// exactly the scenario Choice items cause. Before the S8 fix, `MoveUsed{Struggle}`
+/// was treated like any other move: `pass1_choice_exclusion` saw two distinct moves
+/// used (Earthquake, then Struggle) and unsoundly excluded every Choice item, even
+/// though Struggle is not a real move choice and the simulator itself never treats it
+/// as one for choice-lock purposes.
+#[test]
+fn test_struggle_does_not_exclude_choice_items() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Struggle,
+                targets: vec![p1(0)],
+            }),
+        ],
+    );
+    let m = &result.p2_active_mons[0];
+    assert!(
+        !is_item_excluded(m, &Item::ChoiceBand),
+        "ChoiceBand must NOT be excluded — Struggle is not a real move choice"
+    );
+    assert!(!is_item_excluded(m, &Item::ChoiceScarf));
+    assert!(!is_item_excluded(m, &Item::ChoiceSpecs));
+}
+
+/// `MoveUsed{Struggle}` must not consume one of the mon's 4 real moveslots.
+#[test]
+fn test_struggle_does_not_burn_a_moveslot() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Struggle,
+            targets: vec![p1(0)],
+        })],
+    );
+    let m = &result.p2_active_mons[0];
+    assert_eq!(
+        m.known_moves,
+        [None, None, None, None],
+        "Struggle must not be recorded as a known move"
+    );
+}
+
 // ── Pass 1: Boosts ────────────────────────────────────────────────────────────
 
 #[test]
@@ -469,6 +524,52 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
     assert!(
         !is_item_excluded(&result.p2_active_mons[0], &Item::LifeOrb),
         "LifeOrb must not be excluded when self-damage reaction is present"
+    );
+}
+
+// ── Regression: S10 — Life Orb absence must not be inferred when the user fainted ──
+
+/// A self-KO move (Explosion) that hits and then faints the user emits no self
+/// `DamageDealt` (the simulator sets HP to 0 directly — "no damage line in-game").
+/// Before the S10 fix, `pass2_item_from_move` read the missing self-damage as proof
+/// of no Life Orb; the faint (not the item) fully explains the absence, so the
+/// exclusion was unsound.
+#[test]
+fn test_life_orb_not_excluded_when_user_faints_during_move() {
+    let mut mon = unknown_mon();
+    mon.possible_abilities = Unknown::Not(vec![Ability::MagicGuard, Ability::SheerForce]);
+    let state = battle_with_p2(vec![mon]);
+
+    let mut explosion = normal_physical_move(PokemonMove::Explosion, 250);
+    explosion.self_destruct = SelfDestructType::Always;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Explosion, explosion);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Explosion,
+                targets: vec![p1(0)],
+            },
+            vec![
+                event(EventKind::DamageDealt {
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(50),
+                }),
+                // Self-destruct's own faint: no self-DamageDealt, straight to Faint.
+                event(EventKind::Faint { slot: p2(0) }),
+            ],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        !is_item_excluded(&result.p2_active_mons[0], &Item::LifeOrb),
+        "LifeOrb must NOT be excluded — the user's faint (not the item) explains the \
+         missing self-damage reaction"
     );
 }
 
@@ -2364,6 +2465,104 @@ fn test_mega_sets_has_mega_false() {
     assert!(
         result.p1_has_mega,
         "p1_has_mega must remain true — P1 has not yet Mega Evolved"
+    );
+}
+
+// ── Regression: S3 — MegaEvolution/FormeChange with a real species change ────
+
+/// `MegaEvolution` into a genuinely different species (base is already `Known`)
+/// must NOT panic. Before the S3 fix, the handler routed through
+/// `unknown_set_known`, which contradiction-panics whenever the field is already
+/// `Known` to a *different* value — exactly the common case for a real mega evo.
+#[test]
+fn test_mega_evolution_real_species_change_does_not_panic() {
+    use crate::state::pokemon::PokemonGender;
+    let p1_mon = unknown_mon();
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.p2_has_mega = true;
+
+    let mut dex = HashMap::new();
+    dex.insert(Species::GarchompMega, PokemonData {
+        species: Species::GarchompMega,
+        types: vec![PokemonType::Dragon, PokemonType::Ground],
+        base_stats: [108, 170, 115, 120, 95, 92],
+        weight: 950,
+        primary_ability: Some(Ability::SandForce),
+        abilities: vec![Ability::SandForce],
+        base_species: Some(Species::Garchomp),
+        forme: None,
+        required_item: None,
+        battle_only: Some(Species::Garchomp),
+        default_gender: PokemonGender::Male,
+    });
+
+    let result = apply_ex(
+        state,
+        vec![event(EventKind::MegaEvolution {
+            slot: p2(0),
+            into: Species::GarchompMega,
+        })],
+        dex,
+        HashMap::new(),
+    );
+
+    let mon = &result.p2_active_mons[0];
+    assert!(
+        matches!(&mon.possible_species, Unknown::Known(s) if *s == Species::GarchompMega),
+        "species must overwrite to the mega forme, got {:?}",
+        mon.possible_species
+    );
+    assert!(mon.is_mega);
+    assert!(!result.p2_has_mega);
+    assert!(
+        matches!(&mon.possible_abilities, Unknown::Known(a) if *a == Ability::SandForce)
+            || matches!(&mon.possible_abilities, Unknown::Possibly(v) if v == &vec![Ability::SandForce]),
+        "ability set must be recomputed from the mega species dex entry, got {:?}",
+        mon.possible_abilities
+    );
+}
+
+/// `FormeChange` into a genuinely different species (e.g. Stance Change,
+/// Mimikyu-Busted) must NOT panic when the base species is already `Known`.
+#[test]
+fn test_forme_change_real_species_change_does_not_panic() {
+    use crate::state::pokemon::PokemonGender;
+    let p1_mon = unknown_mon();
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut dex = HashMap::new();
+    dex.insert(Species::GarchompMega, PokemonData {
+        species: Species::GarchompMega,
+        types: vec![PokemonType::Dragon, PokemonType::Ground],
+        base_stats: [108, 170, 115, 120, 95, 92],
+        weight: 950,
+        primary_ability: Some(Ability::SandForce),
+        abilities: vec![Ability::SandForce],
+        base_species: Some(Species::Garchomp),
+        forme: None,
+        required_item: None,
+        battle_only: Some(Species::Garchomp),
+        default_gender: PokemonGender::Male,
+    });
+
+    let result = apply_ex(
+        state,
+        vec![event(EventKind::FormeChange {
+            slot: p2(0),
+            into: Species::GarchompMega,
+            permanent: true,
+        })],
+        dex,
+        HashMap::new(),
+    );
+
+    let mon = &result.p2_active_mons[0];
+    assert!(
+        matches!(&mon.possible_species, Unknown::Known(s) if *s == Species::GarchompMega),
+        "species must overwrite to the new forme, got {:?}",
+        mon.possible_species
     );
 }
 

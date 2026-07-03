@@ -871,6 +871,17 @@ fn pass1_apply_event(
         EventKind::MoveUsed {
             user, move_used, ..
         } => {
+            // Struggle is not a moveslot — it fires only when every move is out of PP
+            // (or the holder is Choice-locked into a 0-PP move) and is not a real move
+            // choice. The simulator itself excludes Struggle from choice-lock, last-move,
+            // and Copycat bookkeeping (simulator/mod.rs); mirror that here. Without this
+            // guard, `reveal_move_on_mon` would burn a real moveslot on a non-move, and
+            // `pass1_choice_exclusion` would see "two distinct moves used" — Choice's own
+            // failure mode — and unsoundly exclude Choice items in exactly the scenario
+            // that causes it.
+            if *move_used == PokemonMove::Struggle {
+                return;
+            }
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     reveal_move_on_mon(mon, move_used);
@@ -1178,15 +1189,17 @@ fn pass1_apply_event(
         EventKind::MegaEvolution { slot, into } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    unknown_set_known(
-                        &mut mon.possible_species,
-                        into.clone(),
-                        &format!("mon#{idx} mega"),
-                    );
+                    // Overwrite (not unknown_set_known): MegaEvolution genuinely changes
+                    // the mon's apparent species away from its pre-mega Known value, so
+                    // the "already Known to something else" panic path is not a
+                    // contradiction here — it's the expected common case. Mirrors the
+                    // IllusionEnded handler's overwrite pattern.
+                    mon.possible_species = Unknown::Known(into.clone());
                     mon.is_mega = true;
-                    // Update types and ability set from the mega species dex entry.
+                    // Update types, ability set, and weight from the mega species dex entry.
                     if let Some(data) = ctx.dex.get(into) {
                         mon.possible_types = Unknown::Known(data.types.clone());
+                        mon.possible_weight_hg = Unknown::Known(data.weight);
                         // Mega abilities are fixed per mega species — recompute both
                         // original and live ability to the mega's slot set.
                         let mega_abilities = if data.abilities.is_empty() {
@@ -1196,6 +1209,11 @@ fn pass1_apply_event(
                         };
                         mon.possible_original_abilities = mega_abilities.clone();
                         mon.possible_abilities = mega_abilities;
+                        // Mega Evolution swaps in a new base-stat table; EVs/IVs/nature are
+                        // unaffected, but the achievable final-stat window must be remapped
+                        // against the new base or pass5 will see an impossible window
+                        // (bounds computed for the pre-mega base stats).
+                        recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
                     }
                 }
                 match slot.player {
@@ -1252,13 +1270,13 @@ fn pass1_apply_event(
         EventKind::FormeChange { slot, into, .. } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    unknown_set_known(
-                        &mut mon.possible_species,
-                        into.clone(),
-                        &format!("mon#{idx} forme"),
-                    );
+                    // Overwrite (not unknown_set_known): a forme change (Stance Change,
+                    // Mimikyu-Busted, Palafin-Hero, etc.) genuinely changes the apparent
+                    // species away from its pre-change Known value — see MegaEvolution above.
+                    mon.possible_species = Unknown::Known(into.clone());
                     if let Some(data) = ctx.dex.get(into) {
                         mon.possible_types = Unknown::Known(data.types.clone());
+                        mon.possible_weight_hg = Unknown::Known(data.weight);
                         // Forme-change abilities are fixed per forme — recompute ability
                         // sets to the new forme's slot set.
                         let forme_abilities = if data.abilities.is_empty() {
@@ -1268,6 +1286,10 @@ fn pass1_apply_event(
                         };
                         mon.possible_original_abilities = forme_abilities.clone();
                         mon.possible_abilities = forme_abilities;
+                        // Forme changes (Stance Change, Mimikyu-Busted, …) can swap in a
+                        // different base-stat table — remap the achievable-stat window
+                        // the same way Mega Evolution does (see above).
+                        recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
                     }
                 }
             }
@@ -1827,6 +1849,55 @@ fn recompute_stats_for_iv_mode(
             calc_stat(b[4], 31, 252, lv, 1.0),
             calc_stat(b[5], 31, 252, lv, 1.0),
         ];
+    }
+}
+
+/// After a Mega Evolution / permanent Forme Change swaps in a new base-stat table
+/// for an already-tracked mon, remap `minStats`/`maxStats`/`min_pre_nature_stat`/
+/// `max_pre_nature_stat` against the new base using the mon's EXISTING (possibly
+/// already-tightened) `minEvs`/`maxEvs`/`minIvs`/`maxIvs`/`possible_natures` bounds.
+///
+/// Mega Evolution and forme changes do not alter a Pokémon's EVs, IVs, or nature —
+/// only the base-stat table used to compute the final stat from them. Unlike
+/// `recompute_stats_for_iv_mode` (used for a brand-new sighting), this must NOT reset
+/// EV/IV/nature bounds to the theoretical worst/best case — that would discard
+/// information already gained from prior battle observations (Pass 3/5). Leaving the
+/// old species' stat window in place instead (the bug this fixes) makes the window
+/// inconsistent with the new base stats and pass5 sees an impossible constraint.
+fn recompute_stat_bounds_for_species_change(
+    mon: &mut UnknownPokemonState,
+    new_base: [u16; 6],
+    level: u8,
+) {
+    // HP: no nature modifier.
+    mon.min_pre_nature_stat[0] = calc_hp(new_base[0], mon.minIvs[0], mon.minEvs[0], level);
+    mon.max_pre_nature_stat[0] = calc_hp(new_base[0], mon.maxIvs[0], mon.maxEvs[0], level);
+    mon.minStats[0] = mon.min_pre_nature_stat[0];
+    mon.maxStats[0] = mon.max_pre_nature_stat[0];
+
+    const STATS: [PokemonStat; 5] = [
+        PokemonStat::Atk,
+        PokemonStat::Def,
+        PokemonStat::SpA,
+        PokemonStat::SpD,
+        PokemonStat::Spe,
+    ];
+    for (i, stat) in STATS.iter().enumerate() {
+        let si = i + 1;
+        let bsv_lo = calc_stat(new_base[si], mon.minIvs[si], mon.minEvs[si], level, 1.0);
+        let bsv_hi = calc_stat(new_base[si], mon.maxIvs[si], mon.maxEvs[si], level, 1.0);
+        mon.min_pre_nature_stat[si] = bsv_lo;
+        mon.max_pre_nature_stat[si] = bsv_hi;
+
+        // Widest nature modifier still possible for this stat, over the mon's current
+        // (possibly already-narrowed) nature candidates.
+        let classes = possible_nature_classes(&mon.possible_natures, stat, si);
+        let (min_mod, max_mod) = classes.iter().fold(
+            (f32::MAX, f32::MIN),
+            |(mn, mx), &(m, _, _)| (mn.min(m), mx.max(m)),
+        );
+        mon.minStats[si] = (bsv_lo as f64 * min_mod as f64).floor() as u16;
+        mon.maxStats[si] = (bsv_hi as f64 * max_mod as f64).floor() as u16;
     }
 }
 
@@ -2886,7 +2957,18 @@ fn pass2_item_from_move(
             .iter()
             .any(|r| matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == user));
 
-        if hit_any_opponent {
+        // Self-KO moves (Explosion, Self-Destruct, Misty Explosion, Final Gambit) and any
+        // move whose own recoil/crash/drain-reversal fainted the user can suppress the LO
+        // chip entirely (the sim gates LO on `!attacker_fainted`) without the absence being
+        // evidence against Life Orb — the faint, not the item, explains the missing chip.
+        // Pass 1 has already applied any nested `Faint{user}` by the time this runs (the
+        // depth-first walk visits reactions before the parent's Pass 2/3), so `mon.fainted`
+        // reflects the post-move truth.
+        let user_fainted = mon_idx_for_active_slot(state, user)
+            .and_then(|i| get_mon_by_idx(state, i))
+            .map_or(false, |m| m.fainted);
+
+        if hit_any_opponent && !user_fainted {
             if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
                 if !has_lo_recoil {
                     let (could_mg, could_sf, has_secondary) = {
