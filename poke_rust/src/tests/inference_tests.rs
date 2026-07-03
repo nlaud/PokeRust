@@ -333,6 +333,141 @@ fn test_choice_not_excluded_for_same_move_twice() {
     );
 }
 
+// ── Regression: S15 — bookkeeping drift (consecutive_move_count, times_hit,
+//    last_move_on_field) must match simulator semantics ──────────────────────
+
+/// `consecutive_move_count` must use the simulator's 0-based streak convention:
+/// a move's first use (or a switch to a different move) is streak 0, not 1. Before
+/// the S15 fix, inference used a 1-based convention (first use = 1, second = 2),
+/// off by one from `simulator/mod.rs`'s `new_count = if last_used_move == move
+/// { count + 1 } else { 0 }`.
+#[test]
+fn test_consecutive_move_count_is_zero_based() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result.p2_active_mons[0].consecutive_move_count, 0,
+        "first use of a move must be streak 0, matching the simulator's convention"
+    );
+
+    let result2 = apply(
+        result,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result2.p2_active_mons[0].consecutive_move_count, 1,
+        "second consecutive use of the same move must be streak 1"
+    );
+
+    let result3 = apply(
+        result2,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::DragonClaw,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result3.p2_active_mons[0].consecutive_move_count, 0,
+        "switching to a different move must reset the streak to 0"
+    );
+}
+
+/// `times_hit` (Rage Fist) must only increment for a Physical/Special hit taken by a
+/// TARGET of the enclosing move — never for the move's own recoil/crash/drain-reversal
+/// self-damage on the user, and never for EOT/residual chip with no enclosing move.
+/// Before the S15 fix, every `DamageDealt` on a mon incremented its own `times_hit`
+/// regardless of cause, category, or self-vs-opponent.
+#[test]
+fn test_times_hit_excludes_self_damage_and_eot_chip() {
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+
+    let state = battle_with_p2(vec![unknown_mon()]);
+
+    // P2 uses Earthquake, hits P1 AND takes self-damage (e.g. Life Orb recoil).
+    let result = apply_ex(
+        state,
+        vec![
+            event_with(
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::Earthquake,
+                    targets: vec![p1(0)],
+                },
+                vec![
+                    event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(200) }),
+                    event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(90) }),
+                ],
+            ),
+            // EOT chip on P2 with no enclosing MoveUsed (e.g. Sandstorm).
+            event_with(
+                EventKind::EndOfTurn,
+                vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(80) })],
+            ),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].times_hit, 0,
+        "P2's own self-damage (recoil) and EOT chip must NOT increment its times_hit"
+    );
+}
+
+/// `state.last_move_on_field` (Copycat) must be updated to the most recently used
+/// non-Struggle move. Before the S15 fix, this field was never written by inference.
+#[test]
+fn test_last_move_on_field_updated_by_move_used() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::DragonClaw,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result.last_move_on_field,
+        Some(PokemonMove::DragonClaw),
+        "last_move_on_field must reflect the most recently used move"
+    );
+}
+
+/// Struggle must not update `last_move_on_field` (matches the simulator's exclusion).
+#[test]
+fn test_last_move_on_field_not_updated_by_struggle() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let mut state_with_prior = state;
+    state_with_prior.last_move_on_field = Some(PokemonMove::DragonClaw);
+    let result = apply(
+        state_with_prior,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Struggle,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result.last_move_on_field,
+        Some(PokemonMove::DragonClaw),
+        "Struggle must not overwrite last_move_on_field"
+    );
+}
+
 // ── Regression: S8 — Struggle must not trip choice-lock / moveslot bookkeeping ──
 
 /// A Choice-locked Pokémon whose locked move runs out of PP is forced into Struggle —

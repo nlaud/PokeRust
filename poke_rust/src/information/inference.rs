@@ -888,10 +888,13 @@ fn pass1_apply_event(
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
+                    // Matches the sim's 0-based streak convention exactly
+                    // (simulator/mod.rs: `new_count = if last_used_move == move { count+1 }
+                    // else { 0 }`): a move's first use in a streak is count 0, not 1.
                     if Some(move_used) == mon.last_used_move.as_ref() {
                         mon.consecutive_move_count = mon.consecutive_move_count.saturating_add(1);
                     } else {
-                        mon.consecutive_move_count = 1;
+                        mon.consecutive_move_count = 0;
                     }
                     // Update used_moves_this_field BEFORE choice exclusion (it reads it).
                     for i in 0..4 {
@@ -905,6 +908,10 @@ fn pass1_apply_event(
                     mon.last_used_move = Some(move_used.clone());
                 }
             }
+            // Field-level last-move tracker for Copycat (simulator/mod.rs sets this
+            // unconditionally for any executed non-Struggle move, on the top-level state,
+            // not per-mon — set after the mon borrow above ends).
+            state.last_move_on_field = Some(move_used.clone());
         }
 
         EventKind::Faint { slot } => {
@@ -952,7 +959,6 @@ fn pass1_apply_event(
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.damaged_this_turn = true;
                     mon.last_damage_taken = damage_delta.clone();
-                    mon.times_hit = mon.times_hit.saturating_add(1);
 
                     // Attribute to the enclosing MoveUsed if available.
                     if let Some(ref mctx) = ctx.move_context {
@@ -973,6 +979,16 @@ fn pass1_apply_event(
                                     mon.last_special_attacker = Some(attacker.clone());
                                 }
                                 MoveCategory::Status => {}
+                            }
+                            // Rage Fist hit counter: the sim increments only for a target of a
+                            // Physical/Special direct hit — never for the move's own recoil/
+                            // crash/drain-reversal self-damage on the user (a separate code
+                            // path there), and never for Status moves or EOT/residual chip
+                            // (no enclosing MoveUsed at all, handled by the `None` arm below).
+                            if target != attacker
+                                && matches!(md.category, MoveCategory::Physical | MoveCategory::Special)
+                            {
+                                mon.times_hit = mon.times_hit.saturating_add(1);
                             }
                         }
                     }
