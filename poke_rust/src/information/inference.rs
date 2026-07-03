@@ -813,6 +813,16 @@ struct MoveContext {
     pre_hit_hp: Vec<(FieldSlot, PokemonHP)>,
     /// Accumulated observed damage intervals per target, in hit order.
     observed_damage: Vec<(FieldSlot, PokemonHP)>,
+    /// S24: full fog snapshot of the attacker as of the moment the move was declared.
+    /// Pass 1 applies the whole reaction tree (self-boosts, Flame Body burns, item
+    /// consumption) before Pass 3 runs, so the live mon reflects POST-move state for
+    /// an observation made PRE-move. Pass 3 enumerates items/abilities and
+    /// materializes from this snapshot; bounds still write back to the live mon.
+    pre_move_attacker: Option<UnknownPokemonState>,
+    /// S24: pre-move fog snapshot of each target (same rationale — e.g. a Def-drop
+    /// secondary or a resist berry consumed by the observed hit itself must not leak
+    /// into the oracle run for that hit).
+    pre_move_targets: Vec<(FieldSlot, UnknownPokemonState)>,
 }
 
 /// Depth-first event walk applying Passes 1–3.
@@ -846,6 +856,19 @@ fn process_battle_event(
             })
             .collect();
 
+        // S24: full pre-move fog snapshots for Pass 3 (see MoveContext field docs).
+        let pre_move_attacker = mon_idx_for_active_slot(state, user)
+            .and_then(|i| get_mon_by_idx(state, i))
+            .cloned();
+        let pre_move_targets = targets
+            .iter()
+            .filter_map(|t| {
+                mon_idx_for_active_slot(state, t)
+                    .and_then(|i| get_mon_by_idx(state, i))
+                    .map(|m| (t.clone(), m.clone()))
+            })
+            .collect();
+
         ctx.move_context = Some(MoveContext {
             user_slot: user.clone(),
             pokemon_move: move_used.clone(),
@@ -853,6 +876,8 @@ fn process_battle_event(
             is_crit,
             pre_hit_hp,
             observed_damage: Vec::new(),
+            pre_move_attacker,
+            pre_move_targets,
         });
         // Clear switch_slot: we're now in a move context, not a switch context.
         ctx.switch_slot = None;
@@ -3260,6 +3285,11 @@ fn pass2_item_from_move(
         if hit_any_opponent && !user_fainted && !items_suppressed {
             if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
                 if !has_lo_recoil {
+                    // S24 epoch note: these ability reads are post-move, which is
+                    // sound here — a mid-move ability change (Mummy on contact)
+                    // replaces Magic Guard BEFORE the LO chip fires in the sim, so
+                    // "no recoil + post-move non-MG ability + Life Orb" is genuinely
+                    // impossible and the exclusion below remains valid.
                     let (could_mg, could_sf, could_klutz, has_secondary) = {
                         let um = get_mon_by_idx(state, user_idx);
                         (
@@ -3630,6 +3660,11 @@ fn pass2_contact_absence(
         let defender_klutz_possible =
             !unknown_is_excluded(&mon.possible_abilities, &Ability::Klutz);
 
+        // S24 epoch note: `mon.item` here is post-move — if the observed hit consumed
+        // the defender's berry, the item is already `Known(None)` and the exclusion
+        // below no-ops (unknown_exclude on a different Known value). Vacuous but
+        // sound; the mon provably wasn't holding a Helmet this move either way.
+        //
         // Rocky Helmet: Magic Guard on the attacker prevents the chip, so Helmet
         // absence is only certain when Magic Guard is also excluded — and (S21) when
         // the Helmet itself cannot have been inert (Magic Room / defender Klutz).
@@ -5524,10 +5559,31 @@ fn pass3_direction_b(
     use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
     use crate::simulator::DamageConfig;
 
-    let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
+    // S24: enumerate items/abilities and materialize from the PRE-MOVE snapshots —
+    // the live mons already carry this move's own reactions (self-boosts, mid-move
+    // status, consumed items), which must not leak into the oracle run for a hit
+    // that happened before them. Bounds are still written back to the live mon by
+    // apply_unconditional_tightening. Falls back to the live mon when no snapshot
+    // exists (defensive; MoveUsed always populates it).
+    let attacker_unk = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| mc.pre_move_attacker.clone())
+        .or_else(|| get_mon_by_idx(state, user_idx).cloned());
+    let Some(attacker_unk) = attacker_unk else {
         return;
     };
-    let Some(mut target_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+    let target_unk = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| {
+            mc.pre_move_targets
+                .iter()
+                .find(|(slot, _)| slot == target_slot)
+                .map(|(_, m)| m.clone())
+        })
+        .or_else(|| get_mon_by_idx(state, target_idx).cloned());
+    let Some(mut target_unk) = target_unk else {
         return;
     };
     // S23: materialize the target at the HP this hit was actually taken at.
@@ -6149,14 +6205,30 @@ fn pass3_direction_a(
         return;
     }
 
-    let Some(mut defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+    // S24: source both mons from the pre-move snapshots (see pass3_direction_b).
+    let defender_unk = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| {
+            mc.pre_move_targets
+                .iter()
+                .find(|(slot, _)| slot == target_slot)
+                .map(|(_, m)| m.clone())
+        })
+        .or_else(|| get_mon_by_idx(state, target_idx).cloned());
+    let Some(mut defender_unk) = defender_unk else {
         return;
     };
     // S23: materialize the defender at the HP this hit was actually taken at, so
     // full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) stay live for
     // the hit that broke full HP.
     defender_unk.hp = hit_pre_hp.clone();
-    let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
+    let attacker_unk = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| mc.pre_move_attacker.clone())
+        .or_else(|| get_mon_by_idx(state, user_idx).cloned());
+    let Some(attacker_unk) = attacker_unk else {
         return;
     };
 

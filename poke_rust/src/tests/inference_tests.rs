@@ -1027,6 +1027,55 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     );
 }
 
+// ── Regression: S24 — Pass 3 must run against the PRE-move state ────────────────
+
+/// A Power-Up-Punch-style move raises the user's Atk AFTER the hit; Pass 1 applies
+/// that `BoostChanged` before Pass 3 runs, so the oracle used to model the observed
+/// (unboosted) damage at +1 Atk.
+///
+/// Hand-derived (Garchomp, neutral, 40 BP Normal vs Def=100, formula
+/// `floor(floor(22·40·A/100)/50)+2`, rolls 0.85–1.00): true Atk BSV = 182 → base
+/// term 34 → non-crit damage 28–34; observed 34 (roll 1.0). With the post-move +1
+/// stage baked in, damage 34 needs boosted A ∈ [182, 221] → BSV ∈ ≈[135, 147] —
+/// capping the bound at 147 and excluding the true 182. The S24 snapshot restores
+/// the pre-move (stage 0) view, where BSV = 182 is exactly feasible.
+#[test]
+fn test_s24_self_boost_secondary_keeps_true_atk_feasible() {
+    let p1_mon = known_p1_normal(); // HP=500, Def=100
+    let p2_mon = neutral_no_item_garchomp();
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+            vec![
+                // The hit itself: 34 damage (500 → 466), dealt at stage 0.
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(466) }),
+                // The self-boost lands AFTER the hit.
+                event(EventKind::BoostChanged { target: p2(0), boost_idx: 0, stages: 1 }),
+            ],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    // The live boost must still be recorded (Pass 1 is unchanged) …
+    assert_eq!(p2_r.boosts[0], 1, "the +1 Atk stage must be tracked on the live mon");
+    // … but Pass 3 must have run against the pre-boost snapshot.
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 182 && 182 <= p2_r.max_pre_nature_stat[1],
+        "true Atk BSV 182 must stay within [{}, {}] — modeling the observed damage \
+         at the post-move +1 stage excludes it",
+        p2_r.min_pre_nature_stat[1],
+        p2_r.max_pre_nature_stat[1]
+    );
+}
+
 // ── Regression: S27 — Metronome streak resets on zero-effective-damage moves ────
 
 /// The sim resets `consecutive_move_count` to 0 and nulls `last_used_move` when a
