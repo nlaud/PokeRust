@@ -7680,3 +7680,94 @@ fn test_dauntless_shield_excluded_when_no_def_boost_on_entry() {
          possible_abilities = {:?}", result.p2_active_mons[0].possible_abilities
     );
 }
+
+// ── Regression: S1 — P2's active mon_idx must survive P1-side bench churn ────────
+//
+// Under the pre-S1 layout (`[p1_active, p1_known_back, p1_possible_back, p2_active,
+// ...]`), P2's active mon_idx was `p1_active.len() + p1_known_back.len() +
+// p1_possible_back.len()` — it depended on P1's CURRENT bench size. Any P1-side
+// switch (which pushes the outgoing mon onto p1_known_back/p1_possible_back, then
+// removes the incoming mon from wherever it was benched) shifted every mon_idx that
+// came after P1's bench segments, silently retargeting persistent `Statement`s
+// (SpeedComparison, weather/terrain/screen setters, HasItem/HasAbility clauses) that
+// reference a P2 mon onto a DIFFERENT physical Pokémon — purely from P1 activity
+// that P2 was not even involved in.
+//
+// The S1 fix places both active segments first (`[p1_active, p2_active,
+// p1_known_back, ...]`), so P2's active mon_idx depends only on
+// `p1_active_mons.len()`, which is fixed for the whole battle after the initial
+// lead-sending bootstrap. This test grows P1's known-back roster from 0 to 2 mons
+// via real switches and asserts a clause captured against P2's active mon BEFORE
+// those switches still resolves to the SAME P2 mon (by species) afterward.
+
+#[test]
+fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
+    let p1_mon_a = unknown_mon_species(Species::Garchomp);
+    let p1_mon_c = unknown_mon_species(Species::Corviknight);
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+
+    let mut state = battle_1v1(p1_mon_a, p2_mon);
+    // P1 already has one known-back mon before we start — this is exactly the
+    // condition that made the OLD layout diverge from the NEW one (P2's mon_idx
+    // was 2 under the old layout here, 1 under the new one).
+    state.p1_known_back_mons = vec![p1_mon_c];
+
+    // Capture P2's active mon_idx and manually install a persistent clause
+    // referencing it, mirroring what Pass 2/3/4 would emit in practice.
+    let p2_idx_before = mon_idx_for_active_slot(&state, &p2(0)).unwrap();
+    state.predicates.push(vec![Statement::HasItem {
+        mon_idx: p2_idx_before,
+        item: Item::Leftovers,
+    }]);
+
+    // P1 switches Garchomp out for Corviknight (already on the bench), then
+    // switches Corviknight out for a brand-new mon (Snorlax) never seen before —
+    // this exercises both a Vec::remove (shrinking p1_known_back) and a push
+    // (growing it), the two operations that caused the old layout to drift.
+    let switch_in_corviknight = event(EventKind::Switch(SwitchState {
+        slot: p1(0),
+        species: Species::Corviknight,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let after_first_switch = apply(state, vec![switch_in_corviknight]);
+
+    let switch_in_new_mon = event(EventKind::Switch(SwitchState {
+        slot: p1(0),
+        species: Species::Alakazam,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let result = apply(after_first_switch, vec![switch_in_new_mon]);
+
+    // P2's active mon_idx (recomputed fresh, post-churn) must still be the SAME
+    // integer as before — proving it never depended on P1's bench size.
+    let p2_idx_after = mon_idx_for_active_slot(&result, &p2(0)).unwrap();
+    assert_eq!(
+        p2_idx_before, p2_idx_after,
+        "P2's active mon_idx must not shift due to P1-side bench churn"
+    );
+
+    // And the mon actually AT that index must still be Snorlax (P2's real mon),
+    // never one of the P1 mons that churned through the bench.
+    let mon_at_idx = get_mon_by_idx(&result, p2_idx_before).unwrap();
+    assert!(
+        matches!(&mon_at_idx.possible_species, Unknown::Known(s) if *s == Species::Snorlax),
+        "mon_idx {p2_idx_before} must still resolve to P2's Snorlax, got {:?}",
+        mon_at_idx.possible_species
+    );
+
+    // The clause captured before the churn is a unit clause, so Pass 6 (BCP)
+    // force-resolves it immediately into the mon's item field (and removes it from
+    // `predicates`). The pre-fix bug would have forced this onto whichever P1 mon
+    // ended up at the stale index instead — assert it landed on P2's Snorlax.
+    assert_eq!(
+        mon_at_idx.item,
+        Unknown::Known(Item::Leftovers),
+        "the pre-churn clause must have resolved onto P2's Snorlax, not a P1 mon"
+    );
+}

@@ -125,14 +125,78 @@ macro_rules! inference_contradiction {
 mod bcp;
 
 // ── mon_idx helpers ────────────────────────────────────────────────────────────
+//
+// S1 soundness fix: `mon_idx` order is `[p1_active…, p2_active…, p1_known_back…,
+// p1_possible_back…, p2_known_back…, p2_possible_back…]` — BOTH active segments
+// come first, before either side's bench. This is a deliberate departure from a
+// naive per-side-contiguous layout (`[p1_active, p1_back, p2_active, p2_back]`),
+// which was the previous ordering and had a critical staleness bug: any switch on
+// EITHER side grows/shrinks that side's `known_back`/`possible_back` Vecs (`push`
+// on switch-out, `Vec::remove` on switch-in), which shifts every index that comes
+// after it. Under the old layout, P1's bench sat between P1's actives and P2's
+// actives, so *every* P1 switch — even one that has nothing to do with P2 — silently
+// shifted P2's active mon_idx values. `Statement`s referencing a P2 active mon
+// (SpeedComparison, weather/terrain/screen setters, HasItem/HasAbility clauses from
+// Pass 2/3/4) persist in `state.predicates` across turns, so a stale index would
+// silently retarget a later force/exclusion onto the wrong physical Pokémon.
+//
+// With both active segments fixed at the front, `p1_active_mons.len()` and
+// `p2_active_mons.len()` are the only two quantities involved in computing any
+// active mon's mon_idx, and (after the initial lead-sending bootstrap) both are
+// permanently stable for the rest of the battle — see `pass1_switch`, which always
+// overwrites an already-populated active slot in place rather than push/removing.
+// Only BENCH mon indices remain unstable, but no code persists a Statement or
+// setter field referencing a bench index (`teammate_indices`/`enforce_unique_item`
+// compute and consume bench indices atomically within a single event, never storing
+// them for later re-evaluation), so this is sound.
+//
+// The trade-off: each side's full roster (active + bench) is no longer a single
+// contiguous range (P1's bench sits after P2's active in this layout). Helpers that
+// need "all mons on side X" (`teammate_indices`, `TeamStatusCured`, `mon_is_p2`)
+// must therefore check each segment explicitly rather than assume one [start, end)
+// range per side.
 
-/// Total number of mons tracked in a `BattleState`, in `mon_idx` order:
-/// `[p1_active…, p1_known_back…, p1_possible_back…, p2_active…, p2_known_back…, p2_possible_back…]`.
+/// The six roster-segment sizes needed to resolve any `mon_idx`, in `mon_idx` order.
+struct MonSegments {
+    p1_active: usize,
+    p2_active: usize,
+    p1_known_back: usize,
+    p1_possible_back: usize,
+    p2_known_back: usize,
+    p2_possible_back: usize,
+}
+
+impl MonSegments {
+    fn of(state: &UnknownBattleState) -> Self {
+        MonSegments {
+            p1_active: state.p1_active_mons.len(),
+            p2_active: state.p2_active_mons.len(),
+            p1_known_back: state.p1_known_back_mons.len(),
+            p1_possible_back: state.p1_possible_back_mons.len(),
+            p2_known_back: state.p2_known_back_mons.len(),
+            p2_possible_back: state.p2_possible_back_mons.len(),
+        }
+    }
+    /// `[p1_active_range, p2_active_range, p1_back_range, p2_back_range]`, each a
+    /// contiguous `mon_idx` range. `p1_back` combines known+possible (always
+    /// adjacent), likewise `p2_back`.
+    fn ranges(&self) -> [std::ops::Range<usize>; 4] {
+        let p1_active = 0..self.p1_active;
+        let p2_active = self.p1_active..(self.p1_active + self.p2_active);
+        let back_start = self.p1_active + self.p2_active;
+        let p1_back_end = back_start + self.p1_known_back + self.p1_possible_back;
+        let p1_back = back_start..p1_back_end;
+        let p2_back = p1_back_end..(p1_back_end + self.p2_known_back + self.p2_possible_back);
+        [p1_active, p2_active, p1_back, p2_back]
+    }
+}
+
+/// Total number of mons tracked in a `BattleState`, in `mon_idx` order.
 fn mons_count_battle(state: &UnknownBattleState) -> usize {
     state.p1_active_mons.len()
+        + state.p2_active_mons.len()
         + state.p1_known_back_mons.len()
         + state.p1_possible_back_mons.len()
-        + state.p2_active_mons.len()
         + state.p2_known_back_mons.len()
         + state.p2_possible_back_mons.len()
 }
@@ -162,9 +226,9 @@ pub fn mon_idx_for_active_slot(state: &UnknownBattleState, slot: &FieldSlot) -> 
 pub fn get_mon_by_idx(state: &UnknownBattleState, idx: usize) -> Option<&UnknownPokemonState> {
     let segs: [&[UnknownPokemonState]; 6] = [
         &state.p1_active_mons,
+        &state.p2_active_mons,
         &state.p1_known_back_mons,
         &state.p1_possible_back_mons,
-        &state.p2_active_mons,
         &state.p2_known_back_mons,
         &state.p2_possible_back_mons,
     ];
@@ -184,15 +248,19 @@ pub fn get_mon_mut_by_idx(
     idx: usize,
 ) -> Option<&mut UnknownPokemonState> {
     let p1a = state.p1_active_mons.len();
+    let p2a = state.p2_active_mons.len();
     let p1k = state.p1_known_back_mons.len();
     let p1p = state.p1_possible_back_mons.len();
-    let p2a = state.p2_active_mons.len();
     let p2k = state.p2_known_back_mons.len();
 
     if idx < p1a {
         return Some(&mut state.p1_active_mons[idx]);
     }
     let idx = idx - p1a;
+    if idx < p2a {
+        return Some(&mut state.p2_active_mons[idx]);
+    }
+    let idx = idx - p2a;
     if idx < p1k {
         return Some(&mut state.p1_known_back_mons[idx]);
     }
@@ -201,10 +269,6 @@ pub fn get_mon_mut_by_idx(
         return Some(&mut state.p1_possible_back_mons[idx]);
     }
     let idx = idx - p1p;
-    if idx < p2a {
-        return Some(&mut state.p2_active_mons[idx]);
-    }
-    let idx = idx - p2a;
     if idx < p2k {
         return Some(&mut state.p2_known_back_mons[idx]);
     }
@@ -305,26 +369,29 @@ fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
 /// `possible_back` entries represent the *same* physical slot, gate exclusion
 /// here so it never fires across such alternatives.
 // TODO: revisit if possible_back ever holds non-distinct Illusion hypotheses.
+///
+/// S1: a side's full roster is no longer one contiguous `mon_idx` range (P1's bench
+/// sits after P2's active segment) — this walks the P1 or P2 range pair from
+/// `MonSegments::ranges()` instead of assuming a single `[start, end)` span.
 fn teammate_indices(state: &UnknownBattleState, source_idx: usize) -> Vec<usize> {
-    let p1a = state.p1_active_mons.len();
-    let p1k = state.p1_known_back_mons.len();
-    let p1p = state.p1_possible_back_mons.len();
-    let p1_end = p1a + p1k + p1p;
+    let [p1_active, p2_active, p1_back, p2_back] = MonSegments::of(state).ranges();
 
-    let p2a = state.p2_active_mons.len();
-    let p2k = state.p2_known_back_mons.len();
-    let p2p = state.p2_possible_back_mons.len();
-    let p2_end = p1_end + p2a + p2k + p2p;
+    let is_p1 = p1_active.contains(&source_idx) || p1_back.contains(&source_idx);
+    let is_p2 = p2_active.contains(&source_idx) || p2_back.contains(&source_idx);
 
-    let (start, end) = if source_idx < p1_end {
-        (0, p1_end)
-    } else if source_idx < p2_end {
-        (p1_end, p2_end)
+    let side_ranges = if is_p1 {
+        [p1_active, p1_back]
+    } else if is_p2 {
+        [p2_active, p2_back]
     } else {
         return vec![];
     };
 
-    (start..end).filter(|&i| i != source_idx).collect()
+    side_ranges
+        .into_iter()
+        .flatten()
+        .filter(|&i| i != source_idx)
+        .collect()
 }
 
 /// Under item clause, exclude `item` from every distinct teammate of the mon at
@@ -1031,26 +1098,19 @@ fn pass1_apply_event(
         // Heal Bell / Aromatherapy: cure the entire side including benched mons.
         EventKind::TeamStatusCured { side } => {
             let total = mons_count_battle(state);
-            // p1 occupies mon_idx 0..p1_active+p1_known_back+p1_possible_back;
-            // p2 occupies the rest.  Use get_mon_mut_by_idx to iterate without caring
-            // about the exact segment boundaries.
-            let (start, end) = match side {
-                Player::P1 => {
-                    let p1_count = state.p1_active_mons.len()
-                        + state.p1_known_back_mons.len()
-                        + state.p1_possible_back_mons.len();
-                    (0, p1_count)
-                }
-                Player::P2 => {
-                    let p1_count = state.p1_active_mons.len()
-                        + state.p1_known_back_mons.len()
-                        + state.p1_possible_back_mons.len();
-                    (p1_count, total)
-                }
-            };
-            for idx in start..end {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    mon.status = None;
+            // S1: a side's roster is not one contiguous mon_idx range under the
+            // active-segments-first layout (P1's bench sits after P2's active
+            // segment) — filter every index by side membership instead.
+            for idx in 0..total {
+                let is_p2 = mon_is_p2(state, idx);
+                let matches_side = match side {
+                    Player::P1 => !is_p2,
+                    Player::P2 => is_p2,
+                };
+                if matches_side {
+                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                        mon.status = None;
+                    }
                 }
             }
         }
@@ -6017,15 +6077,19 @@ fn pass3_direction_a(
 
 // ── Pass 4: Speed ordering → Spe bounds ──────────────────────────────────────
 
-/// Returns `true` if the mon at `mon_idx` is on P2's side (indices past the P1 segments).
+/// Returns the `mon_idx` of P2's first active slot (P2's active segment immediately
+/// follows P1's active segment under the S1 layout — see `MonSegments`).
 fn p2_mon_start(state: &UnknownBattleState) -> usize {
     state.p1_active_mons.len()
-        + state.p1_known_back_mons.len()
-        + state.p1_possible_back_mons.len()
 }
 
+/// `true` if `mon_idx` belongs to a P2 roster member (active or benched). S1: P2's
+/// bench segment is no longer contiguous with P2's active segment (P1's bench sits
+/// between them), so this checks both P2 ranges explicitly rather than a single
+/// ">=" boundary.
 fn mon_is_p2(state: &UnknownBattleState, mon_idx: usize) -> bool {
-    mon_idx >= p2_mon_start(state)
+    let [_, p2_active, _, p2_back] = MonSegments::of(state).ranges();
+    p2_active.contains(&mon_idx) || p2_back.contains(&mon_idx)
 }
 
 /// Extract the core item/ability/type snapshot from a target mon into owned values.

@@ -274,9 +274,18 @@ pub struct UnknownBattleState {
 /// `UnknownBattleState` in this order:
 ///
 /// ```text
-/// [p1_active_mons..., p1_known_back_mons..., p1_possible_back_mons...,
-///  p2_active_mons..., p2_known_back_mons..., p2_possible_back_mons...]
+/// [p1_active_mons..., p2_active_mons...,
+///  p1_known_back_mons..., p1_possible_back_mons...,
+///  p2_known_back_mons..., p2_possible_back_mons...]
 /// ```
+///
+/// Both active segments come first, before either side's bench (S1: this keeps
+/// every active mon's `mon_idx` stable for the whole battle — see the
+/// `mon_idx` helpers doc comment in `information::inference` for why the naive
+/// per-side-contiguous ordering was unsound for persistent `Statement`s). A
+/// side's full roster (active + bench) is therefore NOT one contiguous range —
+/// `teammate_indices` / `mon_is_p2` in `information::inference` check each
+/// segment explicitly.
 ///
 /// For `UnknownTeamPreviewState` the list is simply `[p1_mons..., p2_mons...]`.
 ///
