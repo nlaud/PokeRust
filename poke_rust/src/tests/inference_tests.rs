@@ -3892,6 +3892,49 @@ fn test_item_gained_does_not_exclude_teammate() {
     );
 }
 
+// ── Regression: S12 — a re-confirmed transferred item must not exclude teammates ──
+
+/// A transferred item (Trick/Switcheroo, via `ItemGained`) that is later re-revealed
+/// by an independent source (e.g. Frisk emitting `ItemRevealed` for the SAME item on
+/// the SAME mon on a later turn) must still not trigger the item-clause exclusion.
+/// Before the S12 fix, `ItemRevealed` unconditionally called `enforce_unique_item`
+/// regardless of how the mon came to hold that item, so a Frisk reveal of a Tricked-in
+/// item would unsoundly exclude that item from the mon's own (legitimately
+/// team-built) teammates.
+#[test]
+fn test_item_revealed_after_transfer_does_not_exclude_teammate() {
+    let p1_mon = unknown_mon();
+    let p2_active = unknown_mon_species(Species::Garchomp);
+    let p2_back = unknown_mon_species(Species::Corviknight);
+    let state = battle_1v1_with_known_back(p1_mon, p2_active, p2_back);
+
+    let result = apply_with_config(
+        state,
+        vec![
+            // Turn N: the active mon receives Leftovers via a transfer (Trick).
+            event(EventKind::ItemGained { slot: p2(0), item: Item::Leftovers }),
+            // Turn N+k: an independent source (Frisk) re-reveals the SAME item.
+            event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers }),
+        ],
+        HashMap::new(),
+        HashMap::new(),
+        InferenceConfig::default(),
+    );
+
+    let active = get_mon_by_idx(&result, 1).unwrap();
+    assert!(
+        matches!(&active.item, Unknown::Known(Item::Leftovers)),
+        "Active mon should be Known(Leftovers), got {:?}",
+        active.item
+    );
+    let back = get_mon_by_idx(&result, 2).unwrap();
+    assert!(
+        !is_item_excluded(back, &Item::Leftovers),
+        "Back mon must still allow Leftovers — the active mon's Leftovers was transferred, \
+         not team-built, so it says nothing about what the back mon may hold"
+    );
+}
+
 // ── I-B: Pass 5 re-run after BCP ─────────────────────────────────────────────
 
 /// Regression test for I-B: Pass 5 must be re-run after the final BCP so that

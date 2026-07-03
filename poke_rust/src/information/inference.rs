@@ -1050,12 +1050,21 @@ fn pass1_apply_event(
                         );
                     }
                 }
+                // Item clause: a confirmed team-built item cannot be held by any other
+                // roster member on the same side — but ONLY when this mon's own item is
+                // itself team-built. A mon carrying a transferred item (Trick/Switcheroo/
+                // Symbiosis/Recycle/Pickup — item_was_transferred) reveals nothing about
+                // what this mon's team built, so a later ItemRevealed re-confirming that
+                // transferred item must not exclude it from this mon's teammates (S12:
+                // e.g. Frisk revealing a foe's Tricked-in item).
+                let was_transferred = get_mon_by_idx(state, idx)
+                    .map_or(false, |m| m.item_was_transferred);
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     unknown_set_known(&mut mon.item, item.clone(), &format!("mon#{idx} item"));
                 }
-                // Item clause: a confirmed team-built item cannot be held by any
-                // other roster member on the same side.
-                enforce_unique_item(state, idx, item, ctx.config.allow_repeat_items);
+                if !was_transferred {
+                    enforce_unique_item(state, idx, item, ctx.config.allow_repeat_items);
+                }
             }
         }
         EventKind::ItemGained { slot, item } => {
@@ -1075,6 +1084,9 @@ fn pass1_apply_event(
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.item = Unknown::Known(item.clone());
                     mon.item_lost = false;
+                    // Marks this mon's held item as no-longer-team-built, so any future
+                    // ItemRevealed re-confirming it skips the item-clause exclusion (S12).
+                    mon.item_was_transferred = true;
                 }
             }
         }
