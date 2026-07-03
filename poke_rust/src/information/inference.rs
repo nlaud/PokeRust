@@ -973,6 +973,25 @@ fn pass1_apply_event(
                     // which survives switch-out).
                     pass1_choice_exclusion(mon, move_used);
                     mon.last_used_move = Some(move_used.clone());
+
+                    // S27: mirror the sim's zero-effective-damage reset
+                    // (simulator/mod.rs `total_effective_dmg == 0` → count = 0,
+                    // last_used_move = None). A damaging move that dealt no damage to
+                    // any non-user target (miss / immune / fully blocked) breaks the
+                    // Metronome streak in the sim; without this the fog streak drifts
+                    // upward and the drifted value is materialized straight into the
+                    // Pass 3 oracle for our own attacker (Direction A).
+                    let is_damaging = ctx
+                        .move_dex
+                        .get(move_used)
+                        .map_or(false, |md| !matches!(md.category, MoveCategory::Status));
+                    let dealt_damage = event.reactions.iter().any(|r| {
+                        matches!(&r.kind, EventKind::DamageDealt { target, .. } if target != user)
+                    });
+                    if is_damaging && !dealt_damage {
+                        mon.consecutive_move_count = 0;
+                        mon.last_used_move = None;
+                    }
                 }
             }
             // Field-level last-move tracker for Copycat (simulator/mod.rs sets this

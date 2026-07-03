@@ -1027,6 +1027,51 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     );
 }
 
+// ── Regression: S27 — Metronome streak resets on zero-effective-damage moves ────
+
+/// The sim resets `consecutive_move_count` to 0 and nulls `last_used_move` when a
+/// damaging move deals no effective damage (miss / immune / fully blocked). Before
+/// the S27 fix, inference incremented the streak on every `MoveUsed` regardless of a
+/// `Missed` reaction, so the fog streak drifted above the sim's — and the drifted
+/// value is materialized straight into Pass 3 oracle calls (Metronome ×(1+0.2n)).
+#[test]
+fn test_s27_streak_resets_on_missed_move() {
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+
+    let result = apply_ex(
+        state,
+        vec![
+            // First use connects: streak 0, last_used = Tackle.
+            event_with(
+                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+                vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(90) })],
+            ),
+            // Second use misses: the sim resets the streak and nulls last_used_move.
+            event_with(
+                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+                vec![event(EventKind::Missed { target: p1(0) })],
+            ),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    let mon = &result.p2_active_mons[0];
+    assert_eq!(
+        mon.consecutive_move_count, 0,
+        "a missed damaging move must reset the streak (sim: total_effective_dmg == 0)"
+    );
+    assert_eq!(
+        mon.last_used_move, None,
+        "a missed damaging move must null last_used_move (sim parity)"
+    );
+}
+
 // ── Regression: S22 — Direction A damage band must cover both display roundings ──
 
 /// Exhaustive cross-validation of the Pass 3 percent→damage band against the real
