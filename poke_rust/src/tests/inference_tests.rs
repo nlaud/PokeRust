@@ -2052,6 +2052,51 @@ fn test_ability_revealed_outside_set_overwrites_to_known() {
     // Original abilities field should remain unset (we don't touch possible_original_abilities here)
 }
 
+// ── Regression: S14 — live ability change must overwrite Not/Known too ──────────
+
+/// A revealed ability that was previously excluded from a `Not(excluded)` set (e.g.
+/// ruled out earlier by switch-in absence inference — "this mon's innate ability
+/// isn't Drizzle") must overwrite to `Known` as a live ability change (Trace copying
+/// Drizzle from an ally), not panic. Before the S14 fix, only the `Possibly`-outside
+/// case was treated this way; `Not`-excluded values still routed through
+/// `unknown_set_known` and panicked.
+#[test]
+fn test_ability_revealed_previously_excluded_overwrites_to_known() {
+    let mut mon = unknown_mon(); // Garchomp via from_opponent_species — Not([]) by default here
+    mon.possible_abilities = Unknown::Not(vec![Ability::Drizzle]);
+    let state = battle_with_p2(vec![mon]);
+
+    let result = apply(
+        state,
+        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Drizzle })],
+    );
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::Drizzle),
+        "A previously-excluded ability reveal should overwrite to Known (live change), not panic"
+    );
+}
+
+/// A revealed ability that conflicts with an already-`Known` value (e.g. the mon's
+/// live ability was previously pinned to X, and a later Trace/Skill Swap/Mummy event
+/// changes it to Y) must overwrite to `Known(Y)`, not panic.
+#[test]
+fn test_ability_revealed_conflicting_known_overwrites_to_known() {
+    let mut mon = unknown_mon();
+    mon.possible_abilities = Unknown::Known(Ability::SandVeil);
+    let state = battle_with_p2(vec![mon]);
+
+    let result = apply(
+        state,
+        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Levitate })],
+    );
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::Levitate),
+        "A conflicting Known->Known ability reveal should overwrite (live change), not panic"
+    );
+}
+
 // ── Phase 2: Contact-reaction absence ────────────────────────────────────────
 
 fn contact_physical_move(name: PokemonMove, bp: u16) -> MoveData {

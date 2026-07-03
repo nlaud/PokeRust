@@ -1112,17 +1112,20 @@ fn pass1_apply_event(
         EventKind::AbilityRevealed { slot, ability } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    // Narrow-vs-overwrite: if the revealed ability is already
-                    // in the candidate set (or the set is wide `Not`), narrow.
-                    // If it is outside a `Possibly` set, a live ability-change
-                    // (Trace, Skill Swap, Mummy, etc.) occurred — overwrite the
-                    // live ability to `Known` without treating it as a
-                    // contradiction. `possible_original_abilities` is untouched.
-                    let outside_possibly = matches!(
-                        &mon.possible_abilities,
-                        Unknown::Possibly(v) if !v.contains(ability)
-                    );
-                    if outside_possibly {
+                    // Narrow-vs-overwrite: if the revealed ability is already possible
+                    // (a candidate in `Possibly`, unexcluded in `Not`, or already the
+                    // `Known` value), narrow/no-op via `unknown_set_known`. If it is
+                    // excluded under ANY of the three `Unknown` representations —
+                    // outside a `Possibly` slot set, in a `Not` exclusion list (e.g.
+                    // ruled out earlier by switch-in absence inference), or a different
+                    // `Known` value — a live ability change occurred (Trace, Skill Swap,
+                    // Mummy, Wandering Spirit, …): overwrite rather than treating it as
+                    // a contradiction. `possible_original_abilities` is left untouched
+                    // in every case, since none of these represent the mon's innate
+                    // ability changing. S14: previously only the `Possibly` case was
+                    // handled this way; `Not`-excluded and `Known(other)` incorrectly
+                    // panicked even though they are the same live-change scenario.
+                    if unknown_is_excluded(&mon.possible_abilities, ability) {
                         mon.possible_abilities = Unknown::Known(ability.clone());
                     } else {
                         unknown_set_known(
