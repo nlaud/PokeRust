@@ -1024,6 +1024,33 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     );
 }
 
+// ── Regression: S20 — Choice exclusion must not fire on a transferred Choice item ──
+
+/// P2's mon uses Tackle, receives a Choice Scarf via Trick (ItemGained), then legally
+/// selects a different move — Choice lock only binds from the first move used while
+/// holding the item. Before the S20 fix, `pass1_choice_exclusion` saw two distinct
+/// moves this stint and tried to exclude ChoiceScarf from the mon's now-Known(Scarf)
+/// item — an unconditional contradiction panic on a legal game sequence.
+#[test]
+fn test_s20_choice_exclusion_skipped_for_tricked_item() {
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let result = apply(
+        state,
+        vec![
+            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] }),
+            event(EventKind::ItemGained { slot: p2(0), item: Item::ChoiceScarf }),
+            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BodySlam, targets: vec![p1(0)] }),
+        ],
+    );
+    assert!(
+        matches!(&result.p2_active_mons[0].item, Unknown::Known(i) if *i == Item::ChoiceScarf),
+        "the transferred Choice Scarf must survive the multi-move stint"
+    );
+}
+
 // ── Regression: S17 — conditional SpeedComparisons must not propagate bounds ────
 
 /// A slow mon with a possible Quick Claw moves before our exactly-known fast mon.

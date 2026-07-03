@@ -2405,8 +2405,19 @@ fn narrow_species_by_learnset(
 /// (not cleared on switch-out) so that a Pokémon using a new move after switching back
 /// in is never incorrectly flagged as Choice-locked.
 ///
+/// S20: skipped once the mon's held item arrived via a mid-battle transfer
+/// (`item_was_transferred`, set by `ItemGained` — Trick / Switcheroo / Recycle /
+/// Pickup). Choice lock binds from the first move used *while holding* the Choice
+/// item, so "used move A, was Tricked a Choice Scarf, then legally picked move B" is
+/// a perfectly consistent sequence — excluding the Scarf from the mon's now-`Known`
+/// item was a guaranteed contradiction panic. (An item *loss* mid-stint needs no
+/// guard: `ItemLost` pins the item to `Known(None)`, on which the exclusion no-ops.)
+///
 /// Call AFTER `used_moves_this_field` has been updated for `new_move`.
 fn pass1_choice_exclusion(mon: &mut UnknownPokemonState, new_move: &PokemonMove) {
+    if mon.item_was_transferred {
+        return;
+    }
     // Count how many distinct known moves have been used this field.
     let distinct_used: Vec<&PokemonMove> = mon
         .known_moves
