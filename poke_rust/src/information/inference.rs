@@ -6251,14 +6251,99 @@ fn priority_lift_escapes(
 ///   Quick Draw, ability priority, Stall, item speed modifiers, weather abilities, etc.).
 /// - Accounts for Trick Room (reverses the inferred fast/slow assignment) and Tailwind
 ///   (folds the ×2 multiplier into the comparison deterministically).
+/// Per-mover snapshot used by `pass4_speed_from_order`: everything needed to emit a
+/// pairing's clause, including the speed-relevant fields (Spe boost stage, paralysis,
+/// Tailwind) captured AS OF the point in the turn just before this mover's own
+/// `MoveUsed`, not read live from `state` at Pass 4's call time (see S4 comment on
+/// `compute_speed_multipliers`).
+struct Mover {
+    eff_prio: i8,
+    mon_idx: usize,
+    move_used: PokemonMove,
+    spe_boost: i8,
+    paralyzed: bool,
+    tailwind: bool,
+}
+
+/// Deep-scan `reactions` for events that change a mon's Spe boost stage, paralysis
+/// status, or a side's Tailwind — the fields `compute_speed_multipliers` bakes into
+/// a `SpeedComparison`'s numeric factors — and update the running snapshot maps.
+///
+/// Deliberately narrow: `BoostsSwapped`/`BoostsCopied` are not tracked (which
+/// specific stats they move isn't recoverable from the event alone without the
+/// causing move; Heart Swap/Power Swap/Guard Swap mid-turn before a same-turn
+/// speed-relevant pairing is rare enough that leaving the snapshot stale here is an
+/// acceptable, documented residual gap rather than blocking the fix for the common
+/// cases (Thunder Wave, Icy Wind/Charm, Intimidate-adjacent, Tailwind, Haze).
+fn update_speed_snapshot_from_reactions(
+    state: &UnknownBattleState,
+    reactions: &[InformationEvent],
+    spe_boost: &mut HashMap<usize, i8>,
+    paralyzed: &mut HashMap<usize, bool>,
+    tailwind: &mut HashMap<Player, bool>,
+) {
+    for r in reactions {
+        match &r.kind {
+            EventKind::StatusInflicted { target, status } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    paralyzed.insert(idx, matches!(status, Status::Paralysis));
+                }
+            }
+            EventKind::StatusCured { target, .. } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    paralyzed.insert(idx, false);
+                }
+            }
+            EventKind::BoostChanged { target, boost_idx: 4, stages } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    let cur = *spe_boost.get(&idx).unwrap_or(&0);
+                    spe_boost.insert(idx, (cur as i16 + *stages as i16).clamp(-6, 6) as i8);
+                }
+            }
+            EventKind::BoostsCleared { target } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    spe_boost.insert(idx, 0);
+                }
+            }
+            EventKind::BoostsInverted { target } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    let cur = *spe_boost.get(&idx).unwrap_or(&0);
+                    spe_boost.insert(idx, -cur);
+                }
+            }
+            EventKind::SideConditionStart { side, condition: SideCondition::TailWind } => {
+                tailwind.insert(*side, true);
+            }
+            EventKind::SideConditionEnd { side, condition: SideCondition::TailWind } => {
+                tailwind.insert(*side, false);
+            }
+            _ => {}
+        }
+        update_speed_snapshot_from_reactions(state, &r.reactions, spe_boost, paralyzed, tailwind);
+    }
+}
+
 fn pass4_speed_from_order(
     state: &mut UnknownBattleState,
     top_events: &[InformationEvent],
     move_dex: &HashMap<PokemonMove, MoveData>,
     _ability_dex: &HashMap<Ability, AbilityData>,
 ) {
-    // Collect (slot, eff_priority, mon_idx, move_used) for all top-level MoveUsed events.
-    let mut move_order: Vec<(FieldSlot, i8, usize, PokemonMove)> = Vec::new();
+    // Running snapshot of Spe boost / paralysis / Tailwind, seeded from `state`'s
+    // values at call time and updated as we scan forward through `top_events` —
+    // see `Mover` and `update_speed_snapshot_from_reactions` (S4).
+    let mut spe_boost: HashMap<usize, i8> = HashMap::new();
+    let mut paralyzed: HashMap<usize, bool> = HashMap::new();
+    let mut tailwind: HashMap<Player, bool> = HashMap::new();
+    tailwind.insert(Player::P1, state.p1_side_conditions.contains(&SideCondition::TailWind));
+    tailwind.insert(Player::P2, state.p2_side_conditions.contains(&SideCondition::TailWind));
+
+    // Collect one Mover per top-level MoveUsed event, each carrying a snapshot taken
+    // AS OF the point in the scan just before its own MoveUsed — i.e. reflecting
+    // every earlier top-level event's effects (including this event's own
+    // reactions are applied AFTER recording, so a later mover sees them, not this
+    // one).
+    let mut move_order: Vec<Mover> = Vec::new();
     for event in top_events {
         if let EventKind::MoveUsed {
             user, move_used, ..
@@ -6271,16 +6356,34 @@ fn pass4_speed_from_order(
                 if let (Some(mon), Some(md)) = (get_mon_by_idx(state, idx), move_dex.get(move_used)) {
                     eff_prio = fold_known_ability_priority(md, eff_prio, mon);
                 }
-                move_order.push((user.clone(), eff_prio, idx, move_used.clone()));
+                let s_boost = *spe_boost.entry(idx).or_insert_with(|| {
+                    get_mon_by_idx(state, idx).map_or(0, |m| m.boosts[4])
+                });
+                let s_para = *paralyzed.entry(idx).or_insert_with(|| {
+                    get_mon_by_idx(state, idx)
+                        .map_or(false, |m| matches!(m.status, Some(Status::Paralysis)))
+                });
+                let s_tw = *tailwind.entry(user.player).or_insert(false);
+                move_order.push(Mover {
+                    eff_prio,
+                    mon_idx: idx,
+                    move_used: move_used.clone(),
+                    spe_boost: s_boost,
+                    paralyzed: s_para,
+                    tailwind: s_tw,
+                });
             }
         }
+        update_speed_snapshot_from_reactions(state, &event.reactions, &mut spe_boost, &mut paralyzed, &mut tailwind);
     }
 
     let trick_room_active = state.pseudo_weathers.contains(&PseudoWeather::TrickRoom);
 
     for window in move_order.windows(2) {
-        let (_, p0, idx0, mv0) = &window[0];
-        let (_, p1, idx1, _mv1) = &window[1];
+        let mover0 = &window[0];
+        let mover1 = &window[1];
+        let (p0, idx0, mv0) = (mover0.eff_prio, mover0.mon_idx, &mover0.move_used);
+        let (p1, idx1) = (mover1.eff_prio, mover1.mon_idx);
 
         // Different effective priority brackets.
         // If the first mover has a *lower* effective priority than the second (p0 < p1),
@@ -6289,11 +6392,11 @@ fn pass4_speed_from_order(
         // Emit a disjunction for these; if it collapses to a unit clause BCP will force
         // the ability.  If p0 > p1, normal priority ordering — no inference possible.
         if p0 != p1 {
-            if *p0 < *p1 {
+            if p0 < p1 {
                 // Earlier mover had lower declared priority — must have a lifter.
                 // The escapes are exactly the priority-lift abilities/items; no
                 // SpeedComparison literal here since bracket ordering dominates speed.
-                let fast_idx = *idx0;
+                let fast_idx = idx0;
                 let clause = priority_lift_escapes(state, fast_idx, mv0, move_dex);
                 if !clause.is_empty() {
                     state.predicates.push(clause);
@@ -6303,15 +6406,23 @@ fn pass4_speed_from_order(
             continue;
         }
 
-        // Under Trick Room the slower mon goes first; swap the fast/slow assignment.
-        let (fast_idx, slow_idx, fast_move) = if trick_room_active {
-            // idx1 went second → is the faster mon in normal ordering.
-            (*idx1, *idx0, _mv1.clone())
+        // Under Trick Room the slower mon goes first; swap the fast/slow assignment
+        // (and their snapshotted speed-relevant fields along with it).
+        let (fast_idx, slow_idx, fast_move, fast_snap, slow_snap) = if trick_room_active {
+            // mover1 went second → is the faster mon in normal ordering.
+            (idx1, idx0, mover1.move_used.clone(), mover1, mover0)
         } else {
-            (*idx0, *idx1, mv0.clone())
+            (idx0, idx1, mv0.clone(), mover0, mover1)
         };
 
-        let (fast_mult, slow_mult) = compute_speed_multipliers(state, fast_idx, slow_idx);
+        let (fast_mult, slow_mult) = compute_speed_multipliers(
+            fast_snap.spe_boost,
+            slow_snap.spe_boost,
+            fast_snap.paralyzed,
+            slow_snap.paralyzed,
+            fast_snap.tailwind,
+            slow_snap.tailwind,
+        );
 
         // ── Build escape disjuncts ────────────────────────────────────────────
         // Every escape disjunct D means: "the SpeedComparison OR the escape D explains
@@ -6465,36 +6576,25 @@ fn pass4_speed_from_order(
 /// Accounts for boost stages, paralysis (×½), and Tailwind (×2, deterministic).
 /// Items (Choice Scarf, Iron Ball) and ability-based multipliers (Swift Swim, etc.)
 /// are NOT folded in — they are handled as escape disjuncts in `pass4_speed_from_order`.
+///
+/// S4: takes the boost/paralysis/Tailwind values EXPLICITLY (as-of the moment the
+/// compared pair's ordering was actually observed — see `SpeedFieldsSnapshot` in
+/// `pass4_speed_from_order`) rather than reading them live from `state`. An earlier
+/// action in the SAME turn (e.g. Thunder Wave paralyzing the second mover, or an
+/// Intimidate/boost-move changing a Spe stage) can change these fields mid-turn;
+/// reading them live at Pass 4's call time (either before or after the whole turn's
+/// events have been walked) can disagree with what actually determined the
+/// observed order, baking a wrong numeric factor into a persistent `SpeedComparison`
+/// — which `propagate_speed_comparisons` then uses to derive hard Spe bounds, so a
+/// wrong factor is a soundness risk, not just imprecision.
 fn compute_speed_multipliers(
-    state: &UnknownBattleState,
-    fast_idx: usize,
-    slow_idx: usize,
+    fast_boost: i8,
+    slow_boost: i8,
+    fast_para: bool,
+    slow_para: bool,
+    fast_tailwind: bool,
+    slow_tailwind: bool,
 ) -> (u32, u32) {
-    let fast_boost = get_mon_by_idx(state, fast_idx)
-        .map(|m| m.boosts[4])
-        .unwrap_or(0);
-    let slow_boost = get_mon_by_idx(state, slow_idx)
-        .map(|m| m.boosts[4])
-        .unwrap_or(0);
-    let fast_para = get_mon_by_idx(state, fast_idx)
-        .map(|m| matches!(m.status, Some(Status::Paralysis)))
-        .unwrap_or(false);
-    let slow_para = get_mon_by_idx(state, slow_idx)
-        .map(|m| matches!(m.status, Some(Status::Paralysis)))
-        .unwrap_or(false);
-
-    // Tailwind ×2: deterministically known from side conditions.
-    let fast_tailwind = if mon_is_p2(state, fast_idx) {
-        state.p2_side_conditions.contains(&SideCondition::TailWind)
-    } else {
-        state.p1_side_conditions.contains(&SideCondition::TailWind)
-    };
-    let slow_tailwind = if mon_is_p2(state, slow_idx) {
-        state.p2_side_conditions.contains(&SideCondition::TailWind)
-    } else {
-        state.p1_side_conditions.contains(&SideCondition::TailWind)
-    };
-
     // Stage multiplier as (numerator, denominator).
     let stage_frac = |stage: i8| -> (u32, u32) {
         let s = stage.clamp(-6, 6);

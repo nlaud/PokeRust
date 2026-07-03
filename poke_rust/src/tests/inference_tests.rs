@@ -871,6 +871,103 @@ fn test_no_speed_comparison_different_priority() {
     assert_eq!(speed_cmp_count, 0, "no SpeedComparison for different priority brackets");
 }
 
+// ── Regression: S4 — Pass 4 must use speed-relevant state AS OF the comparison ──
+
+/// A doubles turn where P1's Thunder Wave paralyzes a P2 mon mid-turn, and that
+/// SAME mon then acts later in the SAME turn against its own ally: the paralysis
+/// ×½ factor must be baked into the resulting Spe-bound tightening for that later
+/// pairing.
+///
+/// Before the S4 fix, Pass 4 read `mon.status`/boosts live from `state` at its
+/// call time (either before the turn's events were walked, when the paralysis
+/// hadn't happened yet, or after the whole turn including EndOfTurn, which can
+/// also disagree) — never "as of the moment this specific pairing's order was
+/// actually observed". That produced a numeric fast_mult/slow_mult that didn't
+/// match what actually determined the order, which `propagate_speed_comparisons`
+/// then uses to derive hard Spe bounds — a soundness risk (not just imprecision).
+///
+/// P2b (fast) is pinned to an exact known speed (60) so the tightening effect on
+/// P2a's (slow) max Spe bound is directly observable: with the paralysis factor
+/// correctly applied, `slow.maxStats[5] <= floor(60*8/4) = 120`. Without it (the
+/// pre-fix bug, using the neutral 1:1 ratio), `slow.maxStats[5] <= floor(60*4/4)
+/// = 60` — an unsound over-tightening that excludes any true Spe in (60, 120].
+#[test]
+fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
+    let mut thunder_wave = normal_physical_move(PokemonMove::ThunderWave, 0);
+    thunder_wave.category = MoveCategory::Status;
+    thunder_wave.accuracy = AccuracyType::Percent(100);
+    let splash = normal_physical_move(PokemonMove::Splash, 0);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::ThunderWave, thunder_wave);
+    move_dex.insert(PokemonMove::Splash, splash);
+
+    // P1a: known, no Quick Claw/Quick Draw (clean SpeedComparisons, no disjuncts).
+    let mut p1a = unknown_mon_species(Species::Pikachu);
+    p1a.item = Unknown::Not(vec![Item::QuickClaw]);
+    p1a.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
+    let mut p1b = unknown_mon_species(Species::Pikachu);
+    p1b.item = Unknown::Not(vec![Item::QuickClaw]);
+    p1b.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
+
+    // P2a: the mon that gets paralyzed mid-turn (default wide Snorlax Spe range).
+    // P2b: its ally, pinned to an exact Spe of 60, moves right before it.
+    let mut p2a = unknown_mon_species(Species::Snorlax);
+    p2a.possible_abilities = Unknown::Not(vec![Ability::QuickFeet]); // no Quick Feet escape muddying the test
+    let natural_max_spe = p2a.maxStats[5];
+
+    let mut p2b = unknown_mon_species(Species::Snorlax);
+    p2b.possible_abilities = Unknown::Not(vec![Ability::QuickFeet]);
+    p2b.minStats[5] = 60;
+    p2b.maxStats[5] = 60;
+    p2b.min_pre_nature_stat[5] = 60;
+    p2b.max_pre_nature_stat[5] = 60;
+
+    let state = battle_nvn(vec![p1a, p1b], vec![p2a, p2b]);
+
+    let p2a_idx_before = mon_idx_for_active_slot(&state, &p2(0)).unwrap();
+
+    let result = apply_ex(
+        state,
+        vec![
+            // P1a paralyzes P2a as the FIRST action this turn.
+            event_with(
+                EventKind::MoveUsed {
+                    user: p1(0),
+                    move_used: PokemonMove::ThunderWave,
+                    targets: vec![p2(0)],
+                },
+                vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Paralysis })],
+            ),
+            // P2b moves next (same priority bracket)...
+            event(EventKind::MoveUsed {
+                user: p2(1),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+            // ...then P2a moves LAST, now paralyzed — the pairing under test.
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    let p2a_after = get_mon_by_idx(&result, p2a_idx_before).unwrap();
+    let expected_max = natural_max_spe.min(120);
+    assert_eq!(
+        p2a_after.maxStats[5], expected_max,
+        "P2a's max Spe bound must reflect the paralysis-adjusted tightening \
+         (floor(60*8/4) = 120, capped by its natural max {natural_max_spe}) = \
+         {expected_max}. A bound of 60 here means Pass 4 used the stale (unparalyzed, \
+         1:1 ratio) ordering instead of a snapshot as of the actual comparison point, \
+         unsoundly excluding any true Spe in (60, {expected_max}]"
+    );
+}
+
 // ── SpeedComparison propagation ───────────────────────────────────────────────
 
 #[test]
@@ -7890,3 +7987,4 @@ fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
         "the pre-churn clause must have resolved onto P2's Snorlax, not a P1 mon"
     );
 }
+
