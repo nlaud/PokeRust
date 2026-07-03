@@ -4799,13 +4799,14 @@ fn pass3_damage_to_stats(
                 }
                 (PokemonHP::Percent(pre_pct), PokemonHP::Percent(post_pct)) => {
                     if *post_pct < *pre_pct {
-                        let delta_pct = pre_pct - post_pct;
                         let Some(def_stat) =
                             crate::simulator::helpers::move_defensive_stat(move_data)
                         else {
                             current_hp = new_hp.clone();
                             continue;
                         };
+                        // S22: pass both display percents — the damage band must
+                        // account for the rounding of each endpoint separately.
                         pass3_direction_a(
                             state,
                             event,
@@ -4817,7 +4818,8 @@ fn pass3_damage_to_stats(
                             move_data,
                             &def_stat,
                             is_crit,
-                            delta_pct,
+                            *pre_pct,
+                            *post_pct,
                             bp_override,
                             speed_dep_bp,
                         );
@@ -5186,6 +5188,54 @@ fn achievable_defender_hp_values(
     }
     vals.sort_unstable();
     vals
+}
+
+/// The exact raw-HP interval that displays as percent `p` for a mon with `max_hp`.
+///
+/// Inverts `hp_to_percent` (round-half-up, 0 only at faint, 100 only at full,
+/// otherwise clamped to 1–99) by direct enumeration — O(max_hp), trivially correct,
+/// and negligible next to the Pass 3 oracle calls. Returns `None` when no raw HP
+/// displays as `p` under this `max_hp` hypothesis (the hypothesis is then
+/// incompatible with the observation and may be skipped — sound, it excludes only a
+/// provably impossible world).
+pub(crate) fn percent_bucket(p: u8, max_hp: u16) -> Option<(u16, u16)> {
+    use crate::simulator::helpers::hp_to_percent;
+    if p == 0 {
+        return Some((0, 0));
+    }
+    if p >= 100 {
+        return Some((max_hp, max_hp));
+    }
+    let mut lo: Option<u16> = None;
+    let mut hi = 0u16;
+    for hp in 1..max_hp {
+        if hp_to_percent(hp, max_hp) == p {
+            if lo.is_none() {
+                lo = Some(hp);
+            }
+            hi = hp;
+        }
+    }
+    lo.map(|l| (l, hi))
+}
+
+/// S22: the sound raw-damage interval for an observed `pre_pct → post_pct` display
+/// transition under the max-HP hypothesis `max_hp`.
+///
+/// The former derivation treated `delta_pct = pre_pct − post_pct` as a single
+/// rounding of the damage (`[(δ−0.5)%, (δ+0.5)%]` of max HP). But both endpoints
+/// carry their own ±0.5% display rounding, so the true band is up to twice as wide —
+/// for a 362-HP Blissey the old band could exclude several achievable damage values,
+/// and with them the true defensive BSV (unsound exclusion). Only a `pre_pct` of 100
+/// (full HP is displayed exactly) or a `post_pct` of 0 (faint is displayed exactly)
+/// shrinks that side's rounding to zero — which the exact bucket intersection below
+/// captures automatically.
+fn percent_delta_damage_band(pre_pct: u8, post_pct: u8, max_hp: u16) -> Option<(u16, u16)> {
+    let (pre_lo, pre_hi) = percent_bucket(pre_pct, max_hp)?;
+    let (post_lo, post_hi) = percent_bucket(post_pct, max_hp)?;
+    let d_lo = pre_lo.saturating_sub(post_hi).max(1);
+    let d_hi = pre_hi.saturating_sub(post_lo);
+    if d_hi == 0 { None } else { Some((d_lo, d_hi)) }
 }
 
 /// Per-nature-class neutral-gear BSV bounds produced by the Pass 3 oracle search.
@@ -6013,7 +6063,11 @@ fn pass3_direction_a(
     move_data: &crate::state::dex_data::MoveData,
     def_stat: &crate::state::dex_data::PokemonStat,
     is_crit: bool,
-    delta_pct: u8,
+    // S22: pre-hit and post-hit DISPLAY percents. Each carries its own display
+    // rounding; the damage band is derived per max-HP hypothesis from the exact
+    // display buckets, not from the delta alone.
+    pre_pct: u8,
+    post_pct: u8,
     // Per-hit base power override for multi-hit moves.
     bp_override: Option<u16>,
     // True for Gyro Ball / Electro Ball — defender's speed affects BP.
@@ -6209,14 +6263,12 @@ fn pass3_direction_a(
     let hp_candidates =
         achievable_defender_hp_values(base_stats[0], level, ctx.config, &defender_unk);
     for hp_cand in hp_candidates {
-        // Convert percent delta to raw damage interval for this candidate max HP.
-        // Convention: Percent(p) = round(current_hp * 100 / max_hp), so:
-        //   p = round(hp * 100 / max_hp)  →  hp = round(p * max_hp / 100)
-        // Damage interval for delta_pct p: [floor((p-0.5)*max_hp/100), ceil((p+0.5)*max_hp/100)]
-        // clamped to [1, max_hp].  Sound: this is wider than the actual rounding bucket.
-        let hp_c = hp_cand as f64;
-        let d_lo = ((delta_pct as f64 - 0.5) * hp_c / 100.0).floor().max(1.0) as u16;
-        let d_hi = ((delta_pct as f64 + 0.5) * hp_c / 100.0).ceil().min(hp_c) as u16;
+        // S22: exact damage band for this max-HP hypothesis from the display buckets
+        // of BOTH endpoints (each percent carries its own rounding). A `None` band
+        // means this hp_cand cannot display the observed percents at all — skip it.
+        let Some((d_lo, d_hi)) = percent_delta_damage_band(pre_pct, post_pct, hp_cand) else {
+            continue;
+        };
 
         for (class_idx, (nat_mod, _is_boost, _is_nerf)) in nature_classes.iter().enumerate() {
             // Thin wrapper so the two call sites below don't repeat the full argument list.

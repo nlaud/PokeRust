@@ -431,13 +431,24 @@ O(log range) + constant, with correctness guaranteed by the monotonicity invaria
 
 #### Direction A — you attack the opponent (percent HP seen)
 
-When `target.hp` is `PokemonHP::Percent`, the damage is only known as a display
-percentage `δ%`. For a candidate max HP `H`:
+When `target.hp` is `PokemonHP::Percent`, the damage is only known through the two
+display percentages (pre-hit and post-hit). For a candidate max HP `H`, both display
+values are inverted to their exact raw-HP buckets via `percent_bucket` (the exact
+inverse of `hp_to_percent`: round-half-up, 0 only at faint, 100 only at full,
+clamped 1–99), and the damage band is:
 
 ```
-damage_lo = floor((δ - 0.5) × H / 100)   (clamped to ≥ 1)
-damage_hi =  ceil((δ + 0.5) × H / 100)   (clamped to ≤ H)
+damage_lo = max(1, pre_bucket.lo − post_bucket.hi)
+damage_hi = pre_bucket.hi − post_bucket.lo
 ```
+
+(S22: each display percent carries its own ±0.5% rounding — the previous
+`[(δ−0.5)%, (δ+0.5)%]`-of-max-HP band treated the *delta* as a single rounding and
+could exclude achievable damages, and with them the true defensive BSV, for
+large-HP defenders whose pre-hit HP was itself rounded. A `pre` of 100 or `post` of
+0 is display-exact and automatically shrinks that side's bucket to a point. An empty
+bucket means the `H` hypothesis cannot display the observed percent at all and is
+skipped.)
 
 The oracle then scans the defender's BSV range: a BSV `v` is feasible if any outcome
 falls in `[damage_lo, damage_hi]`.

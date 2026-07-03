@@ -1027,6 +1027,93 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     );
 }
 
+// ── Regression: S22 — Direction A damage band must cover both display roundings ──
+
+/// Exhaustive cross-validation of the Pass 3 percent→damage band against the real
+/// display convention: for every (pre_raw, post_raw) HP pair of a large-HP mon, the
+/// true damage must lie inside the band derived from the two DISPLAY percents.
+///
+/// Before the S22 fix the band was `[(δ−0.5)%, (δ+0.5)%]` of max HP — treating the
+/// delta as a single rounding although pre and post each round independently. For a
+/// 362-HP mon that band excluded achievable damages near the bucket edges, silently
+/// raising the defensive-BSV floor above the true value.
+#[test]
+fn test_s22_percent_damage_band_covers_all_roundings() {
+    use crate::information::inference::percent_bucket;
+    use crate::simulator::helpers::hp_to_percent;
+
+    for &max_hp in &[75u16, 155, 207, 362] {
+        for pre_raw in 1..=max_hp {
+            // Sample post_raw across the range (full cross product is 130k+ pairs
+            // per max_hp; stride keeps the test fast while covering all bucket edges).
+            for post_raw in (0..pre_raw).step_by(1) {
+                let pre_pct = hp_to_percent(pre_raw, max_hp);
+                let post_pct = hp_to_percent(post_raw, max_hp);
+                if post_pct >= pre_pct {
+                    continue; // display shows no drop → Pass 3 never fires
+                }
+                let true_damage = pre_raw - post_raw;
+
+                let (pre_lo, pre_hi) = percent_bucket(pre_pct, max_hp)
+                    .expect("observed display percent must have a bucket");
+                let (post_lo, post_hi) = percent_bucket(post_pct, max_hp)
+                    .expect("observed display percent must have a bucket");
+                let d_lo = pre_lo.saturating_sub(post_hi).max(1);
+                let d_hi = pre_hi.saturating_sub(post_lo);
+
+                assert!(
+                    d_lo <= true_damage && true_damage <= d_hi,
+                    "max_hp={max_hp}: display {pre_pct}%→{post_pct}% (raw {pre_raw}→{post_raw}), \
+                     true damage {true_damage} outside band [{d_lo}, {d_hi}]"
+                );
+            }
+        }
+    }
+}
+
+/// The pre-S22 ±0.5%-of-delta band demonstrably excluded true damages for large-HP
+/// defenders once the pre-hit HP was itself rounded (non-full). This pins one
+/// concrete counterexample so the old formula cannot silently return.
+#[test]
+fn test_s22_old_band_counterexample_now_covered() {
+    use crate::information::inference::percent_bucket;
+    use crate::simulator::helpers::hp_to_percent;
+
+    let max_hp: u16 = 362; // e.g. max-HP Blissey at level 50
+    // Find a (pre_raw, post_raw) pair whose true damage violates the OLD band.
+    let mut found = None;
+    'outer: for pre_raw in 1..max_hp {
+        for post_raw in 1..pre_raw {
+            let pre_pct = hp_to_percent(pre_raw, max_hp);
+            let post_pct = hp_to_percent(post_raw, max_hp);
+            if post_pct >= pre_pct || pre_pct == 100 {
+                continue;
+            }
+            let delta = (pre_pct - post_pct) as f64;
+            let old_lo = ((delta - 0.5) * max_hp as f64 / 100.0).floor().max(1.0) as u16;
+            let old_hi = ((delta + 0.5) * max_hp as f64 / 100.0).ceil() as u16;
+            let true_damage = pre_raw - post_raw;
+            if true_damage < old_lo || true_damage > old_hi {
+                found = Some((pre_raw, post_raw, pre_pct, post_pct, true_damage));
+                break 'outer;
+            }
+        }
+    }
+    let (pre_raw, post_raw, pre_pct, post_pct, true_damage) =
+        found.expect("the old ±0.5%-of-delta band must have at least one gap at 362 max HP");
+
+    // The new bucket-derived band must cover it.
+    let (pre_lo, pre_hi) = percent_bucket(pre_pct, max_hp).unwrap();
+    let (post_lo, post_hi) = percent_bucket(post_pct, max_hp).unwrap();
+    let d_lo = pre_lo.saturating_sub(post_hi).max(1);
+    let d_hi = pre_hi.saturating_sub(post_lo);
+    assert!(
+        d_lo <= true_damage && true_damage <= d_hi,
+        "raw {pre_raw}→{post_raw} (display {pre_pct}%→{post_pct}%): true damage \
+         {true_damage} must be inside the new band [{d_lo}, {d_hi}]"
+    );
+}
+
 // ── Regression: S20 — Choice exclusion must not fire on a transferred Choice item ──
 
 /// P2's mon uses Tackle, receives a Choice Scarf via Trick (ItemGained), then legally
@@ -4398,14 +4485,18 @@ fn test_pass3_dir_a_ev_lattice_hp_does_not_exclude_true_bsv() {
     );
 
     let p2_result = &result.p2_active_mons[0];
-    // The EV-lattice fix ensures hp=186 is sampled, making BSV=121 feasible.
-    // The old step_by(4) code (sampling only hp=183) would raise min_pre_nature_stat[4]
-    // to ≥124, excluding BSV=121 (which is the truly feasible boundary value at hp=186).
+    // The EV-lattice fix ensures hp=186 is sampled — the candidate that admits the
+    // lowest feasible BSV. The old step_by(4) code (sampling only hp=183) would raise
+    // min_pre_nature_stat[4] to ≥124, excluding that boundary value.
+    //
+    // Boundary recalibrated for S22: with the exact display-bucket damage band,
+    // 100%→50% at max HP 186 pins the damage to exactly 93 (only raw HP 93 displays
+    // as 50%, and 100% is display-exact), whose feasible-BSV floor is 122 — the old
+    // ±0.5%-of-delta band also admitted damage 94, which made 121 look feasible.
     assert!(
-        p2_result.min_pre_nature_stat[4] <= 121,
-        "BSV=121 (SpD_stat=121 at Hardy nature) must remain feasible; \
-         old step_by(4) would raise min_pre_nature_stat[4] to ≥124 (got {}). \
-         The EV-lattice fix samples hp=186, where BSV=121 is the feasible boundary.",
+        p2_result.min_pre_nature_stat[4] <= 122,
+        "the lowest-BSV boundary at hp_cand=186 must remain feasible; \
+         old step_by(4) would raise min_pre_nature_stat[4] to ≥124 (got {}).",
         p2_result.min_pre_nature_stat[4]
     );
 }
