@@ -12,9 +12,10 @@ failure classes:
    clause bindings) disagree with the simulator's actual state, so later
    inferences are computed against the wrong world.
 
-Every FIXED finding below has a regression test (`test_s<NN>_*` in
-`tests/inference_tests.rs`); S17–S20 and S23 were additionally reproduced
-against the pre-fix source before committing.
+Every finding below is FIXED, each with a regression test (`test_s<NN>_*` or
+`roundtrip_s<NN>_*` in `tests/inference_tests.rs`). S17–S20 and S23–S29 were
+additionally reproduced against the pre-fix source (or with the specific fix
+logic neutered) before committing.
 
 ---
 
@@ -134,108 +135,102 @@ order with a pending-crit flag (matching the sim's single emit site: `Crit`
 directly before its hit's `DamageDealt`) and threads each hit's true pre-hit
 HP into the oracle materialization.
 
----
+### S24 — Pass 3 read other post-move state (item / boosts / status)  *(soundness, medium)*
 
-## Confirmed but not fixed (need design decisions)
+S23 fixed the HP half of this family. Pass 3 runs after the full reaction tree
+has been applied by Pass 1, so the attacker/defender clones it worked from
+carried **post-move** state for an observation made **pre-move**: a resist berry
+consumed by the observed hit itself pinned the defender's item to `Known(None)`
+before `defensive_damage_items` ran (dropping the berry world → inflated
+defensive BSV floor; Direction B mirrored it for our own berry), a self-boost or
+target stat-drop secondary (Power-Up Punch, Crunch) was applied before the
+oracle ran (wrong stage), and a mid-move Flame Body burn halved the modeled
+physical damage for a hit dealt unburned.
 
-### S24 — Pass 3 reads other post-move state (item / boosts / status)  *(soundness, medium)*
+**Fix:** `MoveContext` now snapshots the attacker's and each target's full
+`UnknownPokemonState` at `MoveUsed` time (alongside `pre_hit_hp`); both Pass 3
+directions enumerate items/abilities and materialize from the snapshots, with
+S23's per-hit HP override applied on top, while still writing bounds back to the
+live mons. Pass 2's post-move reads (Life Orb ability reads, contact-absence
+item reads) were audited and documented as sound at that epoch.
 
-S23 fixed the HP half of this family; the rest remains. Pass 3 runs after the
-full reaction tree has been applied by Pass 1, so the attacker/defender clones
-it works from carry **post-move** state for an observation made **pre-move**:
+### S25 — Materialize HP sentinel disabled pinch abilities  *(soundness, medium)*
 
-- **Item**: a resist berry consumed *by the observed hit itself* pins the
-  defender's item to `Known(None)` before `defensive_damage_items` runs, so
-  the berry world is dropped from the union and the halved observed damage is
-  explained by an inflated defensive BSV floor. Direction B mirrors this when
-  *our* mon's berry was consumed by the observed hit (the oracle materializes
-  the target with `Known(None)`, halving is unmodeled, and the attacker's max
-  BSV drops below the truth).
-- **Boosts**: a move with a self-boost or a target stat-drop secondary
-  (Power-Up Punch, Overheat, Crunch) has the boost applied before Pass 3, so
-  the oracle models the hit at the wrong stage.
-- **Status**: Flame Body burning the attacker on contact halves the oracle's
-  physical damage for a hit that was dealt unburned, shifting the feasible
-  interval above the truth.
+`materialize_pokemon` maps any non-100 display percent to `0.5 × max HP`. That
+sentinel sits above the ≤1/3 gate used by Blaze / Overgrow / Swarm / Torrent,
+so an opponent attacker genuinely in pinch range was always modeled un-boosted
+and observed boosted damage excluded the true (lower-Atk + pinch) world.
 
-*Suggested fix:* extend `MoveContext` to snapshot the attacker's and each
-target's `UnknownPokemonState` at `MoveUsed` time (the way `pre_hit_hp`
-already does for HP) and run Pass 3 from those snapshots, writing bounds back
-to the live mons.
+**Fix:** Direction B derives the admissible gate states from the attacker's
+display-percent bucket (reusing S22's `percent_bucket`): ≤31% → pinch-active
+only, 32–34% → both hypotheses unioned, ≥35% / 100% / exact `Number` → the
+sentinel path. The pinch hypothesis materializes a `Number` HP strictly inside
+the gate and is unioned into the (item, ability, streak) enumeration and the
+neutral-gear runs. (No other attacker-HP-gated damage modifier exists in the
+sim — no Defeatist.)
 
-### S25 — Materialize HP sentinel disables pinch abilities  *(soundness, medium)*
+### S26 — Transform was invisible to inference  *(drift, medium)*
 
-`materialize_pokemon` maps any non-100 display percent to `0.5 × max HP`. The
-sentinel is deliberate for full-HP-gated *reducers*, but Blaze / Overgrow /
-Swarm / Torrent gate at **≤ 1/3** in the sim (`hp*3 <= max`), so an opponent
-attacker genuinely in pinch range is always modeled un-boosted. Observed
-boosted damage then excludes the true (lower Atk + pinch ability) world even
-though those abilities are enumerated in `offensive_damage_abilities` — the
-enumeration is pointless while the materialized HP keeps them inactive.
+The simulator implemented Transform (`transform_into`, from both the Transform
+move and Imposter) but emitted no identity event and inference had no handler,
+so a transformed opponent kept its original identity in the fog while the sim
+mon was a copy: moves used while transformed were burned into the original's
+`known_moves` permanently, Pass 3 inverted damage against the wrong base stats,
+and Choice-lock / learnset logic reasoned about moves the mon never owned.
 
-*Suggested fix:* when the attacker's display percent bucket admits HP ≤ 1/3,
-run the oracle at a pinch-active HP as an additional union branch (both
-branches when the bucket straddles the threshold).
+**Fix:** new `EventKind::Transformed { slot, into_slot, into_species }` emitted
+from both `transform_into` call sites. Pass 1 saves the transformer into
+`pre_transform` and overlays the copy source's fog identity
+(species/types/weight/gender/ability/boosts/moves-with-PP-capped-5 and the five
+non-HP stat bounds), so copying the observer's own Known mon yields exact stats
+and copying a hidden opponent inherits its bounds; stale pre-transform clauses
+are purged. Pass 5 and both Pass 3 inversions are skipped for a transformed mon,
+and `apply_switch_out_reset` reverts the snapshot (preserving live
+HP/status/fainted), mirroring the sim.
 
-### S26 — Transform is invisible to inference  *(drift, medium)*
-
-The simulator implements Transform (`transform_into`, helpers.rs) but emits no
-identity-change event, and inference has no handler. After an opponent
-transforms, its fog entry keeps the original species/stats/moves/ability while
-the sim mon is a copy of the target: moves used while transformed are burned
-into the original's `known_moves` slots permanently, Pass 3 inverts observed
-damage against the wrong base stats (usually yielding empty feasible sets —
-lossy — but capable of poisoning EV/nature back-solving), and the
-Choice-exclusion / learnset logic reasons about moves the mon never owned.
-
-*Suggested fix:* emit a dedicated event (or reuse `FormeChange
-{permanent:false}` plus a marker) and give the fog state a
-`pre_transform`-style snapshot/restore, which `UnknownPokemonState` already
-has a field for.
-
-### S27 — `consecutive_move_count` drifts on zero-damage outcomes  *(drift, low)*
+### S27 — `consecutive_move_count` drifted on zero-damage outcomes  *(drift, low)*
 
 The sim resets `consecutive_move_count` to 0 and nulls `last_used_move` when a
-damaging move deals no effective damage (miss/immune/protect); inference
-increments on every `MoveUsed` regardless of `Missed` / `Immune` / `Blocked`
-reactions. The drifted streak feeds the Metronome-item multiplier in oracle
-calls (it is materialized directly for our own attacker in Direction A) and
-the Direction-B streak union starts from a wrong baseline.
+damaging move deals no effective damage (miss/immune/blocked); inference
+incremented on every `MoveUsed`, and the drifted streak fed the Metronome-item
+multiplier in oracle calls (materialized directly for our own attacker in
+Direction A).
 
-*Suggested fix:* mirror the sim in the Pass 1 `MoveUsed` handler — if the move
-is damaging and produced no `DamageDealt` on a non-user target, reset the
-count and clear `last_used_move`.
+**Fix:** the Pass 1 `MoveUsed` handler mirrors the sim — a damaging move with no
+`DamageDealt` on a non-user target resets the count and clears `last_used_move`.
 
-### S28 — Analytic "moved last" heuristic misses non-move actions  *(soundness, low)*
+### S28 — Analytic "moved last" was decided by the wrong predicate  *(soundness, low)*
 
-Pass 3 decides whether Analytic fired by checking whether the *target* appears
-in `move_users_this_turn`. A target that switched (or was fully paralyzed,
-flinched, …) never appears, yet the attacker still moved last and Analytic's
-×1.3 applied in the sim. Direction B then drops Analytic from the booster
-union (the observed boosted damage forces the BSV floor above the truth);
-Direction A substitutes `Ability::None` for our own genuinely-boosted
-attacker, shifting the defender's feasible interval. In doubles the
-target-centric test is also simply the wrong predicate ("all other actors
-done", not "this target moved").
+Pass 3 decided whether Analytic's ×1.3 applied by checking whether the *target*
+had already moved this turn. A target that switched, flinched, or was fully
+paralyzed never entered `move_users_this_turn`, so Analytic was wrongly judged
+not to have fired (dropped from the Direction B booster union / substituted
+`Ability::None` in Direction A) even when the attacker really moved last — the
+observed boosted damage then forced the attacker/defender BSV bound past the
+truth (roundtrip: `[178,182]` vs a true 150). It was also the wrong predicate in
+doubles.
 
-*Suggested fix:* track *all* consumed actions per turn (moves, switches,
-`Cant` events) and treat "attacker is the last actor" as the Analytic
-condition; when undecidable, union both branches.
+**Fix:** `compute_analytic_last_movers` precomputes, per turn segment (split on
+`EndOfTurn`), the single slot that committed a move last (`MoveUsed` / `Cant` /
+`MustRecharge` / `ChargingMove` — a `Switch` does not commit a move, matching the
+sim's pending-`MoveAction` semantics). Analytic fires iff the attacker is that
+slot; exact in singles and doubles.
 
-### S29 — Illusion disguised as an already-benched teammate merges two mons  *(drift, low)*
+### S29 — Illusion disguised as a scouted teammate merged two mons  *(drift, low)*
 
-`pass1_switch` pulls the benched fog entry whose species matches the incoming
-`SwitchState.species`. When a Zoroark enters disguised as a teammate the
-observer has *already scouted*, the real teammate's fog entry (HP, revealed
-moves, item knowledge) is moved into the active slot and mutated by events
-that physically happen to the Zoroark; on `IllusionEnded` the species is
-overwritten but the merged knowledge stays, and the real teammate's entry has
-been consumed from the bench. `maybe_widen_for_illusion` widens the species
-set correctly, but the *state merge* is not undone.
+`pass1_switch` matched benched entries by species and **removed** the match, so a
+Zoroark switching in disguised as an already-scouted teammate moved the real
+teammate's fog entry into the active slot to be mutated by events belonging to
+the Zoroark, and the real teammate's entry vanished from the bench.
 
-*Suggested fix:* when the incoming species is widened for Illusion, keep the
-benched entry in place and build the active entry fresh (species-only), then
-reconcile on `IllusionEnded`.
+**Fix:** when an Illusion disguise is possible (a Zoroark forme is on the
+switching side's known bench) and the incoming species is not itself a Zoroark
+forme, `pass1_switch` leaves the benched entry untouched and builds a fresh
+species-only active entry for `maybe_widen_for_illusion` to widen.
+`bench_outgoing_mon` discards a still-ambiguous (`Possibly` species) mon on
+switch-out instead of benching it — it could never be re-matched (bench lookup
+is by `Known` species) and would otherwise double-count one physical mon in
+`teammate_indices` / item-clause propagation.
 
 ---
 
