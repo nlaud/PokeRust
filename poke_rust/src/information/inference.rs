@@ -749,6 +749,8 @@ fn apply_information_battle(
         switch_slot: None,
         damaging_hits_this_turn: Vec::new(),
         move_users_this_turn: Vec::new(),
+        analytic_last_movers: compute_analytic_last_movers(events),
+        turn_segment: 0,
     };
     for event in events {
         process_battle_event(state, event, &mut ctx);
@@ -797,10 +799,21 @@ struct BattleContext<'a> {
     damaging_hits_this_turn: Vec<(FieldSlot, FieldSlot, PokemonMove)>,
     /// Ordered list of user slots that have executed a MoveUsed event so far this turn.
     /// Populated after each MoveUsed's Pass 3 runs; cleared at EndOfTurn.
-    /// Used by Pass 3 to determine whether Analytic fired (attacker moved last):
-    /// if a move's target is already in this list, the attacker moved after it → Analytic fires;
-    /// if the target is absent, the attacker moved first → Analytic did not fire.
+    /// (Retained for potential future use; Analytic now uses `analytic_last_movers`.)
     move_users_this_turn: Vec<FieldSlot>,
+    /// S28: per-turn-segment last move-committed actor — the unique slot for which
+    /// Analytic's "moved last" fires. Computed once up-front from the top-level event
+    /// stream (see `compute_analytic_last_movers`). Indexed by `turn_segment`.
+    ///
+    /// The sim's `attacker_is_last_mover` returns true when no OTHER slot has a
+    /// pending `MoveAction`, so a mon that ultimately flinches / is fully paralyzed
+    /// (emitting `Cant`) still occupied a MoveAction and blocks the earlier mon's
+    /// Analytic. The old heuristic ("did the target already move this turn?") was
+    /// wrong whenever the target switched, flinched, or was fully paralyzed (it never
+    /// entered `move_users_this_turn`), and was the wrong predicate in doubles.
+    analytic_last_movers: Vec<Option<FieldSlot>>,
+    /// S28: index into `analytic_last_movers`; advanced at each `EndOfTurn`.
+    turn_segment: usize,
 }
 
 #[derive(Clone)]
@@ -823,6 +836,34 @@ struct MoveContext {
     /// secondary or a resist berry consumed by the observed hit itself must not leak
     /// into the oracle run for that hit).
     pre_move_targets: Vec<(FieldSlot, UnknownPokemonState)>,
+}
+
+/// S28: for each turn segment (split on top-level `EndOfTurn`), the slot of the last
+/// move-committed actor — the unique slot for which Analytic's "moved last" fires.
+///
+/// A slot "commits a move" (occupies a `MoveAction` in the sim's queue) when it emits
+/// a top-level `MoveUsed`, `Cant`, `MustRecharge`, `ChargingMove`, or `SingleMoveOrTurn`.
+/// A `Switch` is a different action type and does NOT block Analytic. The last such
+/// slot in the segment is the last mover; if it committed via a non-`MoveUsed` event
+/// (e.g. a later mon flinched), then no `MoveUsed` this segment moved last and Analytic
+/// fires for nobody — captured naturally because that slot won't equal any attacker's
+/// own `MoveUsed` user unless it also used the move.
+fn compute_analytic_last_movers(top_events: &[InformationEvent]) -> Vec<Option<FieldSlot>> {
+    let mut segments: Vec<Option<FieldSlot>> = Vec::new();
+    let mut last: Option<FieldSlot> = None;
+    for e in top_events {
+        match &e.kind {
+            EventKind::MoveUsed { user, .. }
+            | EventKind::ChargingMove { user, .. } => last = Some(user.clone()),
+            EventKind::Cant { slot, .. }
+            | EventKind::MustRecharge { slot }
+            | EventKind::SingleMoveOrTurn { slot, .. } => last = Some(slot.clone()),
+            EventKind::EndOfTurn => segments.push(last.take()),
+            _ => {}
+        }
+    }
+    segments.push(last); // trailing segment (event list need not end at EndOfTurn)
+    segments
 }
 
 /// Depth-first event walk applying Passes 1–3.
@@ -934,6 +975,8 @@ fn process_battle_event(
     if matches!(event.kind, EventKind::EndOfTurn) {
         ctx.damaging_hits_this_turn.clear();
         ctx.move_users_this_turn.clear();
+        // S28: advance to the next turn segment's precomputed last-mover.
+        ctx.turn_segment += 1;
     }
 
     ctx.move_context = prev_move_ctx;
@@ -4919,6 +4962,15 @@ fn pass3_damage_to_stats(
     }
 }
 
+/// S28: `true` if the attacker at `user_slot` is this turn's last move-committed
+/// actor, i.e. Analytic's ×1.3 applied. Reads the precomputed per-segment last-mover.
+fn analytic_fired(ctx: &BattleContext, user_slot: &FieldSlot) -> bool {
+    ctx.analytic_last_movers
+        .get(ctx.turn_segment)
+        .and_then(|o| o.as_ref())
+        .map_or(false, |last| last == user_slot)
+}
+
 /// Returns `true` for moves whose base power depends on one or both mons' Speed stats.
 fn is_speed_dependent_bp(move_used: &PokemonMove) -> bool {
     matches!(move_used, PokemonMove::GyroBall | PokemonMove::ElectroBall)
@@ -5652,15 +5704,13 @@ fn pass3_direction_b(
                 // MegaSol: perceives Sun → affects Fire (×1.5) and Water (×0.5) only.
                 Ability::MegaSol => matches!(eff_type_b, PokemonType::Fire | PokemonType::Water),
                 // Analytic: ×1.3 only when the holder moves LAST this turn.
-                // The oracle's empty action_queue makes attacker_is_last_mover always true, but
-                // the real move order is known from the event stream: if the target has already
-                // moved this turn (its slot is in move_users_this_turn), the attacker moved after
-                // it → Analytic fired. If the target has NOT moved yet, the attacker moved first
-                // → Analytic did not fire; including it would wrongly inflate the oracle's output
+                // The oracle's empty action_queue makes attacker_is_last_mover always
+                // true, so keep the ability in the union only when the attacker really
+                // moved last (S28: precomputed from the event stream — exact in singles
+                // and doubles, and correct when the last actor flinched or switched).
+                // Keeping it when Analytic did NOT fire would inflate the oracle output
                 // and push the feasible-BSV upper bound below truth (unsound exclusion).
-                Ability::Analytic => {
-                    ctx.move_users_this_turn.iter().any(|s| s == target_slot)
-                }
+                Ability::Analytic => analytic_fired(ctx, user_slot),
                 // Type-converting abilities (-ate, Normalize): keep for Normal moves to allow
                 // conversion; for non-Normal we conservatively keep them too because an -ate
                 // attacker with an -ate ability may have a different oracle type (soundness).
@@ -6328,16 +6378,14 @@ fn pass3_direction_a(
     // Attacker is OUR known mon; use its actual known stats.
     let atk_stats = attacker_unk.minStats;
     let atk_item = neutral_item(&attacker_unk);
-    // Analytic correction: ×1.3 only when the attacker moves LAST.
-    // If the target (defender) has not yet appeared in move_users_this_turn, the
-    // attacker moved first → Analytic did not fire.  Substituting Ability::None ensures
-    // the oracle uses ×1.0, preventing an inflated damage prediction that would raise
-    // the defender's min stat bound above the truth (unsound exclusion).
+    // Analytic correction: ×1.3 only when the attacker (our own mon = user_slot)
+    // moves LAST this turn. When it did not fire, substitute Ability::None so the
+    // oracle uses ×1.0 — otherwise the inflated damage prediction raises the
+    // defender's min stat bound above the truth (unsound exclusion). S28: decided by
+    // the precomputed per-segment last-mover, not by whether the target has moved.
     let atk_ability = {
         let raw = neutral_ability(&attacker_unk);
-        if raw == Ability::Analytic
-            && !ctx.move_users_this_turn.iter().any(|s| s == target_slot)
-        {
+        if raw == Ability::Analytic && !analytic_fired(ctx, user_slot) {
             Ability::None
         } else {
             raw

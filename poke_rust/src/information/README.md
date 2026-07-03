@@ -524,6 +524,17 @@ Population Bomb, the per-hit BP override is computed from the hit index:
 - Triple Axel: 20, 40, 60
 - Population Bomb: 20 per hit
 
+#### Analytic ("moved last" ×1.3)
+
+The oracle materializes an empty action queue, so its own `attacker_is_last_mover`
+check is always true. Pass 3 therefore decides Analytic's ×1.3 from the event stream
+instead (S28): `compute_analytic_last_movers` records, per turn segment, the single
+slot that committed a move last (`MoveUsed` / `Cant` / `MustRecharge` / `ChargingMove`
+— a `Switch` does not commit a move). Analytic fired iff the attacker is that slot.
+This is exact in singles and doubles and correct when the last actor flinched, was
+fully paralyzed, or the target switched (the old heuristic "did the target already
+move?" was wrong in all of those cases).
+
 #### Speed-dependent BP (Gyro Ball, Electro Ball)
 
 BP for these moves is a function of the speed ratio between attacker and target.

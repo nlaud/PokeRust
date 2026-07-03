@@ -6855,6 +6855,112 @@ mod roundtrip_soundness {
         );
     }
 
+    // ── Scenario S28: Analytic fires when the attacker moves last after a switch ──
+
+    /// P1 switches (a switch resolves before any move), then P2's Analytic Garchomp
+    /// attacks the replacement as the turn's only mover — so Analytic's ×1.3 applied
+    /// in the real sim. Because P1 used no move, the old target-centric heuristic
+    /// ("did the target already move this turn?") concluded Analytic did NOT fire and
+    /// dropped it from the Direction-B booster union, forcing the ×1.3-inflated
+    /// observed damage to be explained by a higher attacker Atk BSV — excluding the
+    /// true value (Pass 5 then panics: "every candidate nature infeasible").
+    ///
+    /// Roundtrip so the observed damage is guaranteed consistent with the true world
+    /// (Atk BSV of a real 252-Atk Adamant Garchomp under Analytic).
+    #[test]
+    fn roundtrip_s28_analytic_last_mover_after_switch() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1 lead: bulky Snorlax that will switch out. Back: a second wall to receive
+        // the hit (Def known to us; its species base Def anchors the inversion).
+        let p1_lead = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let p1_back = build_pokemon_state(
+            Species::Regice, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::ClearBody), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        // P2: Garchomp, Analytic, NEUTRAL 0-EV Atk (true BSV near the species floor).
+        // A max-Atk attacker would not expose the bug: without Analytic the observed
+        // ×1.3 damage would demand a BSV above Garchomp's cap, giving an empty feasible
+        // set (no narrowing) instead of an above-truth min. A low true BSV keeps the
+        // wrong (no-Analytic) requirement inside the range so it raises the floor.
+        // A weak, non-STAB move (Tackle, 40 BP) so the exact-damage inversion is
+        // discriminating; a strong STAB move saturates (every BSV reproduces it).
+        let p2 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::Analytic), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        // Hardy is neutral → pre-nature BSV == the final Atk stat.
+        let true_atk_bsv = p2.stats[1];
+
+        let battle = battle_state_from_lists(
+            vec![p1_lead.clone()], vec![p1_back.clone()],
+            vec![p2.clone()], vec![],
+        );
+        let state = MatchState::BattleState(battle);
+
+        // P1 switches to Regice (back-index 0); P2 attacks — P2 moves last.
+        let p1_cmd = PlayerCommand::Battle(vec![
+            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+        ]);
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+
+        // Fog: P1 fully known (lead + back); P2 Garchomp with its ability narrowed so
+        // Analytic is the ONLY offensive booster candidate (SandVeil is defensive).
+        // Without this the union's stronger boosters (Huge Power, Adaptability, …)
+        // would dominate the min-BSV and mask whether Analytic is (in)correctly
+        // included — the S28 distinction only bites when Analytic is the binding
+        // booster.
+        let mut p2_fog_mon =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, pd, 50);
+        p2_fog_mon.possible_abilities =
+            Unknown::Possibly(vec![Ability::Analytic, Ability::SandVeil]);
+        p2_fog_mon.possible_original_abilities =
+            Unknown::Possibly(vec![Ability::Analytic, Ability::SandVeil]);
+        // Pin the item to None too, else the item union (Choice Band ×1.5, Life Orb
+        // ×1.3, …) would cover for Analytic and mask the distinction.
+        p2_fog_mon.item = Unknown::Known(Item::None);
+        let mut initial_fog = super::battle_nvn(
+            vec![UnknownPokemonState::from_known_pokemon(&p1_lead)],
+            vec![p2_fog_mon],
+        );
+        initial_fog.p1_known_back_mons =
+            vec![UnknownPokemonState::from_known_pokemon(&p1_back)];
+
+        let result = apply_information(
+            UnknownMatchState::Battle(initial_fog),
+            &events, false, pd, md, &HashMap::new(), &InferenceConfig::default(),
+        );
+        let result = match result {
+            UnknownMatchState::Battle(b) => b,
+            _ => panic!("expected Battle state"),
+        };
+
+        let p2_slot = super::FieldSlot { player: Player::P2, slot_index: 0 };
+        let p2_idx = super::mon_idx_for_active_slot(&result, &p2_slot).unwrap();
+        let p2_fog = super::get_mon_by_idx(&result, p2_idx).unwrap();
+        assert!(
+            p2_fog.min_pre_nature_stat[1] <= true_atk_bsv
+                && true_atk_bsv <= p2_fog.max_pre_nature_stat[1],
+            "soundness (S28): true Atk BSV {true_atk_bsv} must lie within inferred \
+             pre-nature range [{}, {}] — Analytic must be in the union because P2 \
+             moved last (after P1's switch)",
+            p2_fog.min_pre_nature_stat[1], p2_fog.max_pre_nature_stat[1]
+        );
+    }
+
     // ── Scenario E: Intimidate vs. Clear Body (C2 end-to-end regression) ─────
 
     /// P2 switches Garchomp in (true ability = Intimidate).  P1 has Regice
