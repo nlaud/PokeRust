@@ -1027,6 +1027,49 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     );
 }
 
+// ── Regression: S25 — pinch abilities must be live for a low-HP attacker ────────
+
+/// A Garchomp at 25% display HP with Blaze still possible (and item Known(None), so
+/// no Choice Band alias can cover for it) uses a 40 BP Fire move. True world: min
+/// Atk BSV 135 + Blaze ×1.5 (BP 60 → base term 37), observed damage 31 (roll 0.85).
+///
+/// Before the S25 fix, materialize mapped any non-100% display HP to 0.5×max, so the
+/// ≤1/3 pinch gate never fired in the oracle: every enumerated combo degenerated to
+/// the neutral model (BP 40), for which damage 31 is only feasible at BSV ∈
+/// ≈[165, 182] — raising min_pre_nature_stat[1] above the true 135.
+#[test]
+fn test_s25_blaze_pinch_keeps_true_atk_feasible() {
+    let mut p1_mon = known_p1_normal(); // HP=500, Def=100, Normal type (Fire → ×1)
+    let mut p2_mon = neutral_no_item_garchomp();
+    // Blaze remains possible; ability not Known so the neutral run uses Ability::None.
+    p2_mon.possible_abilities = Unknown::Possibly(vec![Ability::Blaze, Ability::SandVeil]);
+    p2_mon.hp = PokemonHP::Percent(25); // certainly at ≤1/3 HP
+
+    let mut fire_move = normal_physical_move(PokemonMove::FirePunch, 40);
+    fire_move.pokemon_type = PokemonType::Fire; // no STAB for Dragon/Ground Garchomp
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::FirePunch, fire_move);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::FirePunch, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(469) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 135,
+        "true Atk BSV 135 (+ active Blaze) must remain feasible; got min {} — the \
+         0.5×max HP sentinel disables the pinch gate and forces the neutral model",
+        p2_r.min_pre_nature_stat[1]
+    );
+}
+
 // ── Regression: S24 — Pass 3 must run against the PRE-move state ────────────────
 
 /// A Power-Up-Punch-style move raises the user's Atk AFTER the hit; Pass 1 applies

@@ -5688,6 +5688,32 @@ fn pass3_direction_b(
         None
     };
 
+    // ── S25: attacker HP hypotheses for the pinch-ability gate ────────────────
+    // Blaze/Overgrow/Swarm/Torrent gate on `hp*3 <= max` in the oracle, but the
+    // materialize sentinel maps any non-100 display percent to 0.5×max — never
+    // active. Decide which gate states the attacker's display percent admits and
+    // enumerate each as its own oracle hypothesis (`None` = keep the snapshot HP
+    // as-is, i.e. the non-pinch sentinel path; `Some(hp)` = override with a Number
+    // strictly inside the gate — Number passes through materialize untouched, and
+    // `make_atk` leaves stats[0] at minStats[0], which is what the override is
+    // computed against). Thresholds are widened by 1% on each side of the exact
+    // 33.33% bucket edge so display-rounding jitter can never drop a possible
+    // hypothesis (extra variants only widen the union — sound).
+    let attacker_hp_variants: Vec<Option<PokemonHP>> = match &attacker_unk.hp {
+        // Exact HP (or full HP): the gate is already evaluated correctly.
+        PokemonHP::Number(_) | PokemonHP::Percent(100) => vec![None],
+        PokemonHP::Percent(p) => {
+            let pinch_hp = PokemonHP::Number((attacker_unk.minStats[0] / 4).max(1));
+            if *p <= 31 {
+                vec![Some(pinch_hp)] // certainly at ≤1/3: pinch abilities are live
+            } else if *p <= 34 {
+                vec![Some(pinch_hp), None] // bucket straddles the gate: union both
+            } else {
+                vec![None] // certainly above 1/3: sentinel path is correct
+            }
+        }
+    };
+
     // ── Unconditional tightening: union over all (nature_class, item, ability) ─
     let mut global_bsv_lo: Option<u16> = None;
     let mut global_bsv_hi: Option<u16> = None;
@@ -5726,31 +5752,48 @@ fn pass3_direction_b(
         };
 
         // ── Neutral-gear BSV interval (for predicate emission) ─────────────
+        // S25: union across the attacker HP hypotheses — a Known pinch ability
+        // (neutral_a) needs the correct gate state, and a wider neutral interval
+        // only loosens the emitted GE/LE clause bounds (sound).
         let neutral_i = neutral_item(&attacker_unk);
         let neutral_a = neutral_ability(&attacker_unk);
 
-        let (bsv_lo_neutral, bsv_hi_neutral) = find_feasible_bsv_range_b(
-            state,
-            &attacker_unk,
-            &target_unk,
-            user_slot,
-            target_slot,
-            move_data,
-            &oracle_config,
-            targets_mult,
-            *nat_mod,
-            si,
-            base_stats,
-            bsv_lo,
-            bsv_hi,
-            neutral_i,
-            neutral_a,
-            0,
-            exact_damage,
-            is_crit,
-            bp_override,
-            attacker_speed_range,
-        );
+        let mut bsv_lo_neutral: Option<u16> = None;
+        let mut bsv_hi_neutral: Option<u16> = None;
+        for hp_variant in &attacker_hp_variants {
+            let mut atk_neutral = attacker_unk.clone();
+            if let Some(hp) = hp_variant {
+                atk_neutral.hp = hp.clone();
+            }
+            let (lo, hi) = find_feasible_bsv_range_b(
+                state,
+                &atk_neutral,
+                &target_unk,
+                user_slot,
+                target_slot,
+                move_data,
+                &oracle_config,
+                targets_mult,
+                *nat_mod,
+                si,
+                base_stats,
+                bsv_lo,
+                bsv_hi,
+                neutral_i.clone(),
+                neutral_a.clone(),
+                0,
+                exact_damage,
+                is_crit,
+                bp_override,
+                attacker_speed_range,
+            );
+            if let Some(lo_v) = lo {
+                bsv_lo_neutral = Some(bsv_lo_neutral.map_or(lo_v, |g: u16| g.min(lo_v)));
+            }
+            if let Some(hi_v) = hi {
+                bsv_hi_neutral = Some(bsv_hi_neutral.map_or(hi_v, |g: u16| g.max(hi_v)));
+            }
+        }
 
         per_class.push(NatureClassBound {
             mod_f32: *nat_mod,
@@ -5760,44 +5803,49 @@ fn pass3_direction_b(
             bsv_hi_neutral,
         });
 
-        // ── Union over all (item, ability, streak) assignments ─────────────
+        // ── Union over all (item, ability, streak, hp-hypothesis) assignments ──
         for item in &item_choices {
             for ability in &ability_choices {
                 for &streak in &streak_range {
-                    let mut atk_for_oracle = attacker_unk.clone();
-                    atk_for_oracle.consecutive_move_count = streak;
+                    for hp_variant in &attacker_hp_variants {
+                        let mut atk_for_oracle = attacker_unk.clone();
+                        atk_for_oracle.consecutive_move_count = streak;
+                        if let Some(hp) = hp_variant {
+                            atk_for_oracle.hp = hp.clone();
+                        }
 
-                    let (lo, hi) = find_feasible_bsv_range_b(
-                        state,
-                        &atk_for_oracle,
-                        &target_unk,
-                        user_slot,
-                        target_slot,
-                        move_data,
-                        &oracle_config,
-                        targets_mult,
-                        *nat_mod,
-                        si,
-                        base_stats,
-                        bsv_lo,
-                        bsv_hi,
-                        item.clone(),
-                        ability.clone(),
-                        streak,
-                        exact_damage,
-                        is_crit,
-                        bp_override,
-                        attacker_speed_range,
-                    );
-                    if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
-                        let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
-                        let final_hi = (hi_v as f64 * *nat_mod as f64).floor() as u16;
-                        global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
-                        global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
-                        global_stat_lo =
-                            Some(global_stat_lo.map_or(final_lo, |g| g.min(final_lo)));
-                        global_stat_hi =
-                            Some(global_stat_hi.map_or(final_hi, |g| g.max(final_hi)));
+                        let (lo, hi) = find_feasible_bsv_range_b(
+                            state,
+                            &atk_for_oracle,
+                            &target_unk,
+                            user_slot,
+                            target_slot,
+                            move_data,
+                            &oracle_config,
+                            targets_mult,
+                            *nat_mod,
+                            si,
+                            base_stats,
+                            bsv_lo,
+                            bsv_hi,
+                            item.clone(),
+                            ability.clone(),
+                            streak,
+                            exact_damage,
+                            is_crit,
+                            bp_override,
+                            attacker_speed_range,
+                        );
+                        if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
+                            let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
+                            let final_hi = (hi_v as f64 * *nat_mod as f64).floor() as u16;
+                            global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
+                            global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
+                            global_stat_lo =
+                                Some(global_stat_lo.map_or(final_lo, |g| g.min(final_lo)));
+                            global_stat_hi =
+                                Some(global_stat_hi.map_or(final_hi, |g| g.max(final_hi)));
+                        }
                     }
                 }
             }

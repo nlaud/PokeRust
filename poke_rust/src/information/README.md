@@ -800,6 +800,11 @@ The damage oracle (`calculate_damage_outcomes_for_target_with_options`) takes co
   in the oracle. No double-count with the defensive allowlist union: those abilities are
   always enumerated by `defensive_damage_abilities`, but when HP is not 100% they
   contribute nothing because the oracle gates them.
+- **Pinch-gate caveat (S25)**: the ×0.5 sentinel sits above the ≤1/3 gate used by
+  Blaze / Overgrow / Swarm / Torrent, so Direction B enumerates attacker HP
+  *hypotheses* explicitly: display ≤31% → a pinch-active `Number` override; 32–34%
+  (bucket straddles the gate) → both hypotheses unioned; ≥35% / 100% / exact
+  `Number` → the sentinel path alone.
 
 `materialize_battle(unk, p1_active, p2_active) -> BattleState`
 - Copies all field effects (weather, terrain, side conditions, pseudo-weathers, slot
