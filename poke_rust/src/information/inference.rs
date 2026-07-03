@@ -1752,6 +1752,10 @@ fn pass1_apply_switch_event(
 ) {
     match &event.kind {
         EventKind::Switch(sw) => {
+            // S18: the active mon_idx identifies a SLOT, not a Pokémon — drop every
+            // persisted clause/setter record about the outgoing occupant before the
+            // slot is re-bound, or they silently constrain the incoming mon.
+            purge_mon_scoped_knowledge(state, &sw.slot);
             apply_switch_out_reset(state, &sw.slot);
             // B1: preserve the outgoing mon to the bench so its state (HP, move reveals,
             // ability/item narrowing) survives for future re-entry inference.
@@ -1761,6 +1765,8 @@ fn pass1_apply_switch_event(
         }
         EventKind::SimultaneousSwitch { switches } => {
             for sw in switches {
+                // S18: see the single-switch arm above.
+                purge_mon_scoped_knowledge(state, &sw.slot);
                 apply_switch_out_reset(state, &sw.slot);
                 // B1: preserve each outgoing mon before any pass1_switch replaces its slot.
                 bench_outgoing_mon(state, &sw.slot);
@@ -1772,6 +1778,64 @@ fn pass1_apply_switch_event(
             pass1_ability_absence_inference(state, &slots, &event.reactions, ctx);
         }
         _ => {}
+    }
+}
+
+/// `true` if `stmt` (recursing through `Not`) constrains the Pokémon at `mon_idx`.
+fn statement_references_mon(stmt: &Statement, idx: usize) -> bool {
+    match stmt {
+        Statement::Not(inner) => statement_references_mon(inner, idx),
+        Statement::HasItem { mon_idx, .. }
+        | Statement::HasAbility { mon_idx, .. }
+        | Statement::NatureBoostsStat { mon_idx, .. }
+        | Statement::NatureNerfsStat { mon_idx, .. }
+        | Statement::EVIVStatGE { mon_idx, .. }
+        | Statement::EVIVStatLE { mon_idx, .. }
+        | Statement::KnowsThreateningMove { mon_idx, .. } => *mon_idx == idx,
+        Statement::SpeedComparison { fast_idx, slow_idx, .. } => {
+            *fast_idx == idx || *slow_idx == idx
+        }
+        Statement::WeatherTurns { .. }
+        | Statement::TerrainTurns { .. }
+        | Statement::SideConditionTurns { .. } => false,
+    }
+}
+
+/// S18: an active `mon_idx` is a *slot* index — stable as a number (see S1), but
+/// re-bound to a different physical Pokémon whenever the slot's occupant switches.
+/// Persisted `Statement`s (SpeedComparison, HasItem/HasAbility disjunctions, EVIV
+/// bounds) and the weather/terrain/screen setter records all store the slot index of
+/// the mon they were observed on; left in place across a switch, BCP and the timer
+/// machinery would evaluate and even *force* them against the incoming Pokémon
+/// (e.g. a SpeedComparison derived from Mon A's move order raising the fresh
+/// switch-in B's min Spe, or a timer collapse revealing A's Heat Rock as Known on B).
+///
+/// Called at the moment the occupant leaves. Dropping a whole clause when any of its
+/// literals references the slot is sound (removing a constraint only widens); the
+/// cost is completeness — knowledge about the benched mon that lived only in the
+/// predicate store is forgotten. Field-level knowledge (item/ability/EV bounds) is
+/// carried to the bench by `bench_outgoing_mon` and survives re-entry.
+fn purge_mon_scoped_knowledge(state: &mut UnknownBattleState, slot: &FieldSlot) {
+    let Some(idx) = mon_idx_for_active_slot(state, slot) else {
+        return; // Initial lead send-out: the slot was never occupied.
+    };
+    state
+        .predicates
+        .retain(|clause| !clause.iter().any(|lit| statement_references_mon(lit, idx)));
+    if state.weather_setter_mon_idx == Some(idx) {
+        state.weather_setter_mon_idx = None;
+    }
+    if state.terrain_setter_mon_idx == Some(idx) {
+        state.terrain_setter_mon_idx = None;
+    }
+    for setter in state
+        .p1_side_condition_setters
+        .iter_mut()
+        .chain(state.p2_side_condition_setters.iter_mut())
+    {
+        if *setter == Some(idx) {
+            *setter = None;
+        }
     }
 }
 

@@ -871,6 +871,88 @@ fn test_no_speed_comparison_different_priority() {
     assert_eq!(speed_cmp_count, 0, "no SpeedComparison for different priority brackets");
 }
 
+// ── Regression: S18 — slot re-binding must not inherit the old occupant's clauses ──
+
+/// A unit SpeedComparison recorded for the Snorlax in P2 slot 0 must be dropped when
+/// Snorlax switches out: the slot index now denotes the incoming Aggron, and before
+/// the S18 fix the persisted comparison re-bound to it — raising the fresh switch-in's
+/// min Spe to the previous occupant's evidence (excluding every true slower-Aggron
+/// world, and panicking when the forced min exceeded the species' max).
+#[test]
+fn test_s18_speed_comparison_purged_on_switch() {
+    let mut p1_mon = unknown_mon_species(Species::Garchomp);
+    p1_mon.minStats[5] = 150;
+    p1_mon.maxStats[5] = 150;
+
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    // Evidence from a previous turn: P2 slot 0 (Snorlax) outsped our 150-Spe mon.
+    state.predicates.push(vec![Statement::SpeedComparison {
+        fast_idx: 1,
+        slow_idx: 0,
+        fast_mult: 1,
+        slow_mult: 1,
+    }]);
+
+    let fresh_min = unknown_mon_species(Species::Aggron).minStats[5];
+    let result = apply(
+        state,
+        vec![event(EventKind::Switch(SwitchState {
+            slot: p2(0),
+            species: Species::Aggron,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }))],
+    );
+
+    let incoming = &result.p2_active_mons[0];
+    assert!(matches!(&incoming.possible_species, Unknown::Known(s) if *s == Species::Aggron));
+    assert_eq!(
+        incoming.minStats[5], fresh_min,
+        "the previous occupant's SpeedComparison must not constrain the switch-in"
+    );
+    // The Snorlax-scoped clause must be gone from the store.
+    let stale_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }))
+    });
+    assert!(!stale_clause, "mon-scoped clauses must be purged when the slot occupant changes");
+}
+
+/// Item-disjunction analogue: `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]` recorded
+/// for the outgoing occupant must not survive to the switch-in — before the fix, a
+/// later `ItemRevealed{Leftovers}` on the NEW mon falsified both literals and
+/// panicked with an unsatisfiable clause, although both physical mons' items were
+/// perfectly consistent.
+#[test]
+fn test_s18_item_clause_purged_on_switch() {
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.predicates.push(vec![
+        Statement::HasItem { mon_idx: 1, item: Item::BrightPowder },
+        Statement::HasItem { mon_idx: 1, item: Item::LaxIncense },
+    ]);
+
+    // Snorlax leaves; Aggron enters and reveals Leftovers.
+    let result = apply(
+        state,
+        vec![
+            event(EventKind::Switch(SwitchState {
+                slot: p2(0),
+                species: Species::Aggron,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+            })),
+            event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers }),
+        ],
+    );
+    assert!(matches!(&result.p2_active_mons[0].item, Unknown::Known(i) if *i == Item::Leftovers));
+}
+
 // ── Regression: S17 — conditional SpeedComparisons must not propagate bounds ────
 
 /// A slow mon with a possible Quick Claw moves before our exactly-known fast mon.
