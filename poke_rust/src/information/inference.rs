@@ -5735,6 +5735,20 @@ fn pass3_direction_a(
     use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
     use crate::simulator::DamageConfig;
 
+    // S11 soundness fix: Direction A materializes the attacker from its CURRENT
+    // stat/item/ability fields as if they were the exact truth (`atk_stats =
+    // attacker_unk.minStats`, `neutral_item`/`neutral_ability`) — sound only for the
+    // observer's own fully-`Known` Pokémon. Direction A fires whenever the target's
+    // HP is `Percent`, which in doubles also covers an opponent mon hitting its OWN
+    // ally with a spread move (the ally's HP is `Percent` too, since it belongs to
+    // the non-observer side) — there the attacker is itself unknown, and treating
+    // its unresolved stat bounds as exact would produce an unsound defender-BSV
+    // bound. P1 is the observer throughout this module (see S16); only P1's moves
+    // have a fully-Known attacker, so gate Direction A on that.
+    if user_slot.player != Player::P1 {
+        return;
+    }
+
     let Some(defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
         return;
     };

@@ -3357,6 +3357,85 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
     );
 }
 
+// ── Regression: S11 — Direction A must not fire for an unknown (non-P1) attacker ──
+
+/// In doubles, an opponent mon can hit its OWN ally with a spread move — both mons'
+/// HP display as `Percent` (neither belongs to the observer), so the target's HP
+/// representation alone (`Percent`) is not sufficient to conclude the attacker is
+/// our own fully-`Known` mon. Before the S11 fix, Direction A fired unconditionally
+/// whenever the target's HP was `Percent`, materializing the (unknown) P2 attacker's
+/// unresolved stat bounds as if they were exact — an unsound basis for narrowing the
+/// defender's stat bounds. After the fix, Direction A must not touch the defender's
+/// bounds at all when the attacker is not P1 (the observer).
+#[test]
+fn test_pass3_dir_a_skipped_for_opponent_ally_hit() {
+    let p1_mons = vec![unknown_mon(), unknown_mon()];
+
+    // P2 mon 0: the attacker (unknown to us).
+    let p2_attacker = unknown_mon_species(Species::Snorlax);
+    // P2 mon 1: the defender — Garchomp, with a wide starting SpD BSV range.
+    let mut p2_defender = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp, &garchomp_dex(), 50,
+    );
+    p2_defender.hp = PokemonHP::Percent(100);
+    let orig_bsv_lo = p2_defender.min_pre_nature_stat[4];
+    let orig_bsv_hi = p2_defender.max_pre_nature_stat[4];
+
+    let mut state = battle_nvn(p1_mons, vec![p2_attacker, p2_defender]);
+    state.active_per_side = 2;
+
+    let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
+    psychic.category = MoveCategory::Special;
+    psychic.pokemon_type = PokemonType::Psychic;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Psychic, psychic);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Psychic,
+                targets: vec![p2(1)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p2(1),
+                new_hp: PokemonHP::Percent(80), // 20% damage
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // No EVIVStat predicate for the defender's SpD may be emitted — Direction A
+    // must not have run at all for this (unknown-attacker) hit.
+    let has_spd_predicate = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::EVIVStatGE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
+                | Statement::EVIVStatLE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
+            )
+        })
+    });
+    assert!(
+        !has_spd_predicate,
+        "Direction A must not emit any defender predicate for a non-P1 attacker's hit"
+    );
+
+    // The defender's pre-nature SpD bounds must remain exactly the initial wide range —
+    // no unconditional tightening from apply_unconditional_tightening either.
+    let defender = &result.p2_active_mons[1];
+    assert_eq!(
+        defender.min_pre_nature_stat[4], orig_bsv_lo,
+        "defender's min SpD BSV must be untouched by an unknown-attacker hit"
+    );
+    assert_eq!(
+        defender.max_pre_nature_stat[4], orig_bsv_hi,
+        "defender's max SpD BSV must be untouched by an unknown-attacker hit"
+    );
+}
+
 // ── Regression: E1 — Binary-search preserves precision of linear scan ────────
 
 /// The binary-search implementation of `find_feasible_bsv_range_b` (Direction B) must
