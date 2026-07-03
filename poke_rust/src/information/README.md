@@ -501,9 +501,24 @@ forced to `min_pre_nature_stat`/`max_pre_nature_stat` directly.
 
 #### Multi-hit handling
 
-Pass 3 collects **all** `DamageDealt` reactions for the target, in order. Each hit
-is run as an independent constraint on the same BSV lattice; the intersection across
-hits yields tighter bounds than a single hit alone. For Triple Kick / Triple Axel /
+Pass 3 walks **all** of the target's HP-relevant reactions in order (S23):
+
+- `DamageDealt` — one hit; run as an independent constraint on the same BSV lattice
+  (the intersection across hits yields tighter bounds than a single hit alone).
+- `Crit` — sets a pending flag consumed by the *next* `DamageDealt` on that target,
+  matching the sim's emit order (crit is per-hit; a single global "any hit critted"
+  flag applied the crit constraint to non-crit hits, whose feasible interval sits at
+  observed-damage ÷ crit-multiplier — an unsound exclusion on mixed-crit sequences).
+- `Healed` / `SetHp` — moves the running HP baseline without being a hit (a pinch
+  berry firing mid-sequence otherwise understates the next hit's damage by the heal).
+
+Each hit's running pre-hit HP is also passed into the oracle materialization, so
+full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) are evaluated at
+the HP the hit was actually taken at — the live fog field holds the *post-move* HP
+by the time Pass 3 runs, which wrongly disabled them for exactly the hit that broke
+full HP.
+
+For Triple Kick / Triple Axel /
 Population Bomb, the per-hit BP override is computed from the hit index:
 - Triple Kick: 10, 20, 30 (base BP = 10 + 10×hit_idx)
 - Triple Axel: 20, 40, 60

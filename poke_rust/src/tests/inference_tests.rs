@@ -2302,6 +2302,109 @@ fn test_pass3_multihit_2hits_no_contradiction() {
     );
 }
 
+/// **S23 regression — per-hit crit attribution.** A 2-hit move lands a crit on hit 1
+/// only (the sim emits `Crit` immediately before that hit's own `DamageDealt`).
+///
+/// Setup mirrors `test_pass3_multihit_tighter_than_single_hit` (Garchomp, neutral,
+/// 40 BP Normal 2-hit vs Def=100): true Atk BSV = 180 → base term 33, non-crit rolls
+/// 28–33, crit rolls 42–49. Observed: hit 1 NON-crit for 33, hit 2 crit for 45.
+///
+/// Before the S23 fix, one `Crit` reaction set a global flag for EVERY hit, so hit 1
+/// was constrained to Atk values whose CRIT rolls produce 33 — Atk ∈ ≈[135, 147],
+/// entirely below the true 180 — capping `max_pre_nature_stat[1]` at ≈147 before the
+/// genuinely-crit hit 2 (feasible only at Atk ≥ 159) even got scanned.
+#[test]
+fn test_s23_multihit_mixed_crit_keeps_true_atk_feasible() {
+    let p1_mon = known_p1_normal(); // HP=500, Def=100
+    let p2_mon = neutral_no_item_garchomp();
+
+    let mut move_dex = HashMap::new();
+    let mut two_hit = normal_physical_move(PokemonMove::BulletSeed, 40);
+    two_hit.multihit_range = [2, 2];
+    move_dex.insert(PokemonMove::BulletSeed, two_hit);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
+            vec![
+                // Hit 1: non-crit, 33 damage (500 → 467).
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(467) }),
+                // Hit 2: crit, 45 damage (467 → 422) — Crit emitted just before it.
+                event(EventKind::Crit { target: p1(0) }),
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(422) }),
+                event(EventKind::HitCount { target: p1(0), hits: 2 }),
+            ],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 180 && 180 <= p2_r.max_pre_nature_stat[1],
+        "true Atk BSV 180 must stay within [{}, {}] — a global crit flag applied to \
+         the non-crit hit excludes it",
+        p2_r.min_pre_nature_stat[1],
+        p2_r.max_pre_nature_stat[1]
+    );
+}
+
+/// **S23 regression — mid-sequence heal moves the HP baseline.** A pinch berry (or
+/// any heal) firing between two hits is emitted as its own `Healed` reaction; the
+/// next hit's damage must be measured from the POST-heal HP.
+///
+/// True Atk BSV = 180 (base term 33): hit 1 deals 28 (500 → 472), a heal restores to
+/// 478, hit 2 deals 33 (478 → 445). Before the S23 fix, the walk collected only
+/// `DamageDealt` events, so hit 2's baseline stayed at 472 and its damage was
+/// misread as 27 — feasible only for Atk ≤ ≈164, capping the bound below the
+/// true 180.
+#[test]
+fn test_s23_multihit_heal_between_hits_keeps_true_atk_feasible() {
+    let p1_mon = known_p1_normal(); // HP=500, Def=100
+    let p2_mon = neutral_no_item_garchomp();
+
+    let mut move_dex = HashMap::new();
+    let mut two_hit = normal_physical_move(PokemonMove::BulletSeed, 40);
+    two_hit.multihit_range = [2, 2];
+    move_dex.insert(PokemonMove::BulletSeed, two_hit);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
+            vec![
+                // Hit 1: 28 damage (500 → 472).
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(472) }),
+                // Berry-style heal on the target: 472 → 478.
+                event(EventKind::Healed { target: p1(0), new_hp: PokemonHP::Number(478) }),
+                // Hit 2: 33 damage measured from the healed baseline (478 → 445).
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(445) }),
+                event(EventKind::HitCount { target: p1(0), hits: 2 }),
+            ],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= p2_r.max_pre_nature_stat[1],
+        "heal-blind baseline must not invert Atk bounds (min {}, max {})",
+        p2_r.min_pre_nature_stat[1],
+        p2_r.max_pre_nature_stat[1]
+    );
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 180 && 180 <= p2_r.max_pre_nature_stat[1],
+        "true Atk BSV 180 must stay within [{}, {}] — a heal-blind baseline misreads \
+         hit 2's damage as 27 and excludes it",
+        p2_r.min_pre_nature_stat[1],
+        p2_r.max_pre_nature_stat[1]
+    );
+}
+
 /// Multi-hit with varied per-hit damage should produce bounds strictly tighter
 /// than a single-hit observation of just the first hit.
 ///

@@ -4715,16 +4715,15 @@ fn pass3_damage_to_stats(
             continue;
         };
 
-        // Collect ALL DamageDealt reactions for this target, in event order.
-        let damage_reactions: Vec<&InformationEvent> = event
+        // Count this target's damaging hits (multi-hit detection).
+        let n_hits = event
             .reactions
             .iter()
             .filter(|r| {
                 matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == target_slot)
             })
-            .collect();
-
-        if damage_reactions.is_empty() {
+            .count();
+        if n_hits == 0 {
             continue;
         }
 
@@ -4741,24 +4740,52 @@ fn pass3_damage_to_stats(
             continue;
         };
 
-        // For multi-hit: use a global crit flag (any hit critted) — sound but slightly
-        // looser than per-hit crit tracking. For single-hit this is exact.
-        let is_crit = move_ctx.is_crit;
-
         // Detect whether this target's HP is a multi-hit sequence.
-        let is_multi = move_data.multihit_range[0] > 0 || damage_reactions.len() > 1;
+        let is_multi = move_data.multihit_range[0] > 0 || n_hits > 1;
 
-        // Running HP tracks the HP value between consecutive hits.
+        // S23: walk the target's reactions IN ORDER, tracking three things the old
+        // DamageDealt-only collection got wrong for multi-hit sequences:
+        //
+        // 1. Per-hit crit — the sim emits `Crit{target}` immediately before the hit's
+        //    own `DamageDealt` (single emit site, gated on damage > 0), so a pending
+        //    flag attributes each crit to exactly its hit. The old global "any hit
+        //    critted" flag applied the crit constraint to NON-crit hits too, whose
+        //    feasible-BSV interval (observed damage ÷ crit multiplier) sits below the
+        //    truth — an unsound exclusion whenever a mixed-crit multi-hit landed.
+        //
+        // 2. Interleaved heals — a pinch berry firing mid-sequence is emitted as its
+        //    own `Healed` between two `DamageDealt`s (see the emission convention in
+        //    the module README). Skipping it left the next hit's baseline at the
+        //    pre-berry value, understating that hit's damage by the heal amount.
+        //
+        // 3. `current_hp` is passed down as each hit's true pre-hit HP so the oracle
+        //    materializes the defender at the HP the hit was actually taken at —
+        //    full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) were
+        //    previously evaluated against the post-move HP (pass 1 has already applied
+        //    the whole reaction tree by the time Pass 3 runs), which disabled them for
+        //    exactly the hit that dropped the defender below full HP.
         let mut current_hp: PokemonHP = pre_hp.clone();
+        let mut pending_crit = false;
+        let mut hit_idx: usize = 0;
 
-        for (hit_idx, dmg_reaction) in damage_reactions.iter().enumerate() {
-            let new_hp = match &dmg_reaction.kind {
-                EventKind::DamageDealt { new_hp, .. } => new_hp,
-                _ => {
-                    current_hp = current_hp.clone();
+        for reaction in &event.reactions {
+            let new_hp = match &reaction.kind {
+                EventKind::Crit { target } if target == target_slot => {
+                    pending_crit = true;
                     continue;
                 }
+                EventKind::Healed { target, new_hp } | EventKind::SetHp { target, new_hp }
+                    if target == target_slot =>
+                {
+                    // Baseline moves without being a damaging hit.
+                    current_hp = new_hp.clone();
+                    continue;
+                }
+                EventKind::DamageDealt { target, new_hp } if target == target_slot => new_hp,
+                _ => continue,
             };
+            let is_crit = pending_crit;
+            pending_crit = false;
 
             // Per-hit BP override for fixed-BP multi-hit moves (Triple Kick etc.).
             // None for normal multi-hit moves (each hit uses move's base_power).
@@ -4772,6 +4799,7 @@ fn pass3_damage_to_stats(
             } else {
                 None
             };
+            hit_idx += 1;
 
             // ── Classify direction ────────────────────────────────────────────
             // Direction B: target HP is Number → exact damage; bound ATTACKER's stat.
@@ -4791,6 +4819,7 @@ fn pass3_damage_to_stats(
                             move_data,
                             &off_stat,
                             is_crit,
+                            &current_hp,
                             exact_damage,
                             bp_override,
                             speed_dep_bp,
@@ -4818,6 +4847,7 @@ fn pass3_damage_to_stats(
                             move_data,
                             &def_stat,
                             is_crit,
+                            &current_hp,
                             *pre_pct,
                             *post_pct,
                             bp_override,
@@ -5461,6 +5491,10 @@ fn pass3_direction_b(
     move_data: &crate::state::dex_data::MoveData,
     off_stat: &crate::state::dex_data::PokemonStat,
     is_crit: bool,
+    // S23: the HP the target was at when THIS hit landed (pass 1 has already applied
+    // the whole reaction tree, so the live field holds the post-move HP — wrong for
+    // full-HP-gated reducers like Multiscale on the hit that broke full HP).
+    hit_pre_hp: &PokemonHP,
     exact_damage: u16,
     // Per-hit base power override for multi-hit moves (None = use move's base_power).
     bp_override: Option<u16>,
@@ -5474,9 +5508,11 @@ fn pass3_direction_b(
     let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
         return;
     };
-    let Some(target_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+    let Some(mut target_unk) = get_mon_by_idx(state, target_idx).cloned() else {
         return;
     };
+    // S23: materialize the target at the HP this hit was actually taken at.
+    target_unk.hp = hit_pre_hp.clone();
 
     // Need known attacker species for BSV-based inference.
     let base_stats = match &attacker_unk.possible_species {
@@ -6063,6 +6099,9 @@ fn pass3_direction_a(
     move_data: &crate::state::dex_data::MoveData,
     def_stat: &crate::state::dex_data::PokemonStat,
     is_crit: bool,
+    // S23: the HP the defender was at when THIS hit landed (the live field holds the
+    // post-move HP by the time Pass 3 runs — see pass3_direction_b).
+    hit_pre_hp: &PokemonHP,
     // S22: pre-hit and post-hit DISPLAY percents. Each carries its own display
     // rounding; the damage band is derived per max-HP hypothesis from the exact
     // display buckets, not from the delta alone.
@@ -6091,9 +6130,13 @@ fn pass3_direction_a(
         return;
     }
 
-    let Some(defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+    let Some(mut defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
         return;
     };
+    // S23: materialize the defender at the HP this hit was actually taken at, so
+    // full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) stay live for
+    // the hit that broke full HP.
+    defender_unk.hp = hit_pre_hp.clone();
     let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
         return;
     };
