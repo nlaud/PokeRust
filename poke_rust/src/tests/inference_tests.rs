@@ -588,8 +588,11 @@ fn test_switch_from_known_back_to_active() {
 #[test]
 fn test_no_recoil_excludes_life_orb() {
     // Rule out MagicGuard and SheerForce; Earthquake has no secondary → SheerForce irrelevant.
+    // Klutz is also ruled out (S21): a Klutz attacker's Life Orb never chips, so the
+    // hard exclusion requires Klutz impossible as well.
     let mut mon = unknown_mon();
-    mon.possible_abilities = Unknown::Not(vec![Ability::MagicGuard, Ability::SheerForce]);
+    mon.possible_abilities =
+        Unknown::Not(vec![Ability::MagicGuard, Ability::SheerForce, Ability::Klutz]);
 
     // A P1 mon must actually occupy the damaged slot — the simulator never emits
     // DamageDealt for an empty slot, and event shapes here should stay realistic.
@@ -2656,6 +2659,80 @@ fn test_contact_absence_excludes_rocky_helmet() {
     assert!(
         is_item_excluded(&result.p2_active_mons[0], &Item::RockyHelmet),
         "Rocky Helmet should be excluded when no helmet reaction occurred"
+    );
+}
+
+// ── Regression: S21 — item suppression silences item reactions ──────────────────
+
+/// Under Magic Room (`MagicDeluge`), a genuinely-held Rocky Helmet produces no chip
+/// (the sim gates it on `item_is_active`), so the missing reaction is not evidence of
+/// absence. Before the S21 fix, the contact-absence pass excluded Rocky Helmet on the
+/// defender anyway — excluding the true held item.
+#[test]
+fn test_s21_no_helmet_exclusion_under_magic_room() {
+    let p1_mon = {
+        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        m.item = Unknown::Known(Item::None);
+        m.possible_abilities = Unknown::Known(Ability::SandVeil);
+        m
+    };
+    let p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.pseudo_weathers = vec![PseudoWeather::MagicDeluge];
+    state.pseudo_weather_turns = vec![Unknown::Known(3)];
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, contact_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Earthquake, targets: vec![p2(0)] },
+            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(50) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].item, &Item::RockyHelmet),
+        "Rocky Helmet must not be excluded while Magic Room suppresses items"
+    );
+}
+
+/// Life Orb analogue: the LO chip is gated on `item_is_active` in the sim, so
+/// missing recoil under Magic Room says nothing about the attacker's item.
+#[test]
+fn test_s21_no_life_orb_exclusion_under_magic_room() {
+    let p1_mon = {
+        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        m.item = Unknown::Known(Item::None);
+        m.possible_abilities = Unknown::Known(Ability::SandVeil);
+        m
+    };
+    // Attacker (P2) with the recoil-escape abilities excluded — only Magic Room
+    // stands between "no recoil" and the (unsound) Life Orb exclusion.
+    let p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.pseudo_weathers = vec![PseudoWeather::MagicDeluge];
+    state.pseudo_weather_turns = vec![Unknown::Known(3)];
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(120) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].item, &Item::LifeOrb),
+        "Life Orb must not be excluded while Magic Room suppresses items"
     );
 }
 
@@ -7431,8 +7508,11 @@ fn test_contact_absence_skipped_when_defender_may_be_suppressed() {
         Ability::NeutralizingGas,
     ]);
 
-    // Defender: fully unknown abilities — Neutralizing Gas remains possible.
-    let p2_mon = unknown_mon();
+    // Defender: abilities unknown except Klutz — Neutralizing Gas remains possible
+    // (the suppression gate under test), while the S21 item-inertness gate is
+    // satisfied so the Helmet exclusion below can still fire.
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::Klutz]);
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();

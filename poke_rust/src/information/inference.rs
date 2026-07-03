@@ -3233,10 +3233,15 @@ fn pass2_item_from_move(
             .and_then(|i| get_mon_by_idx(state, i))
             .map_or(false, |m| m.fainted);
 
-        if hit_any_opponent && !user_fainted {
+        // S21: the sim gates the LO chip on `item_is_active` — Magic Room (field-wide)
+        // or Klutz on the attacker silences the recoil even when Life Orb IS held, so
+        // absence is only evidence when neither can be in play.
+        let items_suppressed = state.pseudo_weathers.contains(&PseudoWeather::MagicDeluge);
+
+        if hit_any_opponent && !user_fainted && !items_suppressed {
             if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
                 if !has_lo_recoil {
-                    let (could_mg, could_sf, has_secondary) = {
+                    let (could_mg, could_sf, could_klutz, has_secondary) = {
                         let um = get_mon_by_idx(state, user_idx);
                         (
                             um.map_or(false, |m| {
@@ -3245,17 +3250,20 @@ fn pass2_item_from_move(
                             um.map_or(false, |m| {
                                 !unknown_is_excluded(&m.possible_abilities, &Ability::SheerForce)
                             }),
+                            um.map_or(false, |m| {
+                                !unknown_is_excluded(&m.possible_abilities, &Ability::Klutz)
+                            }),
                             !move_data.secondaries.is_empty(),
                         )
                     };
 
-                    if !could_mg && !(could_sf && has_secondary) {
+                    if !could_mg && !(could_sf && has_secondary) && !could_klutz {
                         // Definitively no Life Orb on this mon.
                         if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
                             unknown_exclude(&mut mon.item, &Item::LifeOrb, "no-lo-recoil");
                         }
                     } else {
-                        // Predicate: Not(LifeOrb) ∨ MagicGuard ∨ (SheerForce ∧ secondary)
+                        // Predicate: Not(LifeOrb) ∨ MagicGuard ∨ (SheerForce ∧ secondary) ∨ Klutz
                         let mut clause = vec![Statement::Not(Box::new(Statement::HasItem {
                             mon_idx: user_idx,
                             item: Item::LifeOrb,
@@ -3270,6 +3278,13 @@ fn pass2_item_from_move(
                             clause.push(Statement::HasAbility {
                                 mon_idx: user_idx,
                                 ability: Ability::SheerForce,
+                            });
+                        }
+                        // S21: Klutz silences the LO chip while the orb stays held.
+                        if could_klutz {
+                            clause.push(Statement::HasAbility {
+                                mon_idx: user_idx,
+                                ability: Ability::Klutz,
                             });
                         }
                         state.predicates.push(clause);
@@ -3581,16 +3596,26 @@ fn pass2_contact_absence(
         // Defender-side suppression: if the DEFENDER's ability might be suppressed
         // (Neutralizing Gas possibly on the field, or Gastro Acid on the defender),
         // Rough Skin / Iron Barbs would be silent even if present — excluding them
-        // would be unsound. Rocky Helmet is an item and is unaffected by suppression.
+        // would be unsound. Rocky Helmet is an item and is unaffected by ability
+        // suppression, but IS silenced by item suppression (see below).
         let defender_maybe_suppressed = unknown_ability_might_be_suppressed(state, target);
+
+        // S21: the sim gates the Helmet chip on `item_is_active` — Magic Room
+        // (field-wide) or Klutz on the DEFENDER keeps the Helmet silent while it is
+        // genuinely held, so absence is only evidence when neither can be in play.
+        let items_suppressed = state.pseudo_weathers.contains(&PseudoWeather::MagicDeluge);
 
         let Some(mon) = get_mon_mut_by_idx(state, target_idx) else {
             continue;
         };
+        let defender_klutz_possible =
+            !unknown_is_excluded(&mon.possible_abilities, &Ability::Klutz);
 
         // Rocky Helmet: Magic Guard on the attacker prevents the chip, so Helmet
-        // absence is only certain when Magic Guard is also excluded.
-        if !helmet_revealed && !magic_guard_possible {
+        // absence is only certain when Magic Guard is also excluded — and (S21) when
+        // the Helmet itself cannot have been inert (Magic Room / defender Klutz).
+        if !helmet_revealed && !magic_guard_possible && !items_suppressed && !defender_klutz_possible
+        {
             unknown_exclude(&mut mon.item, &Item::RockyHelmet, "no-helmet-chip");
         }
 
