@@ -54,6 +54,16 @@ pub struct UnknownPokemonState {
     /// Item revealed when it was taken or knocked off (Knock Off, Thief loser side, Fling).
     /// Not set for consumed items (use `consumed_item`) or Trick/Switcheroo (use `item`).
     pub removed_item: Option<Item>,
+    /// True once this Pokémon's current held item arrived via a mid-battle transfer
+    /// (Trick, Switcheroo, Symbiosis, Recycle, Pickup — anything emitted as
+    /// `ItemGained`) rather than being its own team-built item. Gates the item-clause
+    /// exclusion (`enforce_unique_item`): a transferred item is not evidence about what
+    /// this Pokémon's OWN team built, so a later `ItemRevealed` re-confirming it must
+    /// not exclude that item from this mon's teammates. Persists across switches
+    /// (transfers are permanent for the rest of the battle) — only cleared by a further
+    /// `ItemGained`/`ItemLost` cycle back to a state where the flag is no longer needed
+    /// to reason about (kept `true` once set; see S12 in the inference audit).
+    pub item_was_transferred: bool,
 
     // ── Per-turn event flags (cleared in end_turn Phase 5 and on switch-out) ────────
     /// Took any damage this turn — direct hits, recoil, confusion self-hits, etc.
@@ -264,9 +274,18 @@ pub struct UnknownBattleState {
 /// `UnknownBattleState` in this order:
 ///
 /// ```text
-/// [p1_active_mons..., p1_known_back_mons..., p1_possible_back_mons...,
-///  p2_active_mons..., p2_known_back_mons..., p2_possible_back_mons...]
+/// [p1_active_mons..., p2_active_mons...,
+///  p1_known_back_mons..., p1_possible_back_mons...,
+///  p2_known_back_mons..., p2_possible_back_mons...]
 /// ```
+///
+/// Both active segments come first, before either side's bench (S1: this keeps
+/// every active mon's `mon_idx` stable for the whole battle — see the
+/// `mon_idx` helpers doc comment in `information::inference` for why the naive
+/// per-side-contiguous ordering was unsound for persistent `Statement`s). A
+/// side's full roster (active + bench) is therefore NOT one contiguous range —
+/// `teammate_indices` / `mon_is_p2` in `information::inference` check each
+/// segment explicitly.
 ///
 /// For `UnknownTeamPreviewState` the list is simply `[p1_mons..., p2_mons...]`.
 ///
@@ -402,6 +421,7 @@ impl UnknownPokemonState {
             cud_chew_pending: mon.cud_chew_pending.clone(),
             item_lost: mon.item_lost,
             removed_item: None,
+            item_was_transferred: false,
             damaged_this_turn: mon.damaged_this_turn,
             damaged_by_this_turn: mon.damaged_by_this_turn.clone(),
             last_physical_damage_taken: PokemonHP::Number(mon.last_physical_damage_taken),
@@ -541,6 +561,7 @@ impl UnknownPokemonState {
             cud_chew_pending: None,
             item_lost: false,
             removed_item: None,
+            item_was_transferred: false,
             damaged_this_turn: false,
             damaged_by_this_turn: Vec::new(),
             last_physical_damage_taken: PokemonHP::Percent(0),

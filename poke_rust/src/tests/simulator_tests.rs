@@ -32331,6 +32331,94 @@ mod event_round_trip {
     fn p1s0() -> FieldSlot { FieldSlot { player: Player::P1, slot_index: 0 } }
     fn p2s0() -> FieldSlot { FieldSlot { player: Player::P2, slot_index: 0 } }
 
+    // ── Regression: S2 — coalesce_branches must not merge divergent event histories ──
+    //
+    // `pending_events` is deliberately excluded from BattleState's PartialEq/Hash when
+    // no observer is attached (the hot simulation path), but INCLUDED whenever
+    // event_observer is Some — see state/battle.rs. Two branches with identical
+    // battle state but different observable histories (e.g. Crit vs no-Crit on a hit
+    // that happens to deal the same damage) must survive coalesce_branches as
+    // separate entries when observed, and still merge as before when unobserved.
+
+    /// With an observer attached, two branches with identical state but DIFFERENT
+    /// pending_events (e.g. one recorded a Crit, the other didn't) must NOT be merged.
+    #[test]
+    fn coalesce_keeps_divergent_event_histories_separate_when_observed() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, None, None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, None, None, None, None, None, None, false,
+        );
+        let mut bs_a = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
+        bs_a.event_observer = Some(Player::P1);
+        bs_a.pending_events = vec![InformationEvent {
+            kind: EventKind::Crit { target: p2s0() },
+            reactions: vec![],
+        }];
+        let mut bs_b = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        bs_b.event_observer = Some(Player::P1);
+        bs_b.pending_events = vec![]; // no Crit recorded on this branch
+
+        let branches = vec![
+            (MatchState::BattleState(bs_a), 0.0625),
+            (MatchState::BattleState(bs_b), 0.9375),
+        ];
+        let merged = crate::simulator::helpers::coalesce_branches(branches);
+        assert_eq!(
+            merged.len(), 2,
+            "branches with identical state but different event histories must stay separate"
+        );
+        let total_prob: f64 = merged.iter().map(|(_, p)| p).sum();
+        assert!((total_prob - 1.0).abs() < 1e-9, "probabilities must still sum to 1.0");
+    }
+
+    /// Without an observer, the same two branches (identical state, one carrying
+    /// leftover pending_events content that would never normally be populated in
+    /// the unobserved path) must merge exactly as before the S2 fix — the hot
+    /// simulation path is unaffected.
+    #[test]
+    fn coalesce_merges_identical_state_when_unobserved() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, None, None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, None, None, None, None, None, None, false,
+        );
+        let mut bs_a = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
+        bs_a.event_observer = None;
+        bs_a.pending_events = vec![InformationEvent {
+            kind: EventKind::Crit { target: p2s0() },
+            reactions: vec![],
+        }];
+        let mut bs_b = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        bs_b.event_observer = None;
+        bs_b.pending_events = vec![];
+
+        let branches = vec![
+            (MatchState::BattleState(bs_a), 0.25),
+            (MatchState::BattleState(bs_b), 0.75),
+        ];
+        let merged = crate::simulator::helpers::coalesce_branches(branches);
+        assert_eq!(
+            merged.len(), 1,
+            "unobserved branches must still merge on state alone, ignoring pending_events"
+        );
+        assert!((merged[0].1 - 1.0).abs() < 1e-9);
+    }
+
     // ── Test 1: MoveUsed wraps DamageDealt; EndOfTurn wraps Leftovers heal ────
 
     /// Verify the two fundamental nesting contracts in one turn:
@@ -33093,38 +33181,64 @@ mod event_round_trip {
         let p1_splash = PlayerCommand::Battle(simple_attack(Player::P1, vec![1]));
         let p2_splash = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
+        // Slowbro and Snorlax both have base Speed 30 — a genuine speed tie, so P1/P2
+        // move order branches 50/50 each turn. `damage_rolls=1` makes the resulting
+        // BATTLE STATE deterministic regardless of order (Future Sight vs Splash order
+        // doesn't affect either mon's stats), but since the S2 fix the two move-order
+        // branches are correctly kept separate (their event histories genuinely
+        // differ — which mon's MoveUsed appears first), rather than being silently
+        // merged into one. Assert state-consistency across whichever branches come
+        // back instead of assuming exactly one.
+        fn assert_same_resulting_state(
+            branches: &[(MatchState, Option<Vec<InformationEvent>>, f64)],
+            turn_label: &str,
+        ) {
+            let total_prob: f64 = branches.iter().map(|(_, _, p)| p).sum();
+            assert!(
+                (total_prob - 1.0).abs() < 1e-9,
+                "{turn_label}: branch probabilities must sum to 1.0, got {total_prob}"
+            );
+            assert!(
+                branches.iter().all(|(st, _, _)| *st == branches[0].0),
+                "{turn_label}: a speed-tie move-order branch must not change the \
+                 resulting battle state, only the event history"
+            );
+        }
+
         // Turn 1: Future Sight queued; no damage yet.
         let mut t1 = run_single_turn_with_events_opts(
             &state, &p1_fs, &p2_splash, md, pd, Player::P1, false, 1,
         );
-        assert_eq!(t1.len(), 1, "turn 1 must be deterministic");
+        assert_same_resulting_state(&t1, "turn 1");
         let (state_t1, _, _) = t1.remove(0);
 
         // Turn 2: both splash; FutureMove ticks to turns_remaining=1.
         let mut t2 = run_single_turn_with_events_opts(
             &state_t1, &p1_splash, &p2_splash, md, pd, Player::P1, false, 1,
         );
-        assert_eq!(t2.len(), 1, "turn 2 must be deterministic");
+        assert_same_resulting_state(&t2, "turn 2");
         let (state_t2, _, _) = t2.remove(0);
 
-        // Turn 3: FutureMove fires at EOT — DamageDealt must be emitted.
-        let mut t3 = run_single_turn_with_events_opts(
+        // Turn 3: FutureMove fires at EOT — DamageDealt must be emitted, regardless of
+        // which speed-tie move-order branch is inspected (Future Sight's EOT firing is
+        // independent of the other mon's Splash-vs-Splash ordering).
+        let t3 = run_single_turn_with_events_opts(
             &state_t2, &p1_splash, &p2_splash, md, pd, Player::P1, false, 1,
         );
-        assert_eq!(t3.len(), 1, "damage_rolls=1 yields a single deterministic branch");
-        let (_, events_opt, _) = t3.remove(0);
-        let events = events_opt.expect("observer set — events must be Some");
-
-        let eot = events.iter()
-            .find(|e| matches!(e.kind, EventKind::EndOfTurn))
-            .expect("EndOfTurn event must be present on turn 3");
-        assert!(
-            any_kind(&eot.reactions, |k| matches!(k,
-                EventKind::DamageDealt { target, .. } if *target == p2s0()
-            )),
-            "Future Sight firing must emit DamageDealt for P2 slot 0 under EndOfTurn;\n\
-             reactions = {:#?}", eot.reactions
-        );
+        assert_same_resulting_state(&t3, "turn 3");
+        for (_, events_opt, _) in &t3 {
+            let events = events_opt.as_ref().expect("observer set — events must be Some");
+            let eot = events.iter()
+                .find(|e| matches!(e.kind, EventKind::EndOfTurn))
+                .expect("EndOfTurn event must be present on turn 3");
+            assert!(
+                any_kind(&eot.reactions, |k| matches!(k,
+                    EventKind::DamageDealt { target, .. } if *target == p2s0()
+                )),
+                "Future Sight firing must emit DamageDealt for P2 slot 0 under EndOfTurn;\n\
+                 reactions = {:#?}", eot.reactions
+            );
+        }
     }
 
     // ── Test 11: attacker recoil-class damage is now emitted ──────────────────
@@ -33224,6 +33338,92 @@ mod event_round_trip {
             any_kind(&mv.reactions, |k| matches!(k,
                 EventKind::DamageDealt { target, .. } if *target == p2s0())),
             "Life Orb chip must emit the holder's DamageDealt;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
+
+    // ── Regression: S5 — a mid-hit pinch berry must be its own Healed event ────
+    //
+    // Before the S5 fix, a Sitrus/Oran-style berry firing DURING a hit was folded
+    // into the same DamageDealt as the hit itself (take_damage internally applies
+    // damage then immediately checks for a berry trigger, and the caller captured
+    // only the final post-berry HP). This understated the true damage dealt — a
+    // real player (and Pass 3's damage-to-stat inference) sees a DamageDealt line
+    // at the pre-berry HP, THEN a separate Healed line once the berry fires.
+
+    /// A hit that drops the target to/below its Sitrus Berry threshold must emit a
+    /// DamageDealt (pre-berry HP, reflecting the FULL damage dealt) followed by a
+    /// separate Healed event (post-berry HP) — not one combined DamageDealt.
+    #[test]
+    fn mid_hit_pinch_berry_emits_separate_damage_and_heal_events() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None,
+            Some(crate::data::item::Item::SitrusBerry), None, None, None, false,
+        );
+        // Just above the 50% Sitrus threshold — any nonzero hit crosses it.
+        let max_hp = p2.hp;
+        p2.hp = max_hp / 2 + 1;
+
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 must be present");
+
+        // P2 is the opponent from observer P1's perspective, so its HP is reported
+        // as a display Percent, not an exact Number.
+        // DamageDealt must report the PRE-berry HP: at or below the 50% threshold,
+        // not healed back up.
+        let damage_pct: Option<u8> = mv.reactions.iter().find_map(|e| match &e.kind {
+            EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p) }
+                if *target == p2s0() => Some(*p),
+            _ => None,
+        });
+        let damage_pct = damage_pct.expect("DamageDealt for P2 slot 0 must be present");
+        assert!(
+            damage_pct <= 50,
+            "DamageDealt must report the pre-berry HP ({damage_pct}%) at or below the \
+             Sitrus threshold (50%), not a post-heal value"
+        );
+
+        // A separate Healed event for the berry's recovery must ALSO be present,
+        // reporting a HIGHER HP than the DamageDealt (the berry healed the target
+        // back up), and it must not just be equal to the damage HP.
+        let heal_pct: Option<u8> = mv.reactions.iter().find_map(|e| match &e.kind {
+            EventKind::Healed { target, new_hp: PokemonHP::Percent(p) }
+                if *target == p2s0() => Some(*p),
+            _ => None,
+        });
+        let heal_pct = heal_pct.expect("a separate Healed event for the Sitrus Berry must be present");
+        assert!(
+            heal_pct > damage_pct,
+            "the berry's Healed HP ({heal_pct}%) must be strictly greater than the \
+             DamageDealt HP ({damage_pct}%)"
+        );
+
+        // The berry's consumption must also be reflected via ItemLost somewhere in
+        // this move's reaction tree (emitted generically by process_item_loss_events).
+        assert!(
+            any_event_deep(&mv.reactions, |k| matches!(k,
+                EventKind::ItemLost { slot, item, consumed: true }
+                if *slot == p2s0() && *item == crate::data::item::Item::SitrusBerry)),
+            "Sitrus Berry consumption must be reflected via ItemLost;\n\
              reactions = {:#?}", mv.reactions
         );
     }

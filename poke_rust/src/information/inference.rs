@@ -125,14 +125,78 @@ macro_rules! inference_contradiction {
 mod bcp;
 
 // ── mon_idx helpers ────────────────────────────────────────────────────────────
+//
+// S1 soundness fix: `mon_idx` order is `[p1_active…, p2_active…, p1_known_back…,
+// p1_possible_back…, p2_known_back…, p2_possible_back…]` — BOTH active segments
+// come first, before either side's bench. This is a deliberate departure from a
+// naive per-side-contiguous layout (`[p1_active, p1_back, p2_active, p2_back]`),
+// which was the previous ordering and had a critical staleness bug: any switch on
+// EITHER side grows/shrinks that side's `known_back`/`possible_back` Vecs (`push`
+// on switch-out, `Vec::remove` on switch-in), which shifts every index that comes
+// after it. Under the old layout, P1's bench sat between P1's actives and P2's
+// actives, so *every* P1 switch — even one that has nothing to do with P2 — silently
+// shifted P2's active mon_idx values. `Statement`s referencing a P2 active mon
+// (SpeedComparison, weather/terrain/screen setters, HasItem/HasAbility clauses from
+// Pass 2/3/4) persist in `state.predicates` across turns, so a stale index would
+// silently retarget a later force/exclusion onto the wrong physical Pokémon.
+//
+// With both active segments fixed at the front, `p1_active_mons.len()` and
+// `p2_active_mons.len()` are the only two quantities involved in computing any
+// active mon's mon_idx, and (after the initial lead-sending bootstrap) both are
+// permanently stable for the rest of the battle — see `pass1_switch`, which always
+// overwrites an already-populated active slot in place rather than push/removing.
+// Only BENCH mon indices remain unstable, but no code persists a Statement or
+// setter field referencing a bench index (`teammate_indices`/`enforce_unique_item`
+// compute and consume bench indices atomically within a single event, never storing
+// them for later re-evaluation), so this is sound.
+//
+// The trade-off: each side's full roster (active + bench) is no longer a single
+// contiguous range (P1's bench sits after P2's active in this layout). Helpers that
+// need "all mons on side X" (`teammate_indices`, `TeamStatusCured`, `mon_is_p2`)
+// must therefore check each segment explicitly rather than assume one [start, end)
+// range per side.
 
-/// Total number of mons tracked in a `BattleState`, in `mon_idx` order:
-/// `[p1_active…, p1_known_back…, p1_possible_back…, p2_active…, p2_known_back…, p2_possible_back…]`.
+/// The six roster-segment sizes needed to resolve any `mon_idx`, in `mon_idx` order.
+struct MonSegments {
+    p1_active: usize,
+    p2_active: usize,
+    p1_known_back: usize,
+    p1_possible_back: usize,
+    p2_known_back: usize,
+    p2_possible_back: usize,
+}
+
+impl MonSegments {
+    fn of(state: &UnknownBattleState) -> Self {
+        MonSegments {
+            p1_active: state.p1_active_mons.len(),
+            p2_active: state.p2_active_mons.len(),
+            p1_known_back: state.p1_known_back_mons.len(),
+            p1_possible_back: state.p1_possible_back_mons.len(),
+            p2_known_back: state.p2_known_back_mons.len(),
+            p2_possible_back: state.p2_possible_back_mons.len(),
+        }
+    }
+    /// `[p1_active_range, p2_active_range, p1_back_range, p2_back_range]`, each a
+    /// contiguous `mon_idx` range. `p1_back` combines known+possible (always
+    /// adjacent), likewise `p2_back`.
+    fn ranges(&self) -> [std::ops::Range<usize>; 4] {
+        let p1_active = 0..self.p1_active;
+        let p2_active = self.p1_active..(self.p1_active + self.p2_active);
+        let back_start = self.p1_active + self.p2_active;
+        let p1_back_end = back_start + self.p1_known_back + self.p1_possible_back;
+        let p1_back = back_start..p1_back_end;
+        let p2_back = p1_back_end..(p1_back_end + self.p2_known_back + self.p2_possible_back);
+        [p1_active, p2_active, p1_back, p2_back]
+    }
+}
+
+/// Total number of mons tracked in a `BattleState`, in `mon_idx` order.
 fn mons_count_battle(state: &UnknownBattleState) -> usize {
     state.p1_active_mons.len()
+        + state.p2_active_mons.len()
         + state.p1_known_back_mons.len()
         + state.p1_possible_back_mons.len()
-        + state.p2_active_mons.len()
         + state.p2_known_back_mons.len()
         + state.p2_possible_back_mons.len()
 }
@@ -162,9 +226,9 @@ pub fn mon_idx_for_active_slot(state: &UnknownBattleState, slot: &FieldSlot) -> 
 pub fn get_mon_by_idx(state: &UnknownBattleState, idx: usize) -> Option<&UnknownPokemonState> {
     let segs: [&[UnknownPokemonState]; 6] = [
         &state.p1_active_mons,
+        &state.p2_active_mons,
         &state.p1_known_back_mons,
         &state.p1_possible_back_mons,
-        &state.p2_active_mons,
         &state.p2_known_back_mons,
         &state.p2_possible_back_mons,
     ];
@@ -184,15 +248,19 @@ pub fn get_mon_mut_by_idx(
     idx: usize,
 ) -> Option<&mut UnknownPokemonState> {
     let p1a = state.p1_active_mons.len();
+    let p2a = state.p2_active_mons.len();
     let p1k = state.p1_known_back_mons.len();
     let p1p = state.p1_possible_back_mons.len();
-    let p2a = state.p2_active_mons.len();
     let p2k = state.p2_known_back_mons.len();
 
     if idx < p1a {
         return Some(&mut state.p1_active_mons[idx]);
     }
     let idx = idx - p1a;
+    if idx < p2a {
+        return Some(&mut state.p2_active_mons[idx]);
+    }
+    let idx = idx - p2a;
     if idx < p1k {
         return Some(&mut state.p1_known_back_mons[idx]);
     }
@@ -201,10 +269,6 @@ pub fn get_mon_mut_by_idx(
         return Some(&mut state.p1_possible_back_mons[idx]);
     }
     let idx = idx - p1p;
-    if idx < p2a {
-        return Some(&mut state.p2_active_mons[idx]);
-    }
-    let idx = idx - p2a;
     if idx < p2k {
         return Some(&mut state.p2_known_back_mons[idx]);
     }
@@ -305,26 +369,29 @@ fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
 /// `possible_back` entries represent the *same* physical slot, gate exclusion
 /// here so it never fires across such alternatives.
 // TODO: revisit if possible_back ever holds non-distinct Illusion hypotheses.
+///
+/// S1: a side's full roster is no longer one contiguous `mon_idx` range (P1's bench
+/// sits after P2's active segment) — this walks the P1 or P2 range pair from
+/// `MonSegments::ranges()` instead of assuming a single `[start, end)` span.
 fn teammate_indices(state: &UnknownBattleState, source_idx: usize) -> Vec<usize> {
-    let p1a = state.p1_active_mons.len();
-    let p1k = state.p1_known_back_mons.len();
-    let p1p = state.p1_possible_back_mons.len();
-    let p1_end = p1a + p1k + p1p;
+    let [p1_active, p2_active, p1_back, p2_back] = MonSegments::of(state).ranges();
 
-    let p2a = state.p2_active_mons.len();
-    let p2k = state.p2_known_back_mons.len();
-    let p2p = state.p2_possible_back_mons.len();
-    let p2_end = p1_end + p2a + p2k + p2p;
+    let is_p1 = p1_active.contains(&source_idx) || p1_back.contains(&source_idx);
+    let is_p2 = p2_active.contains(&source_idx) || p2_back.contains(&source_idx);
 
-    let (start, end) = if source_idx < p1_end {
-        (0, p1_end)
-    } else if source_idx < p2_end {
-        (p1_end, p2_end)
+    let side_ranges = if is_p1 {
+        [p1_active, p1_back]
+    } else if is_p2 {
+        [p2_active, p2_back]
     } else {
         return vec![];
     };
 
-    (start..end).filter(|&i| i != source_idx).collect()
+    side_ranges
+        .into_iter()
+        .flatten()
+        .filter(|&i| i != source_idx)
+        .collect()
 }
 
 /// Under item clause, exclude `item` from every distinct teammate of the mon at
@@ -871,16 +938,30 @@ fn pass1_apply_event(
         EventKind::MoveUsed {
             user, move_used, ..
         } => {
+            // Struggle is not a moveslot — it fires only when every move is out of PP
+            // (or the holder is Choice-locked into a 0-PP move) and is not a real move
+            // choice. The simulator itself excludes Struggle from choice-lock, last-move,
+            // and Copycat bookkeeping (simulator/mod.rs); mirror that here. Without this
+            // guard, `reveal_move_on_mon` would burn a real moveslot on a non-move, and
+            // `pass1_choice_exclusion` would see "two distinct moves used" — Choice's own
+            // failure mode — and unsoundly exclude Choice items in exactly the scenario
+            // that causes it.
+            if *move_used == PokemonMove::Struggle {
+                return;
+            }
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     reveal_move_on_mon(mon, move_used);
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
+                    // Matches the sim's 0-based streak convention exactly
+                    // (simulator/mod.rs: `new_count = if last_used_move == move { count+1 }
+                    // else { 0 }`): a move's first use in a streak is count 0, not 1.
                     if Some(move_used) == mon.last_used_move.as_ref() {
                         mon.consecutive_move_count = mon.consecutive_move_count.saturating_add(1);
                     } else {
-                        mon.consecutive_move_count = 1;
+                        mon.consecutive_move_count = 0;
                     }
                     // Update used_moves_this_field BEFORE choice exclusion (it reads it).
                     for i in 0..4 {
@@ -894,6 +975,10 @@ fn pass1_apply_event(
                     mon.last_used_move = Some(move_used.clone());
                 }
             }
+            // Field-level last-move tracker for Copycat (simulator/mod.rs sets this
+            // unconditionally for any executed non-Struggle move, on the top-level state,
+            // not per-mon — set after the mon borrow above ends).
+            state.last_move_on_field = Some(move_used.clone());
         }
 
         EventKind::Faint { slot } => {
@@ -941,7 +1026,6 @@ fn pass1_apply_event(
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.damaged_this_turn = true;
                     mon.last_damage_taken = damage_delta.clone();
-                    mon.times_hit = mon.times_hit.saturating_add(1);
 
                     // Attribute to the enclosing MoveUsed if available.
                     if let Some(ref mctx) = ctx.move_context {
@@ -962,6 +1046,16 @@ fn pass1_apply_event(
                                     mon.last_special_attacker = Some(attacker.clone());
                                 }
                                 MoveCategory::Status => {}
+                            }
+                            // Rage Fist hit counter: the sim increments only for a target of a
+                            // Physical/Special direct hit — never for the move's own recoil/
+                            // crash/drain-reversal self-damage on the user (a separate code
+                            // path there), and never for Status moves or EOT/residual chip
+                            // (no enclosing MoveUsed at all, handled by the `None` arm below).
+                            if target != attacker
+                                && matches!(md.category, MoveCategory::Physical | MoveCategory::Special)
+                            {
+                                mon.times_hit = mon.times_hit.saturating_add(1);
                             }
                         }
                     }
@@ -1004,26 +1098,19 @@ fn pass1_apply_event(
         // Heal Bell / Aromatherapy: cure the entire side including benched mons.
         EventKind::TeamStatusCured { side } => {
             let total = mons_count_battle(state);
-            // p1 occupies mon_idx 0..p1_active+p1_known_back+p1_possible_back;
-            // p2 occupies the rest.  Use get_mon_mut_by_idx to iterate without caring
-            // about the exact segment boundaries.
-            let (start, end) = match side {
-                Player::P1 => {
-                    let p1_count = state.p1_active_mons.len()
-                        + state.p1_known_back_mons.len()
-                        + state.p1_possible_back_mons.len();
-                    (0, p1_count)
-                }
-                Player::P2 => {
-                    let p1_count = state.p1_active_mons.len()
-                        + state.p1_known_back_mons.len()
-                        + state.p1_possible_back_mons.len();
-                    (p1_count, total)
-                }
-            };
-            for idx in start..end {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    mon.status = None;
+            // S1: a side's roster is not one contiguous mon_idx range under the
+            // active-segments-first layout (P1's bench sits after P2's active
+            // segment) — filter every index by side membership instead.
+            for idx in 0..total {
+                let is_p2 = mon_is_p2(state, idx);
+                let matches_side = match side {
+                    Player::P1 => !is_p2,
+                    Player::P2 => is_p2,
+                };
+                if matches_side {
+                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                        mon.status = None;
+                    }
                 }
             }
         }
@@ -1039,12 +1126,21 @@ fn pass1_apply_event(
                         );
                     }
                 }
+                // Item clause: a confirmed team-built item cannot be held by any other
+                // roster member on the same side — but ONLY when this mon's own item is
+                // itself team-built. A mon carrying a transferred item (Trick/Switcheroo/
+                // Symbiosis/Recycle/Pickup — item_was_transferred) reveals nothing about
+                // what this mon's team built, so a later ItemRevealed re-confirming that
+                // transferred item must not exclude it from this mon's teammates (S12:
+                // e.g. Frisk revealing a foe's Tricked-in item).
+                let was_transferred = get_mon_by_idx(state, idx)
+                    .map_or(false, |m| m.item_was_transferred);
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     unknown_set_known(&mut mon.item, item.clone(), &format!("mon#{idx} item"));
                 }
-                // Item clause: a confirmed team-built item cannot be held by any
-                // other roster member on the same side.
-                enforce_unique_item(state, idx, item, ctx.config.allow_repeat_items);
+                if !was_transferred {
+                    enforce_unique_item(state, idx, item, ctx.config.allow_repeat_items);
+                }
             }
         }
         EventKind::ItemGained { slot, item } => {
@@ -1064,6 +1160,9 @@ fn pass1_apply_event(
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.item = Unknown::Known(item.clone());
                     mon.item_lost = false;
+                    // Marks this mon's held item as no-longer-team-built, so any future
+                    // ItemRevealed re-confirming it skips the item-clause exclusion (S12).
+                    mon.item_was_transferred = true;
                 }
             }
         }
@@ -1089,17 +1188,20 @@ fn pass1_apply_event(
         EventKind::AbilityRevealed { slot, ability } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    // Narrow-vs-overwrite: if the revealed ability is already
-                    // in the candidate set (or the set is wide `Not`), narrow.
-                    // If it is outside a `Possibly` set, a live ability-change
-                    // (Trace, Skill Swap, Mummy, etc.) occurred — overwrite the
-                    // live ability to `Known` without treating it as a
-                    // contradiction. `possible_original_abilities` is untouched.
-                    let outside_possibly = matches!(
-                        &mon.possible_abilities,
-                        Unknown::Possibly(v) if !v.contains(ability)
-                    );
-                    if outside_possibly {
+                    // Narrow-vs-overwrite: if the revealed ability is already possible
+                    // (a candidate in `Possibly`, unexcluded in `Not`, or already the
+                    // `Known` value), narrow/no-op via `unknown_set_known`. If it is
+                    // excluded under ANY of the three `Unknown` representations —
+                    // outside a `Possibly` slot set, in a `Not` exclusion list (e.g.
+                    // ruled out earlier by switch-in absence inference), or a different
+                    // `Known` value — a live ability change occurred (Trace, Skill Swap,
+                    // Mummy, Wandering Spirit, …): overwrite rather than treating it as
+                    // a contradiction. `possible_original_abilities` is left untouched
+                    // in every case, since none of these represent the mon's innate
+                    // ability changing. S14: previously only the `Possibly` case was
+                    // handled this way; `Not`-excluded and `Known(other)` incorrectly
+                    // panicked even though they are the same live-change scenario.
+                    if unknown_is_excluded(&mon.possible_abilities, ability) {
                         mon.possible_abilities = Unknown::Known(ability.clone());
                     } else {
                         unknown_set_known(
@@ -1178,15 +1280,17 @@ fn pass1_apply_event(
         EventKind::MegaEvolution { slot, into } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    unknown_set_known(
-                        &mut mon.possible_species,
-                        into.clone(),
-                        &format!("mon#{idx} mega"),
-                    );
+                    // Overwrite (not unknown_set_known): MegaEvolution genuinely changes
+                    // the mon's apparent species away from its pre-mega Known value, so
+                    // the "already Known to something else" panic path is not a
+                    // contradiction here — it's the expected common case. Mirrors the
+                    // IllusionEnded handler's overwrite pattern.
+                    mon.possible_species = Unknown::Known(into.clone());
                     mon.is_mega = true;
-                    // Update types and ability set from the mega species dex entry.
+                    // Update types, ability set, and weight from the mega species dex entry.
                     if let Some(data) = ctx.dex.get(into) {
                         mon.possible_types = Unknown::Known(data.types.clone());
+                        mon.possible_weight_hg = Unknown::Known(data.weight);
                         // Mega abilities are fixed per mega species — recompute both
                         // original and live ability to the mega's slot set.
                         let mega_abilities = if data.abilities.is_empty() {
@@ -1196,6 +1300,11 @@ fn pass1_apply_event(
                         };
                         mon.possible_original_abilities = mega_abilities.clone();
                         mon.possible_abilities = mega_abilities;
+                        // Mega Evolution swaps in a new base-stat table; EVs/IVs/nature are
+                        // unaffected, but the achievable final-stat window must be remapped
+                        // against the new base or pass5 will see an impossible window
+                        // (bounds computed for the pre-mega base stats).
+                        recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
                     }
                 }
                 match slot.player {
@@ -1252,13 +1361,13 @@ fn pass1_apply_event(
         EventKind::FormeChange { slot, into, .. } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    unknown_set_known(
-                        &mut mon.possible_species,
-                        into.clone(),
-                        &format!("mon#{idx} forme"),
-                    );
+                    // Overwrite (not unknown_set_known): a forme change (Stance Change,
+                    // Mimikyu-Busted, Palafin-Hero, etc.) genuinely changes the apparent
+                    // species away from its pre-change Known value — see MegaEvolution above.
+                    mon.possible_species = Unknown::Known(into.clone());
                     if let Some(data) = ctx.dex.get(into) {
                         mon.possible_types = Unknown::Known(data.types.clone());
+                        mon.possible_weight_hg = Unknown::Known(data.weight);
                         // Forme-change abilities are fixed per forme — recompute ability
                         // sets to the new forme's slot set.
                         let forme_abilities = if data.abilities.is_empty() {
@@ -1268,6 +1377,10 @@ fn pass1_apply_event(
                         };
                         mon.possible_original_abilities = forme_abilities.clone();
                         mon.possible_abilities = forme_abilities;
+                        // Forme changes (Stance Change, Mimikyu-Busted, …) can swap in a
+                        // different base-stat table — remap the achievable-stat window
+                        // the same way Mega Evolution does (see above).
+                        recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
                     }
                 }
             }
@@ -1827,6 +1940,55 @@ fn recompute_stats_for_iv_mode(
             calc_stat(b[4], 31, 252, lv, 1.0),
             calc_stat(b[5], 31, 252, lv, 1.0),
         ];
+    }
+}
+
+/// After a Mega Evolution / permanent Forme Change swaps in a new base-stat table
+/// for an already-tracked mon, remap `minStats`/`maxStats`/`min_pre_nature_stat`/
+/// `max_pre_nature_stat` against the new base using the mon's EXISTING (possibly
+/// already-tightened) `minEvs`/`maxEvs`/`minIvs`/`maxIvs`/`possible_natures` bounds.
+///
+/// Mega Evolution and forme changes do not alter a Pokémon's EVs, IVs, or nature —
+/// only the base-stat table used to compute the final stat from them. Unlike
+/// `recompute_stats_for_iv_mode` (used for a brand-new sighting), this must NOT reset
+/// EV/IV/nature bounds to the theoretical worst/best case — that would discard
+/// information already gained from prior battle observations (Pass 3/5). Leaving the
+/// old species' stat window in place instead (the bug this fixes) makes the window
+/// inconsistent with the new base stats and pass5 sees an impossible constraint.
+fn recompute_stat_bounds_for_species_change(
+    mon: &mut UnknownPokemonState,
+    new_base: [u16; 6],
+    level: u8,
+) {
+    // HP: no nature modifier.
+    mon.min_pre_nature_stat[0] = calc_hp(new_base[0], mon.minIvs[0], mon.minEvs[0], level);
+    mon.max_pre_nature_stat[0] = calc_hp(new_base[0], mon.maxIvs[0], mon.maxEvs[0], level);
+    mon.minStats[0] = mon.min_pre_nature_stat[0];
+    mon.maxStats[0] = mon.max_pre_nature_stat[0];
+
+    const STATS: [PokemonStat; 5] = [
+        PokemonStat::Atk,
+        PokemonStat::Def,
+        PokemonStat::SpA,
+        PokemonStat::SpD,
+        PokemonStat::Spe,
+    ];
+    for (i, stat) in STATS.iter().enumerate() {
+        let si = i + 1;
+        let bsv_lo = calc_stat(new_base[si], mon.minIvs[si], mon.minEvs[si], level, 1.0);
+        let bsv_hi = calc_stat(new_base[si], mon.maxIvs[si], mon.maxEvs[si], level, 1.0);
+        mon.min_pre_nature_stat[si] = bsv_lo;
+        mon.max_pre_nature_stat[si] = bsv_hi;
+
+        // Widest nature modifier still possible for this stat, over the mon's current
+        // (possibly already-narrowed) nature candidates.
+        let classes = possible_nature_classes(&mon.possible_natures, stat, si);
+        let (min_mod, max_mod) = classes.iter().fold(
+            (f32::MAX, f32::MIN),
+            |(mn, mx), &(m, _, _)| (mn.min(m), mx.max(m)),
+        );
+        mon.minStats[si] = (bsv_lo as f64 * min_mod as f64).floor() as u16;
+        mon.maxStats[si] = (bsv_hi as f64 * max_mod as f64).floor() as u16;
     }
 }
 
@@ -2562,8 +2724,7 @@ const WEATHER_SETTING_ABILITIES: &[Ability] = &[
     Ability::Drought,
     Ability::SandStream,
     Ability::SnowWarning,
-    Ability::OrichalcumPulse, // Sets Sun (from helpers.rs:5791)
-    Ability::HadronEngine,    // Sets Electric Terrain (from helpers.rs:5785)
+    Ability::OrichalcumPulse, // Sets Sun (apply_entry_ability_field_effects, helpers.rs)
 ];
 
 /// Terrain-setting abilities whose activation is always visible (`TerrainChanged`).
@@ -2572,7 +2733,13 @@ const TERRAIN_SETTING_ABILITIES: &[Ability] = &[
     Ability::GrassySurge,
     Ability::MistySurge,
     Ability::PsychicSurge,
-    // HadronEngine sets Electric Terrain (already listed above, checked separately)
+    // S7: HadronEngine sets Electric Terrain, NOT weather — it must live in this list,
+    // not WEATHER_SETTING_ABILITIES. `apply_entry_ability_field_effects` matches
+    // `Ability::ElectricSurge | Ability::HadronEngine => set_terrain(..., ElectricTerrain, ...)`;
+    // it never touches `state.weather` at all, so "no WeatherChanged" carries zero
+    // information about whether the entrant has HadronEngine (the absence would be
+    // true regardless), and excluding it there was vacuous, not sound evidence.
+    Ability::HadronEngine,
 ];
 
 /// After a batch of switch-ins, scan the combined `reactions` list and remove
@@ -2886,7 +3053,18 @@ fn pass2_item_from_move(
             .iter()
             .any(|r| matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == user));
 
-        if hit_any_opponent {
+        // Self-KO moves (Explosion, Self-Destruct, Misty Explosion, Final Gambit) and any
+        // move whose own recoil/crash/drain-reversal fainted the user can suppress the LO
+        // chip entirely (the sim gates LO on `!attacker_fainted`) without the absence being
+        // evidence against Life Orb — the faint, not the item, explains the missing chip.
+        // Pass 1 has already applied any nested `Faint{user}` by the time this runs (the
+        // depth-first walk visits reactions before the parent's Pass 2/3), so `mon.fainted`
+        // reflects the post-move truth.
+        let user_fainted = mon_idx_for_active_slot(state, user)
+            .and_then(|i| get_mon_by_idx(state, i))
+            .map_or(false, |m| m.fainted);
+
+        if hit_any_opponent && !user_fainted {
             if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
                 if !has_lo_recoil {
                     let (could_mg, could_sf, has_secondary) = {
@@ -3849,6 +4027,23 @@ fn pass_eot_heal(
             continue;
         }
 
+        // S6 defensive guard: `emit_eot_hp_deltas` diffs HP across a whole EOT
+        // sub-phase with ONE before/after snapshot — if this mon ALSO took chip
+        // damage (DamageDealt) or consumed a berry (ItemLost{consumed:true}) this
+        // same EndOfTurn, the observed Healed could be the NET result of chip
+        // clobbered by a pinch-berry overheal, not a passive-item heal. That netting
+        // is a real (separately tracked) gap in the emission layer — until it is
+        // fixed there, this pass cannot soundly distinguish "pure Leftovers heal"
+        // from "sandstorm chip masked by Sitrus Berry", so skip rather than risk
+        // pinning the wrong item (or panicking when the true item excludes Leftovers).
+        let has_other_eot_hp_event_same_target = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
+                || matches!(&r.kind, EventKind::ItemLost { slot: t, consumed: true, .. } if t == target)
+        });
+        if has_other_eot_hp_event_same_target {
+            continue;
+        }
+
         let is_poison = known_types
             .as_ref()
             .map_or(false, |ts| ts.contains(&PokemonType::Poison));
@@ -3967,6 +4162,23 @@ fn pass_eot_sand_immunity(
             matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == &field_slot)
         });
         if took_sand_chip {
+            continue;
+        }
+
+        // S6 defensive guard: `emit_eot_hp_deltas` diffs HP across the whole weather
+        // sub-phase with ONE before/after snapshot. If the sand chip fired but was
+        // fully offset by a pinch berry (Sitrus etc.) triggered by that SAME chip
+        // (`deal_residual_damage` calls `take_damage`, which checks berries
+        // internally), the net delta can show as a `Healed` event instead of
+        // `DamageDealt` — or, in the exact-cancel case, no HP-change event at all,
+        // only the berry's `ItemLost`. Either way "no DamageDealt" is NOT reliable
+        // evidence of immunity here; skip rather than risk an unsound sand-immunity
+        // clause (or a later contradiction-panic when the true item conflicts).
+        let chip_masked_by_berry = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::Healed { target: t, .. } if t == &field_slot)
+                || matches!(&r.kind, EventKind::ItemLost { slot: t, consumed: true, .. } if t == &field_slot)
+        });
+        if chip_masked_by_berry {
             continue;
         }
 
@@ -5617,6 +5829,20 @@ fn pass3_direction_a(
     use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
     use crate::simulator::DamageConfig;
 
+    // S11 soundness fix: Direction A materializes the attacker from its CURRENT
+    // stat/item/ability fields as if they were the exact truth (`atk_stats =
+    // attacker_unk.minStats`, `neutral_item`/`neutral_ability`) — sound only for the
+    // observer's own fully-`Known` Pokémon. Direction A fires whenever the target's
+    // HP is `Percent`, which in doubles also covers an opponent mon hitting its OWN
+    // ally with a spread move (the ally's HP is `Percent` too, since it belongs to
+    // the non-observer side) — there the attacker is itself unknown, and treating
+    // its unresolved stat bounds as exact would produce an unsound defender-BSV
+    // bound. P1 is the observer throughout this module (see S16); only P1's moves
+    // have a fully-Known attacker, so gate Direction A on that.
+    if user_slot.player != Player::P1 {
+        return;
+    }
+
     let Some(defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
         return;
     };
@@ -5885,15 +6111,19 @@ fn pass3_direction_a(
 
 // ── Pass 4: Speed ordering → Spe bounds ──────────────────────────────────────
 
-/// Returns `true` if the mon at `mon_idx` is on P2's side (indices past the P1 segments).
+/// Returns the `mon_idx` of P2's first active slot (P2's active segment immediately
+/// follows P1's active segment under the S1 layout — see `MonSegments`).
 fn p2_mon_start(state: &UnknownBattleState) -> usize {
     state.p1_active_mons.len()
-        + state.p1_known_back_mons.len()
-        + state.p1_possible_back_mons.len()
 }
 
+/// `true` if `mon_idx` belongs to a P2 roster member (active or benched). S1: P2's
+/// bench segment is no longer contiguous with P2's active segment (P1's bench sits
+/// between them), so this checks both P2 ranges explicitly rather than a single
+/// ">=" boundary.
 fn mon_is_p2(state: &UnknownBattleState, mon_idx: usize) -> bool {
-    mon_idx >= p2_mon_start(state)
+    let [_, p2_active, _, p2_back] = MonSegments::of(state).ranges();
+    p2_active.contains(&mon_idx) || p2_back.contains(&mon_idx)
 }
 
 /// Extract the core item/ability/type snapshot from a target mon into owned values.
@@ -6021,14 +6251,99 @@ fn priority_lift_escapes(
 ///   Quick Draw, ability priority, Stall, item speed modifiers, weather abilities, etc.).
 /// - Accounts for Trick Room (reverses the inferred fast/slow assignment) and Tailwind
 ///   (folds the ×2 multiplier into the comparison deterministically).
+/// Per-mover snapshot used by `pass4_speed_from_order`: everything needed to emit a
+/// pairing's clause, including the speed-relevant fields (Spe boost stage, paralysis,
+/// Tailwind) captured AS OF the point in the turn just before this mover's own
+/// `MoveUsed`, not read live from `state` at Pass 4's call time (see S4 comment on
+/// `compute_speed_multipliers`).
+struct Mover {
+    eff_prio: i8,
+    mon_idx: usize,
+    move_used: PokemonMove,
+    spe_boost: i8,
+    paralyzed: bool,
+    tailwind: bool,
+}
+
+/// Deep-scan `reactions` for events that change a mon's Spe boost stage, paralysis
+/// status, or a side's Tailwind — the fields `compute_speed_multipliers` bakes into
+/// a `SpeedComparison`'s numeric factors — and update the running snapshot maps.
+///
+/// Deliberately narrow: `BoostsSwapped`/`BoostsCopied` are not tracked (which
+/// specific stats they move isn't recoverable from the event alone without the
+/// causing move; Heart Swap/Power Swap/Guard Swap mid-turn before a same-turn
+/// speed-relevant pairing is rare enough that leaving the snapshot stale here is an
+/// acceptable, documented residual gap rather than blocking the fix for the common
+/// cases (Thunder Wave, Icy Wind/Charm, Intimidate-adjacent, Tailwind, Haze).
+fn update_speed_snapshot_from_reactions(
+    state: &UnknownBattleState,
+    reactions: &[InformationEvent],
+    spe_boost: &mut HashMap<usize, i8>,
+    paralyzed: &mut HashMap<usize, bool>,
+    tailwind: &mut HashMap<Player, bool>,
+) {
+    for r in reactions {
+        match &r.kind {
+            EventKind::StatusInflicted { target, status } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    paralyzed.insert(idx, matches!(status, Status::Paralysis));
+                }
+            }
+            EventKind::StatusCured { target, .. } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    paralyzed.insert(idx, false);
+                }
+            }
+            EventKind::BoostChanged { target, boost_idx: 4, stages } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    let cur = *spe_boost.get(&idx).unwrap_or(&0);
+                    spe_boost.insert(idx, (cur as i16 + *stages as i16).clamp(-6, 6) as i8);
+                }
+            }
+            EventKind::BoostsCleared { target } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    spe_boost.insert(idx, 0);
+                }
+            }
+            EventKind::BoostsInverted { target } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    let cur = *spe_boost.get(&idx).unwrap_or(&0);
+                    spe_boost.insert(idx, -cur);
+                }
+            }
+            EventKind::SideConditionStart { side, condition: SideCondition::TailWind } => {
+                tailwind.insert(*side, true);
+            }
+            EventKind::SideConditionEnd { side, condition: SideCondition::TailWind } => {
+                tailwind.insert(*side, false);
+            }
+            _ => {}
+        }
+        update_speed_snapshot_from_reactions(state, &r.reactions, spe_boost, paralyzed, tailwind);
+    }
+}
+
 fn pass4_speed_from_order(
     state: &mut UnknownBattleState,
     top_events: &[InformationEvent],
     move_dex: &HashMap<PokemonMove, MoveData>,
     _ability_dex: &HashMap<Ability, AbilityData>,
 ) {
-    // Collect (slot, eff_priority, mon_idx, move_used) for all top-level MoveUsed events.
-    let mut move_order: Vec<(FieldSlot, i8, usize, PokemonMove)> = Vec::new();
+    // Running snapshot of Spe boost / paralysis / Tailwind, seeded from `state`'s
+    // values at call time and updated as we scan forward through `top_events` —
+    // see `Mover` and `update_speed_snapshot_from_reactions` (S4).
+    let mut spe_boost: HashMap<usize, i8> = HashMap::new();
+    let mut paralyzed: HashMap<usize, bool> = HashMap::new();
+    let mut tailwind: HashMap<Player, bool> = HashMap::new();
+    tailwind.insert(Player::P1, state.p1_side_conditions.contains(&SideCondition::TailWind));
+    tailwind.insert(Player::P2, state.p2_side_conditions.contains(&SideCondition::TailWind));
+
+    // Collect one Mover per top-level MoveUsed event, each carrying a snapshot taken
+    // AS OF the point in the scan just before its own MoveUsed — i.e. reflecting
+    // every earlier top-level event's effects (including this event's own
+    // reactions are applied AFTER recording, so a later mover sees them, not this
+    // one).
+    let mut move_order: Vec<Mover> = Vec::new();
     for event in top_events {
         if let EventKind::MoveUsed {
             user, move_used, ..
@@ -6041,16 +6356,34 @@ fn pass4_speed_from_order(
                 if let (Some(mon), Some(md)) = (get_mon_by_idx(state, idx), move_dex.get(move_used)) {
                     eff_prio = fold_known_ability_priority(md, eff_prio, mon);
                 }
-                move_order.push((user.clone(), eff_prio, idx, move_used.clone()));
+                let s_boost = *spe_boost.entry(idx).or_insert_with(|| {
+                    get_mon_by_idx(state, idx).map_or(0, |m| m.boosts[4])
+                });
+                let s_para = *paralyzed.entry(idx).or_insert_with(|| {
+                    get_mon_by_idx(state, idx)
+                        .map_or(false, |m| matches!(m.status, Some(Status::Paralysis)))
+                });
+                let s_tw = *tailwind.entry(user.player).or_insert(false);
+                move_order.push(Mover {
+                    eff_prio,
+                    mon_idx: idx,
+                    move_used: move_used.clone(),
+                    spe_boost: s_boost,
+                    paralyzed: s_para,
+                    tailwind: s_tw,
+                });
             }
         }
+        update_speed_snapshot_from_reactions(state, &event.reactions, &mut spe_boost, &mut paralyzed, &mut tailwind);
     }
 
     let trick_room_active = state.pseudo_weathers.contains(&PseudoWeather::TrickRoom);
 
     for window in move_order.windows(2) {
-        let (_, p0, idx0, mv0) = &window[0];
-        let (_, p1, idx1, _mv1) = &window[1];
+        let mover0 = &window[0];
+        let mover1 = &window[1];
+        let (p0, idx0, mv0) = (mover0.eff_prio, mover0.mon_idx, &mover0.move_used);
+        let (p1, idx1) = (mover1.eff_prio, mover1.mon_idx);
 
         // Different effective priority brackets.
         // If the first mover has a *lower* effective priority than the second (p0 < p1),
@@ -6059,11 +6392,11 @@ fn pass4_speed_from_order(
         // Emit a disjunction for these; if it collapses to a unit clause BCP will force
         // the ability.  If p0 > p1, normal priority ordering — no inference possible.
         if p0 != p1 {
-            if *p0 < *p1 {
+            if p0 < p1 {
                 // Earlier mover had lower declared priority — must have a lifter.
                 // The escapes are exactly the priority-lift abilities/items; no
                 // SpeedComparison literal here since bracket ordering dominates speed.
-                let fast_idx = *idx0;
+                let fast_idx = idx0;
                 let clause = priority_lift_escapes(state, fast_idx, mv0, move_dex);
                 if !clause.is_empty() {
                     state.predicates.push(clause);
@@ -6073,15 +6406,23 @@ fn pass4_speed_from_order(
             continue;
         }
 
-        // Under Trick Room the slower mon goes first; swap the fast/slow assignment.
-        let (fast_idx, slow_idx, fast_move) = if trick_room_active {
-            // idx1 went second → is the faster mon in normal ordering.
-            (*idx1, *idx0, _mv1.clone())
+        // Under Trick Room the slower mon goes first; swap the fast/slow assignment
+        // (and their snapshotted speed-relevant fields along with it).
+        let (fast_idx, slow_idx, fast_move, fast_snap, slow_snap) = if trick_room_active {
+            // mover1 went second → is the faster mon in normal ordering.
+            (idx1, idx0, mover1.move_used.clone(), mover1, mover0)
         } else {
-            (*idx0, *idx1, mv0.clone())
+            (idx0, idx1, mv0.clone(), mover0, mover1)
         };
 
-        let (fast_mult, slow_mult) = compute_speed_multipliers(state, fast_idx, slow_idx);
+        let (fast_mult, slow_mult) = compute_speed_multipliers(
+            fast_snap.spe_boost,
+            slow_snap.spe_boost,
+            fast_snap.paralyzed,
+            slow_snap.paralyzed,
+            fast_snap.tailwind,
+            slow_snap.tailwind,
+        );
 
         // ── Build escape disjuncts ────────────────────────────────────────────
         // Every escape disjunct D means: "the SpeedComparison OR the escape D explains
@@ -6235,36 +6576,25 @@ fn pass4_speed_from_order(
 /// Accounts for boost stages, paralysis (×½), and Tailwind (×2, deterministic).
 /// Items (Choice Scarf, Iron Ball) and ability-based multipliers (Swift Swim, etc.)
 /// are NOT folded in — they are handled as escape disjuncts in `pass4_speed_from_order`.
+///
+/// S4: takes the boost/paralysis/Tailwind values EXPLICITLY (as-of the moment the
+/// compared pair's ordering was actually observed — see `SpeedFieldsSnapshot` in
+/// `pass4_speed_from_order`) rather than reading them live from `state`. An earlier
+/// action in the SAME turn (e.g. Thunder Wave paralyzing the second mover, or an
+/// Intimidate/boost-move changing a Spe stage) can change these fields mid-turn;
+/// reading them live at Pass 4's call time (either before or after the whole turn's
+/// events have been walked) can disagree with what actually determined the
+/// observed order, baking a wrong numeric factor into a persistent `SpeedComparison`
+/// — which `propagate_speed_comparisons` then uses to derive hard Spe bounds, so a
+/// wrong factor is a soundness risk, not just imprecision.
 fn compute_speed_multipliers(
-    state: &UnknownBattleState,
-    fast_idx: usize,
-    slow_idx: usize,
+    fast_boost: i8,
+    slow_boost: i8,
+    fast_para: bool,
+    slow_para: bool,
+    fast_tailwind: bool,
+    slow_tailwind: bool,
 ) -> (u32, u32) {
-    let fast_boost = get_mon_by_idx(state, fast_idx)
-        .map(|m| m.boosts[4])
-        .unwrap_or(0);
-    let slow_boost = get_mon_by_idx(state, slow_idx)
-        .map(|m| m.boosts[4])
-        .unwrap_or(0);
-    let fast_para = get_mon_by_idx(state, fast_idx)
-        .map(|m| matches!(m.status, Some(Status::Paralysis)))
-        .unwrap_or(false);
-    let slow_para = get_mon_by_idx(state, slow_idx)
-        .map(|m| matches!(m.status, Some(Status::Paralysis)))
-        .unwrap_or(false);
-
-    // Tailwind ×2: deterministically known from side conditions.
-    let fast_tailwind = if mon_is_p2(state, fast_idx) {
-        state.p2_side_conditions.contains(&SideCondition::TailWind)
-    } else {
-        state.p1_side_conditions.contains(&SideCondition::TailWind)
-    };
-    let slow_tailwind = if mon_is_p2(state, slow_idx) {
-        state.p2_side_conditions.contains(&SideCondition::TailWind)
-    } else {
-        state.p1_side_conditions.contains(&SideCondition::TailWind)
-    };
-
     // Stage multiplier as (numerator, denominator).
     let stage_frac = |stage: i8| -> (u32, u32) {
         let s = stage.clamp(-6, 6);

@@ -623,7 +623,22 @@ pub fn try_mega_evolution(
 // ── Custom PartialEq / Eq / Hash for BattleState ─────────────────────────────
 // `last_move_on_field` is excluded from equality and hashing so that
 // `coalesce_branches` can merge states that differ only in move-order tracking.
-
+//
+// S2 soundness fix: `pending_events` is compared/hashed ONLY when `event_observer`
+// is `Some` (observability active). Two branches can reach identical battle state
+// via DIFFERENT observable histories (e.g. a Crit vs a non-Crit hit that happen to
+// deal the same damage) — `coalesce_branches` (called throughout turn expansion via
+// `MatchState`'s derived `PartialEq`/`Hash`, which delegates to this impl for the
+// `BattleState` variant) must not silently merge them and drop one branch's event
+// history while summing both probabilities onto the survivor, or the inference
+// engine would treat a coin-flip fact (e.g. `is_crit`) as certain. When no observer
+// is attached, `pending_events` is always empty anyway, so gating the comparison on
+// `event_observer` leaves the hot (non-observed) simulation path byte-for-byte
+// unaffected. `event_observer` itself is only read here, not compared, but every
+// branch within one `simulate_turn` call carries the same observer value throughout
+// (set once on the initial branches and propagated by cloning), so this is sound in
+// practice; only `self.event_observer` is consulted since both sides of any real
+// comparison always agree.
 impl PartialEq for BattleState {
     fn eq(&self, other: &Self) -> bool {
         self.active_per_side == other.active_per_side
@@ -653,8 +668,9 @@ impl PartialEq for BattleState {
             && self.p2_slot_conditions == other.p2_slot_conditions
             && self.self_switch_pending == other.self_switch_pending
             && self.items_consumed_this_turn == other.items_consumed_this_turn
+            && (self.event_observer.is_none() || self.pending_events == other.pending_events)
         // last_move_on_field, sub_damage_dealt, round_used_this_turn,
-        // move_was_prevented, pending_events, event_observer intentionally excluded
+        // move_was_prevented, event_observer intentionally excluded
     }
 }
 
@@ -689,7 +705,11 @@ impl std::hash::Hash for BattleState {
         self.p2_slot_conditions.hash(state);
         self.self_switch_pending.hash(state);
         self.items_consumed_this_turn.hash(state);
+        // Consistent with PartialEq above: only hashed when observability is active.
+        if self.event_observer.is_some() {
+            self.pending_events.hash(state);
+        }
         // last_move_on_field, sub_damage_dealt, round_used_this_turn,
-        // move_was_prevented, pending_events, event_observer intentionally excluded
+        // move_was_prevented, event_observer intentionally excluded
     }
 }

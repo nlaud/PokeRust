@@ -29,17 +29,28 @@ the event that caused them**, rather than emitted as a flat sequence with a caus
 This means the cause is always implicit from the parent, and the inference engine can
 read item/ability/secondary effects in context without back-referencing earlier entries.
 
-A Life Orb + resist-berry + drain scenario looks like:
+A Life Orb + pinch-berry + drain scenario looks like:
 
 ```
 MoveUsed { user: P1[0], move: DrainPunch, targets: [P2[0]] }
   ├── Crit { target: P2[0] }
-  ├── DamageDealt { target: P2[0], new_hp: Percent(42) }
-  │     └── ItemLost { slot: P2[0], item: OccaBerry, consumed: true }
-  │           └── Healed { target: P2[0], new_hp: Percent(56) }   ← berry
+  ├── DamageDealt { target: P2[0], new_hp: Percent(38) }          ← PRE-berry HP
+  ├── Healed { target: P2[0], new_hp: Percent(56) }               ← Sitrus Berry heal
+  ├── ItemLost { slot: P2[0], item: SitrusBerry, consumed: true } ← from the item ledger
   ├── Healed { target: P1[0], new_hp: Number(185) }               ← drain
   └── DamageDealt { target: P1[0], new_hp: Number(162) }          ← Life Orb recoil
 ```
+
+A pinch/HP berry (Oran, Sitrus, Figy, …) that fires mid-hit is emitted as its own
+`Healed` reaction reporting the **post-berry** HP, immediately after a `DamageDealt`
+that reports the **pre-berry** HP — never folded into one combined `DamageDealt`,
+which would understate the true damage dealt (Pass 3's damage-to-stat inference reads
+this delta directly). The berry's own `ItemLost` is a separate sibling, emitted
+generically later by a whole-move item-snapshot diff rather than nested under the
+specific `Healed` it explains — a real player sees the same three lines in this order.
+A damage-*reducing* item (a type-resist berry like Occa Berry) is different: it has no
+HP-change event of its own at all, since its effect is baked directly into the single
+damage roll.
 
 The inference engine walks this tree depth-first. Every `DamageDealt` nested under a
 `MoveUsed` automatically carries context (which move, which user, which targets) from
@@ -511,7 +522,8 @@ bound.
 ### Pass 4 — Speed Ordering → Spe Bounds
 
 **Where:** `pass4_speed_from_order`, called on the **top-level** event list (not
-recursively), run before the event walk.
+recursively), run before the event walk (and once more after BCP — see
+"Post-BCP re-derivation" below).
 
 Turn order reveals speed relationships. For each consecutive pair of `MoveUsed`
 events in the same **effective priority bracket**:
@@ -555,6 +567,26 @@ base_spe(fast) × fast_mult  ≥  base_spe(slow) × slow_mult
 Hidden multipliers (Choice Scarf ×1.5, Iron Ball ×½, Swift Swim ×2 in rain, etc.)
 are **not folded in** — they become escape disjuncts. Folding them in would make the
 predicate too strong (unsound) when those items/abilities haven't been excluded.
+
+**Snapshot timing (S4):** `compute_speed_multipliers` takes the boost stage,
+paralysis, and Tailwind values as explicit arguments rather than reading them live
+from `state`. `pass4_speed_from_order` builds these per-mover as it scans
+`top_events` in order, maintaining a running snapshot (`spe_boost` / `paralyzed` /
+`tailwind` maps, seeded from `state` at call time) that is updated after each
+top-level event by deep-scanning its reactions for `StatusInflicted`/`StatusCured`,
+`BoostChanged{boost_idx: 4}`/`BoostsCleared`/`BoostsInverted`, and
+`SideConditionStart`/`End{TailWind}`. Each mover's `SpeedComparison` is then built
+from the snapshot **as of the point in the scan just before its own `MoveUsed`** —
+i.e. reflecting every earlier action's effects this turn (e.g. an earlier Thunder
+Wave paralyzing this mon before it acted), not `state`'s value at Pass 4's call
+time. Getting this wrong bakes an incorrect numeric factor into a `SpeedComparison`
+that `propagate_speed_comparisons` then uses to derive hard Spe bounds — a
+soundness risk, not just imprecision (a stale-multiplier bug of this kind can even
+manufacture a spurious `EVIVStatGE`/`LE`-style contradiction). `BoostsSwapped` /
+`BoostsCopied` are deliberately not tracked by the snapshot (which specific stats
+moved isn't recoverable from the event alone); this is a documented, narrow residual
+gap, not a soundness hole, since the escape disjuncts below remain sound regardless
+of snapshot staleness — only the numeric `fast_mult`/`slow_mult` needed the fix.
 
 #### Emitted clause
 

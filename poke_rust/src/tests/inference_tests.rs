@@ -333,6 +333,196 @@ fn test_choice_not_excluded_for_same_move_twice() {
     );
 }
 
+// ── Regression: S15 — bookkeeping drift (consecutive_move_count, times_hit,
+//    last_move_on_field) must match simulator semantics ──────────────────────
+
+/// `consecutive_move_count` must use the simulator's 0-based streak convention:
+/// a move's first use (or a switch to a different move) is streak 0, not 1. Before
+/// the S15 fix, inference used a 1-based convention (first use = 1, second = 2),
+/// off by one from `simulator/mod.rs`'s `new_count = if last_used_move == move
+/// { count + 1 } else { 0 }`.
+#[test]
+fn test_consecutive_move_count_is_zero_based() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result.p2_active_mons[0].consecutive_move_count, 0,
+        "first use of a move must be streak 0, matching the simulator's convention"
+    );
+
+    let result2 = apply(
+        result,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result2.p2_active_mons[0].consecutive_move_count, 1,
+        "second consecutive use of the same move must be streak 1"
+    );
+
+    let result3 = apply(
+        result2,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::DragonClaw,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result3.p2_active_mons[0].consecutive_move_count, 0,
+        "switching to a different move must reset the streak to 0"
+    );
+}
+
+/// `times_hit` (Rage Fist) must only increment for a Physical/Special hit taken by a
+/// TARGET of the enclosing move — never for the move's own recoil/crash/drain-reversal
+/// self-damage on the user, and never for EOT/residual chip with no enclosing move.
+/// Before the S15 fix, every `DamageDealt` on a mon incremented its own `times_hit`
+/// regardless of cause, category, or self-vs-opponent.
+#[test]
+fn test_times_hit_excludes_self_damage_and_eot_chip() {
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+
+    let state = battle_with_p2(vec![unknown_mon()]);
+
+    // P2 uses Earthquake, hits P1 AND takes self-damage (e.g. Life Orb recoil).
+    let result = apply_ex(
+        state,
+        vec![
+            event_with(
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::Earthquake,
+                    targets: vec![p1(0)],
+                },
+                vec![
+                    event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(200) }),
+                    event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(90) }),
+                ],
+            ),
+            // EOT chip on P2 with no enclosing MoveUsed (e.g. Sandstorm).
+            event_with(
+                EventKind::EndOfTurn,
+                vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(80) })],
+            ),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].times_hit, 0,
+        "P2's own self-damage (recoil) and EOT chip must NOT increment its times_hit"
+    );
+}
+
+/// `state.last_move_on_field` (Copycat) must be updated to the most recently used
+/// non-Struggle move. Before the S15 fix, this field was never written by inference.
+#[test]
+fn test_last_move_on_field_updated_by_move_used() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::DragonClaw,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result.last_move_on_field,
+        Some(PokemonMove::DragonClaw),
+        "last_move_on_field must reflect the most recently used move"
+    );
+}
+
+/// Struggle must not update `last_move_on_field` (matches the simulator's exclusion).
+#[test]
+fn test_last_move_on_field_not_updated_by_struggle() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let mut state_with_prior = state;
+    state_with_prior.last_move_on_field = Some(PokemonMove::DragonClaw);
+    let result = apply(
+        state_with_prior,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Struggle,
+            targets: vec![p1(0)],
+        })],
+    );
+    assert_eq!(
+        result.last_move_on_field,
+        Some(PokemonMove::DragonClaw),
+        "Struggle must not overwrite last_move_on_field"
+    );
+}
+
+// ── Regression: S8 — Struggle must not trip choice-lock / moveslot bookkeeping ──
+
+/// A Choice-locked Pokémon whose locked move runs out of PP is forced into Struggle —
+/// exactly the scenario Choice items cause. Before the S8 fix, `MoveUsed{Struggle}`
+/// was treated like any other move: `pass1_choice_exclusion` saw two distinct moves
+/// used (Earthquake, then Struggle) and unsoundly excluded every Choice item, even
+/// though Struggle is not a real move choice and the simulator itself never treats it
+/// as one for choice-lock purposes.
+#[test]
+fn test_struggle_does_not_exclude_choice_items() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Struggle,
+                targets: vec![p1(0)],
+            }),
+        ],
+    );
+    let m = &result.p2_active_mons[0];
+    assert!(
+        !is_item_excluded(m, &Item::ChoiceBand),
+        "ChoiceBand must NOT be excluded — Struggle is not a real move choice"
+    );
+    assert!(!is_item_excluded(m, &Item::ChoiceScarf));
+    assert!(!is_item_excluded(m, &Item::ChoiceSpecs));
+}
+
+/// `MoveUsed{Struggle}` must not consume one of the mon's 4 real moveslots.
+#[test]
+fn test_struggle_does_not_burn_a_moveslot() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Struggle,
+            targets: vec![p1(0)],
+        })],
+    );
+    let m = &result.p2_active_mons[0];
+    assert_eq!(
+        m.known_moves,
+        [None, None, None, None],
+        "Struggle must not be recorded as a known move"
+    );
+}
+
 // ── Pass 1: Boosts ────────────────────────────────────────────────────────────
 
 #[test]
@@ -469,6 +659,52 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
     assert!(
         !is_item_excluded(&result.p2_active_mons[0], &Item::LifeOrb),
         "LifeOrb must not be excluded when self-damage reaction is present"
+    );
+}
+
+// ── Regression: S10 — Life Orb absence must not be inferred when the user fainted ──
+
+/// A self-KO move (Explosion) that hits and then faints the user emits no self
+/// `DamageDealt` (the simulator sets HP to 0 directly — "no damage line in-game").
+/// Before the S10 fix, `pass2_item_from_move` read the missing self-damage as proof
+/// of no Life Orb; the faint (not the item) fully explains the absence, so the
+/// exclusion was unsound.
+#[test]
+fn test_life_orb_not_excluded_when_user_faints_during_move() {
+    let mut mon = unknown_mon();
+    mon.possible_abilities = Unknown::Not(vec![Ability::MagicGuard, Ability::SheerForce]);
+    let state = battle_with_p2(vec![mon]);
+
+    let mut explosion = normal_physical_move(PokemonMove::Explosion, 250);
+    explosion.self_destruct = SelfDestructType::Always;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Explosion, explosion);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Explosion,
+                targets: vec![p1(0)],
+            },
+            vec![
+                event(EventKind::DamageDealt {
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(50),
+                }),
+                // Self-destruct's own faint: no self-DamageDealt, straight to Faint.
+                event(EventKind::Faint { slot: p2(0) }),
+            ],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        !is_item_excluded(&result.p2_active_mons[0], &Item::LifeOrb),
+        "LifeOrb must NOT be excluded — the user's faint (not the item) explains the \
+         missing self-damage reaction"
     );
 }
 
@@ -633,6 +869,103 @@ fn test_no_speed_comparison_different_priority() {
         .filter(|lit| matches!(lit, Statement::SpeedComparison { .. }))
         .count();
     assert_eq!(speed_cmp_count, 0, "no SpeedComparison for different priority brackets");
+}
+
+// ── Regression: S4 — Pass 4 must use speed-relevant state AS OF the comparison ──
+
+/// A doubles turn where P1's Thunder Wave paralyzes a P2 mon mid-turn, and that
+/// SAME mon then acts later in the SAME turn against its own ally: the paralysis
+/// ×½ factor must be baked into the resulting Spe-bound tightening for that later
+/// pairing.
+///
+/// Before the S4 fix, Pass 4 read `mon.status`/boosts live from `state` at its
+/// call time (either before the turn's events were walked, when the paralysis
+/// hadn't happened yet, or after the whole turn including EndOfTurn, which can
+/// also disagree) — never "as of the moment this specific pairing's order was
+/// actually observed". That produced a numeric fast_mult/slow_mult that didn't
+/// match what actually determined the order, which `propagate_speed_comparisons`
+/// then uses to derive hard Spe bounds — a soundness risk (not just imprecision).
+///
+/// P2b (fast) is pinned to an exact known speed (60) so the tightening effect on
+/// P2a's (slow) max Spe bound is directly observable: with the paralysis factor
+/// correctly applied, `slow.maxStats[5] <= floor(60*8/4) = 120`. Without it (the
+/// pre-fix bug, using the neutral 1:1 ratio), `slow.maxStats[5] <= floor(60*4/4)
+/// = 60` — an unsound over-tightening that excludes any true Spe in (60, 120].
+#[test]
+fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
+    let mut thunder_wave = normal_physical_move(PokemonMove::ThunderWave, 0);
+    thunder_wave.category = MoveCategory::Status;
+    thunder_wave.accuracy = AccuracyType::Percent(100);
+    let splash = normal_physical_move(PokemonMove::Splash, 0);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::ThunderWave, thunder_wave);
+    move_dex.insert(PokemonMove::Splash, splash);
+
+    // P1a: known, no Quick Claw/Quick Draw (clean SpeedComparisons, no disjuncts).
+    let mut p1a = unknown_mon_species(Species::Pikachu);
+    p1a.item = Unknown::Not(vec![Item::QuickClaw]);
+    p1a.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
+    let mut p1b = unknown_mon_species(Species::Pikachu);
+    p1b.item = Unknown::Not(vec![Item::QuickClaw]);
+    p1b.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
+
+    // P2a: the mon that gets paralyzed mid-turn (default wide Snorlax Spe range).
+    // P2b: its ally, pinned to an exact Spe of 60, moves right before it.
+    let mut p2a = unknown_mon_species(Species::Snorlax);
+    p2a.possible_abilities = Unknown::Not(vec![Ability::QuickFeet]); // no Quick Feet escape muddying the test
+    let natural_max_spe = p2a.maxStats[5];
+
+    let mut p2b = unknown_mon_species(Species::Snorlax);
+    p2b.possible_abilities = Unknown::Not(vec![Ability::QuickFeet]);
+    p2b.minStats[5] = 60;
+    p2b.maxStats[5] = 60;
+    p2b.min_pre_nature_stat[5] = 60;
+    p2b.max_pre_nature_stat[5] = 60;
+
+    let state = battle_nvn(vec![p1a, p1b], vec![p2a, p2b]);
+
+    let p2a_idx_before = mon_idx_for_active_slot(&state, &p2(0)).unwrap();
+
+    let result = apply_ex(
+        state,
+        vec![
+            // P1a paralyzes P2a as the FIRST action this turn.
+            event_with(
+                EventKind::MoveUsed {
+                    user: p1(0),
+                    move_used: PokemonMove::ThunderWave,
+                    targets: vec![p2(0)],
+                },
+                vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Paralysis })],
+            ),
+            // P2b moves next (same priority bracket)...
+            event(EventKind::MoveUsed {
+                user: p2(1),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+            // ...then P2a moves LAST, now paralyzed — the pairing under test.
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    let p2a_after = get_mon_by_idx(&result, p2a_idx_before).unwrap();
+    let expected_max = natural_max_spe.min(120);
+    assert_eq!(
+        p2a_after.maxStats[5], expected_max,
+        "P2a's max Spe bound must reflect the paralysis-adjusted tightening \
+         (floor(60*8/4) = 120, capped by its natural max {natural_max_spe}) = \
+         {expected_max}. A bound of 60 here means Pass 4 used the stale (unparalyzed, \
+         1:1 ratio) ordering instead of a snapshot as of the actual comparison point, \
+         unsoundly excluding any true Spe in (60, {expected_max}]"
+    );
 }
 
 // ── SpeedComparison propagation ───────────────────────────────────────────────
@@ -1951,6 +2284,51 @@ fn test_ability_revealed_outside_set_overwrites_to_known() {
     // Original abilities field should remain unset (we don't touch possible_original_abilities here)
 }
 
+// ── Regression: S14 — live ability change must overwrite Not/Known too ──────────
+
+/// A revealed ability that was previously excluded from a `Not(excluded)` set (e.g.
+/// ruled out earlier by switch-in absence inference — "this mon's innate ability
+/// isn't Drizzle") must overwrite to `Known` as a live ability change (Trace copying
+/// Drizzle from an ally), not panic. Before the S14 fix, only the `Possibly`-outside
+/// case was treated this way; `Not`-excluded values still routed through
+/// `unknown_set_known` and panicked.
+#[test]
+fn test_ability_revealed_previously_excluded_overwrites_to_known() {
+    let mut mon = unknown_mon(); // Garchomp via from_opponent_species — Not([]) by default here
+    mon.possible_abilities = Unknown::Not(vec![Ability::Drizzle]);
+    let state = battle_with_p2(vec![mon]);
+
+    let result = apply(
+        state,
+        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Drizzle })],
+    );
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::Drizzle),
+        "A previously-excluded ability reveal should overwrite to Known (live change), not panic"
+    );
+}
+
+/// A revealed ability that conflicts with an already-`Known` value (e.g. the mon's
+/// live ability was previously pinned to X, and a later Trace/Skill Swap/Mummy event
+/// changes it to Y) must overwrite to `Known(Y)`, not panic.
+#[test]
+fn test_ability_revealed_conflicting_known_overwrites_to_known() {
+    let mut mon = unknown_mon();
+    mon.possible_abilities = Unknown::Known(Ability::SandVeil);
+    let state = battle_with_p2(vec![mon]);
+
+    let result = apply(
+        state,
+        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Levitate })],
+    );
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::Levitate),
+        "A conflicting Known->Known ability reveal should overwrite (live change), not panic"
+    );
+}
+
 // ── Phase 2: Contact-reaction absence ────────────────────────────────────────
 
 fn contact_physical_move(name: PokemonMove, bp: u16) -> MoveData {
@@ -2364,6 +2742,104 @@ fn test_mega_sets_has_mega_false() {
     assert!(
         result.p1_has_mega,
         "p1_has_mega must remain true — P1 has not yet Mega Evolved"
+    );
+}
+
+// ── Regression: S3 — MegaEvolution/FormeChange with a real species change ────
+
+/// `MegaEvolution` into a genuinely different species (base is already `Known`)
+/// must NOT panic. Before the S3 fix, the handler routed through
+/// `unknown_set_known`, which contradiction-panics whenever the field is already
+/// `Known` to a *different* value — exactly the common case for a real mega evo.
+#[test]
+fn test_mega_evolution_real_species_change_does_not_panic() {
+    use crate::state::pokemon::PokemonGender;
+    let p1_mon = unknown_mon();
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.p2_has_mega = true;
+
+    let mut dex = HashMap::new();
+    dex.insert(Species::GarchompMega, PokemonData {
+        species: Species::GarchompMega,
+        types: vec![PokemonType::Dragon, PokemonType::Ground],
+        base_stats: [108, 170, 115, 120, 95, 92],
+        weight: 950,
+        primary_ability: Some(Ability::SandForce),
+        abilities: vec![Ability::SandForce],
+        base_species: Some(Species::Garchomp),
+        forme: None,
+        required_item: None,
+        battle_only: Some(Species::Garchomp),
+        default_gender: PokemonGender::Male,
+    });
+
+    let result = apply_ex(
+        state,
+        vec![event(EventKind::MegaEvolution {
+            slot: p2(0),
+            into: Species::GarchompMega,
+        })],
+        dex,
+        HashMap::new(),
+    );
+
+    let mon = &result.p2_active_mons[0];
+    assert!(
+        matches!(&mon.possible_species, Unknown::Known(s) if *s == Species::GarchompMega),
+        "species must overwrite to the mega forme, got {:?}",
+        mon.possible_species
+    );
+    assert!(mon.is_mega);
+    assert!(!result.p2_has_mega);
+    assert!(
+        matches!(&mon.possible_abilities, Unknown::Known(a) if *a == Ability::SandForce)
+            || matches!(&mon.possible_abilities, Unknown::Possibly(v) if v == &vec![Ability::SandForce]),
+        "ability set must be recomputed from the mega species dex entry, got {:?}",
+        mon.possible_abilities
+    );
+}
+
+/// `FormeChange` into a genuinely different species (e.g. Stance Change,
+/// Mimikyu-Busted) must NOT panic when the base species is already `Known`.
+#[test]
+fn test_forme_change_real_species_change_does_not_panic() {
+    use crate::state::pokemon::PokemonGender;
+    let p1_mon = unknown_mon();
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut dex = HashMap::new();
+    dex.insert(Species::GarchompMega, PokemonData {
+        species: Species::GarchompMega,
+        types: vec![PokemonType::Dragon, PokemonType::Ground],
+        base_stats: [108, 170, 115, 120, 95, 92],
+        weight: 950,
+        primary_ability: Some(Ability::SandForce),
+        abilities: vec![Ability::SandForce],
+        base_species: Some(Species::Garchomp),
+        forme: None,
+        required_item: None,
+        battle_only: Some(Species::Garchomp),
+        default_gender: PokemonGender::Male,
+    });
+
+    let result = apply_ex(
+        state,
+        vec![event(EventKind::FormeChange {
+            slot: p2(0),
+            into: Species::GarchompMega,
+            permanent: true,
+        })],
+        dex,
+        HashMap::new(),
+    );
+
+    let mon = &result.p2_active_mons[0];
+    assert!(
+        matches!(&mon.possible_species, Unknown::Known(s) if *s == Species::GarchompMega),
+        "species must overwrite to the new forme, got {:?}",
+        mon.possible_species
     );
 }
 
@@ -2975,6 +3451,85 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
     assert!(
         has_spd_predicate,
         "Direction A must emit an EVIVStat predicate for the defender's SpD after observing damage %"
+    );
+}
+
+// ── Regression: S11 — Direction A must not fire for an unknown (non-P1) attacker ──
+
+/// In doubles, an opponent mon can hit its OWN ally with a spread move — both mons'
+/// HP display as `Percent` (neither belongs to the observer), so the target's HP
+/// representation alone (`Percent`) is not sufficient to conclude the attacker is
+/// our own fully-`Known` mon. Before the S11 fix, Direction A fired unconditionally
+/// whenever the target's HP was `Percent`, materializing the (unknown) P2 attacker's
+/// unresolved stat bounds as if they were exact — an unsound basis for narrowing the
+/// defender's stat bounds. After the fix, Direction A must not touch the defender's
+/// bounds at all when the attacker is not P1 (the observer).
+#[test]
+fn test_pass3_dir_a_skipped_for_opponent_ally_hit() {
+    let p1_mons = vec![unknown_mon(), unknown_mon()];
+
+    // P2 mon 0: the attacker (unknown to us).
+    let p2_attacker = unknown_mon_species(Species::Snorlax);
+    // P2 mon 1: the defender — Garchomp, with a wide starting SpD BSV range.
+    let mut p2_defender = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp, &garchomp_dex(), 50,
+    );
+    p2_defender.hp = PokemonHP::Percent(100);
+    let orig_bsv_lo = p2_defender.min_pre_nature_stat[4];
+    let orig_bsv_hi = p2_defender.max_pre_nature_stat[4];
+
+    let mut state = battle_nvn(p1_mons, vec![p2_attacker, p2_defender]);
+    state.active_per_side = 2;
+
+    let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
+    psychic.category = MoveCategory::Special;
+    psychic.pokemon_type = PokemonType::Psychic;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Psychic, psychic);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Psychic,
+                targets: vec![p2(1)],
+            },
+            vec![event(EventKind::DamageDealt {
+                target: p2(1),
+                new_hp: PokemonHP::Percent(80), // 20% damage
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // No EVIVStat predicate for the defender's SpD may be emitted — Direction A
+    // must not have run at all for this (unknown-attacker) hit.
+    let has_spd_predicate = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::EVIVStatGE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
+                | Statement::EVIVStatLE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
+            )
+        })
+    });
+    assert!(
+        !has_spd_predicate,
+        "Direction A must not emit any defender predicate for a non-P1 attacker's hit"
+    );
+
+    // The defender's pre-nature SpD bounds must remain exactly the initial wide range —
+    // no unconditional tightening from apply_unconditional_tightening either.
+    let defender = &result.p2_active_mons[1];
+    assert_eq!(
+        defender.min_pre_nature_stat[4], orig_bsv_lo,
+        "defender's min SpD BSV must be untouched by an unknown-attacker hit"
+    );
+    assert_eq!(
+        defender.max_pre_nature_stat[4], orig_bsv_hi,
+        "defender's max SpD BSV must be untouched by an unknown-attacker hit"
     );
 }
 
@@ -3690,6 +4245,49 @@ fn test_item_gained_does_not_exclude_teammate() {
     assert!(
         !is_item_excluded(back, &Item::Leftovers),
         "ItemGained must not trigger item-clause exclusion; back mon must still allow Leftovers"
+    );
+}
+
+// ── Regression: S12 — a re-confirmed transferred item must not exclude teammates ──
+
+/// A transferred item (Trick/Switcheroo, via `ItemGained`) that is later re-revealed
+/// by an independent source (e.g. Frisk emitting `ItemRevealed` for the SAME item on
+/// the SAME mon on a later turn) must still not trigger the item-clause exclusion.
+/// Before the S12 fix, `ItemRevealed` unconditionally called `enforce_unique_item`
+/// regardless of how the mon came to hold that item, so a Frisk reveal of a Tricked-in
+/// item would unsoundly exclude that item from the mon's own (legitimately
+/// team-built) teammates.
+#[test]
+fn test_item_revealed_after_transfer_does_not_exclude_teammate() {
+    let p1_mon = unknown_mon();
+    let p2_active = unknown_mon_species(Species::Garchomp);
+    let p2_back = unknown_mon_species(Species::Corviknight);
+    let state = battle_1v1_with_known_back(p1_mon, p2_active, p2_back);
+
+    let result = apply_with_config(
+        state,
+        vec![
+            // Turn N: the active mon receives Leftovers via a transfer (Trick).
+            event(EventKind::ItemGained { slot: p2(0), item: Item::Leftovers }),
+            // Turn N+k: an independent source (Frisk) re-reveals the SAME item.
+            event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers }),
+        ],
+        HashMap::new(),
+        HashMap::new(),
+        InferenceConfig::default(),
+    );
+
+    let active = get_mon_by_idx(&result, 1).unwrap();
+    assert!(
+        matches!(&active.item, Unknown::Known(Item::Leftovers)),
+        "Active mon should be Known(Leftovers), got {:?}",
+        active.item
+    );
+    let back = get_mon_by_idx(&result, 2).unwrap();
+    assert!(
+        !is_item_excluded(back, &Item::Leftovers),
+        "Back mon must still allow Leftovers — the active mon's Leftovers was transferred, \
+         not team-built, so it says nothing about what the back mon may hold"
     );
 }
 
@@ -6302,6 +6900,125 @@ fn test_eot_sand_immunity_not_emitted_without_sandstorm() {
     );
 }
 
+// ── Regression: S6 — EOT netting must not produce unsound heal/immunity clauses ──
+//
+// `emit_eot_hp_deltas` diffs HP across a whole EOT sub-phase with ONE before/after
+// snapshot; a sand chip that triggers a pinch berry mid-chip (`deal_residual_damage`
+// calls `take_damage`, which checks berries internally) can net into a `Healed`
+// event, or — in the exact-cancel case — no HP-change event at all (just the
+// berry's `ItemLost`). Both `pass_eot_heal` and `pass_eot_sand_immunity` must
+// recognize this ambiguity and skip rather than draw an unsound conclusion.
+
+/// A target that shows BOTH a `DamageDealt` and a `Healed` for itself in the same
+/// EndOfTurn must not have a Leftovers/BlackSludge clause emitted for the Healed —
+/// the co-occurring chip means the heal could be a chip-then-berry-overheal net
+/// result, not a passive item.
+#[test]
+fn test_eot_heal_not_inferred_when_same_target_also_took_chip_this_eot() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.item = Unknown::Not(vec![]);
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let eot = event_with(
+        EventKind::EndOfTurn,
+        vec![
+            event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(40) }),
+            event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(55) }),
+        ],
+    );
+    let result = apply(state, vec![eot]);
+
+    let has_leftovers_clause = result.predicates.iter().any(|c| {
+        c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::Leftovers, .. }))
+    });
+    assert!(
+        !has_leftovers_clause,
+        "no Leftovers clause should be emitted when the same target also took EOT \
+         chip this turn (chip/berry netting ambiguity)"
+    );
+}
+
+/// A target that shows no sand chip but DOES show a `Healed` event this same EOT
+/// must not have a sand-immunity clause emitted — the "no chip" observation could
+/// be explained by the chip being clobbered by a pinch berry, not immunity.
+#[test]
+fn test_sand_immunity_not_inferred_when_target_healed_this_eot() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::AirLock, Ability::CloudNine]);
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Sandstorm);
+
+    // No DamageDealt (no visible chip), but a Healed for the same mon this EOT —
+    // the netted result of a sand chip clobbered by a pinch berry.
+    let eot = event_with(
+        EventKind::EndOfTurn,
+        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(55) })],
+    );
+    let result = apply(state, vec![eot]);
+
+    let has_sand_immunity_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }
+                | Statement::HasAbility { ability: Ability::SandRush, .. }
+                | Statement::HasAbility { ability: Ability::SandForce, .. }
+                | Statement::HasAbility { ability: Ability::Overcoat, .. }
+                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
+        ))
+    });
+    assert!(
+        !has_sand_immunity_clause,
+        "no sand-immunity clause should be emitted when the same mon was healed \
+         this EOT (chip/berry netting ambiguity)"
+    );
+}
+
+/// A target that shows no sand chip and no Healed, but DID consume a berry this EOT
+/// (the exact-cancel case: chip damage and berry heal net to precisely zero, so
+/// neither DamageDealt nor Healed appears) must also not have a sand-immunity
+/// clause emitted.
+#[test]
+fn test_sand_immunity_not_inferred_when_target_ate_berry_this_eot_exact_cancel() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::AirLock, Ability::CloudNine]);
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Sandstorm);
+
+    // No DamageDealt, no Healed — but ItemLost for a consumed berry is present,
+    // proving the chip fired and was exactly offset.
+    let eot = event_with(
+        EventKind::EndOfTurn,
+        vec![event(EventKind::ItemLost {
+            slot: p2(0),
+            item: Item::SitrusBerry,
+            consumed: true,
+        })],
+    );
+    let result = apply(state, vec![eot]);
+
+    let has_sand_immunity_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }
+                | Statement::HasAbility { ability: Ability::SandRush, .. }
+                | Statement::HasAbility { ability: Ability::SandForce, .. }
+                | Statement::HasAbility { ability: Ability::Overcoat, .. }
+                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
+        ))
+    });
+    assert!(
+        !has_sand_immunity_clause,
+        "no sand-immunity clause should be emitted when the same mon consumed a \
+         berry this EOT, even with no visible HP-change event (exact-cancel case)"
+    );
+}
+
 // ── G2 regressions: soundness fixes for absence-based inferences ──────────────
 //
 // Both tests encode a scenario where the observable signal (−1 Atk / contact chip)
@@ -7085,6 +7802,74 @@ fn test_terrain_setter_not_excluded_when_neutralizing_gas_possible() {
     );
 }
 
+// ── Regression: S7 — HadronEngine belongs in the terrain list, not the weather list ──
+
+/// HadronEngine sets Electric Terrain (`TerrainChanged`), never weather — it must be
+/// checked against `TerrainChanged`, not `WeatherChanged`. Before the S7 fix,
+/// HadronEngine was listed in `WEATHER_SETTING_ABILITIES`: a mon that switches in and
+/// sets Electric Terrain (revealing HadronEngine via a nested `AbilityRevealed`) would
+/// still see no `WeatherChanged` reaction (HadronEngine never emits one) and get
+/// wrongly excluded by the weather-absence pass before the nested reveal was even
+/// processed — a vacuous, always-true "absence" that carried no real information.
+#[test]
+fn test_hadron_engine_not_excluded_by_weather_absence() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![p2_back];
+
+    // Switch-in where HadronEngine sets Electric Terrain (TerrainChanged nested under
+    // the AbilityRevealed wrapper), but no WeatherChanged occurs at all.
+    let sw = event_with(
+        EventKind::Switch(SwitchState {
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }),
+        vec![event_with(
+            EventKind::AbilityRevealed { slot: p2(0), ability: Ability::HadronEngine },
+            vec![event(EventKind::TerrainChanged { terrain: Some(Terrain::ElectricTerrain) })],
+        )],
+    );
+    let result = apply(state, vec![sw]);
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::HadronEngine),
+        "HadronEngine must be confirmed Known, not excluded by the (vacuous) weather-absence check"
+    );
+}
+
+/// Terrain-setter absence must exclude HadronEngine too — it belongs in the terrain
+/// list now, so "no TerrainChanged fires" correctly rules it out.
+#[test]
+fn test_hadron_engine_excluded_when_no_terrain_change() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![p2_back];
+
+    let sw = event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let result = apply(state, vec![sw]);
+
+    assert!(
+        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::HadronEngine),
+        "HadronEngine must be excluded when no TerrainChanged fires on switch-in"
+    );
+}
+
 /// Dauntless Shield ability absence (previously zero coverage): a mon that switches in
 /// with no +1 Def boost cannot have Dauntless Shield (once-per-battle, not yet used).
 #[test]
@@ -7111,3 +7896,95 @@ fn test_dauntless_shield_excluded_when_no_def_boost_on_entry() {
          possible_abilities = {:?}", result.p2_active_mons[0].possible_abilities
     );
 }
+
+// ── Regression: S1 — P2's active mon_idx must survive P1-side bench churn ────────
+//
+// Under the pre-S1 layout (`[p1_active, p1_known_back, p1_possible_back, p2_active,
+// ...]`), P2's active mon_idx was `p1_active.len() + p1_known_back.len() +
+// p1_possible_back.len()` — it depended on P1's CURRENT bench size. Any P1-side
+// switch (which pushes the outgoing mon onto p1_known_back/p1_possible_back, then
+// removes the incoming mon from wherever it was benched) shifted every mon_idx that
+// came after P1's bench segments, silently retargeting persistent `Statement`s
+// (SpeedComparison, weather/terrain/screen setters, HasItem/HasAbility clauses) that
+// reference a P2 mon onto a DIFFERENT physical Pokémon — purely from P1 activity
+// that P2 was not even involved in.
+//
+// The S1 fix places both active segments first (`[p1_active, p2_active,
+// p1_known_back, ...]`), so P2's active mon_idx depends only on
+// `p1_active_mons.len()`, which is fixed for the whole battle after the initial
+// lead-sending bootstrap. This test grows P1's known-back roster from 0 to 2 mons
+// via real switches and asserts a clause captured against P2's active mon BEFORE
+// those switches still resolves to the SAME P2 mon (by species) afterward.
+
+#[test]
+fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
+    let p1_mon_a = unknown_mon_species(Species::Garchomp);
+    let p1_mon_c = unknown_mon_species(Species::Corviknight);
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+
+    let mut state = battle_1v1(p1_mon_a, p2_mon);
+    // P1 already has one known-back mon before we start — this is exactly the
+    // condition that made the OLD layout diverge from the NEW one (P2's mon_idx
+    // was 2 under the old layout here, 1 under the new one).
+    state.p1_known_back_mons = vec![p1_mon_c];
+
+    // Capture P2's active mon_idx and manually install a persistent clause
+    // referencing it, mirroring what Pass 2/3/4 would emit in practice.
+    let p2_idx_before = mon_idx_for_active_slot(&state, &p2(0)).unwrap();
+    state.predicates.push(vec![Statement::HasItem {
+        mon_idx: p2_idx_before,
+        item: Item::Leftovers,
+    }]);
+
+    // P1 switches Garchomp out for Corviknight (already on the bench), then
+    // switches Corviknight out for a brand-new mon (Snorlax) never seen before —
+    // this exercises both a Vec::remove (shrinking p1_known_back) and a push
+    // (growing it), the two operations that caused the old layout to drift.
+    let switch_in_corviknight = event(EventKind::Switch(SwitchState {
+        slot: p1(0),
+        species: Species::Corviknight,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let after_first_switch = apply(state, vec![switch_in_corviknight]);
+
+    let switch_in_new_mon = event(EventKind::Switch(SwitchState {
+        slot: p1(0),
+        species: Species::Alakazam,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let result = apply(after_first_switch, vec![switch_in_new_mon]);
+
+    // P2's active mon_idx (recomputed fresh, post-churn) must still be the SAME
+    // integer as before — proving it never depended on P1's bench size.
+    let p2_idx_after = mon_idx_for_active_slot(&result, &p2(0)).unwrap();
+    assert_eq!(
+        p2_idx_before, p2_idx_after,
+        "P2's active mon_idx must not shift due to P1-side bench churn"
+    );
+
+    // And the mon actually AT that index must still be Snorlax (P2's real mon),
+    // never one of the P1 mons that churned through the bench.
+    let mon_at_idx = get_mon_by_idx(&result, p2_idx_before).unwrap();
+    assert!(
+        matches!(&mon_at_idx.possible_species, Unknown::Known(s) if *s == Species::Snorlax),
+        "mon_idx {p2_idx_before} must still resolve to P2's Snorlax, got {:?}",
+        mon_at_idx.possible_species
+    );
+
+    // The clause captured before the churn is a unit clause, so Pass 6 (BCP)
+    // force-resolves it immediately into the mon's item field (and removes it from
+    // `predicates`). The pre-fix bug would have forced this onto whichever P1 mon
+    // ended up at the stale index instead — assert it landed on P2's Snorlax.
+    assert_eq!(
+        mon_at_idx.item,
+        Unknown::Known(Item::Leftovers),
+        "the pre-churn clause must have resolved onto P2's Snorlax, not a P1 mon"
+    );
+}
+
