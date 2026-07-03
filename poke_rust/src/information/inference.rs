@@ -2664,8 +2664,7 @@ const WEATHER_SETTING_ABILITIES: &[Ability] = &[
     Ability::Drought,
     Ability::SandStream,
     Ability::SnowWarning,
-    Ability::OrichalcumPulse, // Sets Sun (from helpers.rs:5791)
-    Ability::HadronEngine,    // Sets Electric Terrain (from helpers.rs:5785)
+    Ability::OrichalcumPulse, // Sets Sun (apply_entry_ability_field_effects, helpers.rs)
 ];
 
 /// Terrain-setting abilities whose activation is always visible (`TerrainChanged`).
@@ -2674,7 +2673,13 @@ const TERRAIN_SETTING_ABILITIES: &[Ability] = &[
     Ability::GrassySurge,
     Ability::MistySurge,
     Ability::PsychicSurge,
-    // HadronEngine sets Electric Terrain (already listed above, checked separately)
+    // S7: HadronEngine sets Electric Terrain, NOT weather — it must live in this list,
+    // not WEATHER_SETTING_ABILITIES. `apply_entry_ability_field_effects` matches
+    // `Ability::ElectricSurge | Ability::HadronEngine => set_terrain(..., ElectricTerrain, ...)`;
+    // it never touches `state.weather` at all, so "no WeatherChanged" carries zero
+    // information about whether the entrant has HadronEngine (the absence would be
+    // true regardless), and excluding it there was vacuous, not sound evidence.
+    Ability::HadronEngine,
 ];
 
 /// After a batch of switch-ins, scan the combined `reactions` list and remove

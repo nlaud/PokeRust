@@ -7507,6 +7507,74 @@ fn test_terrain_setter_not_excluded_when_neutralizing_gas_possible() {
     );
 }
 
+// ── Regression: S7 — HadronEngine belongs in the terrain list, not the weather list ──
+
+/// HadronEngine sets Electric Terrain (`TerrainChanged`), never weather — it must be
+/// checked against `TerrainChanged`, not `WeatherChanged`. Before the S7 fix,
+/// HadronEngine was listed in `WEATHER_SETTING_ABILITIES`: a mon that switches in and
+/// sets Electric Terrain (revealing HadronEngine via a nested `AbilityRevealed`) would
+/// still see no `WeatherChanged` reaction (HadronEngine never emits one) and get
+/// wrongly excluded by the weather-absence pass before the nested reveal was even
+/// processed — a vacuous, always-true "absence" that carried no real information.
+#[test]
+fn test_hadron_engine_not_excluded_by_weather_absence() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![p2_back];
+
+    // Switch-in where HadronEngine sets Electric Terrain (TerrainChanged nested under
+    // the AbilityRevealed wrapper), but no WeatherChanged occurs at all.
+    let sw = event_with(
+        EventKind::Switch(SwitchState {
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }),
+        vec![event_with(
+            EventKind::AbilityRevealed { slot: p2(0), ability: Ability::HadronEngine },
+            vec![event(EventKind::TerrainChanged { terrain: Some(Terrain::ElectricTerrain) })],
+        )],
+    );
+    let result = apply(state, vec![sw]);
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_abilities,
+        Unknown::Known(Ability::HadronEngine),
+        "HadronEngine must be confirmed Known, not excluded by the (vacuous) weather-absence check"
+    );
+}
+
+/// Terrain-setter absence must exclude HadronEngine too — it belongs in the terrain
+/// list now, so "no TerrainChanged fires" correctly rules it out.
+#[test]
+fn test_hadron_engine_excluded_when_no_terrain_change() {
+    let mut p2_back = unknown_mon();
+    p2_back.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![p2_back];
+
+    let sw = event(EventKind::Switch(SwitchState {
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }));
+    let result = apply(state, vec![sw]);
+
+    assert!(
+        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::HadronEngine),
+        "HadronEngine must be excluded when no TerrainChanged fires on switch-in"
+    );
+}
+
 /// Dauntless Shield ability absence (previously zero coverage): a mon that switches in
 /// with no +1 Def boost cannot have Dauntless Shield (once-per-battle, not yet used).
 #[test]
