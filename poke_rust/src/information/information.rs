@@ -381,4 +381,20 @@ pub enum EventKind {
     /// Emitted as a sibling of `DamageDealt` on the first direct-move damage hit,
     /// or alongside ability suppression/change events.
     IllusionEnded { slot: FieldSlot, actual_species: Species },
+
+    /// A Pokémon Transformed into another (the Transform move or the Imposter ability).
+    /// `slot` is the transformer; `into_slot` is the copied Pokémon (the directly-
+    /// opposite active slot); `into_species` is the displayed species after the copy.
+    ///
+    /// The transformer adopts the copy source's species, types, stats (except HP /
+    /// max HP), ability, moves (PP capped at 5), and stat stages; its own level, HP,
+    /// item, status, nature, EVs, and IVs are unchanged. Inference reads the copy
+    /// source's *fog* entry at `into_slot`, so transforming into the observer's own
+    /// Pokémon yields exact copied stats while transforming into a hidden opponent
+    /// inherits that opponent's current bounds.
+    Transformed {
+        slot: FieldSlot,
+        into_slot: FieldSlot,
+        into_species: Species,
+    },
 }

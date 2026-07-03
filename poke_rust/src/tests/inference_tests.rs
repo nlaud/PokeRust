@@ -1027,6 +1027,234 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     );
 }
 
+// ── Regression: S26 — Transform overlay and switch-out revert ───────────────────
+
+/// An opponent Ditto uses Transform (a `Transformed` reaction nested under the
+/// `MoveUsed`) to copy our Garchomp, gaining its moves; then switches out. The copied
+/// move (Earthquake) must NOT persist on the benched Ditto after the revert — before
+/// S26 there was no Transform handling at all, so a copied move stayed burned into
+/// the mon's own `known_moves` permanently, corrupting later Choice-lock / learnset
+/// reasoning. The revert also restores the pre-transform species (Ditto).
+#[test]
+fn test_s26_transform_reverts_moves_on_switch_out() {
+    // Our P1 Garchomp with a known move (the copy source's move set).
+    let mut p1_mon = unknown_mon_species(Species::Garchomp);
+    p1_mon.known_moves[0] = Some(PokemonMove::Earthquake);
+    // Opponent Ditto, currently active.
+    let p2_mon = unknown_mon_species(Species::Ditto);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Transform, poke_status_move(PokemonMove::Transform));
+    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![
+            // Ditto Transforms into our Garchomp: copies its identity + moves.
+            event_with(
+                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Transform, targets: vec![p1(0)] },
+                vec![event(EventKind::Transformed {
+                    slot: p2(0),
+                    into_slot: p1(0),
+                    into_species: Species::Garchomp,
+                })],
+            ),
+            // …then switches out for a fresh Snorlax.
+            event(EventKind::Switch(SwitchState {
+                slot: p2(0), species: Species::Snorlax, level: 50,
+                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            })),
+        ],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // The benched mon must have reverted to Ditto (species restored), with no copied
+    // Earthquake and no lingering pre_transform snapshot.
+    let ditto = result
+        .p2_known_back_mons
+        .iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Ditto)))
+        .expect("the transformed Ditto must revert to Ditto on switch-out");
+    assert!(
+        !ditto.known_moves.iter().any(|m| *m == Some(PokemonMove::Earthquake)),
+        "a move copied while transformed must not persist after the revert"
+    );
+    assert!(ditto.pre_transform.is_none(), "pre_transform must clear on revert");
+}
+
+/// While transformed, the mon's copied stats must NOT be back-solved against its own
+/// (Ditto) species base — Pass 5 is skipped for a transformed mon. This pins that the
+/// overlay + gate run without a contradiction panic even though Garchomp's copied
+/// stats are impossible for Ditto's base stats + EV lattice.
+#[test]
+fn test_s26_transform_skips_pass5_backsolve() {
+    let mut p1_mon = unknown_mon_species(Species::Garchomp);
+    p1_mon.known_moves[0] = Some(PokemonMove::Earthquake);
+    let p2_mon = unknown_mon_species(Species::Ditto);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Transform, poke_status_move(PokemonMove::Transform));
+
+    // Must not panic (pass5 skip) and must display Garchomp with a saved snapshot.
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Transform, targets: vec![p1(0)] },
+            vec![event(EventKind::Transformed {
+                slot: p2(0),
+                into_slot: p1(0),
+                into_species: Species::Garchomp,
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let t = &result.p2_active_mons[0];
+    assert!(matches!(&t.possible_species, Unknown::Known(Species::Garchomp)));
+    assert!(t.pre_transform.is_some(), "pre_transform snapshot must be saved");
+}
+
+// ── Regression: S25 — pinch abilities must be live for a low-HP attacker ────────
+
+/// A Garchomp at 25% display HP with Blaze still possible (and item Known(None), so
+/// no Choice Band alias can cover for it) uses a 40 BP Fire move. True world: min
+/// Atk BSV 135 + Blaze ×1.5 (BP 60 → base term 37), observed damage 31 (roll 0.85).
+///
+/// Before the S25 fix, materialize mapped any non-100% display HP to 0.5×max, so the
+/// ≤1/3 pinch gate never fired in the oracle: every enumerated combo degenerated to
+/// the neutral model (BP 40), for which damage 31 is only feasible at BSV ∈
+/// ≈[165, 182] — raising min_pre_nature_stat[1] above the true 135.
+#[test]
+fn test_s25_blaze_pinch_keeps_true_atk_feasible() {
+    let mut p1_mon = known_p1_normal(); // HP=500, Def=100, Normal type (Fire → ×1)
+    let mut p2_mon = neutral_no_item_garchomp();
+    // Blaze remains possible; ability not Known so the neutral run uses Ability::None.
+    p2_mon.possible_abilities = Unknown::Possibly(vec![Ability::Blaze, Ability::SandVeil]);
+    p2_mon.hp = PokemonHP::Percent(25); // certainly at ≤1/3 HP
+
+    let mut fire_move = normal_physical_move(PokemonMove::FirePunch, 40);
+    fire_move.pokemon_type = PokemonType::Fire; // no STAB for Dragon/Ground Garchomp
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::FirePunch, fire_move);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::FirePunch, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(469) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 135,
+        "true Atk BSV 135 (+ active Blaze) must remain feasible; got min {} — the \
+         0.5×max HP sentinel disables the pinch gate and forces the neutral model",
+        p2_r.min_pre_nature_stat[1]
+    );
+}
+
+// ── Regression: S24 — Pass 3 must run against the PRE-move state ────────────────
+
+/// A Power-Up-Punch-style move raises the user's Atk AFTER the hit; Pass 1 applies
+/// that `BoostChanged` before Pass 3 runs, so the oracle used to model the observed
+/// (unboosted) damage at +1 Atk.
+///
+/// Hand-derived (Garchomp, neutral, 40 BP Normal vs Def=100, formula
+/// `floor(floor(22·40·A/100)/50)+2`, rolls 0.85–1.00): true Atk BSV = 182 → base
+/// term 34 → non-crit damage 28–34; observed 34 (roll 1.0). With the post-move +1
+/// stage baked in, damage 34 needs boosted A ∈ [182, 221] → BSV ∈ ≈[135, 147] —
+/// capping the bound at 147 and excluding the true 182. The S24 snapshot restores
+/// the pre-move (stage 0) view, where BSV = 182 is exactly feasible.
+#[test]
+fn test_s24_self_boost_secondary_keeps_true_atk_feasible() {
+    let p1_mon = known_p1_normal(); // HP=500, Def=100
+    let p2_mon = neutral_no_item_garchomp();
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+
+    let state = battle_1v1(p1_mon, p2_mon);
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+            vec![
+                // The hit itself: 34 damage (500 → 466), dealt at stage 0.
+                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(466) }),
+                // The self-boost lands AFTER the hit.
+                event(EventKind::BoostChanged { target: p2(0), boost_idx: 0, stages: 1 }),
+            ],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_r = &result.p2_active_mons[0];
+    // The live boost must still be recorded (Pass 1 is unchanged) …
+    assert_eq!(p2_r.boosts[0], 1, "the +1 Atk stage must be tracked on the live mon");
+    // … but Pass 3 must have run against the pre-boost snapshot.
+    assert!(
+        p2_r.min_pre_nature_stat[1] <= 182 && 182 <= p2_r.max_pre_nature_stat[1],
+        "true Atk BSV 182 must stay within [{}, {}] — modeling the observed damage \
+         at the post-move +1 stage excludes it",
+        p2_r.min_pre_nature_stat[1],
+        p2_r.max_pre_nature_stat[1]
+    );
+}
+
+// ── Regression: S27 — Metronome streak resets on zero-effective-damage moves ────
+
+/// The sim resets `consecutive_move_count` to 0 and nulls `last_used_move` when a
+/// damaging move deals no effective damage (miss / immune / fully blocked). Before
+/// the S27 fix, inference incremented the streak on every `MoveUsed` regardless of a
+/// `Missed` reaction, so the fog streak drifted above the sim's — and the drifted
+/// value is materialized straight into Pass 3 oracle calls (Metronome ×(1+0.2n)).
+#[test]
+fn test_s27_streak_resets_on_missed_move() {
+    let p1_mon = unknown_mon_species(Species::Garchomp);
+    let p2_mon = unknown_mon_species(Species::Snorlax);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+
+    let result = apply_ex(
+        state,
+        vec![
+            // First use connects: streak 0, last_used = Tackle.
+            event_with(
+                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+                vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(90) })],
+            ),
+            // Second use misses: the sim resets the streak and nulls last_used_move.
+            event_with(
+                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+                vec![event(EventKind::Missed { target: p1(0) })],
+            ),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    let mon = &result.p2_active_mons[0];
+    assert_eq!(
+        mon.consecutive_move_count, 0,
+        "a missed damaging move must reset the streak (sim: total_effective_dmg == 0)"
+    );
+    assert_eq!(
+        mon.last_used_move, None,
+        "a missed damaging move must null last_used_move (sim parity)"
+    );
+}
+
 // ── Regression: S22 — Direction A damage band must cover both display roundings ──
 
 /// Exhaustive cross-validation of the Pass 3 percent→damage band against the real
@@ -1443,6 +1671,99 @@ fn test_switch_widens_species_for_possible_illusion() {
             "with a Zoroark in the back the incoming species must be Possibly([...]); got {other:?}"
         ),
     }
+}
+
+// ── Regression: S29 — Illusion disguise must not consume a scouted teammate ─────
+
+/// With a Zoroark on the opponent's known bench, a "Garchomp" switch-in might be the
+/// Zoroark in disguise. The real (previously scouted) Garchomp's benched entry must
+/// therefore survive — before the S29 fix `pass1_switch` matched by species and
+/// REMOVED it, moving the real teammate's accumulated fog into the active slot to be
+/// mutated by events that physically happen to the Zoroark (merging two mons).
+#[test]
+fn test_s29_illusion_switch_preserves_benched_teammate() {
+    let garchomp_back =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let zoroark_back =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+
+    let result = apply(
+        state,
+        vec![event(EventKind::Switch(SwitchState {
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }))],
+    );
+
+    // Active species is the ambiguous disguise set.
+    assert!(
+        matches!(&result.p2_active_mons[0].possible_species,
+            Unknown::Possibly(v) if v.contains(&Species::Garchomp) && v.contains(&Species::Zoroark)),
+        "active species must widen to Possibly([Garchomp, Zoroark])"
+    );
+    // The real Garchomp's benched entry must NOT have been consumed.
+    let garchomp_still_benched = result
+        .p2_known_back_mons
+        .iter()
+        .any(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp)));
+    assert!(
+        garchomp_still_benched,
+        "the scouted Garchomp must remain benched (not merged into the disguise); \
+         bench = {:?}",
+        result.p2_known_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+    );
+}
+
+/// When the still-ambiguous disguise switches back out before its identity resolves,
+/// its `Possibly`-species entry must be DISCARDED — not benched. `pass1_switch`
+/// re-matches by `Known` species (so it could never be pulled back), and benching it
+/// beside the real teammate's surviving entry would double-count one physical mon in
+/// `teammate_indices` / item-clause propagation.
+#[test]
+fn test_s29_ambiguous_disguise_discarded_on_switch_out() {
+    let garchomp_back =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let zoroark_back =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+
+    let result = apply(
+        state,
+        vec![
+            // "Garchomp" (possibly the Zoroark) switches in → ambiguous active entry.
+            event(EventKind::Switch(SwitchState {
+                slot: p2(0), species: Species::Garchomp, level: 50,
+                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            })),
+            // …then switches back out for Snorlax before the disguise ever broke.
+            event(EventKind::Switch(SwitchState {
+                slot: p2(0), species: Species::Snorlax, level: 50,
+                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            })),
+        ],
+    );
+
+    // The ambiguous entry was discarded, not pushed to possible_back.
+    assert!(
+        result.p2_possible_back_mons.is_empty(),
+        "the unresolved disguise must be discarded, not benched; possible_back = {:?}",
+        result.p2_possible_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+    );
+    // The real Garchomp entry is still intact on the known bench.
+    assert!(
+        result.p2_known_back_mons.iter().any(|m|
+            matches!(&m.possible_species, Unknown::Known(Species::Garchomp))),
+        "the scouted Garchomp entry must survive the ambiguous mon's switch-out"
+    );
 }
 
 /// `KnowsThreateningMove` satisfaction (previously untested): once the constrained mon
@@ -6715,6 +7036,201 @@ mod roundtrip_soundness {
         assert!(
             !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::Immunity),
             "soundness: true ability Immunity must not be excluded"
+        );
+    }
+
+    // ── Scenario S28: Analytic fires when the attacker moves last after a switch ──
+
+    /// P1 switches (a switch resolves before any move), then P2's Analytic Garchomp
+    /// attacks the replacement as the turn's only mover — so Analytic's ×1.3 applied
+    /// in the real sim. Because P1 used no move, the old target-centric heuristic
+    /// ("did the target already move this turn?") concluded Analytic did NOT fire and
+    /// dropped it from the Direction-B booster union, forcing the ×1.3-inflated
+    /// observed damage to be explained by a higher attacker Atk BSV — excluding the
+    /// true value (Pass 5 then panics: "every candidate nature infeasible").
+    ///
+    /// Roundtrip so the observed damage is guaranteed consistent with the true world
+    /// (Atk BSV of a real 252-Atk Adamant Garchomp under Analytic).
+    #[test]
+    fn roundtrip_s28_analytic_last_mover_after_switch() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1 lead: bulky Snorlax that will switch out. Back: a second wall to receive
+        // the hit (Def known to us; its species base Def anchors the inversion).
+        let p1_lead = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let p1_back = build_pokemon_state(
+            Species::Regice, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::ClearBody), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        // P2: Garchomp, Analytic, NEUTRAL 0-EV Atk (true BSV near the species floor).
+        // A max-Atk attacker would not expose the bug: without Analytic the observed
+        // ×1.3 damage would demand a BSV above Garchomp's cap, giving an empty feasible
+        // set (no narrowing) instead of an above-truth min. A low true BSV keeps the
+        // wrong (no-Analytic) requirement inside the range so it raises the floor.
+        // A weak, non-STAB move (Tackle, 40 BP) so the exact-damage inversion is
+        // discriminating; a strong STAB move saturates (every BSV reproduces it).
+        let p2 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::Analytic), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        // Hardy is neutral → pre-nature BSV == the final Atk stat.
+        let true_atk_bsv = p2.stats[1];
+
+        let battle = battle_state_from_lists(
+            vec![p1_lead.clone()], vec![p1_back.clone()],
+            vec![p2.clone()], vec![],
+        );
+        let state = MatchState::BattleState(battle);
+
+        // P1 switches to Regice (back-index 0); P2 attacks — P2 moves last.
+        let p1_cmd = PlayerCommand::Battle(vec![
+            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+        ]);
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+
+        // Fog: P1 fully known (lead + back); P2 Garchomp with its ability narrowed so
+        // Analytic is the ONLY offensive booster candidate (SandVeil is defensive).
+        // Without this the union's stronger boosters (Huge Power, Adaptability, …)
+        // would dominate the min-BSV and mask whether Analytic is (in)correctly
+        // included — the S28 distinction only bites when Analytic is the binding
+        // booster.
+        let mut p2_fog_mon =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, pd, 50);
+        p2_fog_mon.possible_abilities =
+            Unknown::Possibly(vec![Ability::Analytic, Ability::SandVeil]);
+        p2_fog_mon.possible_original_abilities =
+            Unknown::Possibly(vec![Ability::Analytic, Ability::SandVeil]);
+        // Pin the item to None too, else the item union (Choice Band ×1.5, Life Orb
+        // ×1.3, …) would cover for Analytic and mask the distinction.
+        p2_fog_mon.item = Unknown::Known(Item::None);
+        let mut initial_fog = super::battle_nvn(
+            vec![UnknownPokemonState::from_known_pokemon(&p1_lead)],
+            vec![p2_fog_mon],
+        );
+        initial_fog.p1_known_back_mons =
+            vec![UnknownPokemonState::from_known_pokemon(&p1_back)];
+
+        let result = apply_information(
+            UnknownMatchState::Battle(initial_fog),
+            &events, false, pd, md, &HashMap::new(), &InferenceConfig::default(),
+        );
+        let result = match result {
+            UnknownMatchState::Battle(b) => b,
+            _ => panic!("expected Battle state"),
+        };
+
+        let p2_slot = super::FieldSlot { player: Player::P2, slot_index: 0 };
+        let p2_idx = super::mon_idx_for_active_slot(&result, &p2_slot).unwrap();
+        let p2_fog = super::get_mon_by_idx(&result, p2_idx).unwrap();
+        assert!(
+            p2_fog.min_pre_nature_stat[1] <= true_atk_bsv
+                && true_atk_bsv <= p2_fog.max_pre_nature_stat[1],
+            "soundness (S28): true Atk BSV {true_atk_bsv} must lie within inferred \
+             pre-nature range [{}, {}] — Analytic must be in the union because P2 \
+             moved last (after P1's switch)",
+            p2_fog.min_pre_nature_stat[1], p2_fog.max_pre_nature_stat[1]
+        );
+    }
+
+    // ── Scenario S26: Transform (Imposter) copies the source's fog identity ──────
+
+    /// P2's Ditto (Imposter) switches in opposite P1's fully-known Garchomp and
+    /// transforms. The real sim emits a `Transformed` event; inference must overlay
+    /// Garchomp's identity onto the Ditto fog entry — and because the copy source is
+    /// the observer's OWN Known mon, the copied non-HP stats become exact.
+    #[test]
+    fn roundtrip_s26_imposter_copies_known_source_exactly() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // P1: known Garchomp (max Atk, Adamant) with Splash.
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::SandVeil), Some(Nature::Adamant), None, None,
+            Some([0, 252, 0, 0, 0, 4]), Some([31u8; 6]), false,
+        );
+        let true_atk = p1.stats[1];
+
+        // P2 lead: Snorlax; back: Ditto with Imposter.
+        let p2_lead = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let p2_ditto = build_pokemon_state(
+            Species::Ditto, pd, md, Some(50),
+            Some([Some(PokemonMove::Transform), None, None, None]),
+            None, Some(Ability::Imposter), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        let battle = battle_state_from_lists(
+            vec![p1.clone()], vec![], vec![p2_lead], vec![p2_ditto],
+        );
+        let state = MatchState::BattleState(battle);
+
+        // P1 Splash; P2 switches to Ditto → Imposter transforms into Garchomp.
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(vec![
+            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+        ]);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+
+        // The event stream must contain a Transformed announcing the copy.
+        fn contains_transformed(evs: &[InformationEvent]) -> bool {
+            use crate::information::information::EventKind;
+            evs.iter().any(|e| {
+                matches!(&e.kind, EventKind::Transformed { into_species, .. }
+                    if *into_species == Species::Garchomp)
+                    || contains_transformed(&e.reactions)
+            })
+        }
+        assert!(contains_transformed(&events), "sim must emit Transformed for Imposter");
+
+        let fog = fog_1v1(&p1, Species::Snorlax);
+        let mut initial_fog = fog;
+        initial_fog.p2_known_back_mons =
+            vec![UnknownPokemonState::from_opponent_species(Species::Ditto, pd, 50)];
+
+        let result = apply_information(
+            UnknownMatchState::Battle(initial_fog),
+            &events, false, pd, md, &HashMap::new(), &InferenceConfig::default(),
+        );
+        let result = match result {
+            UnknownMatchState::Battle(b) => b,
+            _ => panic!("expected Battle state"),
+        };
+
+        let t = &result.p2_active_mons[0];
+        assert!(
+            matches!(&t.possible_species, Unknown::Known(Species::Garchomp)),
+            "transformed Ditto must display Garchomp; got {:?}", t.possible_species
+        );
+        assert!(t.pre_transform.is_some(), "pre_transform snapshot must be saved");
+        // Copy source is our own Known mon → copied Atk is exact.
+        assert_eq!(
+            (t.minStats[1], t.maxStats[1]), (true_atk, true_atk),
+            "copied Atk must be exact (source is the observer's Known Garchomp)"
+        );
+        // Garchomp's move (Splash was P1's; the copy takes P1's move set).
+        assert!(
+            t.known_moves.iter().any(|m| *m == Some(PokemonMove::Splash)),
+            "transformed mon must copy the source's moves"
         );
     }
 

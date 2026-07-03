@@ -682,7 +682,8 @@ fn process_team_preview_event(
         | EventKind::PerishCount { .. }
         | EventKind::EndOfTurn
         | EventKind::AnticipationShudder { .. }
-        | EventKind::IllusionEnded { .. } => {
+        | EventKind::IllusionEnded { .. }
+        | EventKind::Transformed { .. } => {
             panic!(
                 "[inference] illegal event {:?} at team preview",
                 event.kind
@@ -749,6 +750,8 @@ fn apply_information_battle(
         switch_slot: None,
         damaging_hits_this_turn: Vec::new(),
         move_users_this_turn: Vec::new(),
+        analytic_last_movers: compute_analytic_last_movers(events),
+        turn_segment: 0,
     };
     for event in events {
         process_battle_event(state, event, &mut ctx);
@@ -797,10 +800,21 @@ struct BattleContext<'a> {
     damaging_hits_this_turn: Vec<(FieldSlot, FieldSlot, PokemonMove)>,
     /// Ordered list of user slots that have executed a MoveUsed event so far this turn.
     /// Populated after each MoveUsed's Pass 3 runs; cleared at EndOfTurn.
-    /// Used by Pass 3 to determine whether Analytic fired (attacker moved last):
-    /// if a move's target is already in this list, the attacker moved after it → Analytic fires;
-    /// if the target is absent, the attacker moved first → Analytic did not fire.
+    /// (Retained for potential future use; Analytic now uses `analytic_last_movers`.)
     move_users_this_turn: Vec<FieldSlot>,
+    /// S28: per-turn-segment last move-committed actor — the unique slot for which
+    /// Analytic's "moved last" fires. Computed once up-front from the top-level event
+    /// stream (see `compute_analytic_last_movers`). Indexed by `turn_segment`.
+    ///
+    /// The sim's `attacker_is_last_mover` returns true when no OTHER slot has a
+    /// pending `MoveAction`, so a mon that ultimately flinches / is fully paralyzed
+    /// (emitting `Cant`) still occupied a MoveAction and blocks the earlier mon's
+    /// Analytic. The old heuristic ("did the target already move this turn?") was
+    /// wrong whenever the target switched, flinched, or was fully paralyzed (it never
+    /// entered `move_users_this_turn`), and was the wrong predicate in doubles.
+    analytic_last_movers: Vec<Option<FieldSlot>>,
+    /// S28: index into `analytic_last_movers`; advanced at each `EndOfTurn`.
+    turn_segment: usize,
 }
 
 #[derive(Clone)]
@@ -813,6 +827,44 @@ struct MoveContext {
     pre_hit_hp: Vec<(FieldSlot, PokemonHP)>,
     /// Accumulated observed damage intervals per target, in hit order.
     observed_damage: Vec<(FieldSlot, PokemonHP)>,
+    /// S24: full fog snapshot of the attacker as of the moment the move was declared.
+    /// Pass 1 applies the whole reaction tree (self-boosts, Flame Body burns, item
+    /// consumption) before Pass 3 runs, so the live mon reflects POST-move state for
+    /// an observation made PRE-move. Pass 3 enumerates items/abilities and
+    /// materializes from this snapshot; bounds still write back to the live mon.
+    pre_move_attacker: Option<UnknownPokemonState>,
+    /// S24: pre-move fog snapshot of each target (same rationale — e.g. a Def-drop
+    /// secondary or a resist berry consumed by the observed hit itself must not leak
+    /// into the oracle run for that hit).
+    pre_move_targets: Vec<(FieldSlot, UnknownPokemonState)>,
+}
+
+/// S28: for each turn segment (split on top-level `EndOfTurn`), the slot of the last
+/// move-committed actor — the unique slot for which Analytic's "moved last" fires.
+///
+/// A slot "commits a move" (occupies a `MoveAction` in the sim's queue) when it emits
+/// a top-level `MoveUsed`, `Cant`, `MustRecharge`, `ChargingMove`, or `SingleMoveOrTurn`.
+/// A `Switch` is a different action type and does NOT block Analytic. The last such
+/// slot in the segment is the last mover; if it committed via a non-`MoveUsed` event
+/// (e.g. a later mon flinched), then no `MoveUsed` this segment moved last and Analytic
+/// fires for nobody — captured naturally because that slot won't equal any attacker's
+/// own `MoveUsed` user unless it also used the move.
+fn compute_analytic_last_movers(top_events: &[InformationEvent]) -> Vec<Option<FieldSlot>> {
+    let mut segments: Vec<Option<FieldSlot>> = Vec::new();
+    let mut last: Option<FieldSlot> = None;
+    for e in top_events {
+        match &e.kind {
+            EventKind::MoveUsed { user, .. }
+            | EventKind::ChargingMove { user, .. } => last = Some(user.clone()),
+            EventKind::Cant { slot, .. }
+            | EventKind::MustRecharge { slot }
+            | EventKind::SingleMoveOrTurn { slot, .. } => last = Some(slot.clone()),
+            EventKind::EndOfTurn => segments.push(last.take()),
+            _ => {}
+        }
+    }
+    segments.push(last); // trailing segment (event list need not end at EndOfTurn)
+    segments
 }
 
 /// Depth-first event walk applying Passes 1–3.
@@ -846,6 +898,19 @@ fn process_battle_event(
             })
             .collect();
 
+        // S24: full pre-move fog snapshots for Pass 3 (see MoveContext field docs).
+        let pre_move_attacker = mon_idx_for_active_slot(state, user)
+            .and_then(|i| get_mon_by_idx(state, i))
+            .cloned();
+        let pre_move_targets = targets
+            .iter()
+            .filter_map(|t| {
+                mon_idx_for_active_slot(state, t)
+                    .and_then(|i| get_mon_by_idx(state, i))
+                    .map(|m| (t.clone(), m.clone()))
+            })
+            .collect();
+
         ctx.move_context = Some(MoveContext {
             user_slot: user.clone(),
             pokemon_move: move_used.clone(),
@@ -853,6 +918,8 @@ fn process_battle_event(
             is_crit,
             pre_hit_hp,
             observed_damage: Vec::new(),
+            pre_move_attacker,
+            pre_move_targets,
         });
         // Clear switch_slot: we're now in a move context, not a switch context.
         ctx.switch_slot = None;
@@ -909,6 +976,8 @@ fn process_battle_event(
     if matches!(event.kind, EventKind::EndOfTurn) {
         ctx.damaging_hits_this_turn.clear();
         ctx.move_users_this_turn.clear();
+        // S28: advance to the next turn segment's precomputed last-mover.
+        ctx.turn_segment += 1;
     }
 
     ctx.move_context = prev_move_ctx;
@@ -973,6 +1042,25 @@ fn pass1_apply_event(
                     // which survives switch-out).
                     pass1_choice_exclusion(mon, move_used);
                     mon.last_used_move = Some(move_used.clone());
+
+                    // S27: mirror the sim's zero-effective-damage reset
+                    // (simulator/mod.rs `total_effective_dmg == 0` → count = 0,
+                    // last_used_move = None). A damaging move that dealt no damage to
+                    // any non-user target (miss / immune / fully blocked) breaks the
+                    // Metronome streak in the sim; without this the fog streak drifts
+                    // upward and the drifted value is materialized straight into the
+                    // Pass 3 oracle for our own attacker (Direction A).
+                    let is_damaging = ctx
+                        .move_dex
+                        .get(move_used)
+                        .map_or(false, |md| !matches!(md.category, MoveCategory::Status));
+                    let dealt_damage = event.reactions.iter().any(|r| {
+                        matches!(&r.kind, EventKind::DamageDealt { target, .. } if target != user)
+                    });
+                    if is_damaging && !dealt_damage {
+                        mon.consecutive_move_count = 0;
+                        mon.last_used_move = None;
+                    }
                 }
             }
             // Field-level last-move tracker for Copycat (simulator/mod.rs sets this
@@ -1728,6 +1816,63 @@ fn pass1_apply_event(
             }
         }
 
+        // ── Transformed: overlay the copy source's fog identity (S26) ─────────────
+        // The transformer adopts the copy source's species/types/stats/ability/moves/
+        // boosts; its own HP, max HP, item, status, level, nature, EVs, IVs are kept.
+        // We read the FOG entry at `into_slot`, so copying our own Known mon yields
+        // exact stats and copying a hidden opponent inherits that opponent's bounds.
+        EventKind::Transformed { slot, into_slot, into_species } => {
+            let src_idx = mon_idx_for_active_slot(state, into_slot);
+            let dst_idx = mon_idx_for_active_slot(state, slot);
+            if let (Some(si), Some(di)) = (src_idx, dst_idx) {
+                if let Some(src) = get_mon_by_idx(state, si).cloned() {
+                    if let Some(mon) = get_mon_mut_by_idx(state, di) {
+                        // Save the pre-transform snapshot once (revert on switch-out).
+                        if mon.pre_transform.is_none() {
+                            mon.pre_transform = Some(Box::new(mon.clone()));
+                        }
+                        // Displayed species is authoritative (matches what the player
+                        // sees); everything else is copied from the source's fog view.
+                        mon.possible_species = Unknown::Known(into_species.clone());
+                        mon.possible_types = src.possible_types.clone();
+                        mon.possible_weight_hg = src.possible_weight_hg.clone();
+                        mon.possible_genders = src.possible_genders.clone();
+                        mon.possible_abilities = src.possible_abilities.clone();
+                        mon.possible_original_abilities = src.possible_original_abilities.clone();
+                        mon.boosts = src.boosts;
+                        // Moves copied; PP (and max PP) capped at 5 per Transform rules.
+                        mon.known_moves = src.known_moves.clone();
+                        for i in 0..4 {
+                            if src.max_pp[i] >= 0 {
+                                let capped = src.max_pp[i].min(5);
+                                mon.max_pp[i] = capped;
+                                mon.move_pp[i] = capped;
+                            } else {
+                                mon.max_pp[i] = -1;
+                                mon.move_pp[i] = -1;
+                            }
+                        }
+                        // Stats and their EV/IV/nature back-solve inputs come from the
+                        // source for the five non-HP stats; HP (index 0) is NOT copied.
+                        for i in 1..6 {
+                            mon.minStats[i] = src.minStats[i];
+                            mon.maxStats[i] = src.maxStats[i];
+                            mon.min_pre_nature_stat[i] = src.min_pre_nature_stat[i];
+                            mon.max_pre_nature_stat[i] = src.max_pre_nature_stat[i];
+                        }
+                    }
+                }
+            }
+            // Pre-transform SpeedComparison / EVIV / HasAbility clauses describe the
+            // transformer's OWN pre-copy stats and ability — stale now. Drop them
+            // (predicate purge only; setter records are unaffected by a transform).
+            if let Some(di) = dst_idx {
+                state
+                    .predicates
+                    .retain(|clause| !clause.iter().any(|lit| statement_references_mon(lit, di)));
+            }
+        }
+
         // Events with no direct state update in Pass 1 — all handled by
         // enclosing MoveUsed context in Passes 2/3 or by reactions.
         // When a Pokémon fails to move due to flinch, attempt to attribute the flinch
@@ -1958,10 +2103,15 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot) {
                 Player::P2 => state.p2_known_back_mons.push(benched),
             }
         } else {
-            match slot.player {
-                Player::P1 => state.p1_possible_back_mons.push(benched),
-                Player::P2 => state.p2_possible_back_mons.push(benched),
-            }
+            // S29: a non-`Known` species here is an UNRESOLVED Illusion disguise
+            // (`Possibly([shown, Zoroark…])` set by `maybe_widen_for_illusion` and
+            // never collapsed by learnset narrowing). Discard it rather than benching:
+            // `pass1_switch` re-matches bench entries by `Known` species, so it could
+            // never be pulled back out, and benching it alongside the real teammate's
+            // still-present entry would make one physical roster member count as two
+            // in `teammate_indices` / item-clause propagation (the hazard the
+            // `teammate_indices` TODO warns about). Knowledge gained while the identity
+            // was ambiguous is lost — an acceptable trade for a Zoroark edge case.
         }
     }
 }
@@ -1971,8 +2121,33 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     let slot_i = sw.slot.slot_index as usize;
     let species = &sw.species;
 
-    // Find the mon in the back and move it to the active slot.
-    let back_mon: Option<UnknownPokemonState> = {
+    // S29: if an Illusion disguise is possible on this side (a Zoroark forme sits on
+    // this side's known bench) and the incoming "species" is not itself a Zoroark
+    // forme, the shown species may be a disguise. Consuming the matching benched
+    // teammate's entry would move the REAL teammate's accumulated observations into
+    // the active slot and then mutate them with events that physically happen to the
+    // Zoroark — merging two distinct mons. Build a fresh species-only entry instead
+    // and let `maybe_widen_for_illusion` widen it to `Possibly([species, Zoroark…])`.
+    let illusion_possible = {
+        let back = match player {
+            Player::P1 => &state.p1_known_back_mons,
+            Player::P2 => &state.p2_known_back_mons,
+        };
+        let back_species: Vec<Species> = back
+            .iter()
+            .filter_map(|m| match &m.possible_species {
+                Unknown::Known(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        bcp::contains_illusion_forme(&back_species) && !bcp::is_illusion_forme(species)
+    };
+
+    // Find the mon in the back and move it to the active slot — skipped entirely when
+    // an Illusion disguise is possible (S29: never consume a benched entry then).
+    let back_mon: Option<UnknownPokemonState> = if illusion_possible {
+        None
+    } else {
         let known = match player {
             Player::P1 => &mut state.p1_known_back_mons,
             Player::P2 => &mut state.p2_known_back_mons,
@@ -2290,6 +2465,20 @@ pub(crate) fn apply_switch_out_reset(state: &mut UnknownBattleState, slot: &Fiel
     };
     let i = slot.slot_index as usize;
     if let Some(mon) = actives.get_mut(i) {
+        // S26: revert a Transform/Imposter copy first (mirrors the sim's
+        // apply_switch_out_ability_effects). Restore the saved pre-transform snapshot
+        // but preserve the live HP / status / fainted flag (damage and status taken
+        // while transformed carry over); the boost/volatile clears below then apply
+        // to the reverted mon exactly as the sim clears them after reverting.
+        if let Some(saved) = mon.pre_transform.take() {
+            let live_hp = mon.hp.clone();
+            let live_status = mon.status.clone();
+            let live_fainted = mon.fainted;
+            *mon = *saved;
+            mon.hp = live_hp;
+            mon.status = live_status;
+            mon.fainted = live_fainted;
+        }
         // Clear all stat boosts (mirrors simulator clear_pokemon_for_switch_out:6206).
         mon.boosts.iter_mut().for_each(|b| *b = 0);
         // Clear all volatile statuses (mirrors simulator:6205).
@@ -3241,6 +3430,11 @@ fn pass2_item_from_move(
         if hit_any_opponent && !user_fainted && !items_suppressed {
             if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
                 if !has_lo_recoil {
+                    // S24 epoch note: these ability reads are post-move, which is
+                    // sound here — a mid-move ability change (Mummy on contact)
+                    // replaces Magic Guard BEFORE the LO chip fires in the sim, so
+                    // "no recoil + post-move non-MG ability + Life Orb" is genuinely
+                    // impossible and the exclusion below remains valid.
                     let (could_mg, could_sf, could_klutz, has_secondary) = {
                         let um = get_mon_by_idx(state, user_idx);
                         (
@@ -3611,6 +3805,11 @@ fn pass2_contact_absence(
         let defender_klutz_possible =
             !unknown_is_excluded(&mon.possible_abilities, &Ability::Klutz);
 
+        // S24 epoch note: `mon.item` here is post-move — if the observed hit consumed
+        // the defender's berry, the item is already `Known(None)` and the exclusion
+        // below no-ops (unknown_exclude on a different Known value). Vacuous but
+        // sound; the mon provably wasn't holding a Helmet this move either way.
+        //
         // Rocky Helmet: Magic Guard on the attacker prevents the chip, so Helmet
         // absence is only certain when Magic Guard is also excluded — and (S21) when
         // the Helmet itself cannot have been inert (Magic Room / defender Klutz).
@@ -4865,6 +5064,15 @@ fn pass3_damage_to_stats(
     }
 }
 
+/// S28: `true` if the attacker at `user_slot` is this turn's last move-committed
+/// actor, i.e. Analytic's ×1.3 applied. Reads the precomputed per-segment last-mover.
+fn analytic_fired(ctx: &BattleContext, user_slot: &FieldSlot) -> bool {
+    ctx.analytic_last_movers
+        .get(ctx.turn_segment)
+        .and_then(|o| o.as_ref())
+        .map_or(false, |last| last == user_slot)
+}
+
 /// Returns `true` for moves whose base power depends on one or both mons' Speed stats.
 fn is_speed_dependent_bp(move_used: &PokemonMove) -> bool {
     matches!(move_used, PokemonMove::GyroBall | PokemonMove::ElectroBall)
@@ -5505,10 +5713,37 @@ fn pass3_direction_b(
     use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
     use crate::simulator::DamageConfig;
 
-    let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
+    // S24: enumerate items/abilities and materialize from the PRE-MOVE snapshots —
+    // the live mons already carry this move's own reactions (self-boosts, mid-move
+    // status, consumed items), which must not leak into the oracle run for a hit
+    // that happened before them. Bounds are still written back to the live mon by
+    // apply_unconditional_tightening. Falls back to the live mon when no snapshot
+    // exists (defensive; MoveUsed always populates it).
+    let attacker_unk = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| mc.pre_move_attacker.clone())
+        .or_else(|| get_mon_by_idx(state, user_idx).cloned());
+    let Some(attacker_unk) = attacker_unk else {
         return;
     };
-    let Some(mut target_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+    // S26: a Transformed attacker's Atk/SpA are COPIED from the copy source, not
+    // derived from its own species base — the BSV inversion here would bound the
+    // wrong thing. Skip (the copy source's own stat inference stands on its own).
+    if attacker_unk.pre_transform.is_some() {
+        return;
+    }
+    let target_unk = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| {
+            mc.pre_move_targets
+                .iter()
+                .find(|(slot, _)| slot == target_slot)
+                .map(|(_, m)| m.clone())
+        })
+        .or_else(|| get_mon_by_idx(state, target_idx).cloned());
+    let Some(mut target_unk) = target_unk else {
         return;
     };
     // S23: materialize the target at the HP this hit was actually taken at.
@@ -5577,15 +5812,13 @@ fn pass3_direction_b(
                 // MegaSol: perceives Sun → affects Fire (×1.5) and Water (×0.5) only.
                 Ability::MegaSol => matches!(eff_type_b, PokemonType::Fire | PokemonType::Water),
                 // Analytic: ×1.3 only when the holder moves LAST this turn.
-                // The oracle's empty action_queue makes attacker_is_last_mover always true, but
-                // the real move order is known from the event stream: if the target has already
-                // moved this turn (its slot is in move_users_this_turn), the attacker moved after
-                // it → Analytic fired. If the target has NOT moved yet, the attacker moved first
-                // → Analytic did not fire; including it would wrongly inflate the oracle's output
+                // The oracle's empty action_queue makes attacker_is_last_mover always
+                // true, so keep the ability in the union only when the attacker really
+                // moved last (S28: precomputed from the event stream — exact in singles
+                // and doubles, and correct when the last actor flinched or switched).
+                // Keeping it when Analytic did NOT fire would inflate the oracle output
                 // and push the feasible-BSV upper bound below truth (unsound exclusion).
-                Ability::Analytic => {
-                    ctx.move_users_this_turn.iter().any(|s| s == target_slot)
-                }
+                Ability::Analytic => analytic_fired(ctx, user_slot),
                 // Type-converting abilities (-ate, Normalize): keep for Normal moves to allow
                 // conversion; for non-Normal we conservatively keep them too because an -ate
                 // attacker with an -ate ability may have a different oracle type (soundness).
@@ -5611,6 +5844,32 @@ fn pass3_direction_b(
         Some((attacker_unk.minStats[5], attacker_unk.maxStats[5]))
     } else {
         None
+    };
+
+    // ── S25: attacker HP hypotheses for the pinch-ability gate ────────────────
+    // Blaze/Overgrow/Swarm/Torrent gate on `hp*3 <= max` in the oracle, but the
+    // materialize sentinel maps any non-100 display percent to 0.5×max — never
+    // active. Decide which gate states the attacker's display percent admits and
+    // enumerate each as its own oracle hypothesis (`None` = keep the snapshot HP
+    // as-is, i.e. the non-pinch sentinel path; `Some(hp)` = override with a Number
+    // strictly inside the gate — Number passes through materialize untouched, and
+    // `make_atk` leaves stats[0] at minStats[0], which is what the override is
+    // computed against). Thresholds are widened by 1% on each side of the exact
+    // 33.33% bucket edge so display-rounding jitter can never drop a possible
+    // hypothesis (extra variants only widen the union — sound).
+    let attacker_hp_variants: Vec<Option<PokemonHP>> = match &attacker_unk.hp {
+        // Exact HP (or full HP): the gate is already evaluated correctly.
+        PokemonHP::Number(_) | PokemonHP::Percent(100) => vec![None],
+        PokemonHP::Percent(p) => {
+            let pinch_hp = PokemonHP::Number((attacker_unk.minStats[0] / 4).max(1));
+            if *p <= 31 {
+                vec![Some(pinch_hp)] // certainly at ≤1/3: pinch abilities are live
+            } else if *p <= 34 {
+                vec![Some(pinch_hp), None] // bucket straddles the gate: union both
+            } else {
+                vec![None] // certainly above 1/3: sentinel path is correct
+            }
+        }
     };
 
     // ── Unconditional tightening: union over all (nature_class, item, ability) ─
@@ -5651,31 +5910,48 @@ fn pass3_direction_b(
         };
 
         // ── Neutral-gear BSV interval (for predicate emission) ─────────────
+        // S25: union across the attacker HP hypotheses — a Known pinch ability
+        // (neutral_a) needs the correct gate state, and a wider neutral interval
+        // only loosens the emitted GE/LE clause bounds (sound).
         let neutral_i = neutral_item(&attacker_unk);
         let neutral_a = neutral_ability(&attacker_unk);
 
-        let (bsv_lo_neutral, bsv_hi_neutral) = find_feasible_bsv_range_b(
-            state,
-            &attacker_unk,
-            &target_unk,
-            user_slot,
-            target_slot,
-            move_data,
-            &oracle_config,
-            targets_mult,
-            *nat_mod,
-            si,
-            base_stats,
-            bsv_lo,
-            bsv_hi,
-            neutral_i,
-            neutral_a,
-            0,
-            exact_damage,
-            is_crit,
-            bp_override,
-            attacker_speed_range,
-        );
+        let mut bsv_lo_neutral: Option<u16> = None;
+        let mut bsv_hi_neutral: Option<u16> = None;
+        for hp_variant in &attacker_hp_variants {
+            let mut atk_neutral = attacker_unk.clone();
+            if let Some(hp) = hp_variant {
+                atk_neutral.hp = hp.clone();
+            }
+            let (lo, hi) = find_feasible_bsv_range_b(
+                state,
+                &atk_neutral,
+                &target_unk,
+                user_slot,
+                target_slot,
+                move_data,
+                &oracle_config,
+                targets_mult,
+                *nat_mod,
+                si,
+                base_stats,
+                bsv_lo,
+                bsv_hi,
+                neutral_i.clone(),
+                neutral_a.clone(),
+                0,
+                exact_damage,
+                is_crit,
+                bp_override,
+                attacker_speed_range,
+            );
+            if let Some(lo_v) = lo {
+                bsv_lo_neutral = Some(bsv_lo_neutral.map_or(lo_v, |g: u16| g.min(lo_v)));
+            }
+            if let Some(hi_v) = hi {
+                bsv_hi_neutral = Some(bsv_hi_neutral.map_or(hi_v, |g: u16| g.max(hi_v)));
+            }
+        }
 
         per_class.push(NatureClassBound {
             mod_f32: *nat_mod,
@@ -5685,44 +5961,49 @@ fn pass3_direction_b(
             bsv_hi_neutral,
         });
 
-        // ── Union over all (item, ability, streak) assignments ─────────────
+        // ── Union over all (item, ability, streak, hp-hypothesis) assignments ──
         for item in &item_choices {
             for ability in &ability_choices {
                 for &streak in &streak_range {
-                    let mut atk_for_oracle = attacker_unk.clone();
-                    atk_for_oracle.consecutive_move_count = streak;
+                    for hp_variant in &attacker_hp_variants {
+                        let mut atk_for_oracle = attacker_unk.clone();
+                        atk_for_oracle.consecutive_move_count = streak;
+                        if let Some(hp) = hp_variant {
+                            atk_for_oracle.hp = hp.clone();
+                        }
 
-                    let (lo, hi) = find_feasible_bsv_range_b(
-                        state,
-                        &atk_for_oracle,
-                        &target_unk,
-                        user_slot,
-                        target_slot,
-                        move_data,
-                        &oracle_config,
-                        targets_mult,
-                        *nat_mod,
-                        si,
-                        base_stats,
-                        bsv_lo,
-                        bsv_hi,
-                        item.clone(),
-                        ability.clone(),
-                        streak,
-                        exact_damage,
-                        is_crit,
-                        bp_override,
-                        attacker_speed_range,
-                    );
-                    if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
-                        let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
-                        let final_hi = (hi_v as f64 * *nat_mod as f64).floor() as u16;
-                        global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
-                        global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
-                        global_stat_lo =
-                            Some(global_stat_lo.map_or(final_lo, |g| g.min(final_lo)));
-                        global_stat_hi =
-                            Some(global_stat_hi.map_or(final_hi, |g| g.max(final_hi)));
+                        let (lo, hi) = find_feasible_bsv_range_b(
+                            state,
+                            &atk_for_oracle,
+                            &target_unk,
+                            user_slot,
+                            target_slot,
+                            move_data,
+                            &oracle_config,
+                            targets_mult,
+                            *nat_mod,
+                            si,
+                            base_stats,
+                            bsv_lo,
+                            bsv_hi,
+                            item.clone(),
+                            ability.clone(),
+                            streak,
+                            exact_damage,
+                            is_crit,
+                            bp_override,
+                            attacker_speed_range,
+                        );
+                        if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
+                            let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
+                            let final_hi = (hi_v as f64 * *nat_mod as f64).floor() as u16;
+                            global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
+                            global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
+                            global_stat_lo =
+                                Some(global_stat_lo.map_or(final_lo, |g| g.min(final_lo)));
+                            global_stat_hi =
+                                Some(global_stat_hi.map_or(final_hi, |g| g.max(final_hi)));
+                        }
                     }
                 }
             }
@@ -6130,14 +6411,35 @@ fn pass3_direction_a(
         return;
     }
 
-    let Some(mut defender_unk) = get_mon_by_idx(state, target_idx).cloned() else {
+    // S24: source both mons from the pre-move snapshots (see pass3_direction_b).
+    let defender_unk = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| {
+            mc.pre_move_targets
+                .iter()
+                .find(|(slot, _)| slot == target_slot)
+                .map(|(_, m)| m.clone())
+        })
+        .or_else(|| get_mon_by_idx(state, target_idx).cloned());
+    let Some(mut defender_unk) = defender_unk else {
         return;
     };
     // S23: materialize the defender at the HP this hit was actually taken at, so
     // full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) stay live for
     // the hit that broke full HP.
     defender_unk.hp = hit_pre_hp.clone();
-    let Some(attacker_unk) = get_mon_by_idx(state, user_idx).cloned() else {
+    // S26: a Transformed defender's Def/SpD are copied, not derived from its species
+    // base — skip the BSV inversion (see pass3_direction_b).
+    if defender_unk.pre_transform.is_some() {
+        return;
+    }
+    let attacker_unk = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| mc.pre_move_attacker.clone())
+        .or_else(|| get_mon_by_idx(state, user_idx).cloned());
+    let Some(attacker_unk) = attacker_unk else {
         return;
     };
 
@@ -6189,16 +6491,14 @@ fn pass3_direction_a(
     // Attacker is OUR known mon; use its actual known stats.
     let atk_stats = attacker_unk.minStats;
     let atk_item = neutral_item(&attacker_unk);
-    // Analytic correction: ×1.3 only when the attacker moves LAST.
-    // If the target (defender) has not yet appeared in move_users_this_turn, the
-    // attacker moved first → Analytic did not fire.  Substituting Ability::None ensures
-    // the oracle uses ×1.0, preventing an inflated damage prediction that would raise
-    // the defender's min stat bound above the truth (unsound exclusion).
+    // Analytic correction: ×1.3 only when the attacker (our own mon = user_slot)
+    // moves LAST this turn. When it did not fire, substitute Ability::None so the
+    // oracle uses ×1.0 — otherwise the inflated damage prediction raises the
+    // defender's min stat bound above the truth (unsound exclusion). S28: decided by
+    // the precomputed per-segment last-mover, not by whether the target has moved.
     let atk_ability = {
         let raw = neutral_ability(&attacker_unk);
-        if raw == Ability::Analytic
-            && !ctx.move_users_this_turn.iter().any(|s| s == target_slot)
-        {
+        if raw == Ability::Analytic && !analytic_fired(ctx, user_slot) {
             Ability::None
         } else {
             raw
@@ -6915,6 +7215,14 @@ pub fn pass5_back_solve(
     config: &InferenceConfig,
     dex: &HashMap<Species, PokemonData>,
 ) {
+    // S26: a Transformed mon's stats are COPIED from the copy source, not derived
+    // from this mon's own species base + EV/IV/nature. Back-solving EVs against the
+    // (now copied) species base would be nonsense — and its own EV/IV/nature bounds
+    // are preserved in `pre_transform` for the switch-out revert. Skip until it
+    // reverts.
+    if mon.pre_transform.is_some() {
+        return;
+    }
     let base: [u16; 6] = match &mon.possible_species {
         Unknown::Known(s) => match dex.get(s) {
             Some(d) => d.base_stats,

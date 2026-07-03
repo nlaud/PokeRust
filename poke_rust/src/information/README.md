@@ -78,7 +78,7 @@ rounding is available.
 | Category | Examples |
 |---|---|
 | Major actions | `MoveUsed`, `Switch`, `SimultaneousSwitch`, `Faint`, `EndOfTurn` |
-| Form changes | `MegaEvolution`, `Terastallization`, `FormeChange`, `TypeChanged` |
+| Form changes | `MegaEvolution`, `Terastallization`, `FormeChange`, `TypeChanged`, `Transformed` |
 | HP changes | `DamageDealt`, `Healed`, `SetHp` |
 | Hit qualifiers | `Crit`, `Immune`, `Missed`, `MoveFailed`, `Blocked`, `HitCount` |
 | Status | `StatusInflicted`, `StatusCured` |
@@ -524,6 +524,17 @@ Population Bomb, the per-hit BP override is computed from the hit index:
 - Triple Axel: 20, 40, 60
 - Population Bomb: 20 per hit
 
+#### Analytic ("moved last" ×1.3)
+
+The oracle materializes an empty action queue, so its own `attacker_is_last_mover`
+check is always true. Pass 3 therefore decides Analytic's ×1.3 from the event stream
+instead (S28): `compute_analytic_last_movers` records, per turn segment, the single
+slot that committed a move last (`MoveUsed` / `Cant` / `MustRecharge` / `ChargingMove`
+— a `Switch` does not commit a move). Analytic fired iff the attacker is that slot.
+This is exact in singles and doubles and correct when the last actor flinched, was
+fully paralyzed, or the target switched (the old heuristic "did the target already
+move?" was wrong in all of those cases).
+
 #### Speed-dependent BP (Gyro Ball, Electro Ball)
 
 BP for these moves is a function of the speed ratio between attacker and target.
@@ -782,6 +793,23 @@ When a Pokémon's `possible_species` is `Possibly([s1, s2, …])` (typically set
 This is only sound because it only removes species that are provably unable to produce
 the observed move. It never narrows on species that could plausibly learn it.
 
+### Illusion and the bench (S29)
+
+When an Illusion disguise is possible (a Zoroark forme sits on the switching side's
+known bench) and the incoming species is not itself a Zoroark forme, `pass1_switch`
+does **not** consume the benched entry that matches the shown species — the shown
+species may be a disguise, and consuming the real teammate's entry would merge two
+physical mons (the real teammate's accumulated fog would be mutated by events that
+happened to the Zoroark). Instead it builds a fresh species-only active entry and
+`maybe_widen_for_illusion` widens it to `Possibly([shown, Zoroark…])`.
+
+If that still-ambiguous entry switches out before its identity resolves (no
+`IllusionEnded`, no learnset collapse to `Known`), `bench_outgoing_mon` **discards**
+it rather than benching: bench re-entry matches by `Known` species (so it could never
+be pulled back), and benching it beside the real teammate's surviving entry would
+double-count one physical roster member in `teammate_indices` / item-clause
+propagation.
+
 ---
 
 ## The Materialize Bridge (`materialize.rs`)
@@ -800,6 +828,11 @@ The damage oracle (`calculate_damage_outcomes_for_target_with_options`) takes co
   in the oracle. No double-count with the defensive allowlist union: those abilities are
   always enumerated by `defensive_damage_abilities`, but when HP is not 100% they
   contribute nothing because the oracle gates them.
+- **Pinch-gate caveat (S25)**: the ×0.5 sentinel sits above the ≤1/3 gate used by
+  Blaze / Overgrow / Swarm / Torrent, so Direction B enumerates attacker HP
+  *hypotheses* explicitly: display ≤31% → a pinch-active `Number` override; 32–34%
+  (bucket straddles the gate) → both hypotheses unioned; ≥35% / 100% / exact
+  `Number` → the sentinel path alone.
 
 `materialize_battle(unk, p1_active, p2_active) -> BattleState`
 - Copies all field effects (weather, terrain, side conditions, pseudo-weathers, slot
