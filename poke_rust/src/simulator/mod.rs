@@ -715,15 +715,12 @@ fn apply_single_hit_branch(
         // Captures (new_hp, max_hp) after take_damage so DamageDealt can be emitted once
         // the target_mon borrow has ended (same split pattern as Smack Down volatiles below).
         let mut damage_dealt_hp_info: Option<(u16, u16)> = None;
-        // S5: a pinch/HP berry (Oran, Sitrus, Figy, ...) can fire mid-hit when this
-        // damage drops the target to or below its threshold. Captured separately so
-        // the berry's heal is reported as its OWN Healed event, with DamageDealt
-        // reporting the PRE-berry HP. Folding both into one combined DamageDealt (the
-        // pre-fix behavior) understated the true damage dealt — Pass 3's damage-to-
-        // stat inference reads this delta directly, and a smaller-than-true delta can
-        // exclude the attacker's real offensive stat from the feasible BSV range
-        // (damage is monotone in BSV, so a fictitiously small target damage value can
-        // fall outside the roll range the true stat actually produces).
+        // A pinch/HP berry (Oran, Sitrus, Figy, ...) can fire mid-hit when this damage
+        // drops the target to or below its threshold. Captured separately so the heal
+        // emits as its own Healed event and DamageDealt reports the pre-berry HP —
+        // folding both into one DamageDealt would understate the true damage, and
+        // Pass 3's damage-to-stat inference reads that delta directly (damage is
+        // monotone in BSV, so an understated delta can exclude the attacker's true stat).
         let mut berry_heal_hp_info: Option<(u16, u16)> = None;
         let target_env = simulator_helpers::berry_env(&bs, target_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&bs);

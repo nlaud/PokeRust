@@ -32,26 +32,22 @@ pub fn materialize_pokemon(
     item: Item,
     ability: Ability,
 ) -> PokemonState {
-    // Species: use the known species; fall back to a placeholder when ambiguous
-    // (Pass 3 skips mons with non-Known species, so this path is defensive).
+    // Pass 3 skips mons with non-Known species, so this fallback is unreachable in practice.
     let species = match &unk.possible_species {
         Unknown::Known(s) => s.clone(),
-        _ => Species::Garchomp, // fallback; never reached in practice
+        _ => Species::Garchomp,
     };
 
-    // Types: use the known types (always Known after a switch-in reveals them).
     let types = match &unk.possible_types {
         Unknown::Known(t) => t.clone(),
         _ => vec![PokemonType::Normal],
     };
 
-    // Tera type: use known if available; otherwise default to species type.
     let tera_type = match &unk.possible_tera_type {
         Unknown::Known(t) => t.clone(),
         _ => types.first().cloned().unwrap_or(PokemonType::Normal),
     };
 
-    // Mega species / ability: Known once mega evolution has been observed.
     let mega_species = match &unk.mega_species {
         Unknown::Known(s) => s.clone(),
         _ => None,
@@ -61,20 +57,17 @@ pub fn materialize_pokemon(
         _ => None,
     };
 
-    // Current HP: 100% -> max HP (stats[0]); any other percent -> max_hp × 0.5, a
-    // sentinel strictly below max_hp that deactivates full-HP-gated reducers
-    // (Multiscale, ShadowShield, TeraShell all check `hp == stats[0]`). This also
-    // keeps `defensive_damage_abilities` in inference.rs — which applies those three
-    // unconditionally — from double-counting, since they only read as active here
-    // when the mon is genuinely at full HP.
+    // Any percent below 100 maps to 0.5×max HP: a sentinel strictly below max HP so
+    // full-HP-gated reducers (Multiscale/ShadowShield/TeraShell, checked via `hp ==
+    // stats[0]`) read as inactive here and aren't double-counted by
+    // `defensive_damage_abilities`, which applies them unconditionally.
     let hp = match &unk.hp {
         PokemonHP::Number(n) => *n,
         PokemonHP::Percent(100) => stats_override[0],
         PokemonHP::Percent(_) => (stats_override[0] as f64 * 0.5) as u16,
     };
 
-    // last_*_damage_taken: used by Counter/Mirror Coat/Metal Burst, which Pass 3
-    // skips. Use 0 (safe default).
+    // Counter/Mirror Coat/Metal Burst read these but Pass 3 skips them, so 0 is a safe default.
     let last_phys: u16 = match &unk.last_physical_damage_taken {
         PokemonHP::Number(n) => *n,
         PokemonHP::Percent(_) => 0,
@@ -88,26 +81,25 @@ pub fn materialize_pokemon(
         PokemonHP::Percent(_) => 0,
     };
 
-    // Gender: pick any known; fall back to Genderless (doesn't affect damage).
+    // Fallback doesn't affect damage.
     let gender = match &unk.possible_genders {
         Unknown::Known(g) => *g,
         _ => PokemonGender::Genderless,
     };
 
-    // Weight: use the known weight (1:1 with species).
     let weight_hg = match &unk.possible_weight_hg {
         Unknown::Known(w) => *w,
         _ => 0,
     };
 
-    // Nature: doesn't matter for the oracle (stats are already overridden),
-    // but pick something neutral so any nature-dependent code is predictable.
+    // Doesn't matter for the oracle (stats are already overridden); neutral keeps any
+    // nature-dependent code path predictable.
     let nature = match &unk.possible_natures {
         Unknown::Known(n) => *n,
         _ => Nature::Hardy,
     };
 
-    // Moves: fill known slots; None for unknown (only matters for Last Resort).
+    // None for unknown slots; only Last Resort reads this.
     let moves: [Option<PokemonMove>; 4] = unk.known_moves.clone();
     let move_pp: [u8; 4] = [
         unk.move_pp[0].max(0) as u8,
@@ -195,13 +187,13 @@ pub fn materialize_battle(
     p1_active: Vec<PokemonState>,
     p2_active: Vec<PokemonState>,
 ) -> BattleState {
-    // Turn-count fallback (3) is safe: the oracle only checks whether an effect is
-    // *active*, never the remaining-turn value. Known(0) is the permanent-effect
-    // sentinel (S-A per-effect timer model, e.g. primordial weather) and must stay
-    // in its own match arm first, or it gets folded into the `_ => 3` fallback.
+    // The oracle only checks whether an effect is active, never its remaining duration,
+    // so an unknown timer can fall back to an arbitrary 3. Known(0) is the permanent-effect
+    // sentinel (e.g. primordial weather) and must stay its own match arm ahead of the
+    // fallback, or it gets folded into it.
     let weather_turns: Option<u8> = unk.weather_turns.as_ref().map(|wu| match wu {
-        Unknown::Known(t) => *t,      // preserves Known(0) permanent-effect sentinel
-        _ => 3,                       // arbitrary; does not affect oracle output
+        Unknown::Known(t) => *t,
+        _ => 3,
     });
     let terrain_turns: Option<u8> = unk.terrain_turns.as_ref().map(|tu| match tu {
         Unknown::Known(t) => *t,
@@ -232,7 +224,6 @@ pub fn materialize_battle(
         })
         .collect();
 
-    // Slot conditions: copy p1/p2 slot conditions (affect Future Sight damage, etc.)
     let p1_slot_conds: Vec<Vec<SlotCondition>> = unk.p1_slot_conditions.clone();
     let p2_slot_conds: Vec<Vec<SlotCondition>> = unk.p2_slot_conditions.clone();
 
