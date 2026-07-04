@@ -126,35 +126,25 @@ mod bcp;
 
 // ── mon_idx helpers ────────────────────────────────────────────────────────────
 //
-// S1 soundness fix: `mon_idx` order is `[p1_active…, p2_active…, p1_known_back…,
-// p1_possible_back…, p2_known_back…, p2_possible_back…]` — BOTH active segments
-// come first, before either side's bench. This is a deliberate departure from a
-// naive per-side-contiguous layout (`[p1_active, p1_back, p2_active, p2_back]`),
-// which was the previous ordering and had a critical staleness bug: any switch on
-// EITHER side grows/shrinks that side's `known_back`/`possible_back` Vecs (`push`
-// on switch-out, `Vec::remove` on switch-in), which shifts every index that comes
-// after it. Under the old layout, P1's bench sat between P1's actives and P2's
-// actives, so *every* P1 switch — even one that has nothing to do with P2 — silently
-// shifted P2's active mon_idx values. `Statement`s referencing a P2 active mon
-// (SpeedComparison, weather/terrain/screen setters, HasItem/HasAbility clauses from
-// Pass 2/3/4) persist in `state.predicates` across turns, so a stale index would
-// silently retarget a later force/exclusion onto the wrong physical Pokémon.
+// S1: `mon_idx` order is `[p1_active…, p2_active…, p1_known_back…, p1_possible_back…,
+// p2_known_back…, p2_possible_back…]` — both active segments come first, before
+// either side's bench. The naive per-side-contiguous layout (`[p1_active, p1_back,
+// p2_active, p2_back]`) had a staleness bug: bench Vecs grow/shrink on switch (`push`
+// out, `Vec::remove` in), shifting every later index. With P1's bench sitting between
+// P1's actives and P2's actives, any P1 switch silently shifted P2's active mon_idx —
+// and persisted `Statement`s (SpeedComparison, weather/terrain/screen setters,
+// HasItem/HasAbility clauses) would then retarget the wrong physical Pokémon.
 //
-// With both active segments fixed at the front, `p1_active_mons.len()` and
-// `p2_active_mons.len()` are the only two quantities involved in computing any
-// active mon's mon_idx, and (after the initial lead-sending bootstrap) both are
-// permanently stable for the rest of the battle — see `pass1_switch`, which always
-// overwrites an already-populated active slot in place rather than push/removing.
-// Only BENCH mon indices remain unstable, but no code persists a Statement or
-// setter field referencing a bench index (`teammate_indices`/`enforce_unique_item`
-// compute and consume bench indices atomically within a single event, never storing
-// them for later re-evaluation), so this is sound.
+// With both actives fixed at the front, `p1_active_mons.len()` / `p2_active_mons.len()`
+// are the only inputs to computing an active mon's index, and both stay stable for
+// the rest of the battle (`pass1_switch` overwrites an active slot in place, never
+// push/removes). Bench indices remain unstable, but nothing persists a bench index
+// across events (`teammate_indices`/`enforce_unique_item` compute and consume them
+// atomically within one event), so this is sound.
 //
-// The trade-off: each side's full roster (active + bench) is no longer a single
-// contiguous range (P1's bench sits after P2's active in this layout). Helpers that
-// need "all mons on side X" (`teammate_indices`, `TeamStatusCured`, `mon_is_p2`)
-// must therefore check each segment explicitly rather than assume one [start, end)
-// range per side.
+// Trade-off: a side's full roster is no longer one contiguous range (P1's bench sits
+// after P2's active). Helpers needing "all mons on side X" (`teammate_indices`,
+// `TeamStatusCured`, `mon_is_p2`) must check each segment explicitly.
 
 /// The six roster-segment sizes needed to resolve any `mon_idx`, in `mon_idx` order.
 struct MonSegments {
@@ -358,21 +348,16 @@ fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
 
 // ── Item-clause helpers ────────────────────────────────────────────────────────
 
-/// Return the `mon_idx` values for every Pokémon on the **same side** as
-/// `source_idx`, excluding `source_idx` itself. Used by item-clause propagation.
+/// Return the `mon_idx` values for every Pokémon on the same side as `source_idx`,
+/// excluding `source_idx` itself. Used by item-clause propagation.
 ///
-/// Soundness assumption: each entry in the six roster lists
-/// (`p1_active`, `p1_known_back`, `p1_possible_back`, and their p2 mirrors) is a
-/// *pairwise-distinct* physical roster member. This holds today — `possible_back`
-/// is only populated by the not-yet-built frontend and is empty in all current
-/// code paths. If future Illusion / overlapping-hypothesis modeling lets two
-/// `possible_back` entries represent the *same* physical slot, gate exclusion
-/// here so it never fires across such alternatives.
+/// Assumes every entry in the six roster lists is a pairwise-distinct physical mon.
+/// Holds today (`possible_back` is unpopulated), but would need gating if future
+/// Illusion modeling ever let two `possible_back` entries alias the same slot.
 // TODO: revisit if possible_back ever holds non-distinct Illusion hypotheses.
 ///
-/// S1: a side's full roster is no longer one contiguous `mon_idx` range (P1's bench
-/// sits after P2's active segment) — this walks the P1 or P2 range pair from
-/// `MonSegments::ranges()` instead of assuming a single `[start, end)` span.
+/// S1: walks the P1/P2 range pair from `MonSegments::ranges()` rather than a single
+/// `[start, end)` span, since a side's roster isn't contiguous (see mon_idx header).
 fn teammate_indices(state: &UnknownBattleState, source_idx: usize) -> Vec<usize> {
     let [p1_active, p2_active, p1_back, p2_back] = MonSegments::of(state).ranges();
 
@@ -802,16 +787,11 @@ struct BattleContext<'a> {
     /// Populated after each MoveUsed's Pass 3 runs; cleared at EndOfTurn.
     /// (Retained for potential future use; Analytic now uses `analytic_last_movers`.)
     move_users_this_turn: Vec<FieldSlot>,
-    /// S28: per-turn-segment last move-committed actor — the unique slot for which
-    /// Analytic's "moved last" fires. Computed once up-front from the top-level event
-    /// stream (see `compute_analytic_last_movers`). Indexed by `turn_segment`.
-    ///
-    /// The sim's `attacker_is_last_mover` returns true when no OTHER slot has a
-    /// pending `MoveAction`, so a mon that ultimately flinches / is fully paralyzed
-    /// (emitting `Cant`) still occupied a MoveAction and blocks the earlier mon's
-    /// Analytic. The old heuristic ("did the target already move this turn?") was
-    /// wrong whenever the target switched, flinched, or was fully paralyzed (it never
-    /// entered `move_users_this_turn`), and was the wrong predicate in doubles.
+    /// S28: per-turn-segment last move-committed actor — the slot for which Analytic's
+    /// "moved last" fires. Computed once from the event stream (`compute_analytic_last_movers`),
+    /// indexed by `turn_segment`. Replaces the old "did the target already move this turn?"
+    /// heuristic, which was wrong whenever the target switched, flinched, or was fully
+    /// paralyzed (and was the wrong predicate in doubles regardless).
     analytic_last_movers: Vec<Option<FieldSlot>>,
     /// S28: index into `analytic_last_movers`; advanced at each `EndOfTurn`.
     turn_segment: usize,
@@ -840,15 +820,12 @@ struct MoveContext {
 }
 
 /// S28: for each turn segment (split on top-level `EndOfTurn`), the slot of the last
-/// move-committed actor — the unique slot for which Analytic's "moved last" fires.
+/// move-committed actor — the slot for which Analytic's "moved last" fires.
 ///
-/// A slot "commits a move" (occupies a `MoveAction` in the sim's queue) when it emits
-/// a top-level `MoveUsed`, `Cant`, `MustRecharge`, `ChargingMove`, or `SingleMoveOrTurn`.
-/// A `Switch` is a different action type and does NOT block Analytic. The last such
-/// slot in the segment is the last mover; if it committed via a non-`MoveUsed` event
-/// (e.g. a later mon flinched), then no `MoveUsed` this segment moved last and Analytic
-/// fires for nobody — captured naturally because that slot won't equal any attacker's
-/// own `MoveUsed` user unless it also used the move.
+/// A slot commits a move (occupies a `MoveAction` in the sim's queue) via a top-level
+/// `MoveUsed`, `Cant`, `MustRecharge`, `ChargingMove`, or `SingleMoveOrTurn`; `Switch`
+/// does not. If the segment's last commit wasn't a `MoveUsed` (e.g. the last mon
+/// flinched), Analytic fires for nobody that segment.
 fn compute_analytic_last_movers(top_events: &[InformationEvent]) -> Vec<Option<FieldSlot>> {
     let mut segments: Vec<Option<FieldSlot>> = Vec::new();
     let mut last: Option<FieldSlot> = None;
@@ -921,7 +898,6 @@ fn process_battle_event(
             pre_move_attacker,
             pre_move_targets,
         });
-        // Clear switch_slot: we're now in a move context, not a switch context.
         ctx.switch_slot = None;
 
         // Accumulate damaging hits for the Cant{Flinch} deduction.
@@ -966,9 +942,8 @@ fn process_battle_event(
         pass2_guaranteed_status_absence(state, event, ctx);
         pass2_ground_immune_clause(state, event, ctx);
         pass3_damage_to_stats(state, event, ctx);
-        // Record the user AFTER Pass 3 so that during this move's own oracle calls
-        // the user is not yet in the list — which correctly represents "I am the current
-        // mover; any opponent already in this list moved before me (Analytic fires for me)".
+        // Recorded after Pass 3 so this move's own oracle calls don't see the user in
+        // the list yet (vestigial ordering; Analytic itself now uses analytic_last_movers).
         ctx.move_users_this_turn.push(user_slot_for_order);
     }
 
@@ -1043,13 +1018,11 @@ fn pass1_apply_event(
                     pass1_choice_exclusion(mon, move_used);
                     mon.last_used_move = Some(move_used.clone());
 
-                    // S27: mirror the sim's zero-effective-damage reset
-                    // (simulator/mod.rs `total_effective_dmg == 0` → count = 0,
-                    // last_used_move = None). A damaging move that dealt no damage to
-                    // any non-user target (miss / immune / fully blocked) breaks the
-                    // Metronome streak in the sim; without this the fog streak drifts
-                    // upward and the drifted value is materialized straight into the
-                    // Pass 3 oracle for our own attacker (Direction A).
+                    // S27: mirror the sim's zero-effective-damage reset (simulator/mod.rs:
+                    // total_effective_dmg == 0 → count = 0, last_used_move = None). A damaging
+                    // move dealing no damage to any non-user target (miss/immune/blocked) breaks
+                    // the Metronome streak in the sim; otherwise the fog streak drifts upward and
+                    // feeds straight into the Pass 3 oracle for our own attacker (Direction A).
                     let is_damaging = ctx
                         .move_dex
                         .get(move_used)
@@ -1122,7 +1095,6 @@ fn pass1_apply_event(
                             mon.damaged_by_this_turn.push(attacker.clone());
                         }
                         mon.last_damage_attacker = Some(attacker.clone());
-                        // Physical vs special from move category.
                         if let Some(md) = ctx.move_dex.get(&mctx.pokemon_move) {
                             match md.category {
                                 MoveCategory::Physical => {
@@ -1135,11 +1107,10 @@ fn pass1_apply_event(
                                 }
                                 MoveCategory::Status => {}
                             }
-                            // Rage Fist hit counter: the sim increments only for a target of a
-                            // Physical/Special direct hit — never for the move's own recoil/
-                            // crash/drain-reversal self-damage on the user (a separate code
-                            // path there), and never for Status moves or EOT/residual chip
-                            // (no enclosing MoveUsed at all, handled by the `None` arm below).
+                            // Rage Fist counter: increments only for a Physical/Special hit on
+                            // a non-user target — never the move's own recoil/crash self-damage
+                            // (separate path), Status moves, or EOT/residual chip (no enclosing
+                            // MoveUsed; handled by the `None` arm below).
                             if target != attacker
                                 && matches!(md.category, MoveCategory::Physical | MoveCategory::Special)
                             {
@@ -1287,19 +1258,15 @@ fn pass1_apply_event(
         EventKind::AbilityRevealed { slot, ability } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    // Narrow-vs-overwrite: if the revealed ability is already possible
-                    // (a candidate in `Possibly`, unexcluded in `Not`, or already the
-                    // `Known` value), narrow/no-op via `unknown_set_known`. If it is
-                    // excluded under ANY of the three `Unknown` representations —
-                    // outside a `Possibly` slot set, in a `Not` exclusion list (e.g.
-                    // ruled out earlier by switch-in absence inference), or a different
-                    // `Known` value — a live ability change occurred (Trace, Skill Swap,
-                    // Mummy, Wandering Spirit, …): overwrite rather than treating it as
-                    // a contradiction. `possible_original_abilities` is left untouched
-                    // in every case, since none of these represent the mon's innate
-                    // ability changing. S14: previously only the `Possibly` case was
-                    // handled this way; `Not`-excluded and `Known(other)` incorrectly
-                    // panicked even though they are the same live-change scenario.
+                    // Narrow-vs-overwrite: if the revealed ability is still possible, narrow
+                    // via `unknown_set_known`. If it's excluded under any `Unknown`
+                    // representation (outside `Possibly`, in a `Not` list, or a different
+                    // `Known` value), a live ability change occurred (Trace, Skill Swap,
+                    // Mummy, Wandering Spirit, …) — overwrite instead of treating it as a
+                    // contradiction. `possible_original_abilities` is untouched either way;
+                    // it tracks the innate ability, which never changes here. S14: previously
+                    // only the `Possibly` case overwrote; `Not`-excluded and `Known(other)`
+                    // wrongly panicked despite being the same live-change scenario.
                     if unknown_is_excluded(&mon.possible_abilities, ability) {
                         mon.possible_abilities = Unknown::Known(ability.clone());
                     } else {
@@ -1736,16 +1703,12 @@ fn pass1_apply_event(
         }
 
         // ── Anticipation: add KnowsThreateningMove clause for opposing active mons ──
-        // Fires when a Pokémon's Anticipation ability shudders on switch-in, meaning
-        // at least one opposing active Pokémon knows a SE or OHKO move against the holder.
+        // Fires when Anticipation shudders on switch-in: at least one opposing active
+        // mon knows a SE or OHKO move against the holder.
         //
-        // Observer convention: P1 is always the observer.  Useful inference requires
-        // the threatening side to be *unknown* (P2).  Therefore only act when the
-        // Anticipation holder is on P1's side (threats are P2 — unknown → useful clause).
-        // A shudder on P2's Anticipation would constrain P1 mons, which the observer
-        // already knows, so no clause is added in that case.
+        // P1 is always the observer, so only a P1 holder yields useful inference — a
+        // P2 shudder would constrain P1's own (already-known) mons.
         EventKind::AnticipationShudder { slot } => {
-            // Only act when the holder is on the observer's own side (P1 = observer).
             if slot.player != Player::P1 {
                 return;
             }
@@ -1958,19 +1921,17 @@ fn statement_references_mon(stmt: &Statement, idx: usize) -> bool {
 }
 
 /// S18: an active `mon_idx` is a *slot* index — stable as a number (see S1), but
-/// re-bound to a different physical Pokémon whenever the slot's occupant switches.
-/// Persisted `Statement`s (SpeedComparison, HasItem/HasAbility disjunctions, EVIV
-/// bounds) and the weather/terrain/screen setter records all store the slot index of
-/// the mon they were observed on; left in place across a switch, BCP and the timer
-/// machinery would evaluate and even *force* them against the incoming Pokémon
-/// (e.g. a SpeedComparison derived from Mon A's move order raising the fresh
+/// re-bound to a different physical Pokémon on every switch. Persisted `Statement`s
+/// (SpeedComparison, HasItem/HasAbility disjunctions, EVIV bounds) and the weather/
+/// terrain/screen setter records store the slot index of the mon they were observed
+/// on; left in place, BCP and the timer machinery would force them against the
+/// incoming Pokémon (e.g. a SpeedComparison from Mon A's move order raising fresh
 /// switch-in B's min Spe, or a timer collapse revealing A's Heat Rock as Known on B).
 ///
-/// Called at the moment the occupant leaves. Dropping a whole clause when any of its
-/// literals references the slot is sound (removing a constraint only widens); the
-/// cost is completeness — knowledge about the benched mon that lived only in the
-/// predicate store is forgotten. Field-level knowledge (item/ability/EV bounds) is
-/// carried to the bench by `bench_outgoing_mon` and survives re-entry.
+/// Called when the occupant leaves. Dropping a clause referencing the slot only
+/// widens (sound); the cost is completeness — predicate-only knowledge about the
+/// benched mon is forgotten. Field-level knowledge (item/ability/EV bounds) survives
+/// via `bench_outgoing_mon`.
 fn purge_mon_scoped_knowledge(state: &mut UnknownBattleState, slot: &FieldSlot) {
     let Some(idx) = mon_idx_for_active_slot(state, slot) else {
         return; // Initial lead send-out: the slot was never occupied.
@@ -2017,20 +1978,19 @@ fn historical_item_literal_value(stmt: &Statement, idx: usize, outgoing: &Item) 
 
 /// S19: `HasItem` clauses encode "held item X *at observation time*", but BCP
 /// evaluates them against the mon's *current* item. Once the held item changes
-/// mid-battle (Knock Off / Thief / Fling → `ItemLost`, berry or gem consumption →
-/// `ItemLost{consumed}`, Trick / Switcheroo / Recycle / Pickup → `ItemGained`),
-/// every persisted clause about this mon's item is stale: a `[HasItem(BrightPowder)
-/// ∨ HasItem(LaxIncense)]` miss-explanation clause became an unsatisfiable-clause
-/// panic when the explaining item was later knocked off (item now `Known(None)`
-/// falsifies both literals), and an `[EVIVStatGE ∨ HasItem(OccaBerry)]` bound got
-/// unit-forced once the berry disjunct was falsified by its own consumption —
+/// (Knock Off/Thief/Fling → `ItemLost`; consumption → `ItemLost{consumed}`;
+/// Trick/Switcheroo/Recycle/Pickup → `ItemGained`), every persisted clause about this
+/// mon's item is stale: `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]` became an
+/// unsatisfiable-clause panic once the explaining item was knocked off (item now
+/// `Known(None)` falsifies both literals), and `[EVIVStatGE ∨ HasItem(OccaBerry)]`
+/// was unit-forced once the berry disjunct was falsified by its own consumption —
 /// raising the stat floor above the true berry-world value.
 ///
 /// Every surviving clause was emitted (or last resolved) during the holding window
-/// that just ended — this function maintains that invariant inductively by running
-/// at *every* item-change event. So when the outgoing item is known, each item
-/// literal about this mon has a definite historical truth value: resolve it —
-/// satisfied clauses are dropped, falsified literals pruned (a pruned-to-unit clause
+/// that just ended; running this at every item-change event maintains that invariant
+/// inductively. With the outgoing item known, each item literal about this mon has a
+/// definite historical truth value: satisfied clauses are dropped, falsified literals
+/// pruned (a pruned-to-unit clause
 /// is forced by the next BCP run, e.g. the `[HasItem(DampRock) ∨ WeatherTurns{5}]`
 /// pair correctly collapses to the base-duration branch when the setter turns out to
 /// have held a berry). When the outgoing item is unknown (`ItemGained` onto an
@@ -2103,15 +2063,14 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot) {
                 Player::P2 => state.p2_known_back_mons.push(benched),
             }
         } else {
-            // S29: a non-`Known` species here is an UNRESOLVED Illusion disguise
-            // (`Possibly([shown, Zoroark…])` set by `maybe_widen_for_illusion` and
-            // never collapsed by learnset narrowing). Discard it rather than benching:
-            // `pass1_switch` re-matches bench entries by `Known` species, so it could
-            // never be pulled back out, and benching it alongside the real teammate's
-            // still-present entry would make one physical roster member count as two
-            // in `teammate_indices` / item-clause propagation (the hazard the
-            // `teammate_indices` TODO warns about). Knowledge gained while the identity
-            // was ambiguous is lost — an acceptable trade for a Zoroark edge case.
+            // S29: a non-`Known` species here is an unresolved Illusion disguise
+            // (`Possibly([shown, Zoroark…])`, never collapsed by learnset narrowing).
+            // Discard rather than bench: `pass1_switch` re-matches by `Known` species
+            // so it could never be pulled back out, and benching it alongside the real
+            // teammate's still-present entry would double-count one physical roster
+            // member in `teammate_indices`/item-clause propagation (the hazard the
+            // `teammate_indices` TODO warns about). Losing knowledge gained while
+            // ambiguous is an acceptable trade for a Zoroark edge case.
         }
     }
 }
@@ -2276,18 +2235,16 @@ fn recompute_stats_for_iv_mode(
     }
 }
 
-/// After a Mega Evolution / permanent Forme Change swaps in a new base-stat table
-/// for an already-tracked mon, remap `minStats`/`maxStats`/`min_pre_nature_stat`/
-/// `max_pre_nature_stat` against the new base using the mon's EXISTING (possibly
-/// already-tightened) `minEvs`/`maxEvs`/`minIvs`/`maxIvs`/`possible_natures` bounds.
+/// After a Mega Evolution / permanent Forme Change swaps in a new base-stat table for
+/// an already-tracked mon, remap the stat-bound fields against the new base using the
+/// mon's EXISTING (possibly already-tightened) EV/IV/nature bounds.
 ///
-/// Mega Evolution and forme changes do not alter a Pokémon's EVs, IVs, or nature —
-/// only the base-stat table used to compute the final stat from them. Unlike
-/// `recompute_stats_for_iv_mode` (used for a brand-new sighting), this must NOT reset
-/// EV/IV/nature bounds to the theoretical worst/best case — that would discard
-/// information already gained from prior battle observations (Pass 3/5). Leaving the
-/// old species' stat window in place instead (the bug this fixes) makes the window
-/// inconsistent with the new base stats and pass5 sees an impossible constraint.
+/// Mega Evolution and forme changes don't alter EVs, IVs, or nature — only the
+/// base-stat table. Unlike `recompute_stats_for_iv_mode` (for a brand-new sighting),
+/// this must NOT reset EV/IV/nature bounds to the theoretical worst/best case, which
+/// would discard information already gained from prior observations (Pass 3/5). The
+/// bug this fixes: leaving the old species' stat window in place is inconsistent with
+/// the new base stats, and pass5 then sees an impossible constraint.
 fn recompute_stat_bounds_for_species_change(
     mon: &mut UnknownPokemonState,
     new_base: [u16; 6],
@@ -2351,33 +2308,15 @@ fn apply_switch_state_to_mon(
     }
 }
 
-/// Infer or exclude the ability `Regenerator` by comparing the mon's last-known
-/// benched HP against the incoming HP observed in `sw`.
+/// Infer or exclude `Regenerator` by comparing the mon's last-known benched HP
+/// against the incoming HP observed in `sw`. Regenerator heals `floor(max_hp / 3)`
+/// silently on switch-out (no `Healed`/`AbilityRevealed` event) — the only observable
+/// is a ≈33% higher return HP (±2% from `hp_to_percent` rounding). See the inline
+/// guards below for the exact skip conditions (hazards, near-full HP, own-side
+/// redundancy).
 ///
-/// Regenerator heals exactly `floor(max_hp / 3)` when a Pokémon switches out.  The
-/// heal fires silently (no `Healed` or `AbilityRevealed` event), so the only
-/// observable is that the mon returns with higher HP than it left with.  In percent
-/// terms this is ≈33% (±2% from `hp_to_percent` rounding).
-///
-/// Rules:
-/// - Only runs when the ability is still uncertain (`!Known`).
-/// - Only runs for `PokemonHP::Percent` (opponent-side) — own-side abilities are
-///   already known so the inference is redundant there.
-/// - Skips when entry hazards are on the entering side (conservative — hazard chip
-///   reduces the re-entry HP and would require knowing the mon's exact types to
-///   account for; not yet implemented).
-/// - Skips when the mon left near-full HP, because Regenerator would cap at 100%
-///   and the observed delta would be indistinguishable from normal (≤1% rounding
-///   noise).
-///
-/// When both hypotheses are distinguishable:
-/// - **Observed delta ≈ 33% gain** → narrow `possible_abilities` and
-///   `possible_original_abilities` to `Known(Regenerator)`.
-/// - **No gain (delta ≈ 0)** → exclude `Regenerator` from both ability fields.
-///
-/// Updating `possible_original_abilities` makes the inference persist across
-/// future switch cycles (which reset `possible_abilities` to `possible_original_abilities`
-/// via `apply_switch_out_reset`).
+/// Also updates `possible_original_abilities` so the inference survives future switch
+/// cycles, which reset `possible_abilities` from it via `apply_switch_out_reset`.
 fn infer_regenerator_from_hp_delta(
     mon: &mut UnknownPokemonState,
     sw: &SwitchState,
@@ -2709,11 +2648,6 @@ fn weather_effects_might_be_suspended(state: &UnknownBattleState) -> bool {
 
 // ── End-of-turn bookkeeping ────────────────────────────────────────────────────
 
-/// Apply internal EOT resets that mirror `end_turn` Phase 5 and
-/// `decrement_effect_timers` in `simulator/helpers.rs`.
-///
-/// Visible EOT effects (weather chip, heal, etc.) are handled by the event walk
-/// visiting `EndOfTurn::reactions`; this function handles the invisible internal state.
 /// Return the item that extends a weather effect beyond its base 5-turn duration.
 /// Used by I-A to reveal the rock item when the weather timer confirms the 8-turn branch.
 fn weather_extension_item(weather: &Weather) -> Option<Item> {
@@ -2764,6 +2698,10 @@ fn emit_extension_item_if_collapsed(
     }
 }
 
+/// Apply internal EOT resets that mirror `end_turn` Phase 5 and
+/// `decrement_effect_timers` in `simulator/helpers.rs`. Visible EOT effects (weather
+/// chip, heal, etc.) are handled by the event walk visiting `EndOfTurn::reactions`;
+/// this function handles the invisible internal state.
 fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
     // ── Decrement field timers and detect Possibly→Known collapses (I-A) ─────
     //
@@ -3100,26 +3038,15 @@ const TERRAIN_SETTING_ABILITIES: &[Ability] = &[
     Ability::HadronEngine,
 ];
 
-/// After a batch of switch-ins, scan the combined `reactions` list and remove
-/// abilities from `possible_abilities` that MUST have activated but didn't.
-///
-/// Sound: only excludes when we can be certain the ability would have been visible.
-/// Conservative: multi-mon battles with multiple possible setters are skipped unless
-/// the attribution is unambiguous.
 /// Returns `true` when every active Pokémon on the side opposing `entering_slot` would
-/// produce a visible `BoostChanged { Atk, −1 }` reaction if Intimidate had fired.
+/// produce a visible `BoostChanged { Atk, −1 }` reaction if Intimidate had fired;
+/// `false` (Intimidate cannot be safely excluded) when at least one foe would silently
+/// block/redirect/invert the drop, or already sits at −6 Atk (the drop is a no-op).
 ///
-/// Returns `false` — so Intimidate **cannot** be safely excluded — when at least one foe:
-/// - Has an ability that silently blocks, redirects, or inverts the −1 Atk drop, OR
-/// - Already has Atk boost clamped at −6 (the −1 is a no-op, nothing visible).
-///
-/// Abilities that prevent a visible −1:
-/// - `InnerFocus / OwnTempo / Oblivious / Scrappy` — full immunity; the −1 is never applied.
-/// - `ClearBody / WhiteSmoke / FullMetalBody` — drop blocked; only `AbilityRevealed` emitted.
-/// - `HyperCutter` — specifically blocks Atk drops.
-/// - `GuardDog` — converts the −1 into a +1 raise.
-/// - `Contrary` — inverts the −1 into a +1 on that target.
-/// - `MirrorArmor` — bounces the drop back onto the Intimidate user; no −1 on the foe.
+/// Abilities that prevent a visible −1: `InnerFocus/OwnTempo/Oblivious/Scrappy` (full
+/// immunity), `ClearBody/WhiteSmoke/FullMetalBody` (blocked, only `AbilityRevealed`
+/// fires), `HyperCutter` (blocks Atk drops specifically), `GuardDog` (converts to +1),
+/// `Contrary` (inverts to +1), `MirrorArmor` (bounces onto the Intimidate user instead).
 ///
 /// Observer's own mons always have `Known` abilities, so checking `Unknown::Known(ab)` is safe.
 fn intimidate_drop_would_be_visible(state: &UnknownBattleState, entering_slot: &FieldSlot) -> bool {
@@ -3166,6 +3093,10 @@ fn intimidate_drop_would_be_visible(state: &UnknownBattleState, entering_slot: &
     true
 }
 
+/// After a batch of switch-ins, scan the combined `reactions` list and exclude
+/// abilities from `possible_abilities` that must have activated but didn't. Sound:
+/// only excludes when the ability's effect would certainly have been visible.
+/// Conservative: skipped for multi-mon batches with more than one possible setter.
 fn pass1_ability_absence_inference(
     state: &mut UnknownBattleState,
     entered_slots: &[FieldSlot],
@@ -3218,14 +3149,11 @@ fn pass1_ability_absence_inference(
         }
 
         // ── Weather-setting abilities ────────────────────────────────────────
-        // Guard: if strong/primordial weather is already active, `set_weather`
-        // silently no-ops (helpers.rs:5478-5492), so the absence of a WeatherChanged
-        // reaction gives no information — the entering Drizzle/Drought/etc. mon simply
-        // didn't change anything.  Skipping also prevents a contradiction-panic: the
-        // absence pass runs before the nested AbilityRevealed reaction is processed
-        // (process_battle_event:800 vs :803), so without this guard we would exclude
-        // the ability and then immediately try to reveal it as Known — triggering
-        // inference_contradiction!.
+        // Guard: if strong/primordial weather is already active, `set_weather` silently
+        // no-ops (helpers.rs:5478-5492), so absence of a WeatherChanged reaction carries
+        // no information. It also avoids a contradiction-panic: the absence pass runs
+        // before the nested AbilityRevealed reaction is processed, so without this guard
+        // we'd exclude the ability then immediately try to reveal it as Known.
         let current_is_strong_weather = matches!(
             state.weather,
             Some(Weather::HeavyRain | Weather::ExtremeSunlight | Weather::StrongWinds)
@@ -3685,7 +3613,7 @@ fn pass2_flinch_holder_from_cant(
                 item: Item::KingsRock,
             });
         }
-        // Razor Fang (now triggers flinch in the simulator — fixed alongside this change)
+        // Razor Fang
         if legal_ok(&Item::RazorFang) && !unknown_is_excluded(&mon.item, &Item::RazorFang) {
             clause.push(Statement::HasItem {
                 mon_idx: ai,
@@ -3841,8 +3769,6 @@ fn pass2_contact_absence(
     }
 }
 
-/// Recursively scan a `MoveUsed` event (and its nested reactions) for an
-/// `ItemRevealed` event naming `item` on the given `slot`.
 /// Recursively scan `event` and all nested reactions for any event satisfying `pred`.
 fn reaction_contains<F: Fn(&EventKind) -> bool>(event: &InformationEvent, pred: &F) -> bool {
     event.reactions.iter().any(|r| pred(&r.kind) || reaction_contains(r, pred))
@@ -3855,6 +3781,7 @@ fn any_reaction_deep<F: Fn(&EventKind) -> bool>(reactions: &[InformationEvent], 
     reactions.iter().any(|r| pred(&r.kind) || any_reaction_deep(&r.reactions, pred))
 }
 
+/// `true` if a nested `ItemRevealed` names `item` on `slot` anywhere under `event`.
 fn reaction_contains_item_reveal(
     event: &InformationEvent,
     slot: &FieldSlot,
@@ -4942,27 +4869,22 @@ fn pass3_damage_to_stats(
         // Detect whether this target's HP is a multi-hit sequence.
         let is_multi = move_data.multihit_range[0] > 0 || n_hits > 1;
 
-        // S23: walk the target's reactions IN ORDER, tracking three things the old
-        // DamageDealt-only collection got wrong for multi-hit sequences:
+        // S23: walk the target's reactions IN ORDER, fixing three multi-hit bugs in
+        // the old DamageDealt-only collection:
         //
-        // 1. Per-hit crit — the sim emits `Crit{target}` immediately before the hit's
-        //    own `DamageDealt` (single emit site, gated on damage > 0), so a pending
-        //    flag attributes each crit to exactly its hit. The old global "any hit
-        //    critted" flag applied the crit constraint to NON-crit hits too, whose
-        //    feasible-BSV interval (observed damage ÷ crit multiplier) sits below the
-        //    truth — an unsound exclusion whenever a mixed-crit multi-hit landed.
+        // 1. Per-hit crit — `Crit{target}` is emitted immediately before its hit's
+        //    `DamageDealt`, so a pending flag attributes it to exactly that hit. The
+        //    old global "any hit critted" flag also constrained non-crit hits to
+        //    crit-only rolls, excluding the true (lower) BSV whenever a multi-hit
+        //    mixed crits.
         //
-        // 2. Interleaved heals — a pinch berry firing mid-sequence is emitted as its
-        //    own `Healed` between two `DamageDealt`s (see the emission convention in
-        //    the module README). Skipping it left the next hit's baseline at the
-        //    pre-berry value, understating that hit's damage by the heal amount.
+        // 2. Interleaved heals — a mid-sequence pinch berry emits its own `Healed`
+        //    between `DamageDealt`s; skipping it left the next hit's baseline
+        //    pre-berry, understating that hit's damage.
         //
-        // 3. `current_hp` is passed down as each hit's true pre-hit HP so the oracle
-        //    materializes the defender at the HP the hit was actually taken at —
-        //    full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) were
-        //    previously evaluated against the post-move HP (pass 1 has already applied
-        //    the whole reaction tree by the time Pass 3 runs), which disabled them for
-        //    exactly the hit that dropped the defender below full HP.
+        // 3. `current_hp` threads each hit's true pre-hit HP into the oracle, so
+        //    full-HP-gated reducers (Multiscale/Shadow Shield/Tera Shell) aren't
+        //    evaluated against the already-post-move HP Pass 1 leaves on the live mon.
         let mut current_hp: PokemonHP = pre_hp.clone();
         let mut pending_crit = false;
         let mut hit_idx: usize = 0;
@@ -6832,14 +6754,6 @@ fn priority_lift_escapes(
     escapes
 }
 
-/// Emit `SpeedComparison` predicates from the observed top-level move order.
-///
-/// For each pair of consecutive moves in the same effective priority bracket:
-/// - Wraps the natural SpeedComparison in a disjunction with any move-order explanation
-///   that could account for the ordering without implying a speed edge (Quick Claw,
-///   Quick Draw, ability priority, Stall, item speed modifiers, weather abilities, etc.).
-/// - Accounts for Trick Room (reverses the inferred fast/slow assignment) and Tailwind
-///   (folds the ×2 multiplier into the comparison deterministically).
 /// Per-mover snapshot used by `pass4_speed_from_order`: everything needed to emit a
 /// pairing's clause, including the speed-relevant fields (Spe boost stage, paralysis,
 /// Tailwind) captured AS OF the point in the turn just before this mover's own
@@ -6912,6 +6826,14 @@ fn update_speed_snapshot_from_reactions(
     }
 }
 
+/// Emit `SpeedComparison` predicates from the observed top-level move order.
+///
+/// For each pair of consecutive moves in the same effective priority bracket:
+/// - Wraps the natural SpeedComparison in a disjunction with any move-order explanation
+///   that could account for the ordering without implying a speed edge (Quick Claw,
+///   Quick Draw, ability priority, Stall, item speed modifiers, weather abilities, etc.).
+/// - Accounts for Trick Room (reverses the inferred fast/slow assignment) and Tailwind
+///   (folds the ×2 multiplier into the comparison deterministically).
 fn pass4_speed_from_order(
     state: &mut UnknownBattleState,
     top_events: &[InformationEvent],

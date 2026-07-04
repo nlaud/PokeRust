@@ -171,7 +171,7 @@ pub struct UnknownPokemonState {
 
     /// Saved pre-transform snapshot for Transform revert. Boxed to avoid
     /// an infinite-size struct (recursive types require indirection in Rust).
-    pub pre_transform: Option<Box<UnknownPokemonState>>, //Don't need to make this unknown unless pokemon with imposter + transform exists
+    pub pre_transform: Option<Box<UnknownPokemonState>>,
 
     /// Original types saved when Mimicry overwrites them. Restored when terrain ends or
     /// the holder switches out. `None` when Mimicry is not active.

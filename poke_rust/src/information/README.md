@@ -1,17 +1,31 @@
 # `information/` — Fog-of-War Inference Engine
 
-This module translates raw, player-visible battle events into tightened bounds on
-an opponent's hidden attributes (EVs, IVs, nature, item, ability, species). It has
-two distinct jobs:
+A Pokémon battle is played under partial information: each side sees the moves,
+switches, damage, and status changes that happen on the field, but not the
+opponent's EVs, IVs, nature, held item, or (until revealed) ability or exact
+species form. This module turns the stream of *player-visible* events from a
+battle into the tightest possible bounds on everything hidden about the
+opponent's team — without ever guessing. Every bound it produces is backed by a
+proof that no possible held item/EV spread/nature/etc. that could have produced
+the observed events has been excluded.
 
-1. **Event model** (`information.rs`, `unknowns.rs`) — define what a player can observe
-   and how partial knowledge is represented.
-2. **Inference engine** (`inference.rs`, `materialize.rs`) — consume an ordered list of
-   events and update the fog-of-war state through six passes.
+It has two jobs, split across four files:
+
+| File | Job |
+|---|---|
+| `information.rs` | Defines `InformationEvent` / `EventKind` — the vocabulary of everything a player can observe. |
+| `unknowns.rs` | Defines `UnknownBattleState` / `UnknownPokemonState` — the fog-of-war mirror of the simulator's concrete state, plus the `Unknown<T>` lattice and the `Statement` constraint language. |
+| `inference.rs` (+ `inference/bcp.rs`) | The six-pass engine that walks events and tightens the fog-of-war state. Entry point: `apply_information`. |
+| `materialize.rs` | Turns a hypothesis (an `UnknownPokemonState` plus a candidate stat/item/ability choice) back into a concrete `PokemonState`/`BattleState` so the real damage-calculation code can be reused as an oracle. |
+
+The rest of this document works through all four in depth. A companion file,
+`AUDIT.md`, is the running log of soundness bugs found and fixed in this engine
+(referenced throughout as "S17", "S23", etc.) — read it alongside this document
+for the failure modes that motivated specific design choices.
 
 ---
 
-## Part 1 — What a Player Sees: `Vec<InformationEvent>`
+## Part 1 — What a Player Sees: `InformationEvent`
 
 ### The nested tree model
 
@@ -24,70 +38,100 @@ pub struct InformationEvent {
 }
 ```
 
-The `reactions` field is the key structural choice: **child events are nested inside
-the event that caused them**, rather than emitted as a flat sequence with a cause tag.
-This means the cause is always implicit from the parent, and the inference engine can
-read item/ability/secondary effects in context without back-referencing earlier entries.
+This module differs from Showdown's flat SIM-PROTOCOL stream in one deliberate
+way: **child events are nested inside the event that caused them**, in the
+`reactions` field, rather than emitted as a flat sequence with a separate cause
+tag. The parent always supplies the cause, so no event needs an "effect
+source" field, and the inference engine can read an item/ability/secondary
+effect in context without having to scan backwards through earlier entries.
 
-A Life Orb + pinch-berry + drain scenario looks like:
+A Life Orb Drain Punch that crits, gets resisted by a Sitrus Berry, and drains
+back HP looks like:
 
 ```
 MoveUsed { user: P1[0], move: DrainPunch, targets: [P2[0]] }
   ├── Crit { target: P2[0] }
-  ├── DamageDealt { target: P2[0], new_hp: Percent(38) }          ← PRE-berry HP
+  ├── DamageDealt { target: P2[0], new_hp: Percent(38) }          ← pre-berry HP
   ├── Healed { target: P2[0], new_hp: Percent(56) }               ← Sitrus Berry heal
-  ├── ItemLost { slot: P2[0], item: SitrusBerry, consumed: true } ← from the item ledger
+  ├── ItemLost { slot: P2[0], item: SitrusBerry, consumed: true }
   ├── Healed { target: P1[0], new_hp: Number(185) }               ← drain
   └── DamageDealt { target: P1[0], new_hp: Number(162) }          ← Life Orb recoil
 ```
 
-A pinch/HP berry (Oran, Sitrus, Figy, …) that fires mid-hit is emitted as its own
-`Healed` reaction reporting the **post-berry** HP, immediately after a `DamageDealt`
-that reports the **pre-berry** HP — never folded into one combined `DamageDealt`,
-which would understate the true damage dealt (Pass 3's damage-to-stat inference reads
-this delta directly). The berry's own `ItemLost` is a separate sibling, emitted
-generically later by a whole-move item-snapshot diff rather than nested under the
-specific `Healed` it explains — a real player sees the same three lines in this order.
-A damage-*reducing* item (a type-resist berry like Occa Berry) is different: it has no
-HP-change event of its own at all, since its effect is baked directly into the single
-damage roll.
+A pinch/HP berry (Oran, Sitrus, Figy, …) firing mid-hit is always its own
+`Healed` reaction reporting the **post-berry** HP, immediately after a
+`DamageDealt` reporting the **pre-berry** HP — the two are never folded into
+one combined `DamageDealt`. Folding them would understate the damage actually
+dealt, and Pass 3's damage→stat inversion reads that delta directly: an
+understated delta can silently exclude the attacker's true offensive stat from
+the feasible range (damage is monotone in the stat, so a smaller-than-true
+delta simply doesn't fall in the roll range the true stat produces). The
+berry's `ItemLost` is its own sibling event, emitted later by a whole-move
+item-snapshot diff rather than nested under the specific `Healed` it explains —
+this matches what a real player actually sees, in order.
 
-The inference engine walks this tree depth-first. Every `DamageDealt` nested under a
-`MoveUsed` automatically carries context (which move, which user, which targets) from
-its parent.
+A damage-*reducing* item (a type-resist berry like Occa Berry) works
+differently: it produces no HP-change event of its own at all, because its
+effect is baked directly into the single damage roll that produced
+`DamageDealt`.
 
-### HP representation: `PokemonHP`
+The inference engine walks this tree depth-first, so every event nested under
+a `MoveUsed` automatically carries that move's context (user, move, targets)
+without needing to look anything up.
 
-HP amounts are typed by visibility:
+### Ordering is the caller's job
+
+`InformationEvent` says nothing about turn order or actor speed. Assembling
+the `Vec<InformationEvent>` for a turn in priority/speed order is the
+responsibility of whatever code drives the simulator loop. Because reactions
+travel nested inside their cause, this ordering choice doesn't affect
+correctness at any deeper level — Pass 4 (speed inference) is the one pass
+that specifically depends on top-level event order, and it says so explicitly.
+
+### `PokemonHP`: HP typed by visibility
 
 ```rust
 pub enum PokemonHP {
-    Number(u16),   // own Pokémon — exact HP
-    Percent(u8),   // opponent — display percentage (0–100)
+    Number(u16),   // your own Pokémon — exact HP
+    Percent(u8),   // an opponent — the displayed percentage, 0–100
 }
 ```
 
-This matches what a real player sees. The inference engine exploits exact HP (Direction B)
-for tight bounds and works from percent intervals (Direction A) where only the display
-rounding is available.
+This mirrors what a real player's screen shows. The inference engine exploits
+this asymmetry directly: when your Pokémon takes damage, the exact HP delta is
+available (Pass 3 "Direction B"); when you deal damage to an opponent, only
+two rounded percentages are available and the true delta must be recovered
+from the display-rounding math (Pass 3 "Direction A").
 
-### What events exist
+### The `EventKind` catalogue
 
-`EventKind` covers every category of player-visible information:
+`EventKind` is grouped, mirroring Showdown's protocol categories:
 
-| Category | Examples |
+| Category | Variants |
 |---|---|
-| Major actions | `MoveUsed`, `Switch`, `SimultaneousSwitch`, `Faint`, `EndOfTurn` |
-| Form changes | `MegaEvolution`, `Terastallization`, `FormeChange`, `TypeChanged`, `Transformed` |
+| Major actions | `MoveUsed`, `Switch`, `SimultaneousSwitch`, `Faint`, `EndOfTurn`, `Cant`, `ChargingMove`, `MustRecharge`, `SingleMoveOrTurn` |
+| Form/identity changes | `MegaEvolution`, `Terastallization`, `FormeChange`, `TypeChanged`, `Transformed`, `IllusionEnded` |
 | HP changes | `DamageDealt`, `Healed`, `SetHp` |
 | Hit qualifiers | `Crit`, `Immune`, `Missed`, `MoveFailed`, `Blocked`, `HitCount` |
-| Status | `StatusInflicted`, `StatusCured` |
-| Stat stages | `BoostChanged`, `BoostsCleared`, `BoostsInverted`, `BoostsSwapped` |
-| Field | `WeatherChanged`, `TerrainChanged`, `PseudoWeatherStart/End` |
-| Side/slot | `SideConditionStart/End`, `SlotConditionStart/End` |
+| Status | `StatusInflicted`, `StatusCured`, `TeamStatusCured` |
+| Stat stages | `BoostChanged`, `BoostsCleared`, `BoostsInverted`, `BoostsSwapped`, `BoostsCopied` |
+| Field | `WeatherChanged`, `TerrainChanged`, `PseudoWeatherStart`/`End` |
+| Side/slot | `SideConditionStart`/`End`, `SlotConditionStart`/`End` |
 | Volatiles | `VolatileStart`, `VolatileEnd`, `PerishCount` |
 | Items | `ItemRevealed`, `ItemGained`, `ItemLost` |
-| Abilities | `AbilityRevealed` |
+| Abilities | `AbilityRevealed`, `AnticipationShudder` |
+
+Each variant's doc comment in `information.rs` records exactly which real
+mechanics route through it and any per-variant subtlety (e.g. `MoveFailed`'s
+cause is always conveyed by a nested event rather than a tag; a `Transformed`
+event is nested under the `Switch`/`MoveUsed` that caused it and records both
+the transformer's slot and the slot it copied). Two mechanics are deliberately
+*not* discrete events because they're better modelled as state:
+
+- **Ability suppression** (Gastro Acid, Neutralizing Gas) is tracked as a
+  volatile / field-wide scan, mirroring `pokemon_ability_is_suppressed` in
+  `simulator::helpers`, rather than an event that would need to be un-done later.
+- **Priority/speed ordering** — see above.
 
 ---
 
@@ -95,781 +139,548 @@ rounding is available.
 
 ### The `Unknown<T>` lattice
 
-Every hidden attribute uses a three-variant enum:
+Every hidden attribute is one of three states:
 
 ```rust
 pub enum Unknown<T> {
     Known(T),          // definitively identified
-    Not(Vec<T>),       // could be anything except these excluded values
+    Not(Vec<T>),        // could be anything except these excluded values
     Possibly(Vec<T>),  // must be one of these candidates
 }
 ```
 
-`Known` is the narrowest; `Not([])` is the widest (no exclusions). The lattice only
-ever moves toward `Known` — the soundness invariant is that the true value is always
-within the `Unknown` at every point in time.
+`Known` is the narrowest possible state; `Not(vec![])` is the widest (nothing
+excluded yet). Information only ever flows one direction — towards `Known` —
+and the engine's central invariant is that **the true value is always
+contained within whatever `Unknown` currently describes it**. An update that
+would risk excluding the true value is never performed; the engine unions
+possibilities instead and lets a later, more specific observation narrow
+things down.
 
-`Possibly` is created specifically for Zoroark/Illusion scenarios via
-`maybe_widen_for_illusion`: when a Pokémon might be disguised, its species becomes
-`Possibly([actual, disguise_target])`. Learnset narrowing then removes candidates
-that can't learn an observed move.
+`Possibly` exists specifically for Illusion (Zoroark): `maybe_widen_for_illusion`
+widens a switch-in's species to `Possibly([shown_species, zoroark_forme, …])`
+when a disguise is possible, and learnset narrowing (see below) prunes
+candidates that can't have produced an observed move, eventually collapsing to
+`Known` if only one survives.
 
-### Per-Pokémon state: `UnknownPokemonState`
+### Per-Pokémon fog: `UnknownPokemonState`
 
-For an opponent Pokémon, every attribute that cannot be directly seen is wrapped in
-`Unknown<T>` or represented as a min/max range:
+Every attribute of an opponent's Pokémon that isn't directly visible is either
+an `Unknown<T>` or a min/max range:
 
 ```
-possible_species:            Unknown<Species>
-possible_types:              Unknown<Vec<PokemonType>>
-item:                        Unknown<Item>
-possible_natures:            Unknown<Nature>
-possible_abilities:          Unknown<Ability>
-possible_weight_hg:          Unknown<u16>    ← 1:1 with species
-possible_tera_type:          Unknown<PokemonType>
+possible_species, possible_types, item, possible_natures,
+possible_abilities, possible_original_abilities, possible_weight_hg,
+possible_tera_type, possible_genders, mega_species, mega_ability : Unknown<T>
 
-minEvs / maxEvs:             [u8; 6]         ← per-stat EV bounds
-minIvs / maxIvs:             [u8; 6]         ← per-stat IV bounds
-minStats / maxStats:         [u16; 6]        ← derived stat ranges
-min_pre_nature_stat /
-max_pre_nature_stat:         [u16; 6]        ← BSV bounds (before nature ×)
+minEvs / maxEvs, minIvs / maxIvs           : [u8; 6]   per-stat bounds
+minStats / maxStats                        : [u16; 6]  derived stat bounds
+min_pre_nature_stat / max_pre_nature_stat  : [u16; 6]  pre-nature BSV bounds
 ```
 
-`min_pre_nature_stat` and `max_pre_nature_stat` store the **pre-nature base stat
-value** — the result of `calc_stat(base, iv, ev, level, 1.0)` before the ×0.9/1.0/1.1
-nature modifier. Pass 3 writes to these directly from observed damage, and Pass 5
-reads them to back-solve EV/IV ranges.
+`min_pre_nature_stat`/`max_pre_nature_stat` store bounds on the **pre-nature
+base stat value** — `calc_stat(base, iv, ev, level, 1.0)`, i.e. the stat before
+the ×0.9/1.0/1.1 nature multiplier. This intermediate quantity matters because
+Pass 3 (damage inversion) can pin down a stat's value *before* knowing the
+Pokémon's nature; Pass 5 then combines these bounds with the possible natures
+to back-solve EV/IV ranges. Everything else the fog-of-war side of the engine
+needs to track — items consumed/lost/gained, per-turn flags read by Counter,
+Metal Burst, Assurance, Avalanche, Rage Fist, Cud Chew's delayed re-eat, Choice
+lock provenance, and so on — mirrors the equivalent field on the simulator's
+concrete `PokemonState` field-for-field, so that `UnknownPokemonState` can walk
+in lockstep with the real battle regardless of how much is currently unknown.
 
-A newly seen opponent mon is initialised by `from_opponent_species`:
-- `minStats[i]` = `calc_stat(base[i], 0, 0, level, 0.9)` (worst case per stat independently)
-- `maxStats[i]` = `calc_stat(base[i], 31, 252, level, 1.1)` (best case)
-- Items/abilities/nature = `Not([])` (nothing excluded yet)
+Two ability fields exist because the *innate* ability and the *currently
+active* ability can diverge mid-battle:
 
-An own Pokémon is initialised by `from_known_pokemon`: every `Unknown` is set to
-`Known(…)` and every range collapses to a single value.
+- `possible_original_abilities` — the Pokémon's innate ability (from its
+  species' ability slots). Changes only on Mega Evolution or a permanent forme
+  change.
+- `possible_abilities` — the ability actually in effect right now. Diverges
+  from the original after Trace, Mummy, Skill Swap, Entrainment, etc., and
+  resets back to `possible_original_abilities` on switch-out.
+
+A freshly-seen opponent Pokémon is built by `UnknownPokemonState::from_opponent_species`:
+stat bounds are the theoretical worst case (0 IV / 0 EV / hindering nature) and
+best case (31 IV / 252 EV / boosting nature) computed independently per stat
+(natures only touch one stat each way, so a single assumed nature would be
+unsound), and the ability set becomes `Possibly(dex[species].abilities)` when
+dex data exists. Your own Pokémon is built by `from_known_pokemon`, where every
+`Unknown` collapses to `Known` and every range collapses to a point, from the
+start.
 
 ### The CNF predicate store
 
-`UnknownBattleState::predicates: Vec<Vec<Statement>>` holds constraints that cannot
-be committed to a field yet. The outer `Vec` is a conjunction (AND); each inner
-`Vec<Statement>` is a disjunction (OR). This is standard conjunctive normal form (CNF):
+Not every observation can be committed straight to a field — many can only be
+expressed as "at least one of these is true." `UnknownBattleState::predicates`
+holds these as conjunctive normal form:
 
 ```
-predicates = [(A ∨ B), (C ∨ D ∨ E), …]
-           = (A ∨ B) ∧ (C ∨ D ∨ E) ∧ …
+predicates: Vec<Vec<Statement>>
+          = (stmt ∨ stmt ∨ …) ∧ (stmt ∨ stmt ∨ …) ∧ …
 ```
 
-A clause like `[HasItem(QuickClaw), HasAbility(QuickDraw), SpeedComparison{…}]` means
-"at least one of: this mon holds Quick Claw, has Quick Draw, or is genuinely faster."
+the outer `Vec` is an AND of clauses, each inner `Vec<Statement>` is an OR of
+literals. For example, observing a 100%-accurate move miss with no other
+explanation emits the clause `[HasItem(BrightPowder), HasItem(LaxIncense)]` —
+"this Pokémon holds at least one of these two items" — without committing to
+either until further evidence (or Boolean Constraint Propagation) narrows it
+to one.
 
-### `Statement` variants
+`Statement` variants:
 
 | Statement | Meaning |
 |---|---|
-| `HasItem { mon_idx, item }` | Mon holds this item |
-| `HasAbility { mon_idx, ability }` | Mon has this ability |
-| `HasMove { mon_idx, pokemon_move }` | Mon knows this move |
-| `HasStatus { mon_idx, status }` | Mon is afflicted with this status |
-| `NatureBoostsStat { mon_idx, stat }` | Mon's nature gives +10% to stat |
-| `NatureNerfsStat { mon_idx, stat }` | Mon's nature gives −10% to stat |
-| `EVIVStatGE { mon_idx, stat, value }` | Pre-nature BSV ≥ value |
-| `EVIVStatLE { mon_idx, stat, value }` | Pre-nature BSV ≤ value |
-| `SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult }` | `spe(fast)*fast_mult ≥ spe(slow)*slow_mult` |
-| `WeatherTurns / PseudoWeatherTurns / SideConditionTurns { turns }` | Field timer is this value |
+| `HasItem { mon_idx, item }` | Holds this item |
+| `HasAbility { mon_idx, ability }` | Has this ability |
+| `HasMove { mon_idx, pokemon_move }` | Knows this move (used by learnset narrowing plumbing) |
+| `HasStatus { mon_idx, status }` | Afflicted with this status |
+| `NatureBoostsStat` / `NatureNerfsStat { mon_idx, stat }` | Nature gives ±10% to this stat |
+| `EVIVStatGE` / `EVIVStatLE { mon_idx, stat, value }` | Pre-nature BSV is ≥/≤ `value` |
+| `SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult }` | `spe(fast)×fast_mult ≥ spe(slow)×slow_mult` |
+| `KnowsThreateningMove { mon_idx, defender_types }` | Knows a move super-effective (or OHKO) against these types — from Anticipation |
+| `WeatherTurns` / `TerrainTurns` / `SideConditionTurns { turns }` | A field timer equals exactly this value |
 
-`mon_idx` is a flat index over all mons in order:
+`SpeedComparison` and `KnowsThreateningMove` are *relational* constraints —
+they compare two Pokémon or relate a Pokémon to a hypothetical move rather
+than pinning one field — so BCP never "forces" them into a concrete value the
+way it does `HasItem`/`HasAbility`/etc.; it only ever satisfies or prunes the
+clause they sit in. `propagate_speed_comparisons` is the code that turns a
+*unit* `SpeedComparison` clause into an actual tightening of `minStats[5]`/
+`maxStats[5]`.
+
+### `mon_idx`: a flat index across every roster
+
+Every `Statement` and setter field refers to a Pokémon by a single `usize`,
+`mon_idx`, resolved against this fixed order:
+
 ```
-[p1_active…, p1_known_back…, p1_possible_back…,
- p2_active…, p2_known_back…, p2_possible_back…]
+[p1_active…, p2_active…,
+ p1_known_back…, p1_possible_back…,
+ p2_known_back…, p2_possible_back…]
 ```
 
-### `mon_idx` helpers
-
-```rust
-mon_idx_for_active_slot(state, &FieldSlot) -> Option<usize>
-get_mon_by_idx(state, idx)     -> Option<&UnknownPokemonState>
-get_mon_mut_by_idx(state, idx) -> Option<&mut UnknownPokemonState>
-```
+Note that **both sides' actives come first**, ahead of either side's bench.
+This is deliberate (see AUDIT.md "S1"): a naive per-side-contiguous layout
+(`[p1_active, p1_back, p2_active, p2_back]`) meant that any switch on P1 — which
+grows or shrinks P1's bench `Vec`s via push/remove — shifted every index after
+it, silently retargeting P2's *persisted* `Statement`s (which survive across
+turns) onto the wrong physical Pokémon. With both active segments fixed at the
+front, only `p1_active_mons.len()` and `p2_active_mons.len()` matter for any
+active mon's index, and both are permanently stable after the initial lead
+bootstrap (`pass1_switch` always overwrites an active slot in place, never
+push/removes). Only bench indices are still unstable, but nothing persists a
+`Statement` referencing a bench index across events, so that's sound. The
+trade-off: a side's full roster is no longer one contiguous range, so helpers
+that need "everything on side X" (`teammate_indices`, `TeamStatusCured`,
+`mon_is_p2`) check each segment explicitly instead of one `[start, end)` span.
+Use `mon_idx_for_active_slot`, `get_mon_by_idx`, and `get_mon_mut_by_idx` to
+resolve indices rather than computing offsets by hand.
 
 ---
 
 ## Part 3 — The Six-Pass Inference Pipeline
 
-Entry point: `apply_information(state, events, …, config)`.
-
-The pipeline runs on each call and visits all six passes in order. Passes are not
-re-entrant within a single call, but Pass 6 (BCP) loops to fixpoint, and Pass 4
-is intentionally run first to pre-warm speed bounds before Pass 3 needs them.
+Entry point: `apply_information(state, events, dex, config)`. Every call runs
+all six passes, in order, over the full event list for one turn:
 
 ```
 apply_information_battle
-  ├── Pass 4 (speed ordering → Spe bounds)    ← run FIRST
-  ├── propagate_speed_comparisons()            ← immediate fixpoint
-  ├── [event walk: Passes 1–3 per event]
-  ├── Pass 5 (back-solve EV/IV/nature)
-  └── Pass 6 BCP to fixpoint
-         └── propagate_speed_comparisons()     ← also inside BCP loop
+  ├── Pass 4  speed ordering → Spe bounds          (run FIRST, to pre-warm bounds)
+  ├── propagate_speed_comparisons()                 (immediate fixpoint)
+  ├── [event walk: Passes 1–3, depth-first per event]
+  ├── Pass 5  back-solve EV / IV / nature
+  └── Pass 6  BCP to fixpoint
+         └── propagate_speed_comparisons()          (also runs inside the BCP loop)
 ```
 
----
+Pass 4 runs first, before the main walk, specifically so that Pass 3's
+speed-dependent base-power moves (Gyro Ball, Electro Ball) see already-tightened
+speed bounds. After the main BCP loop, if BCP just forced a priority-lifting
+ability (Prankster, Gale Wings, Triage) to `Known`, Pass 4 and
+`propagate_speed_comparisons` are re-run once more, since that newly-resolved
+ability can retroactively remove an escape disjunct from an earlier
+speed-order clause.
 
 ### Pass 1 — Structural / Direct Facts
 
-**Where:** `process_battle_event`, the depth-first walk of every `InformationEvent`.
+**Where:** `process_battle_event` / `pass1_apply_event`, the depth-first walk
+of every `InformationEvent` and its nested reactions.
 
-This pass updates `Unknown<T>` fields directly from what is explicitly stated in the event:
+This pass updates fields directly from what an event explicitly states:
+`AbilityRevealed`/`ItemRevealed` narrow their respective `Unknown` to `Known`;
+`ItemLost` sets `consumed_item` or `removed_item` depending on `consumed`;
+status/boost/field events update state directly; `Switch`/`SimultaneousSwitch`
+record species/level/HP/status and build a new `UnknownPokemonState` via
+`from_opponent_species` for a never-before-seen Pokémon;
+`Terastallization`/`MegaEvolution`/`FormeChange` update the corresponding
+identity fields; `MoveUsed` fills `known_moves` via `reveal_move_on_mon` and
+triggers learnset-based species narrowing (below). A contradiction — e.g. an
+`ItemRevealed` for a Pokémon whose item is already `Known` as something else —
+panics immediately via `inference_contradiction!`, since it means the observed
+events are jointly impossible and something upstream is wrong.
 
-- `AbilityRevealed` → `unknown_set_known(&mut mon.possible_abilities, …)`
-- `ItemRevealed` → `unknown_set_known(&mut mon.item, …)`
-- `ItemLost { consumed: true }` → sets `consumed_item`; `consumed: false` → sets `item_lost`
-- `StatusInflicted` / `StatusCured` → sets `mon.status`
-- `BoostChanged` → updates `mon.boosts[boost_idx]`
-- `WeatherChanged` / `TerrainChanged` / `PseudoWeatherStart` → updates field state
-- `Switch(state)` / `SimultaneousSwitch` → records species, level, HP, status at entry;
-  creates a new `UnknownPokemonState` via `from_opponent_species` if unseen before
-- `Terastallization` → sets `mon.is_tera` and `mon.possible_tera_type`
-- `MoveUsed` → calls `reveal_move_on_mon` to fill `known_moves`; also calls
-  `narrow_species_by_learnset` (Pass 1.5, see learnset narrowing below)
+Ability tracking has two extra wrinkles handled here:
 
-Contradictions (e.g., `ItemRevealed` for a mon whose `item` is already `Known` to
-something else) cause an immediate panic via `inference_contradiction!`.
+- If a revealed ability is inside the current candidate set, it narrows to
+  `Known` normally. If it's *outside* the set, that means a live ability
+  change happened (Trace copying a foreign ability, Mummy, etc.) — only
+  `possible_abilities` is overwritten; `possible_original_abilities` is
+  untouched.
+- A switch of a previously-seen Pokémon resets `possible_abilities` back to
+  `possible_original_abilities` (Trace/Skill Swap don't persist across a
+  switch), and Mega Evolution/forme changes recompute both fields from the new
+  species' ability set.
 
-#### Ability tracking — `possible_original_abilities` and `possible_abilities`
+**Slot re-binding (S18).** `mon_idx` identifies a *slot*, not a physical
+Pokémon — the same index means a different Pokémon before and after a switch.
+`purge_mon_scoped_knowledge` runs at the moment an occupant leaves a slot,
+dropping every `Statement` referencing that slot's index and nulling matching
+weather/terrain/screen-setter records, so a fresh occupant never silently
+inherits a predicate that was actually about the Pokémon that just left.
+Dropping constraints only ever widens the fog, so this is sound by
+construction.
 
-Every `UnknownPokemonState` carries two ability fields:
+**Item epoch tracking (S19/S20).** A `HasItem` clause means "held item X *at
+the time the clause was emitted*," not "holds item X right now." Every
+item-change event (`ItemLost`, `ItemGained`, Trick/Switcheroo) resolves
+outstanding item literals against the item the Pokémon was holding *before*
+the change: a literal that was historically true satisfies and drops its
+clause; one that was historically false is pruned from it. This keeps a
+clause like `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]` from becoming an
+impossible clause just because the mon later reveals a third, unrelated item
+via Knock Off. `item_was_transferred` similarly gates Choice-lock exclusion
+(`pass1_choice_exclusion`): using two different moves is normally proof of no
+Choice item, but not if a Choice item arrived mid-stint via Trick — that's
+consistent with "moved, was Tricked a Choice item, then legally moved again."
 
-- `possible_original_abilities` — the mon's **innate** ability (one of the species' slot
-  set from `dex[species].abilities`). Changes only on mega-evolution or forme change.
-- `possible_abilities` — the **live** ability (may differ mid-battle after Trace, Mummy,
-  Skill Swap, etc.; resets to `possible_original_abilities` on switch-out).
-
-On first sight, both are initialised from `dex[species].abilities`:
-- Non-empty dex entry: both become `Possibly([slot0, slot1, slotH])` (deduplicated).
-- No dex data: both remain `Not([])` (no narrowing — unknown species, unknown ability).
-
-**Transitions handled in Pass 1:**
-- `AbilityRevealed` where the revealed ability is **in** the current candidate set →
-  `unknown_set_known` (narrow to `Known`). If it is **outside** the set, a live
-  ability-change occurred (Trace copied a foreign ability, Mummy, etc.) → overwrite
-  `possible_abilities = Known(ability)`; `possible_original_abilities` is unchanged.
-- `Switch` / `SimultaneousSwitch` of a previously seen mon → reset
-  `possible_abilities := possible_original_abilities` (Trace/Skill-Swap effects don't
-  persist across a switch).
-- `MegaEvolution` / `FormeChange` → recompute **both** fields from the new species'
-  ability set (mega/forme abilities are typically fixed singletons in the dex).
-
-Because `unknown_is_excluded` treats anything outside a `Possibly` set as excluded,
-narrowing abilities on first sight immediately prunes all impossible literals from
-every BCP clause in later passes.
-
----
+**Illusion and the bench (S29).** If a Zoroark forme is on the switching
+side's known bench and the incoming species isn't itself a Zoroark forme,
+`pass1_switch` does not match the shown species against that benched entry —
+doing so risks merging the real teammate's accumulated fog with the disguised
+Zoroark's future events. Instead it creates a fresh, ambiguous active entry
+and widens it via `maybe_widen_for_illusion`. If that entry switches back out
+still unresolved (no `IllusionEnded`, no learnset collapse), `bench_outgoing_mon`
+discards it rather than benching it, since an ambiguous (`Possibly`-species)
+bench entry can never be re-matched by species and would otherwise double-count
+one physical roster slot.
 
 ### Pass 2 — Item / Ability Presence and Absence from Behaviour
 
-**Where:** `process_battle_event`, after processing each `MoveUsed` block or
-`EndOfTurn` event. Each helper function is named `pass2_*` or `pass_eot_*`.
+**Where:** helper functions named `pass2_*` / `pass_eot_*`, called from
+`process_battle_event` after a `MoveUsed`'s reaction tree or an `EndOfTurn`
+event is fully walked.
 
-This pass emits CNF clauses from observable side-effects, covering cases where the
-item or ability itself is not directly named but its presence or absence is deducible.
+Reactive items/abilities are modelled with a **nested-reveal convention**: the
+item or ability that *caused* a reaction is always emitted as its own
+`ItemRevealed`/`AbilityRevealed` nested inside the triggering move event, never
+as a bare, unattributed effect. That means Pass 1 already handles *presence* —
+Pass 2 exists almost entirely to reason about **absence**, deducing what a
+Pokémon does *not* have from an effect that didn't happen when it should have.
+Representative clauses it emits (each gated on the escapes that would let the
+event legitimately not fire):
 
-#### Presence clauses (item/ability confirmed by side-effect)
+- **Life Orb presence** — a `DamageDealt { target == user }` at the Life Orb
+  recoil fraction adds `HasItem(LifeOrb)` (gated on the item being active:
+  no Magic Room, no Klutz — S21).
+- **Contact-reaction absence** — a contact move that hits and produces no
+  Rocky Helmet/Rough Skin/Iron Barbs reaction excludes all three from the
+  defender, unless the attacker has an escape (Long Reach, Magic Guard,
+  Protective Pads).
+- **Choice-item absence** — two different moves used in consecutive turns
+  excludes Choice items (subject to the `item_was_transferred` guard above).
+- **Bright Powder / Lax Incense** — a 100%-accurate move missing, with neither
+  side's accuracy/evasion stages explaining it, emits the two-item disjunction.
+- **Powder-move immunity** — a powder move blocked on a non-Grass target
+  emits `[HasItem(SafetyGoggles) ∨ HasAbility(Overcoat)]`.
+- **Guaranteed-status absence** (`pass2_guaranteed_status_absence`) — a
+  100%-chance secondary status that should have landed but didn't emits the
+  disjunction of every *undecided* preventer for that status (decidable ones —
+  type immunity, existing status, Substitute, Safeguard, terrain — are ruled
+  out first). Freeze is skipped entirely in harsh sunlight, where it's simply
+  impossible regardless of ability.
+- **Prankster immunity** (`pass2_prankster_immunity`) — a status move blocked
+  by a Known Dark-type target is a unit clause forcing `Known(Prankster)` on
+  the user immediately.
+- **Ground-move immunity** (`pass2_ground_immune_clause`) — a Ground move
+  whooshing past a non-Flying, non-Magnet-Rise/Telekinesis target emits
+  `[HasItem(AirBalloon) ∨ HasAbility(Levitate) ∨ HasAbility(Eelevate) ∨ HasAbility(EarthEater)]`.
 
-Reactive items and abilities are modelled with the **nested-reveal convention**: the
-item or ability that caused a reaction is always emitted as an `ItemRevealed` /
-`AbilityRevealed` event *nested inside* the move event that triggered it, not as a
-bare effect. Pass 1 therefore pins presence directly; Pass 2 handles only absence.
-
-**Life Orb recoil presence:**
-- If a `DamageDealt { target == user }` reaction appears under a `MoveUsed` at the
-  Life-Orb recoil fraction of the damage dealt, add `HasItem(LifeOrb)` to the clause.
-
-#### Absence clauses
-
-**Contact-reaction absence (Rocky Helmet / Rough Skin / Iron Barbs):**
-- After a contact move (`MoveFlag::Contact`) hits the defender and produces no
-  `ItemRevealed{RockyHelmet}` or `AbilityRevealed{RoughSkin|IronBarbs}` in the
-  reaction tree, those three are excluded on the defender via `unknown_exclude` —
-  **unless** any escape is possible: the attacker has Long Reach (bypasses contact
-  reactions), Magic Guard (negates chip), or holds Protective Pads. Probabilistic
-  contact reactions (Static, Flame Body, Poison Point) are never excluded on absence.
-
-**Choice item (multi-move → excluded):**
-- If a Pokémon uses two different moves in consecutive turns, it cannot have a Choice
-  item. Each move that contradicts a Choice constraint is excluded via `unknown_exclude`.
-
-**Bright Powder / Lax Incense from a 100%-accurate miss:**
-- If a move with `AccuracyType::Percent(100)` misses and neither the user's accuracy
-  stage is lowered nor the target's evasion is raised, emit:
-  `[HasItem(BrightPowder), HasItem(LaxIncense)]` as a disjunctive clause.
-
-**Powder-move immunity (non-Grass target):**
-- A powder-flagged move (`MoveFlag::Powder`) that produces `Immune`/`Blocked` on a
-  target with no known Grass type emits
-  `[HasItem(SafetyGoggles) ∨ HasAbility(Overcoat)]` on the target.
-
-**Guaranteed-status absence (`pass2_guaranteed_status_absence`):**
-- A move whose secondary effect has `chance == 100` and `status == Some(s)` that
-  hits the target (a `DamageDealt` is present, no `Missed`/`Blocked`) but produces no
-  `StatusInflicted` emits a disjunction of unknown preventers for status `s` on the
-  target. Decidable preventers (type immunity, already statused, Substitute, Safeguard,
-  terrain) are ruled out first; only unknown preventers appear in the clause.
-  `HasItem(CovertCloak)` and `HasAbility(ShieldDust)` are added only for secondary
-  effects on damaging moves (`*from_secondary`). Ground-type paralysis immunity is
-  gated to Electric-type moves only (Ground cannot be paralysed by Body Slam but can
-  by Thunder Wave). If harsh sunlight is active and the status is Freeze, the clause
-  is skipped entirely — Freeze is impossible in sun regardless of any ability.
-  The ability lists are exhaustive per status:
-  - **Burn**: Water Veil, Water Bubble, Thermal Exchange, Leaf Guard (sun-gated)
-  - **Paralysis**: Limber, Leaf Guard (sun-gated)
-  - **Poison**: Immunity, Pastel Veil, Leaf Guard (sun-gated), Flower Veil (Grass-target)
-  - **Sleep**: Insomnia, Vital Spirit, Sweet Veil, Leaf Guard (sun-gated)
-  - **Freeze**: Magma Armor, Leaf Guard (sun-gated), Flower Veil (Grass-target)
-
-  After Pass 1 narrows abilities to the species set, BCP typically collapses this
-  clause quickly.
-
-**Prankster-immunity (`pass2_prankster_immunity`):**
-- A status-category move targeting one of our **Known Dark-type** mons that produces
-  `Immune`/`MoveFailed`/`Blocked` emits `[HasAbility(Prankster)]` on the user — a
-  unit clause that BCP immediately forces to `Known(Prankster)`.
-
-**Ground-move immunity (`pass2_ground_immune_clause`):**
-- A Ground-type damaging move that produces `Immune` on an opponent mon whose types
-  are `Known` and do not include Flying, and the mon has no MagnetRise/Telekinesis
-  volatile, emits:
-  `[HasItem(AirBalloon) ∨ HasAbility(Levitate) ∨ HasAbility(Eelevate) ∨ HasAbility(EarthEater)]`
-  BCP typically resolves this to `Known(AirBalloon)` once the species ability set is
-  narrowed (most species cannot have Levitate, Eelevate, or EarthEater).
-
----
-
-### End-of-Turn Inference
-
-Two helpers fire during the `EndOfTurn` event walk (`pass_eot_heal`,
-`pass_eot_sand_immunity`).
-
-**Leftovers / Black Sludge (`pass_eot_heal`):**
-An opponent mon's HP increases at end-of-turn with no attributable cause (Aqua Ring,
-Ingrain, Grassy Terrain, Wish, Leech Seed — all decidable from volatiles and field
-state) emits:
-- `[HasItem(Leftovers)]` for non-Poison-type targets.
-- `[HasItem(Leftovers) ∨ HasItem(BlackSludge)]` for Poison-type targets.
-
-The clause is gated on the item not already being `Known(None)` or consumed, and on
-the mon's item not already being excluded for these values.
-
-**Flame Orb / Toxic Orb (`pass_eot_self_status`):**
-When an `EndOfTurn` event contains a `StatusInflicted{Burn}` or
-`StatusInflicted{ToxicPoison}` reaction targeting an opponent mon that had no prior
-status and whose item is not already `Known`, the item is forced to `Known(FlameOrb)`
-or `Known(ToxicOrb)` respectively. These are the only sources of self-status
-infliction at end-of-turn; there is no other EoT self-burn or self-toxic-poison
-mechanism in the game.
-
-**Sandstorm chip absence (`pass_eot_sand_immunity`):**
-When Sandstorm is active and an opponent mon that is not Rock / Ground / Steel takes
-no EOT chip damage, emit:
-```
-[HasItem(SafetyGoggles), HasAbility(SandVeil), HasAbility(SandRush),
- HasAbility(SandForce), HasAbility(Overcoat), HasAbility(MagicGuard)]
-```
-Literals already excluded from the mon's `possible_abilities` or `item` are omitted
-before emitting (BCP would prune them anyway, but skipping them avoids spurious clauses).
-
----
+End-of-turn absence checks (`pass_eot_heal`, `pass_eot_sand_immunity`,
+`pass_eot_self_status`) work the same way: unexplained EOT healing with every
+decidable source (Aqua Ring, Ingrain, Grassy Terrain, Wish, Leech Seed) ruled
+out emits `[HasItem(Leftovers)]` (or the Leftovers/Black Sludge pair for
+Poison-types); a fresh self-inflicted Burn or Toxic at EOT with no prior status
+is forced straight to `Known(FlameOrb)`/`Known(ToxicOrb)` since no other
+mechanic causes that; and no Sandstorm chip on a non-Rock/Ground/Steel target
+emits the full disjunction of every ability/item that can grant sand immunity,
+skipping any literal already excluded.
 
 ### Pass 3 — Damage → Stat Bounds
 
-**Where:** `pass3_damage_to_stats`, called per `MoveUsed` event after the full reaction
-tree is walked (so all `DamageDealt` events and the crit flag are available).
+**Where:** `pass3_damage_to_stats`, run per `MoveUsed` after its full reaction
+tree (and thus every `DamageDealt`/`Crit`) has been walked.
 
-This is the most computationally intensive pass. Instead of inverting the damage formula
-analytically (fragile under 22 flooring steps), it uses the real simulator as a
-**forward oracle**: enumerate candidate stat values, simulate, and keep only the ones
-that produce the observed damage.
+This is the computationally heaviest pass, and the one with the most
+subtlety. Rather than analytically inverting the damage formula — fragile,
+given its ~20-odd flooring/rounding steps — it treats the simulator's own
+damage function, `calculate_damage_outcomes_for_target_with_options`, as a
+**forward oracle**: enumerate candidate stat values, run the real damage
+calculation, and keep only the candidates consistent with what was observed.
 
-#### Skip conditions (moves with no stat signal)
+Some moves carry no invertible stat signal at all and are skipped outright:
+status moves, OHKO moves, fixed-damage moves (Seismic Toss), retaliation moves
+(Counter/Mirror Coat/Metal Burst/Comeuppance), ambiguous-stat moves (Shell
+Side Arm, Photon Geyser), and Beat Up.
 
-Moves are skipped when their damage cannot be inverted to a single offensive/defensive
-stat:
-- Status-category moves
-- OHKO moves
-- Moves with a fixed damage override (e.g. Seismic Toss)
-- Retaliation moves (Counter, Mirror Coat, Metal Burst, Comeuppance)
-- Ambiguous-stat moves (Shell Side Arm, Photon Geyser)
-- Beat Up (BP depends on party members' base Attack)
+**Direction B — the opponent hits you (exact HP).** The delta
+`pre_hp - post_hp` is exact. The oracle binary-searches the attacker's
+pre-nature BSV range (`find_feasible_bsv_range_b`) for the interval that can
+produce that exact damage, exploiting the fact that damage is monotone in the
+attacking stat — the feasible set for a fixed (item, ability) combination is
+always a contiguous interval, so a binary search plus a short linear refinement
+finds its endpoints in `O(log range)` oracle calls instead of scanning
+one-by-one. Item/ability boosters (Choice Band, Life Orb, etc.) are each
+scanned separately and their feasible ranges unioned (sound: wider), with
+conditional CNF clauses emitted for cases BCP can resolve later.
 
-#### Direction B — opponent attacks your Pokémon (exact HP known)
+**Direction A — you hit the opponent (percent HP).** Only two rounded display
+percentages are available. `percent_bucket` inverts the display-rounding
+formula (`hp_to_percent`) exactly for a candidate max HP, giving each
+percentage its own raw-HP bucket; the true damage band is
+`[pre_lo - post_hi, pre_hi - post_lo]` (S22 — treating the *delta* as a single
+rounding, rather than each side independently, silently excludes real damage
+values and with them the true stat, especially for high-HP defenders).
+`achievable_defender_hp_values` enumerates exactly the HP values the
+defender's species can actually reach under the stat-points lattice, rather
+than a fixed stride, so no feasible BSV is lost to picking an unreachable HP
+along the way. The defensive item/ability search (`defensive_damage_items`/
+`defensive_damage_abilities`) enumerates every damage-reducing modifier the
+oracle implements — completeness here is a **soundness invariant**, checked by
+a dedicated cross-validation test (`test_sc_allowlist_completeness_cross_validation`)
+that runs the oracle against every ability/item the simulator knows and asserts
+anything that changes damage is on the list. A pruning step drops
+provably-inert (item, ability) combinations for the specific move being
+evaluated (e.g. a Water-resist berry against a Fire move) purely for
+performance — never in a way that could drop a live possibility.
 
-When `target.hp` is `PokemonHP::Number`, the damage delta is exact:
-```
-exact_damage = pre_hp - post_hp
-```
+**Per-hit walk (S23).** Multi-hit moves are walked hit-by-hit rather than as
+one aggregate: a `Crit` reaction sets a pending flag consumed only by the
+*next* `DamageDealt` (a global "any hit critted" flag would wrongly apply the
+crit multiplier to non-crit hits in the same sequence); `Healed`/`SetHp`
+reactions move the running HP baseline without counting as a hit, so a
+pinch-berry heal mid-sequence doesn't understate the next hit's damage; and
+each hit is materialized at its own true pre-hit HP rather than the
+already-advanced post-move HP that Pass 1 has by the time Pass 3 runs — this
+matters because Multiscale/Shadow Shield/Tera Shell are full-HP-gated and
+would otherwise read as inactive for exactly the hit that broke full HP. A
+related fix (S24) snapshots the attacker's and targets' *entire* fog state at
+`MoveUsed` time (`MoveContext`), since Pass 3 runs after Pass 1 has already
+applied the whole reaction tree — without the snapshot, a resist berry
+consumed by the very hit being analyzed, a self-boost secondary, or a
+mid-move burn would all be read in their post-move (already-changed) form
+instead of the pre-move form the actual damage roll saw.
 
-The oracle scans the attacker's **pre-nature base stat value** (BSV) range
-`[min_pre_nature_stat[off_si], max_pre_nature_stat[off_si]]`. For each candidate BSV `v`:
-1. Materialise the attacker at `stats[off_si] = floor(v * nature_mod)`.
-2. Call `calculate_damage_outcomes_for_target_with_options` (the same damage function
-   the simulator uses for actual battle resolution).
-3. Keep `v` if any `(damage, crit, _)` outcome has `damage == exact_damage` and
-   `crit == observed_crit`.
-
-The feasible BSV range is intersected across all hits of a multi-hit move. Booster
-items and abilities (Choice Band, Life Orb, etc.) are scanned as separate oracle
-calls; the union of their feasible BSV ranges is taken (sound: wider). CNF clauses
-`[HasItem(ChoiceBand) ∨ EVIVStatGE(…)]` are emitted for conditional tightening that
-BCP can later resolve.
-
-**Binary-search optimisation (`find_feasible_bsv_range_b`):**
-Damage is monotone in the attacking BSV (higher Atk ⟹ strictly non-decreasing
-damage), so the feasible set for any fixed (item, ability) combo is a *contiguous
-interval*. `find_feasible_bsv_range_b` binary-searches for the bracket endpoints
-(`max_roll(bsv) ≥ exact_damage` for the low end; `min_roll(bsv) ≤ exact_damage`
-for the high end), then refines inward with a short linear walk to the first
-exactly-feasible BSV. This reduces oracle calls per combo from O(range) to
-O(log range) + constant, with correctness guaranteed by the monotonicity invariant.
-
-#### Direction A — you attack the opponent (percent HP seen)
-
-When `target.hp` is `PokemonHP::Percent`, the damage is only known through the two
-display percentages (pre-hit and post-hit). For a candidate max HP `H`, both display
-values are inverted to their exact raw-HP buckets via `percent_bucket` (the exact
-inverse of `hp_to_percent`: round-half-up, 0 only at faint, 100 only at full,
-clamped 1–99), and the damage band is:
-
-```
-damage_lo = max(1, pre_bucket.lo − post_bucket.hi)
-damage_hi = pre_bucket.hi − post_bucket.lo
-```
-
-(S22: each display percent carries its own ±0.5% rounding — the previous
-`[(δ−0.5)%, (δ+0.5)%]`-of-max-HP band treated the *delta* as a single rounding and
-could exclude achievable damages, and with them the true defensive BSV, for
-large-HP defenders whose pre-hit HP was itself rounded. A `pre` of 100 or `post` of
-0 is display-exact and automatically shrinks that side's bucket to a point. An empty
-bucket means the `H` hypothesis cannot display the observed percent at all and is
-skipped.)
-
-The oracle then scans the defender's BSV range: a BSV `v` is feasible if any outcome
-falls in `[damage_lo, damage_hi]`.
-
-**HP candidate enumeration (`achievable_defender_hp_values`):**
-Rather than stepping in strides of 4, Direction A enumerates exactly the HP values
-that are achievable by the defender's species given its IV/EV bounds and the stat-points
-lattice. This eliminates the unsound exclusion of BSVs whose achievable HP values happen
-to fall at off-stride positions.
-
-The unconditional union over all candidate (HP, nature class, BSV, def-item, def-ability)
-tuples gives `global_bsv_lo` and `global_bsv_hi`, which are written back to
-`min_pre_nature_stat` and `max_pre_nature_stat`.
-
-**Defensive item/ability union (soundness invariant):**
-Direction A iterates over `defensive_damage_items(defender)` and
-`defensive_damage_abilities(defender)` — complete allowlists of every modifier the
-damage oracle implements on the defender's side. Completeness is a **soundness
-invariant**: any reducer omitted from the lists causes `min_pre_nature_stat` to be
-raised above the true value for defenders that could have that modifier (unsound
-exclusion). The allowlists include:
-- All 18 type-resist berries (Occa … Roseli + ChilanBerry)
-- Eviolite, AssaultVest (stat multipliers, baked into stats before the oracle call)
-- Multiscale, ShadowShield, TeraShell (full-HP-gated ×0.5)
-- Filter, SolidRock, PrismArmor (×0.75 on super-effective hits)
-- ThickFat, FurCoat, IceScales, Heatproof, WaterBubble, PurifyingSalt, DrySkin,
-  FairyAura, Fluffy, PunkRock (type/category/flag-specific reductions)
-
-A self-checking test (`test_sc_allowlist_completeness_cross_validation`) verifies
-completeness: it runs the oracle for every ability/item the simulator knows and asserts
-that any which changes damage output is in the corresponding list.
-
-**E-B pruning (performance):**
-Before iterating `def_items` × `def_abilities`, Direction A prunes entries that are
-provably inert for the specific move (e.g., IceScales when the move is Physical;
-type-resist berries whose type ≠ effective move type; PunkRock when the move has no
-Sound flag). Every prune rule is conservative — it only drops entries that cannot
-possibly change the oracle's output — so soundness is preserved.
-
-**Direction A CNF predicates (nature-conditional tightening):**
-For each nature class κ, Pass 3 also computes the feasible defensive-BSV interval
-under **neutral gear** (no reducer item/ability) and emits conditional CNF clauses:
-```
-[not-κ] ∨ EVIVStatGE{bsv_lo_neutral} ∨ ⋁ HasItem(reducer) ∨ ⋁ HasAbility(reducer)
-[not-κ] ∨ EVIVStatLE{bsv_hi_neutral} ∨ ⋁ HasItem(reducer) ∨ ⋁ HasAbility(reducer)
-```
-where reducers are drawn from the full `defensive_damage_items` / `defensive_damage_abilities`
-allowlists. When BCP excludes all reducer alternatives and pins the nature, the bound is
-forced to `min_pre_nature_stat`/`max_pre_nature_stat` directly.
-
-#### Multi-hit handling
-
-Pass 3 walks **all** of the target's HP-relevant reactions in order (S23):
-
-- `DamageDealt` — one hit; run as an independent constraint on the same BSV lattice
-  (the intersection across hits yields tighter bounds than a single hit alone).
-- `Crit` — sets a pending flag consumed by the *next* `DamageDealt` on that target,
-  matching the sim's emit order (crit is per-hit; a single global "any hit critted"
-  flag applied the crit constraint to non-crit hits, whose feasible interval sits at
-  observed-damage ÷ crit-multiplier — an unsound exclusion on mixed-crit sequences).
-- `Healed` / `SetHp` — moves the running HP baseline without being a hit (a pinch
-  berry firing mid-sequence otherwise understates the next hit's damage by the heal).
-
-Each hit's running pre-hit HP is also passed into the oracle materialization, so
-full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) are evaluated at
-the HP the hit was actually taken at — the live fog field holds the *post-move* HP
-by the time Pass 3 runs, which wrongly disabled them for exactly the hit that broke
-full HP.
-
-For Triple Kick / Triple Axel /
-Population Bomb, the per-hit BP override is computed from the hit index:
-- Triple Kick: 10, 20, 30 (base BP = 10 + 10×hit_idx)
-- Triple Axel: 20, 40, 60
-- Population Bomb: 20 per hit
-
-#### Analytic ("moved last" ×1.3)
-
-The oracle materializes an empty action queue, so its own `attacker_is_last_mover`
-check is always true. Pass 3 therefore decides Analytic's ×1.3 from the event stream
-instead (S28): `compute_analytic_last_movers` records, per turn segment, the single
-slot that committed a move last (`MoveUsed` / `Cant` / `MustRecharge` / `ChargingMove`
-— a `Switch` does not commit a move). Analytic fired iff the attacker is that slot.
-This is exact in singles and doubles and correct when the last actor flinched, was
-fully paralyzed, or the target switched (the old heuristic "did the target already
-move?" was wrong in all of those cases).
-
-#### Speed-dependent BP (Gyro Ball, Electro Ball)
-
-BP for these moves is a function of the speed ratio between attacker and target.
-Because the relevant speed may be hidden, the oracle is called at **both endpoints**
-of the unknown mon's speed range (`minStats[5]` and `maxStats[5]`); a BSV is kept
-if it is feasible at *any* speed in the range (sound over-approximation). Because
-Pass 4 runs first, these speed bounds are already tightened before Pass 3 needs them.
-
-#### Stat formulas used
-
-```
-HP  stat = floor((2 × base + iv + floor(ev/4)) × level/100) + level + 10
-Non-HP  = floor((floor((2 × base + iv + floor(ev/4)) × level/100) + 5) × nature_mod)
-```
-
-The pre-nature BSV (`calc_stat(base, iv, ev, level, 1.0)`) is the intermediate value
-before the `× nature_mod` step; it is what `min_pre_nature_stat`/`max_pre_nature_stat`
-bound.
-
----
+**Analytic and speed-dependent moves.** The oracle materializes an empty
+action queue, so its own "moved last" check for Analytic is always true — Pass
+3 instead decides this from the real event stream (S28) via
+`compute_analytic_last_movers`, which records the one slot that actually
+committed a move last each turn segment (a `Switch` doesn't count; a flinch,
+full paralysis, or a Cant still needs to be handled correctly, which the naive
+"did the target already move?" heuristic got wrong). Gyro Ball/Electro Ball's
+speed-dependent base power is evaluated at both ends of the unknown Pokémon's
+speed range and both results are kept (sound over-approximation), benefiting
+from Pass 4 already having tightened those bounds by the time Pass 3 runs.
 
 ### Pass 4 — Speed Ordering → Spe Bounds
 
-**Where:** `pass4_speed_from_order`, called on the **top-level** event list (not
-recursively), run before the event walk (and once more after BCP — see
-"Post-BCP re-derivation" below).
+**Where:** `pass4_speed_from_order`, over the top-level event list (not
+recursive), run once before the event walk and once more after BCP settles.
 
-Turn order reveals speed relationships. For each consecutive pair of `MoveUsed`
-events in the same **effective priority bracket**:
-
-#### Effective priority
-
-Priority is normally the move's `MoveData::priority`. Grassy Glide gets +1 when
-Grassy Terrain is active (deterministic, folded directly).
-
-When a mon's `possible_abilities` is already `Known`, `fold_known_ability_priority`
-folds the ability into the effective priority bracket before comparing moves:
-- `Known(Prankster)` + Status-category move → base priority + 1
-- `Known(GaleWings)` + Flying-type move + mon at full HP → base priority + 1
-- `Known(Triage)` + move with `heal_fraction ≠ [0,0]` → base priority + 3
-
-When the ability is **not** yet Known, these priority-lifting abilities become escape
-disjuncts in the emitted clause (see "Emitted clause" below).
-
-#### Trick Room
-
-If Trick Room is active (`pseudo_weathers.contains(TrickRoom)`), the mon that moved
-**first** is the **slower** one. `fast_idx` and `slow_idx` are swapped to compensate.
-
-#### Speed multipliers (`compute_speed_multipliers`)
-
-Deterministic multipliers are folded into `fast_mult` / `slow_mult` using a common
-integer denominator:
-
-| Factor | Multiplier | Condition |
-|---|---|---|
-| Boost stage +n | (2+n) / 2 | `boosts[4]` > 0 |
-| Boost stage −n | 2 / (2+n) | `boosts[4]` < 0 |
-| Paralysis | 1 / 2 | `status == Paralysis` |
-| Tailwind | 2 / 1 | side has `SideCondition::TailWind` |
-
-The resulting comparison is:
-```
-base_spe(fast) × fast_mult  ≥  base_spe(slow) × slow_mult
-```
-
-Hidden multipliers (Choice Scarf ×1.5, Iron Ball ×½, Swift Swim ×2 in rain, etc.)
-are **not folded in** — they become escape disjuncts. Folding them in would make the
-predicate too strong (unsound) when those items/abilities haven't been excluded.
-
-**Snapshot timing (S4):** `compute_speed_multipliers` takes the boost stage,
-paralysis, and Tailwind values as explicit arguments rather than reading them live
-from `state`. `pass4_speed_from_order` builds these per-mover as it scans
-`top_events` in order, maintaining a running snapshot (`spe_boost` / `paralyzed` /
-`tailwind` maps, seeded from `state` at call time) that is updated after each
-top-level event by deep-scanning its reactions for `StatusInflicted`/`StatusCured`,
-`BoostChanged{boost_idx: 4}`/`BoostsCleared`/`BoostsInverted`, and
-`SideConditionStart`/`End{TailWind}`. Each mover's `SpeedComparison` is then built
-from the snapshot **as of the point in the scan just before its own `MoveUsed`** —
-i.e. reflecting every earlier action's effects this turn (e.g. an earlier Thunder
-Wave paralyzing this mon before it acted), not `state`'s value at Pass 4's call
-time. Getting this wrong bakes an incorrect numeric factor into a `SpeedComparison`
-that `propagate_speed_comparisons` then uses to derive hard Spe bounds — a
-soundness risk, not just imprecision (a stale-multiplier bug of this kind can even
-manufacture a spurious `EVIVStatGE`/`LE`-style contradiction). `BoostsSwapped` /
-`BoostsCopied` are deliberately not tracked by the snapshot (which specific stats
-moved isn't recoverable from the event alone); this is a documented, narrow residual
-gap, not a soundness hole, since the escape disjuncts below remain sound regardless
-of snapshot staleness — only the numeric `fast_mult`/`slow_mult` needed the fix.
-
-#### Emitted clause
-
-The clause for each pair is:
+Every consecutive pair of same-priority-bracket `MoveUsed` events reveals a
+speed relationship. Effective priority folds in Grassy Glide's terrain bonus
+and, once an ability is already `Known`, priority-shifting abilities
+(Prankster, Gale Wings, Triage); when it's not yet known, those abilities
+become escape disjuncts instead (see below). Trick Room swaps which side of
+the comparison is "faster." Deterministic multipliers — boost stage,
+Paralysis, Tailwind — are folded into the comparison using a shared integer
+denominator; anything conditional on a *hidden* modifier (Choice Scarf, Iron
+Ball, weather-boosted abilities, Unburden, Quick Feet) is never folded in,
+since doing so would make the derived bound unsound until that modifier is
+actually excluded — it becomes an escape disjunct on the emitted clause
+instead:
 
 ```
 [SpeedComparison{fast_idx, slow_idx, fast_mult, slow_mult}]
- ∨ HasItem(QuickClaw)    on fast_idx
- ∨ HasAbility(QuickDraw) on fast_idx
- ∨ HasAbility(Prankster) on fast_idx  [only if move is Status-category]
- ∨ HasAbility(GaleWings) on fast_idx  [only if move is Flying-type AND fast_idx at full HP]
- ∨ HasAbility(Triage)    on fast_idx  [only if move has heal_fraction ≠ 0]
- ∨ HasAbility(Stall)     on slow_idx
- ∨ HasItem(ChoiceScarf)  on fast_idx
- ∨ HasItem(IronBall)     on slow_idx
- ∨ HasItem(LaggingTail)  on slow_idx
- ∨ HasItem(FullIncense)  on slow_idx
- ∨ HasAbility(SwiftSwim) on fast_idx  [only in Rain/Heavy Rain]
- ∨ HasAbility(Chlorophyll) on fast_idx [only in Sun/Extreme Sun]
- ∨ HasAbility(SandRush)  on fast_idx  [only in Sandstorm]
- ∨ HasAbility(SlushRush) on fast_idx  [only in Snow]
- ∨ HasAbility(SurgeSurfer) on fast_idx [only on Electric Terrain]
- ∨ HasAbility(Unburden)  on fast_idx  [only if fast_idx.item_lost]
- ∨ HasAbility(QuickFeet) on fast_idx  [only if fast_idx has a status]
+  ∨ HasItem(QuickClaw | ChoiceScarf) on fast_idx
+  ∨ HasAbility(QuickDraw | Prankster* | GaleWings* | Triage* | SwiftSwim** | Chlorophyll** | SandRush** | SlushRush** | SurgeSurfer** | Unburden*** | QuickFeet****) on fast_idx
+  ∨ HasAbility(Stall) on slow_idx
+  ∨ HasItem(IronBall | LaggingTail | FullIncense) on slow_idx
 ```
+*(gated respectively on move category/type/full-HP, weather/terrain, item-lost state, and existing status; already-excluded literals are omitted.)*
 
-Items/abilities that have been excluded from the mon's sets are not added to the
-clause. A unit clause (after BCP removes false literals) forces the `SpeedComparison`
-to be treated as unconditional.
+**Snapshot timing (S4).** The boost/paralysis/Tailwind values folded into
+each mover's multiplier are taken from a running snapshot built by scanning
+`top_events` in order — reflecting every earlier action's effect *this turn*
+up to that mover's own `MoveUsed` — rather than read live from `state` at
+Pass 4's single call time (which would miss e.g. an earlier Thunder Wave that
+paralyzed this mon before it acted). Getting this wrong bakes a wrong
+numeric multiplier into a `SpeedComparison`, which is a soundness risk (a
+stale multiplier can manufacture a spurious bound), not just imprecision.
+`BoostsSwapped`/`BoostsCopied` are deliberately not tracked by this
+snapshot — which stat moved isn't recoverable from the event alone — a
+narrow, documented gap that doesn't threaten soundness since the escape
+disjuncts remain valid regardless.
 
-#### Post-BCP re-derivation
-
-After the main BCP loop runs, if BCP forced a priority-lifting ability to `Known`
-(e.g., a `[Prankster]` unit clause from `pass2_prankster_immunity` was just
-resolved), Pass 4 and `propagate_speed_comparisons` are re-run once more with the
-updated ability knowledge. This tightens speed bounds that were previously left loose
-because the priority escape was still present.
-
-#### `propagate_speed_comparisons`
-
-After Pass 4 emits clauses, `propagate_speed_comparisons` walks every
-`SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult }` predicate that sits in
-a **unit clause** and applies (S17: a `SpeedComparison` sharing its clause with live
-escape disjuncts is conditional — the order may be explained by Quick Claw etc. —
-and must not be enforced until BCP has excluded every escape and collapsed the
-clause to unit):
+`propagate_speed_comparisons` (invoked immediately after Pass 4 and again
+every BCP iteration) is the only code that turns a `SpeedComparison` into an
+actual Spe bound, and only once it sits alone in a **unit** clause (S17 — a
+`SpeedComparison` still sharing its clause with a live escape disjunct is
+conditional; the observed order might be a Quick Claw proc, not genuine
+speed, and enforcing it anyway can force a mon's minimum speed above its own
+species maximum):
 
 ```
-fast_min × fast_mult ≥ slow_min × slow_mult
- →  fast.minStats[5] ≥ ceil(slow.minStats[5] × slow_mult / fast_mult)
-
-fast_max × fast_mult ≥ slow_max × slow_mult
- →  slow.maxStats[5] ≤ floor(fast.maxStats[5] × fast_mult / slow_mult)
+fast_min × fast_mult ≥ slow_min × slow_mult  ⟹  fast.minStats[5]  ≥ ceil(slow.minStats[5] × slow_mult / fast_mult)
+fast_max × fast_mult ≥ slow_max × slow_mult  ⟹  slow.maxStats[5]  ≤ floor(fast.maxStats[5] × fast_mult / slow_mult)
 ```
-
-This is run to fixpoint immediately after Pass 4 and again inside the BCP loop.
-
----
 
 ### Pass 5 — Back-Solve EV / IV / Nature
 
-**Where:** `pass5_back_solve`, called per mon with a `Known` species after the event walk.
+**Where:** `pass5_back_solve`, run per Pokémon with a `Known` species, after
+the event walk.
 
-Given `minStats[i]`/`maxStats[i]` (tightened by Passes 1–4), Pass 5 inverts the stat
-formula to derive EV/IV/nature constraints.
+Given the `minStats`/`maxStats` (and, for non-HP stats, `min_pre_nature_stat`/
+`max_pre_nature_stat`) tightened by the earlier passes, this pass inverts the
+stat formula to constrain EV, IV, and nature directly.
 
-#### HP (stat index 0, no nature modifier)
+**HP** has no nature term: enumerate `iv ∈ [minIvs[0], maxIvs[0]]` (or just
+`{31}` under `force_max_ivs`) and `ev` over the legal lattice, keep pairs whose
+`calc_hp` falls inside `[minStats[0], maxStats[0]]`, and tighten `minEvs[0]`/
+`maxEvs[0]` to the surviving range.
 
-```
-HP = floor((2 × base[0] + iv + floor(ev/4)) × level/100) + level + 10
-```
+**Non-HP stats** iterate over every still-possible nature. For each nature's
+modifier `m ∈ {0.9, 1.0, 1.1}`, a `(iv, ev)` pair survives if both the final
+stat (`floor(BSV × m)`) falls in `[minStats[i], maxStats[i]]` *and* the BSV
+itself falls in `[min_pre_nature_stat[i], max_pre_nature_stat[i]]`. A nature
+that has no surviving pair for any stat it touches is excluded outright. The
+global EV range per stat is the union across all surviving natures.
 
-Enumerate `iv ∈ [minIvs[0], maxIvs[0]]` (or just `{31}` with `force_max_ivs`) and
-`ev ∈ EV_LATTICE`. Keep `(iv, ev)` pairs where `calc_hp(base, iv, ev, level)`
-falls in `[minStats[0], maxStats[0]]`. The min/max of kept EV values tighten
-`minEvs[0]`/`maxEvs[0]`.
+**Cross-stat EV-total tightening.** When `config.ev_total_cap` is set
+(510 by default for competitive play), each stat's ceiling is additionally
+capped at `cap − Σ(other stats' floors)` — this only ever lowers a ceiling,
+never raises a floor, so it's always sound, and gets tighter as more stats
+develop high confirmed minimums.
 
-#### Non-HP stats (stat indices 1–5)
+**The stat-points EV lattice** (`EV_LATTICE`, 33 values: `0, 4, 12, 20, …, 252`)
+mirrors `scale_evs_for_stat_points`'s `ev = max(0, 8×points − 4)` mapping, used
+whenever `config.use_stat_points` is set to match the simulator's
+`--stat-points` flag.
 
-For each stat, iterate over all remaining candidate natures. For a given nature with
-modifier `m ∈ {0.9, 1.0, 1.1}`:
+### Pass 6 — Boolean Constraint Propagation
 
-```
-non-HP stat = floor(calc_stat(base[i], iv, ev, level, 1.0) × m)
-            = floor(BSV × m)
-```
+**Where:** `inference::bcp::run_bcp`, iterated to a fixpoint.
 
-A `(iv, ev)` pair is kept if the computed stat falls in `[minStats[i], maxStats[i]]`
-AND the BSV falls in `[min_pre_nature_stat[i], max_pre_nature_stat[i]]`. A nature
-is marked impossible if no `(iv, ev)` pair passes for any stat that nature touches.
-Impossible natures are excluded via `unknown_exclude`.
-
-The global `min_ev` / `max_ev` per stat is the union over all surviving natures.
-
-#### EV total-cap cross-stat tightening
-
-When `config.ev_total_cap = Some(cap)` (default 510 for competitive Pokémon Champions):
-
-```
-For each stat i:
-  budget = cap - Σ_{j≠i} minEvs[j]
-  maxEvs[i] = max EV_LATTICE value ≤ budget
-```
-
-This only tightens ceilings, never raises floors, so it is always sound. When two
-stats have high known minimums, the remaining stats get tighter maxima.
-
-#### EV lattice (`EV_LATTICE`)
-
-In stat-points mode the legal EV values are a sparse lattice. The conversion is:
-
-```
-ev = max(0, 8 × stat_points − 4)
-```
-
-for `stat_points ∈ 0..=32`, yielding 33 values:
-`{0, 4, 12, 20, 28, 36, 44, 52, …, 252}` (step 8 after the initial 0→4 gap).
-
----
-
-### Pass 6 — BCP (Boolean Constraint Propagation)
-
-**Where:** `run_bcp`, iterated to fixpoint.
-
-BCP processes each clause in `state.predicates` using three rules:
-
-1. **Remove false literals:** a literal is definitively false (e.g., `HasItem(ChoiceBand)`
-   when `mon.item = Not([ChoiceBand, …])` already excludes it). Empty clause → panic.
-2. **Drop satisfied clauses:** if any literal is definitively true, the clause is
-   already satisfied and can be removed.
-3. **Unit propagation:** if exactly one literal remains live and it is not a
-   `SpeedComparison` (which is a relational constraint, not a field assignment), force
-   it via `force_literal`.
-
-`SpeedComparison` literals stay in the predicate store permanently as relational
-constraints; `propagate_speed_comparisons` runs at the end of every BCP iteration
-to extract concrete stat bounds from them.
-
-`force_literal` for the various statement types:
-- `HasItem` → `unknown_set_known(&mut mon.item, …)`
-- `HasAbility` → `unknown_set_known(&mut mon.possible_abilities, …)`
-- `HasMove` → `reveal_move_on_mon`
-- `HasStatus` → `mon.status = Some(…)`
-- `EVIVStatGE` → raise `mon.min_pre_nature_stat[si]`
-- `EVIVStatLE` → lower `mon.max_pre_nature_stat[si]`
-- `NatureBoostsStat` → narrow `possible_natures` to the boosting subset
+Each pass over `state.predicates` applies three rules per clause: drop any
+literal already known false (an empty clause means the observed events are
+jointly impossible — panic); drop the whole clause if any literal is already
+known true (already satisfied); and if exactly one literal survives and it
+isn't a relational constraint (`SpeedComparison`, `KnowsThreateningMove`),
+force it into the state via `force_literal` — `HasItem`/`HasAbility` narrow the
+corresponding `Unknown` to `Known`, `HasMove` reveals a move slot,
+`EVIVStatGE`/`LE` raise/lower a pre-nature bound, and so on. Relational
+constraints stay in the predicate store permanently; `propagate_speed_comparisons`
+re-derives concrete Spe bounds from them at the end of every iteration. Because
+forcing or excluding a literal can turn some *other* clause into a fresh unit
+clause, the whole loop runs to a fixpoint rather than a single pass.
 
 ---
 
 ## Learnset Narrowing (Illusion / species disambiguation)
 
-**Where:** `narrow_species_by_learnset`, called at the end of the `MoveUsed` and
-`ChargingMove` handlers in the event walk.
+**Where:** `narrow_species_by_learnset`, called from the `MoveUsed` and
+`ChargingMove` handlers.
 
-When a Pokémon's `possible_species` is `Possibly([s1, s2, …])` (typically set by
-`maybe_widen_for_illusion` for Zoroark disguises) and a move is observed:
-
-1. For each candidate species `s`, look up `learnset_dex.get(s)`.
-2. If the learnset exists and does **not** contain `move_used`, remove `s` from the
-   candidate set.
-3. Species with no learnset data are kept (sound: absence of data is not evidence
-   of inability).
-4. If exactly one candidate remains, collapse to `Known(s)` and refresh:
-   - `possible_types` → `Known(dex[s].types)`
-   - `possible_weight_hg` → `Known(dex[s].weight)`
-
-This is only sound because it only removes species that are provably unable to produce
-the observed move. It never narrows on species that could plausibly learn it.
-
-### Illusion and the bench (S29)
-
-When an Illusion disguise is possible (a Zoroark forme sits on the switching side's
-known bench) and the incoming species is not itself a Zoroark forme, `pass1_switch`
-does **not** consume the benched entry that matches the shown species — the shown
-species may be a disguise, and consuming the real teammate's entry would merge two
-physical mons (the real teammate's accumulated fog would be mutated by events that
-happened to the Zoroark). Instead it builds a fresh species-only active entry and
-`maybe_widen_for_illusion` widens it to `Possibly([shown, Zoroark…])`.
-
-If that still-ambiguous entry switches out before its identity resolves (no
-`IllusionEnded`, no learnset collapse to `Known`), `bench_outgoing_mon` **discards**
-it rather than benching: bench re-entry matches by `Known` species (so it could never
-be pulled back), and benching it beside the real teammate's surviving entry would
-double-count one physical roster member in `teammate_indices` / item-clause
-propagation.
+When `possible_species` is `Possibly([s1, s2, …])` — set by
+`maybe_widen_for_illusion` for a suspected Zoroark disguise — and a move is
+observed, every candidate whose learnset is known and does *not* contain that
+move is dropped. Species with no learnset data available are kept (absence of
+data is not evidence of inability — dropping them would be unsound). If
+exactly one candidate survives, the state collapses to `Known` and refreshes
+every species-derived field (types, weight) from the resolved identity.
 
 ---
 
 ## The Materialize Bridge (`materialize.rs`)
 
-The damage oracle (`calculate_damage_outcomes_for_target_with_options`) takes concrete
-`&BattleState` / `&PokemonState` values. Pass 3 bridges this gap:
+Pass 3's damage oracle needs concrete `&BattleState`/`&PokemonState` values;
+all it has is `UnknownBattleState`/`UnknownPokemonState`. `materialize_pokemon`
+and `materialize_battle` do the mechanical translation for one candidate
+hypothesis at a time — callers are responsible for enumerating the right set
+of hypotheses; this module just performs the field mapping faithfully.
 
-`materialize_pokemon(unk, stats_override, item, ability) -> PokemonState`
-- Uses `unk.possible_species` (must be `Known`)
-- Overrides the entire stats array with `stats_override` (the candidate BSV
-  after applying the nature modifier)
-- Sets `weight_hg` from `possible_weight_hg` — required for Low Kick / Heavy Slam BP
-- **HP heuristic**: `Percent(100)` → `stats_override[0]` (max HP, enables Multiscale /
-  ShadowShield / TeraShell); any other percent → `max_hp × 0.5`. The ×0.5 value is
-  strictly less than max HP, so all three full-HP-gated reducers evaluate to "inactive"
-  in the oracle. No double-count with the defensive allowlist union: those abilities are
-  always enumerated by `defensive_damage_abilities`, but when HP is not 100% they
-  contribute nothing because the oracle gates them.
-- **Pinch-gate caveat (S25)**: the ×0.5 sentinel sits above the ≤1/3 gate used by
-  Blaze / Overgrow / Swarm / Torrent, so Direction B enumerates attacker HP
-  *hypotheses* explicitly: display ≤31% → a pinch-active `Number` override; 32–34%
-  (bucket straddles the gate) → both hypotheses unioned; ≥35% / 100% / exact
-  `Number` → the sentinel path alone.
+`materialize_pokemon(unk, stats_override, item, ability)` overrides the
+entire stat array with the candidate BSV-after-nature values being tested and
+sets every other field from whatever `unk` currently knows, defaulting
+harmlessly where a field is still unknown and doesn't affect damage (e.g. an
+unresolved nature becomes `Hardy`, since the stats are already overridden
+directly). The one load-bearing default is **HP**: a display of exactly 100%
+maps to the candidate's max HP (so full-HP-gated reducers like Multiscale can
+be tested active); any other percentage maps to a fixed 0.5×max-HP sentinel,
+strictly below max HP, so those same reducers correctly read as inactive and
+aren't double-counted against the unconditional allowlist Pass 3 already
+applies. That sentinel sits *above* the ≤⅓ HP pinch-ability gate (Blaze,
+Overgrow, Swarm, Torrent), so Direction B enumerates pinch-active HP as an
+explicit separate hypothesis when the attacker's displayed percent could be in
+that range (S25): ≤31% tests pinch-active only, 32–34% (where the display
+bucket straddles the gate) tests both and unions the results, and ≥35% (or
+100%, or an exact `Number`) uses the sentinel path alone.
 
-`materialize_battle(unk, p1_active, p2_active) -> BattleState`
-- Copies all field effects (weather, terrain, side conditions, pseudo-weathers, slot
-  conditions) from `unk` to the concrete `BattleState`
-- **Timer heuristic**: `Unknown::Known(t) => t` (exact); unknown timers → 3 turns.
-  Timer values are **damage-irrelevant** — the oracle checks whether an effect is
-  *present* (weather ≠ None, screen in side_conditions), not its remaining duration.
-  `Known(0)` is the permanent-effect sentinel used for primordial weather and entry
-  hazards; the `Known(t)` arm must remain first to prevent 0 from folding into the
-  `_ => 3` fallback.
+`materialize_battle(unk, p1_active, p2_active)` copies weather/terrain/side/
+slot conditions directly and maps every unresolved field timer to an
+arbitrary `3` — safe because the oracle only ever checks whether an effect is
+*currently active*, never its remaining duration. `Known(0)`, the sentinel for
+a permanent effect (primordial weather, entry hazards), is handled in its own
+match arm ahead of that fallback so it's never folded into it.
 
 ---
 
 ## Soundness Guarantee
 
-The engine never excludes a training (EV/IV/nature/item/ability assignment) that could
-actually have produced the observed events. When the engine cannot determine which of
-several explanations is correct, it takes the **union** — keeping all possibilities.
-Only when an explanation is provably inconsistent with observed events is it excluded.
+The engine never excludes a training (EV/IV/nature/item/ability assignment)
+that could actually have produced the observed events. Where multiple
+explanations remain consistent, it keeps their **union**, not a guess. It only
+narrows once an explanation is *provably* inconsistent with what was observed.
 
-If the observed events are genuinely impossible under any training (e.g., a move is
-revealed that cannot exist for the observed species), the engine panics via
-`inference_contradiction!` with a descriptive message. This represents a bug in the
-event stream, not a normal inference outcome.
+If the observed events are jointly impossible under any assignment — which
+should never happen for a legally-generated event stream — the engine panics
+via `inference_contradiction!` with a descriptive message identifying the
+conflicting values. That panic is a signal of a bug in the event stream (an
+emission-side or engine-side defect), not a normal inference outcome; every
+soundness bug found this way and its regression test is logged in `AUDIT.md`.
 
 ---
 
 ## `InferenceConfig`
 
-Controls inference behaviour at call time:
+Passed to `apply_information` to control inference behaviour:
 
 | Field | Default | Effect |
 |---|---|---|
-| `use_stat_points` | `true` | Restrict EV candidates to the 33-value lattice |
-| `force_max_ivs` | `true` | Assume IVs = 31 (competitive norm) |
-| `level` | `50` | Level for newly observed opponent mons |
-| `legal_items` | `None` | Optional whitelist; `None` = all items possible |
-| `allow_repeat_items` | `false` | Item clause: `false` = each non-`None` item may appear at most once per team; once a teammate's item is confirmed, that item is excluded from every other roster member's lattice. `true` = no cross-teammate exclusion |
-| `learnset_dex` | `{}` | Learnset data; empty = skip learnset narrowing |
-| `ev_total_cap` | `Some(510)` | Total EV budget for cross-stat tightening |
+| `use_stat_points` | `true` | Restrict EV candidates to the 33-value `EV_LATTICE` instead of the full 0–252 range |
+| `force_max_ivs` | `true` | Assume IVs are 31 (skips IV uncertainty entirely) |
+| `level` | `50` | Level assigned to a newly-observed opponent Pokémon |
+| `legal_items` | `None` | Optional item whitelist; a revealed item outside it panics. `None` = every item possible |
+| `allow_repeat_items` | `false` | `false`: each non-`None` item can appear on at most one teammate, and confirming it on one excludes it from the rest. `true`: no cross-teammate exclusion |
+| `learnset_dex` | `{}` | Per-species legal movesets; non-empty enables learnset-based Illusion narrowing |
+| `ev_total_cap` | `Some(510)` | Total EV budget used for Pass 5's cross-stat ceiling tightening; `None` disables it |
+
+---
+
+## Testing
+
+`src/tests/inference_tests.rs` exercises the engine end-to-end: constructing a
+partial-information battle state, feeding it a scripted event sequence, and
+asserting on the resulting bounds. Regression tests for every soundness fix in
+`AUDIT.md` live there, named `test_s<NN>_*` / `roundtrip_s<NN>_*` after the
+finding they cover.

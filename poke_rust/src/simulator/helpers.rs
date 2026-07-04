@@ -5514,12 +5514,10 @@ pub fn weather_rock_duration(mon: &PokemonState, weather: &Weather) -> u8 {
 /// Set weather, respecting strong weather precedence.
 /// Strong weather can only be overridden by other strong weather.
 ///
-/// NOTE: This always re-emits `WeatherChanged` even if the incoming weather is already
-/// active. While that deviates from strict game accuracy (ability weather-setters do not
-/// re-trigger on identical weather), the emission is unconditional so absence of
-/// `WeatherChanged` still correctly implies no setter fired — weather-absence inference
-/// stays sound. If a handler is ever added that early-returns on same-weather, this
-/// invariant must be re-checked.
+/// Always re-emits `WeatherChanged` even if the incoming weather is already active
+/// (deviates from game accuracy — setters don't re-trigger on identical weather) so
+/// that absence of the event still soundly implies no setter fired. Re-check this if
+/// a handler is ever added that early-returns on same-weather.
 pub fn set_weather(state: &mut BattleState, weather: Weather, duration: u8) {
     let current_is_strong = matches!(
         state.weather.as_ref(),
