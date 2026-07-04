@@ -4869,27 +4869,22 @@ fn pass3_damage_to_stats(
         // Detect whether this target's HP is a multi-hit sequence.
         let is_multi = move_data.multihit_range[0] > 0 || n_hits > 1;
 
-        // S23: walk the target's reactions IN ORDER, tracking three things the old
-        // DamageDealt-only collection got wrong for multi-hit sequences:
+        // S23: walk the target's reactions IN ORDER, fixing three multi-hit bugs in
+        // the old DamageDealt-only collection:
         //
-        // 1. Per-hit crit — the sim emits `Crit{target}` immediately before the hit's
-        //    own `DamageDealt` (single emit site, gated on damage > 0), so a pending
-        //    flag attributes each crit to exactly its hit. The old global "any hit
-        //    critted" flag applied the crit constraint to NON-crit hits too, whose
-        //    feasible-BSV interval (observed damage ÷ crit multiplier) sits below the
-        //    truth — an unsound exclusion whenever a mixed-crit multi-hit landed.
+        // 1. Per-hit crit — `Crit{target}` is emitted immediately before its hit's
+        //    `DamageDealt`, so a pending flag attributes it to exactly that hit. The
+        //    old global "any hit critted" flag also constrained non-crit hits to
+        //    crit-only rolls, excluding the true (lower) BSV whenever a multi-hit
+        //    mixed crits.
         //
-        // 2. Interleaved heals — a pinch berry firing mid-sequence is emitted as its
-        //    own `Healed` between two `DamageDealt`s (see the emission convention in
-        //    the module README). Skipping it left the next hit's baseline at the
-        //    pre-berry value, understating that hit's damage by the heal amount.
+        // 2. Interleaved heals — a mid-sequence pinch berry emits its own `Healed`
+        //    between `DamageDealt`s; skipping it left the next hit's baseline
+        //    pre-berry, understating that hit's damage.
         //
-        // 3. `current_hp` is passed down as each hit's true pre-hit HP so the oracle
-        //    materializes the defender at the HP the hit was actually taken at —
-        //    full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) were
-        //    previously evaluated against the post-move HP (pass 1 has already applied
-        //    the whole reaction tree by the time Pass 3 runs), which disabled them for
-        //    exactly the hit that dropped the defender below full HP.
+        // 3. `current_hp` threads each hit's true pre-hit HP into the oracle, so
+        //    full-HP-gated reducers (Multiscale/Shadow Shield/Tera Shell) aren't
+        //    evaluated against the already-post-move HP Pass 1 leaves on the live mon.
         let mut current_hp: PokemonHP = pre_hp.clone();
         let mut pending_crit = false;
         let mut hit_idx: usize = 0;
@@ -6759,14 +6754,6 @@ fn priority_lift_escapes(
     escapes
 }
 
-/// Emit `SpeedComparison` predicates from the observed top-level move order.
-///
-/// For each pair of consecutive moves in the same effective priority bracket:
-/// - Wraps the natural SpeedComparison in a disjunction with any move-order explanation
-///   that could account for the ordering without implying a speed edge (Quick Claw,
-///   Quick Draw, ability priority, Stall, item speed modifiers, weather abilities, etc.).
-/// - Accounts for Trick Room (reverses the inferred fast/slow assignment) and Tailwind
-///   (folds the ×2 multiplier into the comparison deterministically).
 /// Per-mover snapshot used by `pass4_speed_from_order`: everything needed to emit a
 /// pairing's clause, including the speed-relevant fields (Spe boost stage, paralysis,
 /// Tailwind) captured AS OF the point in the turn just before this mover's own
@@ -6839,6 +6826,14 @@ fn update_speed_snapshot_from_reactions(
     }
 }
 
+/// Emit `SpeedComparison` predicates from the observed top-level move order.
+///
+/// For each pair of consecutive moves in the same effective priority bracket:
+/// - Wraps the natural SpeedComparison in a disjunction with any move-order explanation
+///   that could account for the ordering without implying a speed edge (Quick Claw,
+///   Quick Draw, ability priority, Stall, item speed modifiers, weather abilities, etc.).
+/// - Accounts for Trick Room (reverses the inferred fast/slow assignment) and Tailwind
+///   (folds the ×2 multiplier into the comparison deterministically).
 fn pass4_speed_from_order(
     state: &mut UnknownBattleState,
     top_events: &[InformationEvent],
