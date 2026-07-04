@@ -1,12 +1,22 @@
 # CLAUDE.md
 
+## Project Status
+
+The backend is a mature, heavily-tested probabilistic battle simulator: turn
+resolution, damage calculation, and a full fog-of-war inference engine (see
+below) have all been through multiple audit rounds. The project is now
+transitioning focus from backend to **frontend development** — see the
+"Frontend Development" section below for what exists (nothing yet) and what's
+planned.
+
 ## Game Version
 
 This simulator targets the **newest generation of Pokémon — Pokémon Champions**.
 All mechanics, species, moves, items, and abilities are implemented to match that
-game. The `TODO.md` at the repo root tracks the Pokémon Champions moves, items,
-abilities, and berries that still need work; an entry is removed from `TODO.md`
-once its full effect is implemented in the simulator.
+game. `TODO.md` at the repo root is no longer a mechanic-completion tracker — it
+currently tracks frontend build-out (see "Frontend Development" below). If you
+do pick up mechanic-implementation or mechanic-fix work, the Bulbapedia-research
+rule below still applies in full.
 
 ## Research Requirements
 
@@ -71,9 +81,12 @@ cargo clippy
 | `--p1`, `--p2` | required | Teamsheet file paths |
 | `--poke-dex` | `../pokemon_info/showdownDex.txt` | Pokemon species data |
 | `--move-dex` | `../pokemon_info/showdownMoves.txt` | Move definitions |
+| `--ability-dex` | `../pokemon_info/showdownAbilities.txt` | Ability data (used by the inference engine for ability absence/priority reasoning) |
+| `--learnset-dex` | `../pokemon_info/showdownLearnsets.txt` | Learnset data (used by the inference engine for Illusion narrowing) |
 | `-v` / `--verbosity` | `1` | Debug output level (0–4) |
 | `--no-consider-crit` | false | Disable crit branching |
 | `--damage-rolls` | `16` | Number of damage rolls to branch on (1–16) |
+| `--shared-multihit-damage-rolls` | false | Use one shared damage roll across all hits of a multi-hit move |
 | `--stat-points` | true | Use stat-points formula instead of EVs |
 
 ## Architecture
@@ -84,24 +97,50 @@ The project is a probabilistic Pokémon battle simulator. It loads two teams, th
 
 ```
 main.rs                   CLI entry point; loads dex data; drives simulation
-simulator.rs              Public API — all external callers use only this module
-simulator_helpers.rs      Internal battle mechanics (damage calc, stat boosts, ability/item effects)
-battle.rs                 State types: MatchState, BattleState, PokemonState, Action
-pokemon.rs                PokemonState construction & teamsheet parsing
-dex_data.rs               Shared enums and parsing helpers (Status, Weather, Terrain, MoveFlag, …)
-simulator_tests.rs        All tests (~5,600 lines)
-simuilator_test_helpers.rs  Test utilities (battle builders, damage helpers, assert functions)
-data/
-  species.rs              Species enum (~1,000 entries, code-generated)
-  moves.rs                PokemonMove enum (~2,900 entries, code-generated)
-  abilities.rs            Ability enum (~300 entries, code-generated)
-  items.rs                Item enum (~1,000 entries, code-generated)
-helper_scripts/           Python scripts to regenerate data/ enums from Showdown source files
+user.rs                   Interactive battle driver (team preview -> turn loop ->
+                          game over) and CLI text output formatting
+data/                     Code-generated enums — do not hand-edit, regenerate
+                          via helper_scripts/ instead
+  species.rs              Species enum (~1,000 entries)
+  pokemon_move.rs          PokemonMove enum (~2,900 entries)
+  ability.rs               Ability enum (~300 entries)
+  item.rs                  Item enum (~1,000 entries)
+state/                    Core state types
+  battle.rs                MatchState, BattleState, Action, FieldSlot, Player,
+                          BattleCommand/PlayerCommand/TeamPreviewCommand
+  pokemon.rs               PokemonState, teamsheet parsing
+  dex_data.rs              Dex file parsing (species/move/ability/learnset),
+                          shared enums (Status, Weather, Terrain, MoveFlag, …)
+simulator/                Public API + turn resolution engine
+  mod.rs                   team_preview_state_from_teamsheets, simulate_turn,
+                          get_possible_commands_for_active_slot,
+                          validate_battle_command_combination (~7,400 lines)
+  helpers.rs               Internal mechanics: damage calc, ability/item hooks,
+                          weather/terrain, end-of-turn resolution (~12,700 lines)
+information/              Fog-of-war inference engine (partial-information
+                          tracking for the opponent's hidden team data)
+  information.rs           InformationEvent / EventKind: the vocabulary of what
+                          a player can observe, as a nested action->reaction tree
+  unknowns.rs              UnknownBattleState / UnknownPokemonState, the
+                          Unknown<T> lattice, and the CNF Statement predicate store
+  inference.rs             Six-pass engine; entry point apply_information
+  inference/bcp.rs          Boolean constraint propagation pass
+  materialize.rs            Turns a fog-of-war hypothesis back into a concrete
+                          PokemonState/BattleState for the damage calc to use
+  README.md                Full design doc for this module — read before touching it
+  AUDIT.md                 Running soundness-bug log (S1–S29) with regression tests
+tests/
+  simulator_tests.rs        Main battle-mechanics test suite (~33,700 lines)
+  inference_tests.rs         Inference-engine regression tests, named
+                          test_s<NN>_*/roundtrip_s<NN>_* after the AUDIT.md finding
+  simuilator_test_helpers.rs Test builders/helpers (battle builders, damage
+                          helpers, assert functions)
+helper_scripts/            Python scripts to regenerate data/ enums from Showdown source files
 ```
 
 ### Core design: probabilistic branching
 
-Every public simulation function returns `Vec<(MatchState, f64)>` — a list of possible resulting states and their probabilities. Damage rolls, crits, and RNG effects each fork the outcome tree. `simulator_helpers::coalesce_branches()` merges structurally identical states, summing their probabilities.
+Every public simulation function returns a weighted list of possible resulting states and their probabilities. Damage rolls, crits, and RNG effects each fork the outcome tree. `simulator::helpers::coalesce_branches()` merges structurally identical states, summing their probabilities — it must not merge branches with divergent event histories, only truly identical resulting states.
 
 State is cloned per branch — `BattleState` and `PokemonState` are `Clone`-heavy by design.
 
@@ -135,12 +174,51 @@ Action
   └── TeraAction
 ```
 
-### Public API (simulator.rs)
+`BattleState` implements `Display` for human-readable CLI output (used by
+`user.rs`) — this is text, not JSON. No state type currently derives
+`Serialize`/`Deserialize` (see "Frontend Development" below).
 
-- `team_preview_state_from_teamsheets()` — parse team files into initial `MatchState`
-- `get_possible_commands_for_active_slot()` — enumerate legal actions for a slot
-- `simulate_turn()` — core turn resolution; returns `Vec<(MatchState, f64)>`
-- `validate_battle_command_combination()` — validate a chosen action pair
+Player-supplied actions use a two-level command model: a player submits one
+`PlayerCommand` per turn (`Battle(Vec<BattleCommand>)`, `Pass`, or
+`TeamPreview(TeamPreviewCommand)`), and each active slot's `BattleCommand` is
+`Attack(AttackCommand)`, `Switch(SwitchCommand)`, `Struggle`, or `Pass`.
+
+### Public API (`simulator/mod.rs`)
+
+- `team_preview_state_from_teamsheets()` — parse team files into a `TeamPreviewState`
+- `get_possible_commands_for_active_slot()` — enumerate legal `BattleCommand`s for a slot
+- `simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, observer)` —
+  core turn resolution; returns `Vec<(MatchState, Option<Vec<InformationEvent>>, f64)>`.
+  The `InformationEvent` log (present when `observer` is `Some`) is the
+  observer's-eye-view event stream for that branch, consumed by the inference
+  engine below.
+- `validate_battle_command_combination()` — validate a set of per-slot commands is jointly legal
+
+`simulator/helpers.rs` exposes ~100 additional `pub fn`s (damage calculation,
+type effectiveness, status/volatile handling, weather/terrain, ability hooks,
+end-of-turn resolution, etc.) — these are internal engine mechanics, not a
+driver-facing API.
+
+### Fog-of-war inference engine (`information/`)
+
+A Pokémon battle is played under partial information: each side sees moves,
+switches, damage, and status changes on the field, but not the opponent's
+EVs/IVs/nature/held item or (until revealed) ability or exact species form.
+`information/` turns the stream of player-visible events from a battle into
+the tightest possible **sound** bounds on everything hidden about the
+opponent's team — it never excludes a value that could actually be true;
+where multiple explanations remain consistent it keeps their union.
+
+Entry point: `apply_information(state, events, dex, config)`, a six-pass
+pipeline (speed-order → per-event structural facts → item/ability
+presence-absence → damage→stat-bounds → EV/IV/nature back-solve → boolean
+constraint propagation to a fixpoint). The full design — the
+`InformationEvent`/`EventKind` event vocabulary, the `Unknown<T>` lattice, the
+CNF `Statement` predicate store, and each pass in depth — is documented in
+`information/README.md`; don't duplicate that detail here. `information/AUDIT.md`
+logs every soundness bug found and fixed in this engine (S1–S29) with its
+regression test — **read both before modifying this module**, in the same
+spirit as the Bulbapedia research rule above.
 
 ### Global configuration
 
@@ -148,14 +226,65 @@ Verbosity and some roll-sharing flags are stored in `OnceLock<AtomicBool>` globa
 
 ### Data enums
 
-`data/species.rs`, `data/moves.rs`, `data/abilities.rs`, and `data/items.rs` are **code-generated** from Showdown data files using `helper_scripts/gen_enums.py` and `helper_scripts/gen_items.py`. Do not edit them by hand — regenerate from source data instead.
+`data/species.rs`, `data/pokemon_move.rs`, `data/ability.rs`, and `data/item.rs` are **code-generated** from Showdown data files using `helper_scripts/gen_enums.py` and `helper_scripts/gen_items.py`. Do not edit them by hand — regenerate from source data instead.
 
 ## Testing
 
-Tests live in `simulator_tests.rs` and use helpers from `simuilator_test_helpers.rs`. Key helpers:
+Tests live in `tests/simulator_tests.rs` (battle mechanics) and
+`tests/inference_tests.rs` (fog-of-war engine), using helpers from
+`tests/simuilator_test_helpers.rs`:
 
 - `battle_state_from_lists()` — build a `BattleState` from Pokemon lists
 - `run_single_turn()` — execute one turn and return outcome branches
 - `damage_distribution()` — extract probabilistic damage outcomes
 - `assert_distribution_close()` — fuzzy probability assertion
 - `hit_probability()` — compute hit chance across branches
+
+Inference regression tests are named `test_s<NN>_*` / `roundtrip_s<NN>_*` after
+the `AUDIT.md` finding they cover.
+
+## Frontend Development
+
+**Nothing exists yet.** There is no frontend directory, no `package.json`, no
+HTTP/API server crate (no axum/actix/warp/rocket), and no WASM bindings
+(no wasm-bindgen/wasm-pack) anywhere in this repo. `serde`/`serde_json` are
+declared in `poke_rust/Cargo.toml` but currently unused — no state type derives
+`Serialize`/`Deserialize` yet, so there is no existing way to hand `MatchState`/
+`BattleState`/`PokemonState` to a frontend as JSON. This section is a starting
+point for whoever picks up this work, not a description of something already
+built.
+
+### What's planned
+
+The only spec that exists today is the root `TODO.md`:
+
+- Start with **Teams**, **Simulate**, and **Tracker** pages.
+  - The Tracker page needs a parser turning free-text battle-log lines into an
+    action/reaction tree — including inferring "guaranteed" effects the user
+    didn't type explicitly. This will likely involve regex-based line parsing
+    and needs a detailed spec before implementation. Worth reusing rather than
+    reinventing: `information::information::InformationEvent`
+    (`poke_rust/src/information/information.rs`, documented in
+    `information/README.md` Part 1) already models exactly this "cause with
+    nested reactions" tree shape for the inference engine — look at adapting
+    it for the Tracker instead of designing a parallel structure.
+  - Design reference: https://stitch.withgoogle.com/projects/6512361286860616575
+  - Sprite source: https://github.com/PokeAPI/sprites
+- Then move on to bot-creation, battle, and mentor pages.
+
+### Open decisions before writing frontend code
+
+These are decisions for whoever starts this work, not answers:
+
+- **How the frontend talks to the simulator** — e.g. an HTTP/WebSocket API
+  server process wrapping the existing `simulator`/`user` modules, vs.
+  compiling the simulator to WASM and driving it directly in-browser, vs.
+  another integration entirely.
+- **Serialization strategy** for `MatchState`/`BattleState`/`PokemonState`
+  once the above is decided — these types don't derive `Serialize`/
+  `Deserialize` today.
+
+Once frontend work actually starts, extend the "Module layout" and "Commands"
+sections above with the frontend's own directory and its build/dev/test
+commands — this section is a starting point, not the permanent home for
+frontend documentation.
