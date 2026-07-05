@@ -243,48 +243,5 @@ Tests live in `tests/simulator_tests.rs` (battle mechanics) and
 Inference regression tests are named `test_s<NN>_*` / `roundtrip_s<NN>_*` after
 the `AUDIT.md` finding they cover.
 
-## Frontend Development
-
-**Nothing exists yet.** There is no frontend directory, no `package.json`, no
-HTTP/API server crate (no axum/actix/warp/rocket), and no WASM bindings
-(no wasm-bindgen/wasm-pack) anywhere in this repo. `serde`/`serde_json` are
-declared in `poke_rust/Cargo.toml` but currently unused — no state type derives
-`Serialize`/`Deserialize` yet, so there is no existing way to hand `MatchState`/
-`BattleState`/`PokemonState` to a frontend as JSON. This section is a starting
-point for whoever picks up this work, not a description of something already
-built.
-
-### What's planned
-
-The only spec that exists today is the root `TODO.md`:
-
-- Start with **Teams**, **Simulate**, and **Tracker** pages.
-  - The Tracker page needs a parser turning free-text battle-log lines into an
-    action/reaction tree — including inferring "guaranteed" effects the user
-    didn't type explicitly. This will likely involve regex-based line parsing
-    and needs a detailed spec before implementation. Worth reusing rather than
-    reinventing: `information::information::InformationEvent`
-    (`poke_rust/src/information/information.rs`, documented in
-    `information/README.md` Part 1) already models exactly this "cause with
-    nested reactions" tree shape for the inference engine — look at adapting
-    it for the Tracker instead of designing a parallel structure.
-  - Design reference: https://stitch.withgoogle.com/projects/6512361286860616575
-  - Sprite source: https://github.com/PokeAPI/sprites
-- Then move on to bot-creation, battle, and mentor pages.
-
-### Open decisions before writing frontend code
-
-These are decisions for whoever starts this work, not answers:
-
-- **How the frontend talks to the simulator** — e.g. an HTTP/WebSocket API
-  server process wrapping the existing `simulator`/`user` modules, vs.
-  compiling the simulator to WASM and driving it directly in-browser, vs.
-  another integration entirely.
-- **Serialization strategy** for `MatchState`/`BattleState`/`PokemonState`
-  once the above is decided — these types don't derive `Serialize`/
-  `Deserialize` today.
-
-Once frontend work actually starts, extend the "Module layout" and "Commands"
-sections above with the frontend's own directory and its build/dev/test
-commands — this section is a starting point, not the permanent home for
-frontend documentation.
+## Frontend
+Write this as you go.

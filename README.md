@@ -12,9 +12,6 @@ cargo run -- --p1 ../teamsheets/{teamsheet path} --p2 ../teamsheets/{teamsheet p
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)
 - Create a meta sampler from pikalytics, and then get the algorithm to understand that
 
-### Random Stuff
-- Eventually a frontend for this, maybe a mentor mode + battle the AI mode + maybe a team evaluater long running mode?
-
 ### Resources
 Sequencing: https://bulbapedia.bulbagarden.net/wiki/User:FIQ/Turn_sequence
 Sequencing 2: https://www.smogon.com/forums/threads/sword-shield-battle-mechanics-research.3655528/page-64#post-9244179

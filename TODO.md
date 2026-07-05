@@ -1,5 +1,4 @@
 # TODO
-- Comments Deslop
 - MAKE THE FRONTEND YIPPEE
   - Start with Teams, Simulate, and Tracker pages
     - For tracker will need a parser for lines of input -> action / reaction tree (figuring out what is a reaction to what and what causes what from just the lines, also must add guaranteed effect so the user doesn't need to put those in manually). THis will likely include some RegEx stuff as well. Need a detailed spec.
