@@ -1802,6 +1802,15 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             e.side_condition = Some(SideCondition::StealthRock);
             secondaries.push(PokemonSecondaryEffect::simple(100, e));
         }
+        // Parting Shot's -1 Atk / -1 SpA lives in an onHit JS handler the parser
+        // can't read; inject the equivalent effect so it flows through the normal
+        // stat-drop pipeline (Clear Body / Mirror Armor / Defiant / Competitive…).
+        // The switch-only-on-success rule is enforced at the self-switch site.
+        Some(PokemonMove::PartingShot) => {
+            let mut e = empty_hit_effect();
+            e.boosts = [-1, 0, -1, 0, 0, 0, 0];
+            secondaries.push(PokemonSecondaryEffect::simple(100, e));
+        }
         _ => {}
     }
 

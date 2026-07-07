@@ -54,6 +54,9 @@ const SLUG_EXCEPTIONS: Record<string, string> = {
   'ogerpon-wellspring': 'ogerpon-wellspring-mask',
   'ogerpon-hearthflame': 'ogerpon-hearthflame-mask',
   'ogerpon-cornerstone': 'ogerpon-cornerstone-mask',
+  // PokeAPI has no plain "basculegion" pokemon endpoint — only gendered forms.
+  basculegion: 'basculegion-male',
+  'basculegion-m': 'basculegion-male',
 }
 
 /** Convert a Showdown display name ("Abomasnow-Mega") to a PokeAPI slug. */
@@ -105,22 +108,64 @@ export function fetchSprites(species: string): Promise<SpriteUrls> {
   }
 
   const promise = (async (): Promise<SpriteUrls> => {
-    const response = await fetch(`https://pokeapi.co/api/v2/pokemon/${slug}`)
-    if (!response.ok) {
-      console.warn(`PokeAPI sprite lookup failed for "${species}" (slug "${slug}")`)
-      return { front: null, back: null }
+    const urls = await resolveSprites(slug)
+    if (urls) {
+      persist(slug, urls)
+      return urls
     }
-    const data = await response.json()
-    const urls: SpriteUrls = {
-      front: data.sprites?.front_default ?? null,
-      back: data.sprites?.back_default ?? null,
-    }
-    persist(slug, urls)
-    return urls
+    console.warn(`PokeAPI sprite lookup failed for "${species}" (slug "${slug}")`)
+    return { front: null, back: null }
   })()
 
   memoryCache.set(slug, promise)
   return promise
+}
+
+/** GET /pokemon/{slug} and pull out the default sprite URLs, or null on 404. */
+async function spritesFromPokemonEndpoint(slug: string): Promise<SpriteUrls | null> {
+  const response = await fetch(`https://pokeapi.co/api/v2/pokemon/${slug}`)
+  if (!response.ok) return null
+  const data = await response.json()
+  return {
+    front: data.sprites?.front_default ?? null,
+    back: data.sprites?.back_default ?? null,
+  }
+}
+
+/**
+ * Resolve a slug against PokeAPI with fallbacks for formes it doesn't know:
+ * 1. the pokemon endpoint directly;
+ * 2. the species endpoint's default variety (e.g. "basculegion" →
+ *    "basculegion-male");
+ * 3. progressively strip trailing hyphen tokens (Champions-only megas like
+ *    "chandelure-mega" fall back to the base "chandelure" sprite), retrying
+ *    1–2 each time.
+ */
+async function resolveSprites(slug: string): Promise<SpriteUrls | null> {
+  let candidate = slug
+  for (;;) {
+    const direct = await spritesFromPokemonEndpoint(candidate)
+    if (direct) return direct
+
+    try {
+      const speciesResponse = await fetch(`https://pokeapi.co/api/v2/pokemon-species/${candidate}`)
+      if (speciesResponse.ok) {
+        const data = await speciesResponse.json()
+        const varieties = data.varieties as { is_default: boolean; pokemon: { name: string } }[]
+        const defaultName = varieties?.find((v) => v.is_default)?.pokemon.name
+        if (defaultName && defaultName !== candidate) {
+          const viaSpecies = await spritesFromPokemonEndpoint(defaultName)
+          if (viaSpecies) return viaSpecies
+        }
+      }
+    } catch {
+      // Network hiccup on the fallback path — fall through to suffix stripping.
+    }
+
+    const lastHyphen = candidate.lastIndexOf('-')
+    if (lastHyphen <= 0) return null
+    candidate = candidate.slice(0, lastHyphen)
+  }
 }
 
 /** Item sprites live at a predictable URL in the PokeAPI sprites repo. */

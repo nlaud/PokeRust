@@ -2006,7 +2006,7 @@ mod tests {
             );
 
             assert!(!outcomes.is_empty());
-            assert!(outcomes.iter().all(|(state, _)| matches!(state, MatchState::GameOverState { winner: Player::P1 })));
+            assert!(outcomes.iter().all(|(state, _)| matches!(state, MatchState::GameOverState { winner: Player::P1, .. })));
             let total_probability: f64 = outcomes.iter().map(|(_, p)| *p).sum();
             assert!((total_probability - 1.0).abs() < 1e-9);
         }
@@ -2116,7 +2116,7 @@ mod tests {
 
             println!("{:?}", outcomes_t2);
             let final_outcome = outcomes_t2.into_iter().find(|(state, _)| {
-                    matches!(state, MatchState::GameOverState { winner: Player::P1
+                    matches!(state, MatchState::GameOverState { winner: Player::P1, ..
                 })});
             assert!(final_outcome.is_some(), "The match should conclude with P1 winning.");
         }
@@ -2223,7 +2223,7 @@ mod tests {
 
             println!("{:?}", outcomes_t2);
             let final_outcome = outcomes_t2.into_iter().find(|(state, _)| {
-                    matches!(state, MatchState::GameOverState { winner: Player::P1
+                    matches!(state, MatchState::GameOverState { winner: Player::P1, ..
                 })});
             assert!(final_outcome.is_some(), "The match should conclude with P1 winning.");
         }
@@ -3126,7 +3126,7 @@ mod tests {
             let total_probability_t1: f64 = outcomes.iter().map(|(_, p)|*p).sum();
             assert!((total_probability_t1 - 1.0).abs() < 1e-9);
 
-            let (MatchState::GameOverState{winner:player}, p_t1) = outcomes.clone().into_iter().next().unwrap() else {panic!("BattleState not returned")};
+            let (MatchState::GameOverState{winner:player, ..}, p_t1) = outcomes.clone().into_iter().next().unwrap() else {panic!("BattleState not returned")};
 
             assert_eq!(p_t1, 1.0);
 
@@ -3760,7 +3760,7 @@ mod tests {
             );
 
             assert_eq!(outcomes.len(), 1);
-            assert!(matches!(outcomes[0].0, MatchState::GameOverState { winner: Player::P1 }));
+            assert!(matches!(outcomes[0].0, MatchState::GameOverState { winner: Player::P1, .. }));
             assert!((outcomes[0].1 - 1.0).abs() < 1e-9);
         }
 
@@ -4871,7 +4871,7 @@ mod tests {
                 );
 
                 assert_eq!(weather_outcomes.len(), 1);
-                assert!(matches!(weather_outcomes[0].0, MatchState::GameOverState { winner: Player::P1 }));
+                assert!(matches!(weather_outcomes[0].0, MatchState::GameOverState { winner: Player::P1, .. }));
 
                 let clear_outcomes = run_single_turn(
                     &MatchState::BattleState(make_state(None)),
@@ -4882,7 +4882,7 @@ mod tests {
                 );
 
                 assert_eq!(clear_outcomes.len(), 1);
-                assert!(matches!(clear_outcomes[0].0, MatchState::GameOverState { winner: Player::P2 }));
+                assert!(matches!(clear_outcomes[0].0, MatchState::GameOverState { winner: Player::P2, .. }));
             }
         }
     }
@@ -10177,7 +10177,7 @@ mod tests {
                 &pokemon_dex,
             );
 
-            assert!(wonder_outcomes.iter().any(|(state, _)| matches!(state, MatchState::GameOverState { winner } if *winner == Player::P1)));
+            assert!(wonder_outcomes.iter().any(|(state, _)| matches!(state, MatchState::GameOverState { winner, .. } if *winner == Player::P1)));
         }
 
         #[test]
@@ -10451,7 +10451,7 @@ mod tests {
                 &pokemon_dex,
             );
 
-            assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::GameOverState { winner } if *winner == Player::P1)));
+            assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::GameOverState { winner, .. } if *winner == Player::P1)));
         }
 
         #[test]
@@ -12542,7 +12542,7 @@ mod tests {
 
             // Sash full-HP condition fails → holder faints → game over (P2 wins).
             let game_over_prob: f64 = outcomes.iter().map(|(s, p)| {
-                if matches!(s, MatchState::GameOverState { winner: Player::P2 }) { *p } else { 0.0 }
+                if matches!(s, MatchState::GameOverState { winner: Player::P2, .. }) { *p } else { 0.0 }
             }).sum();
             assert!((game_over_prob - 1.0).abs() < 1e-9,
                 "P1 should always faint when not at full HP (Sash cannot fire)");
@@ -12631,7 +12631,7 @@ mod tests {
             }).sum();
 
             let faint_prob: f64 = outcomes.iter().map(|(s, p)| {
-                if matches!(s, MatchState::GameOverState { winner: Player::P2 }) { *p } else { 0.0 }
+                if matches!(s, MatchState::GameOverState { winner: Player::P2, .. }) { *p } else { 0.0 }
             }).sum();
 
             assert!((survive_prob - 0.1).abs() < 1e-9,
@@ -13926,7 +13926,7 @@ mod tests {
 
             let p1_wins: f64 = outcomes.iter()
                 .filter_map(|(state, prob)| {
-                    if let MatchState::GameOverState { winner } = state {
+                    if let MatchState::GameOverState { winner, .. } = state {
                         if *winner == Player::P1 { Some(prob) } else { None }
                     } else { None }
                 })
@@ -14124,7 +14124,7 @@ mod tests {
             let attacker_took_recoil = outcomes.iter().any(|(state, _)| {
                 match state {
                     MatchState::BattleState(bs) => bs.p1_active_mons[0].hp < initial_attacker_hp,
-                    MatchState::GameOverState { winner } => *winner == Player::P2, // attacker fainted to recoil
+                    MatchState::GameOverState { winner, .. } => *winner == Player::P2, // attacker fainted to recoil
                     _ => false,
                 }
             });
@@ -16961,14 +16961,14 @@ mod priority_abilities {
     /// Sum probability of branches where P1 wins.
     fn p1_win_prob(outcomes: &[(MatchState, f64)]) -> f64 {
         outcomes.iter().filter_map(|(s, p)| {
-            if let MatchState::GameOverState { winner: Player::P1 } = s { Some(p) } else { None }
+            if let MatchState::GameOverState { winner: Player::P1, .. } = s { Some(p) } else { None }
         }).sum()
     }
 
     /// Sum probability of branches where P2 wins.
     fn p2_win_prob(outcomes: &[(MatchState, f64)]) -> f64 {
         outcomes.iter().filter_map(|(s, p)| {
-            if let MatchState::GameOverState { winner: Player::P2 } = s { Some(p) } else { None }
+            if let MatchState::GameOverState { winner: Player::P2, .. } = s { Some(p) } else { None }
         }).sum()
     }
 
@@ -24157,7 +24157,7 @@ mod ability_manipulation_moves {
         fn p1_win_probability(outcomes: &[(MatchState, f64)]) -> f64 {
             outcomes
                 .iter()
-                .filter(|(s, _)| matches!(s, MatchState::GameOverState { winner: Player::P1 }))
+                .filter(|(s, _)| matches!(s, MatchState::GameOverState { winner: Player::P1, .. }))
                 .map(|(_, p)| *p)
                 .sum()
         }
@@ -27479,7 +27479,7 @@ mod new_moves_session {
         // P1 has +1 priority from Grassy Glide → attacks first → P2 faints → P1 wins.
         // If priority were 0, P2 (faster) would go first and P1 would faint → P2 wins.
         let p1_won = outcomes.iter().all(|(state, _)| {
-            matches!(state, MatchState::GameOverState { winner: Player::P1 })
+            matches!(state, MatchState::GameOverState { winner: Player::P1, .. })
         });
         assert!(p1_won, "Grassy Glide should grant +1 priority under Grassy Terrain; P1 must act first and win the race");
     }
@@ -33402,29 +33402,26 @@ mod event_round_trip {
              Sitrus threshold (50%), not a post-heal value"
         );
 
-        // A separate Healed event for the berry's recovery must ALSO be present,
-        // reporting a HIGHER HP than the DamageDealt (the berry healed the target
-        // back up), and it must not just be equal to the damage HP.
-        let heal_pct: Option<u8> = mv.reactions.iter().find_map(|e| match &e.kind {
+        // The berry's consumption is announced as ItemLost, with the recovery's
+        // Healed event nested as its reaction ("used its Sitrus Berry!" → heal),
+        // reporting a HIGHER HP than the DamageDealt.
+        let item_lost = mv.reactions.iter().find(|e| matches!(&e.kind,
+            EventKind::ItemLost { slot, item, consumed: true }
+            if *slot == p2s0() && *item == crate::data::item::Item::SitrusBerry));
+        let item_lost = item_lost.unwrap_or_else(|| panic!(
+            "Sitrus Berry consumption must be announced via ItemLost;\n\
+             reactions = {:#?}", mv.reactions
+        ));
+        let heal_pct: Option<u8> = item_lost.reactions.iter().find_map(|e| match &e.kind {
             EventKind::Healed { target, new_hp: PokemonHP::Percent(p) }
                 if *target == p2s0() => Some(*p),
             _ => None,
         });
-        let heal_pct = heal_pct.expect("a separate Healed event for the Sitrus Berry must be present");
+        let heal_pct = heal_pct.expect("the berry's Healed must nest under its ItemLost");
         assert!(
             heal_pct > damage_pct,
             "the berry's Healed HP ({heal_pct}%) must be strictly greater than the \
              DamageDealt HP ({damage_pct}%)"
-        );
-
-        // The berry's consumption must also be reflected via ItemLost somewhere in
-        // this move's reaction tree (emitted generically by process_item_loss_events).
-        assert!(
-            any_event_deep(&mv.reactions, |k| matches!(k,
-                EventKind::ItemLost { slot, item, consumed: true }
-                if *slot == p2s0() && *item == crate::data::item::Item::SitrusBerry)),
-            "Sitrus Berry consumption must be reflected via ItemLost;\n\
-             reactions = {:#?}", mv.reactions
         );
     }
 
@@ -33859,5 +33856,925 @@ mod sample_mode {
             bs.p2_active_mons[0].hp < 1000,
             "Icicle Spear (100% accuracy) must have dealt damage in the sampled trajectory"
         );
+    }
+}
+
+// A replacement send-out phase is not a turn of its own — end-of-turn must not
+// run again for it (no volatile ticks, no turn_number bump, no EndOfTurn node).
+mod replacement_phase {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::EventKind;
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        )
+    }
+
+    fn has_must_recharge(mon: &PokemonState) -> bool {
+        mon.volatiles.iter().any(|v| {
+            matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::MustRecharge, _))
+        })
+    }
+
+    /// Hyper Beam KOs the target; the opponent's replacement send-out must not
+    /// tick MustRecharge away (the attacker still recharges on the next real
+    /// turn) and must not advance the turn counter.
+    #[test]
+    fn replacement_sendout_does_not_tick_volatiles_or_turn_number() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::HyperBeam);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        p2.hp = 1; // a Hyper Beam hit is a guaranteed KO
+        let p2_bench = mon(Species::Clefable, PokemonMove::Splash);
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![p2_bench]),
+        );
+
+        // Turn 1: Hyper Beam (90% accuracy) — keep the hit branch, which faints
+        // Shuckle and opens the replacement phase.
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, None,
+        );
+        let replacement_state = outcomes
+            .into_iter()
+            .find_map(|(s, _, _)| match s {
+                MatchState::BattleState(bs) if bs.turn_started && bs.turn_ended => Some(bs),
+                _ => None,
+            })
+            .expect("hit branch must end in the replacement phase");
+        assert!(has_must_recharge(&replacement_state.p1_active_mons[0]),
+            "Hyper Beam user must carry MustRecharge into the replacement phase");
+        let turn_number_before = replacement_state.turn_number;
+
+        // Replacement phase: P2 sends in Clefable, P1 passes.
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::BattleState(replacement_state),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass]),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        assert_eq!(outcomes.len(), 1, "a lone replacement send-out is deterministic");
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+
+        assert!(has_must_recharge(&bs.p1_active_mons[0]),
+            "replacement send-out must not tick MustRecharge away");
+        assert_eq!(bs.turn_number, turn_number_before,
+            "a replacement send-out is not a turn — turn_number must not advance");
+        assert!(!bs.turn_started && !bs.turn_ended,
+            "turn flags reset for the next real turn");
+        assert_eq!(bs.p2_active_mons[0].species, Species::Clefable);
+        let events = events.expect("observer requested");
+        assert!(
+            !events.iter().any(|e| matches!(e.kind, EventKind::EndOfTurn)),
+            "no EndOfTurn node may be emitted for a replacement send-out"
+        );
+
+        // Next real turn: the forced recharge (Pass) — MustRecharge now expires.
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::BattleState(bs),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, None,
+        );
+        for (s, _, _) in outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert!(!has_must_recharge(&bs.p1_active_mons[0]),
+                    "the real recharge turn consumes MustRecharge");
+            }
+        }
+    }
+}
+
+// The battle-ending turn's events must survive the BattleState → GameOverState
+// conversion so the winning turn still has a log.
+mod game_over_events {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        )
+    }
+
+    fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+        events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+    }
+
+    #[test]
+    fn winning_turn_events_are_returned_with_game_over() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        p2.hp = 1; // Tackle is a guaranteed KO — and Shuckle has no bench
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::GameOverState { winner, final_state, .. } = s else {
+            panic!("P1 must win, got {s:?}");
+        };
+        assert_eq!(winner, Player::P1);
+        // The final field rides along for display: the KO'd mon is visible.
+        assert!(final_state.p2_active_mons[0].fainted,
+            "final_state must show the field as it stood when the battle ended");
+        assert_eq!(final_state.p2_active_mons[0].hp, 0);
+        let events = events.expect("observer requested");
+        assert!(
+            tree_contains(&events, &|k| matches!(k, EventKind::MoveUsed { .. })),
+            "final turn's MoveUsed event must survive into the GameOver result"
+        );
+        assert!(
+            tree_contains(&events, &|k| matches!(k, EventKind::Faint { .. })),
+            "final turn's Faint event must survive into the GameOver result"
+        );
+    }
+}
+
+// Reaction abilities must announce themselves: the in-game popup is an
+// AbilityRevealed event, followed by the visible consequence (BoostChanged…).
+mod reaction_ability_reveals {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), None, None, None, None, None, false,
+        )
+    }
+
+    fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+        events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+    }
+
+    /// Run one turn (P1 uses move slot 0, P2 splashes) and return P1's observer
+    /// event log of the first branch plus its resulting state.
+    fn run_observed(p1: PokemonState, p2: PokemonState) -> (Vec<InformationEvent>, MatchState) {
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        let (s, ev, _) = outcomes.into_iter().next().unwrap();
+        (ev.expect("observer requested"), s)
+    }
+
+    #[test]
+    fn competitive_reveals_on_opponent_stat_drop() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Growl, Ability::None);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Milotic, PokemonMove::Splash, Ability::Competitive);
+
+        let (events, s) = run_observed(p1, p2);
+        assert!(
+            tree_contains(&events, &|k| matches!(
+                k, EventKind::AbilityRevealed { ability: Ability::Competitive, .. }
+            )),
+            "Competitive must emit AbilityRevealed when it triggers"
+        );
+        assert!(
+            tree_contains(&events, &|k| matches!(
+                k, EventKind::BoostChanged { boost_idx: 2, stages: 2, .. }
+            )),
+            "Competitive's +2 SpA must be emitted as BoostChanged"
+        );
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p2_active_mons[0].boosts[0], -1, "Growl's -1 Atk applies");
+        assert_eq!(bs.p2_active_mons[0].boosts[2], 2, "Competitive's +2 SpA applies");
+    }
+
+    #[test]
+    fn defiant_reveals_on_opponent_stat_drop() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Growl, Ability::None);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Bisharp, PokemonMove::Splash, Ability::Defiant);
+
+        let (events, _) = run_observed(p1, p2);
+        assert!(
+            tree_contains(&events, &|k| matches!(
+                k, EventKind::AbilityRevealed { ability: Ability::Defiant, .. }
+            )),
+            "Defiant must emit AbilityRevealed when it triggers"
+        );
+        assert!(
+            tree_contains(&events, &|k| matches!(
+                k, EventKind::BoostChanged { boost_idx: 0, stages, .. } if *stages > 0
+            )),
+            "Defiant's Attack raise must be emitted as BoostChanged"
+        );
+    }
+
+    /// Stamina used to apply its boost with no events at all — neither the
+    /// reveal nor the BoostChanged reached the observer.
+    #[test]
+    fn stamina_reveals_and_emits_boost_on_hit() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle, Ability::None);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Mudsdale, PokemonMove::Splash, Ability::Stamina);
+
+        let (events, s) = run_observed(p1, p2);
+        assert!(
+            tree_contains(&events, &|k| matches!(
+                k, EventKind::AbilityRevealed { ability: Ability::Stamina, .. }
+            )),
+            "Stamina must emit AbilityRevealed when it triggers"
+        );
+        assert!(
+            tree_contains(&events, &|k| matches!(
+                k, EventKind::BoostChanged { boost_idx: 1, stages: 1, .. }
+            )),
+            "Stamina's +1 Def must be emitted as BoostChanged"
+        );
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p2_active_mons[0].boosts[1], 1, "Stamina's +1 Def applies");
+    }
+}
+
+// Parting Shot and the pivot-move family (researched behaviour, Bulbapedia):
+// - Parting Shot: -1 Atk / -1 SpA, then switch — but no switch if the drop was
+//   fully repelled (Clear Body / both stats at -6); Mirror Armor still switches.
+// - Tearful Look: same drop, no switch.
+// - Volt Switch: no pivot when the target is immune.
+// - Chilly Reception: switches even when snow is already active.
+mod pivot_moves {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::dex_data::Weather;
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(ability), None, None, None, None, None, false,
+        )
+    }
+
+    fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+        events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+    }
+
+    /// P1 (fast, with a bench Clefable) uses move slot 0; P2 splashes.
+    fn run_pivot(p1_move: PokemonMove, p2: PokemonState, weather: Option<Weather>)
+        -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)>
+    {
+        let mut p1 = mon(Species::Snorlax, p1_move, Ability::None);
+        p1.stats[5] = 200;
+        let bench = mon(Species::Clefable, PokemonMove::Splash, Ability::None);
+        let mut state = battle_state_from_lists(vec![p1], vec![bench], vec![p2], vec![]);
+        if weather.is_some() {
+            state.weather = weather;
+            state.weather_turns = Some(5);
+        }
+        crate::simulator::simulate_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        )
+    }
+
+    #[test]
+    fn parting_shot_lowers_stats_and_switches() {
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash, Ability::None);
+        let outcomes = run_pivot(PokemonMove::PartingShot, p2, None);
+        let (s, _, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p2_active_mons[0].boosts[0], -1, "Parting Shot lowers Atk");
+        assert_eq!(bs.p2_active_mons[0].boosts[2], -1, "Parting Shot lowers SpA");
+        assert!(bs.self_switch_pending.is_some(),
+            "Parting Shot must open the self-switch phase after a successful drop");
+    }
+
+    #[test]
+    fn parting_shot_no_switch_when_drop_fully_repelled() {
+        let p2 = mon(Species::Metagross, PokemonMove::Splash, Ability::ClearBody);
+        let outcomes = run_pivot(PokemonMove::PartingShot, p2, None);
+        for (s, _, _) in outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].boosts[0], 0, "Clear Body repels the Atk drop");
+                assert_eq!(bs.p2_active_mons[0].boosts[2], 0, "Clear Body repels the SpA drop");
+                assert!(bs.self_switch_pending.is_none(),
+                    "Parting Shot must NOT switch when the drop was fully repelled");
+            }
+        }
+    }
+
+    #[test]
+    fn parting_shot_vs_competitive_reveals_boosts_and_switches() {
+        let p2 = mon(Species::Milotic, PokemonMove::Splash, Ability::Competitive);
+        let outcomes = run_pivot(PokemonMove::PartingShot, p2, None);
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        // Two stats lowered → Competitive fires twice: SpA -1 + 4 = +3, Atk -1.
+        assert_eq!(bs.p2_active_mons[0].boosts[0], -1);
+        assert_eq!(bs.p2_active_mons[0].boosts[2], 3);
+        assert!(bs.self_switch_pending.is_some(), "the drop landed, so the user switches");
+        let events = events.expect("observer requested");
+        assert!(
+            tree_contains(&events, &|k| matches!(
+                k, EventKind::AbilityRevealed { ability: Ability::Competitive, .. }
+            )),
+            "Competitive's activation must be revealed"
+        );
+    }
+
+    #[test]
+    fn tearful_look_lowers_stats_without_switching() {
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash, Ability::None);
+        let outcomes = run_pivot(PokemonMove::TearfulLook, p2, None);
+        for (s, _, _) in outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].boosts[0], -1, "Tearful Look lowers Atk");
+                assert_eq!(bs.p2_active_mons[0].boosts[2], -1, "Tearful Look lowers SpA");
+                assert!(bs.self_switch_pending.is_none(), "Tearful Look is not a pivot move");
+            }
+        }
+    }
+
+    #[test]
+    fn volt_switch_does_not_pivot_on_immune_target() {
+        // Garchomp (Ground) is immune to Volt Switch: no damage, no pivot.
+        let p2 = mon(Species::Garchomp, PokemonMove::Splash, Ability::None);
+        let p2_max_hp = p2.stats[0];
+        let outcomes = run_pivot(PokemonMove::VoltSwitch, p2, None);
+        for (s, _, _) in outcomes {
+            if let MatchState::BattleState(bs) = s {
+                assert_eq!(bs.p2_active_mons[0].hp, p2_max_hp, "immune: no damage");
+                assert!(bs.self_switch_pending.is_none(),
+                    "Volt Switch must not pivot when the target is immune");
+            }
+        }
+    }
+
+    #[test]
+    fn chilly_reception_switches_even_when_snow_already_active() {
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash, Ability::None);
+        let outcomes = run_pivot(PokemonMove::ChillyReception, p2, Some(Weather::Snow));
+        let (s, _, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert!(bs.self_switch_pending.is_some(),
+            "Chilly Reception switches even when snow is already up");
+    }
+}
+
+// Fake Out (newest gen): unselectable after the user's first turn on the field;
+// the window resets each time the user re-enters battle.
+mod fake_out_selectability {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::state::battle::{
+        AttackCommand, BattleCommand, BattleState, MatchState, Player, PlayerCommand, SwitchCommand,
+    };
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn snorlax_with_fake_out() -> PokemonState {
+        build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::FakeOut), Some(PokemonMove::Tackle), None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        )
+    }
+
+    fn offers_move_slot(state: &BattleState, move_slot: usize) -> bool {
+        crate::simulator::get_possible_commands_for_active_slot(
+            state, Player::P1, 0, move_dex(), pokemon_dex(),
+        )
+        .iter()
+        .any(|c| matches!(c, BattleCommand::Attack(AttackCommand { move_slot: s, .. }) if *s == move_slot))
+    }
+
+    fn run_turn(state: BattleState, p1_cmd: BattleCommand) -> BattleState {
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![p1_cmd]),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, None,
+        );
+        outcomes
+            .into_iter()
+            .find_map(|(s, _, _)| match s {
+                MatchState::BattleState(bs) => Some(bs),
+                _ => None,
+            })
+            .expect("battle must continue")
+    }
+
+    #[test]
+    fn fake_out_only_selectable_on_first_turn_and_after_reentry() {
+        let p1 = snorlax_with_fake_out();
+        let bench = build_pokemon_state(
+            Species::Clefable, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let mut p2 = build_pokemon_state(
+            Species::Shuckle, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        p2.stats[0] = 1000;
+        p2.hp = 1000; // survives everything
+
+        let state = battle_state_from_lists(vec![p1], vec![bench], vec![p2], vec![]);
+        assert!(offers_move_slot(&state, 0), "Fake Out is legal on the first turn out");
+
+        // Turn 1: use Tackle instead — Fake Out's window closes.
+        let state = run_turn(state, BattleCommand::Attack(AttackCommand {
+            move_slot: 1, target: None, terastallize: false, mega_evolve: false,
+        }));
+        assert!(!offers_move_slot(&state, 0),
+            "Fake Out must be unselectable after the first turn on the field");
+        assert!(offers_move_slot(&state, 1), "other moves stay selectable");
+
+        // Switch out and back in — the first-turn window resets.
+        let state = run_turn(state, BattleCommand::Switch(SwitchCommand { party_index: 0 }));
+        let state = run_turn(state, BattleCommand::Switch(SwitchCommand { party_index: 0 }));
+        assert_eq!(state.p1_active_mons[0].species, Species::Snorlax);
+        assert!(offers_move_slot(&state, 0),
+            "Fake Out must be selectable again after re-entering the field");
+    }
+}
+
+// A mid-hit berry proc must be announced as ItemLost("used its Sitrus Berry!")
+// with the Healed nested as its reaction — not as flat, out-of-order siblings.
+mod berry_heal_event_nesting {
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::pokemon::build_pokemon_state;
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn count_matching(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> usize {
+        events
+            .iter()
+            .map(|e| usize::from(pred(&e.kind)) + count_matching(&e.reactions, pred))
+            .sum()
+    }
+
+    fn find_first<'a>(
+        events: &'a [InformationEvent],
+        pred: &impl Fn(&EventKind) -> bool,
+    ) -> Option<&'a InformationEvent> {
+        for e in events {
+            if pred(&e.kind) {
+                return Some(e);
+            }
+            if let Some(found) = find_first(&e.reactions, pred) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn sitrus_heal_nests_under_its_item_lost() {
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        p1.stats[5] = 200;
+        let mut p2 = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, Some(Item::SitrusBerry), None, None, None, false,
+        );
+        // Sit just above ½ HP so the Tackle drops it below the Sitrus threshold.
+        p2.hp = p2.stats[0] / 2 + 10;
+        let pre_hit_hp = p2.hp;
+
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p2_active_mons[0].item, Item::None, "the berry was eaten");
+        let events = events.expect("observer requested");
+
+        let is_berry_lost = |k: &EventKind| {
+            matches!(k, EventKind::ItemLost { item: Item::SitrusBerry, consumed: true, .. })
+        };
+        assert_eq!(
+            count_matching(&events, &is_berry_lost), 1,
+            "exactly one ItemLost for the berry (no duplicate from the ledger sweep)"
+        );
+        let item_lost = find_first(&events, &is_berry_lost).unwrap();
+        assert!(
+            item_lost.reactions.iter().any(|r| matches!(r.kind, EventKind::Healed { .. })),
+            "the Sitrus heal must nest as a reaction of its ItemLost"
+        );
+        assert_eq!(
+            count_matching(&events, &|k| matches!(k, EventKind::Healed { .. })), 1,
+            "no flat duplicate Healed sibling"
+        );
+
+        // DamageDealt still reports the pre-berry HP (inference reads that delta).
+        let damage = find_first(&events, &|k| matches!(k, EventKind::DamageDealt { .. }))
+            .expect("DamageDealt present");
+        if let EventKind::DamageDealt { new_hp, .. } = &damage.kind {
+            let shown = format!("{new_hp:?}");
+            let post_berry = bs.p2_active_mons[0].hp;
+            assert_ne!(
+                shown,
+                format!("{:?}", crate::information::unknowns::PokemonHP::Percent(
+                    crate::simulator::helpers::hp_to_percent(post_berry, bs.p2_active_mons[0].stats[0])
+                )),
+                "DamageDealt must show the pre-berry HP, not the post-heal HP \
+                 (pre-hit was {pre_hit_hp})"
+            );
+        }
+    }
+}
+
+// A replacement send-out's Switch event must describe the actual entrant —
+// observed live: the event named the mon in the *other* active slot (species
+// and HP), and its Intimidate seemingly re-fired.
+mod replacement_switch_event_identity {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
+
+    fn mon(species: Species, ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(ability), None, None, None, None, None, false,
+        )
+    }
+
+    fn collect_switches(events: &[InformationEvent], out: &mut Vec<(Species, u8)>) {
+        for e in events {
+            match &e.kind {
+                EventKind::Switch(switch) => out.push((switch.species.clone(), switch.slot.slot_index)),
+                EventKind::SimultaneousSwitch { switches } => {
+                    for sw in switches {
+                        out.push((sw.species.clone(), sw.slot.slot_index));
+                    }
+                }
+                _ => {}
+            }
+            collect_switches(&e.reactions, out);
+        }
+    }
+
+    fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+        events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+    }
+
+    #[test]
+    fn replacement_event_names_the_actual_entrant() {
+        // Doubles: P1 slot 0 = fainted Pelipper, slot 1 = live Incineroar
+        // (Intimidate), bench = Archaludon. The replacement into slot 0 must be
+        // reported as Archaludon — not the slot-1 Incineroar — and Incineroar's
+        // Intimidate must not re-fire.
+        let mut pelipper = mon(Species::Pelipper, Ability::Drizzle);
+        pelipper.hp = 0;
+        pelipper.fainted = true;
+        let incineroar = mon(Species::Incineroar, Ability::Intimidate);
+        let archaludon = mon(Species::Archaludon, Ability::Stamina);
+        let archaludon_hp = archaludon.hp;
+
+        let mut state = battle_state_from_lists(
+            vec![pelipper, incineroar],
+            vec![archaludon],
+            vec![mon(Species::Shuckle, Ability::None), mon(Species::Shuckle, Ability::None)],
+            vec![],
+        );
+        // battle_state_from_lists runs send-out effects at build time (that
+        // Intimidate is legitimate) — zero the boosts so the assertions below
+        // measure only what the replacement turn does.
+        for m in state.p2_active_mons.iter_mut() {
+            m.boosts = [0; 7];
+        }
+        // Enter the replacement phase the way the engine leaves it after EOT.
+        state.turn_started = true;
+        state.turn_ended = true;
+
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![
+                BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+                BattleCommand::Pass,
+            ]),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass, BattleCommand::Pass]),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p1_active_mons[0].species, Species::Archaludon,
+            "the replacement itself must land in slot 0");
+        assert_eq!(bs.p1_active_mons[0].hp, archaludon_hp);
+
+        let events = events.expect("observer requested");
+        let mut switches = Vec::new();
+        collect_switches(&events, &mut switches);
+        assert_eq!(switches.len(), 1, "exactly one send-out event, got {switches:?}");
+        assert_eq!(switches[0], (Species::Archaludon, 0),
+            "the Switch event must name the actual entrant in slot 0");
+
+        assert!(
+            !tree_contains(&events, &|k| matches!(
+                k, EventKind::AbilityRevealed { ability: Ability::Intimidate, .. }
+            )),
+            "the staying Incineroar's Intimidate must not re-fire on a teammate's replacement"
+        );
+        // Intimidate re-firing would also show up as Atk drops on P2's side.
+        assert_eq!(bs.p2_active_mons[0].boosts[0], 0, "no spurious Intimidate Atk drop");
+        assert_eq!(bs.p2_active_mons[1].boosts[0], 0, "no spurious Intimidate Atk drop");
+    }
+
+    /// A pivot move's replacement (Flip Turn / U-turn / Parting Shot) must also
+    /// be announced with a Switch event — the self-switch resolution path used
+    /// to run send-out effects with no event at all, so the log kept calling
+    /// the slot by the pivot user's name and the entrant's Intimidate looked
+    /// like it came from the old occupant.
+    #[test]
+    fn pivot_switch_in_emits_switch_event_with_nested_entry_effects() {
+        let mut palafin = build_pokemon_state(
+            Species::Palafin, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::FlipTurn), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        palafin.stats[5] = 200;
+        let incineroar = mon(Species::Incineroar, Ability::Intimidate);
+        let mut shuckle = mon(Species::Shuckle, Ability::None);
+        shuckle.stats[0] = 500;
+        shuckle.hp = 500; // survives Flip Turn comfortably
+
+        let state = battle_state_from_lists(
+            vec![palafin], vec![incineroar], vec![shuckle], vec![],
+        );
+
+        // Turn 1: Flip Turn connects and opens the self-switch phase.
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(vec![BattleCommand::Attack(
+                crate::state::battle::AttackCommand {
+                    move_slot: 0, target: None, terastallize: false, mega_evolve: false,
+                },
+            )]),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass]),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        let pending = outcomes
+            .into_iter()
+            .find_map(|(s, _, _)| match s {
+                MatchState::BattleState(bs) if bs.self_switch_pending.is_some() => Some(bs),
+                _ => None,
+            })
+            .expect("Flip Turn must open the self-switch phase");
+
+        // Self-switch resolution: Incineroar comes in.
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::BattleState(pending),
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass]),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p1_active_mons[0].species, Species::Incineroar);
+
+        let events = events.expect("observer requested");
+        let mut switches = Vec::new();
+        collect_switches(&events, &mut switches);
+        assert_eq!(switches, vec![(Species::Incineroar, 0)],
+            "the pivot replacement must be announced with a Switch event");
+
+        // The entrant's Intimidate nests under its Switch event.
+        let switch_node = events
+            .iter()
+            .find(|e| matches!(e.kind, EventKind::Switch(_)))
+            .expect("Switch node present at top level");
+        assert!(
+            tree_contains(&switch_node.reactions, &|k| matches!(
+                k, EventKind::AbilityRevealed { ability: Ability::Intimidate, .. }
+            )),
+            "the entrant's Intimidate must nest under its Switch event"
+        );
+        assert_eq!(bs.p2_active_mons[0].boosts[0], -1, "Intimidate landed on the opponent");
+    }
+}
+
+// Replacement-phase command validation: switches must name distinct healthy
+// bench mons; a fainted slot may Pass only when every healthy bench mon is
+// already claimed (two faints, one replacement) or the bench is empty.
+mod replacement_validation {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::state::battle::{BattleCommand, Player, SwitchCommand};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
+    use crate::user::replacement_commands_are_valid;
+
+    fn mon(species: Species, fainted: bool) -> PokemonState {
+        let mut m = build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        if fainted {
+            m.hp = 0;
+            m.fainted = true;
+        }
+        m
+    }
+
+    fn sw(i: usize) -> BattleCommand {
+        BattleCommand::Switch(SwitchCommand { party_index: i })
+    }
+
+    #[test]
+    fn two_faints_one_replacement_requires_switch_plus_pass() {
+        // P1: both actives fainted, one healthy bench mon.
+        let state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, true), mon(Species::Clefable, true)],
+            vec![mon(Species::Milotic, false)],
+            vec![mon(Species::Shuckle, false), mon(Species::Shuckle, false)],
+            vec![],
+        );
+        let actives = state.p1_active_mons.clone();
+
+        assert!(replacement_commands_are_valid(&state, Player::P1, &actives,
+            &[sw(0), BattleCommand::Pass]), "switch + pass is the only fill");
+        assert!(replacement_commands_are_valid(&state, Player::P1, &actives,
+            &[BattleCommand::Pass, sw(0)]), "either slot may take the replacement");
+        assert!(!replacement_commands_are_valid(&state, Player::P1, &actives,
+            &[sw(0), sw(0)]), "the same bench mon cannot fill both slots");
+        assert!(!replacement_commands_are_valid(&state, Player::P1, &actives,
+            &[BattleCommand::Pass, BattleCommand::Pass]),
+            "a healthy replacement exists — passing both slots is illegal");
+    }
+
+    #[test]
+    fn switch_must_name_a_healthy_bench_mon() {
+        let state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, true)],
+            vec![mon(Species::Milotic, true), mon(Species::Clefable, false)],
+            vec![mon(Species::Shuckle, false)],
+            vec![],
+        );
+        let actives = state.p1_active_mons.clone();
+        assert!(!replacement_commands_are_valid(&state, Player::P1, &actives, &[sw(0)]),
+            "bench mon 0 is fainted — not a legal replacement");
+        assert!(replacement_commands_are_valid(&state, Player::P1, &actives, &[sw(1)]));
+        assert!(!replacement_commands_are_valid(&state, Player::P1, &actives,
+            &[BattleCommand::Pass]), "cannot pass while a healthy replacement exists");
+    }
+
+    #[test]
+    fn empty_bench_slot_passes() {
+        let state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, true)],
+            vec![],
+            vec![mon(Species::Shuckle, false)],
+            vec![],
+        );
+        let actives = state.p1_active_mons.clone();
+        assert!(replacement_commands_are_valid(&state, Player::P1, &actives,
+            &[BattleCommand::Pass]));
+    }
+}
+
+// Mega Evolutions resolve in speed order (not as a random 50/50 tie), and the
+// mega's on-gain ability effects nest under the MegaEvolution event:
+// Mega → AbilityRevealed(Sand Stream) → WeatherChanged(Sandstorm).
+mod mega_ordering {
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::dex_data::Weather;
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack_mega,
+    };
+
+    fn mega_mon(species: Species, ability: Ability, item: Item, speed: u16) -> PokemonState {
+        let mut m = build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(ability), None, Some(item), None, None, None, false,
+        );
+        m.stats[5] = speed;
+        m
+    }
+
+    #[test]
+    fn megas_resolve_in_speed_order_with_nested_weather_events() {
+        // Charizard (fast) megas into Y-Drought; Tyranitar (slow) into Sand Stream.
+        // Speed order means Charizard's sun comes first and Tyranitar's sand wins.
+        let charizard = mega_mon(Species::Charizard, Ability::Blaze, Item::CharizarditeY, 200);
+        let tyranitar = mega_mon(Species::Tyranitar, Ability::SandStream, Item::Tyranitarite, 50);
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![charizard], vec![], vec![tyranitar], vec![]),
+        );
+
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(simple_attack_mega(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack_mega(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        // Distinct speeds: the mega order is deterministic, not a coin-flip tie.
+        assert_eq!(outcomes.len(), 1, "mega order must not branch when speeds differ");
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.weather, Some(Weather::Sandstorm),
+            "the slower mega's Sand Stream must overwrite the faster mega's sun");
+
+        // Event shape: the two MegaEvolution nodes appear in speed order, and each
+        // carries its ability reveal (with the weather change nested inside).
+        let events = events.expect("observer requested");
+        let mega_nodes: Vec<&InformationEvent> = events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::MegaEvolution { .. }))
+            .collect();
+        assert_eq!(mega_nodes.len(), 2, "both megas must emit a MegaEvolution node");
+        let EventKind::MegaEvolution { slot: first_slot, .. } = &mega_nodes[0].kind else { unreachable!() };
+        assert_eq!(first_slot.player, Player::P1, "the faster mega (Charizard) resolves first");
+
+        for node in mega_nodes {
+            let reveal = node.reactions.iter().find(|r| {
+                matches!(r.kind, EventKind::AbilityRevealed { .. })
+            });
+            let reveal = reveal.expect("MegaEvolution must nest the ability reveal as a reaction");
+            assert!(
+                reveal.reactions.iter().any(|r| matches!(r.kind, EventKind::WeatherChanged { .. })),
+                "the weather change must nest under the ability reveal"
+            );
+        }
     }
 }

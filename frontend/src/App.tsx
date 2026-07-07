@@ -11,9 +11,9 @@ export default function App() {
       <NavBar />
       <main>
         <Routes>
-          <Route path="/" element={<SimulatePage />} />
-          <Route path="/teams" element={<TeamsPage />} />
+          <Route path="/" element={<TeamsPage />} />
           <Route path="/formats" element={<FormatsPage />} />
+          <Route path="/simulate" element={<SimulatePage />} />
         </Routes>
       </main>
       <SettingsSidebar />

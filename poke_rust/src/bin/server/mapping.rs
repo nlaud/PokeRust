@@ -109,6 +109,8 @@ fn side_condition_name(condition: &SideCondition) -> String {
         SideCondition::Spikes(layers) => format!("Spikes ({})", layers),
         SideCondition::ToxicSpikes(layers) => format!("Toxic Spikes ({})", layers),
         SideCondition::StickyWeb(_) => "Sticky Web".to_string(),
+        // The variant is spelled TailWind; the move is one word.
+        SideCondition::TailWind => "Tailwind".to_string(),
         other => humanize_identifier(format!("{:?}", other)),
     }
 }
@@ -275,8 +277,14 @@ pub fn battle_view(state: &MatchState, active_per_side: u8, brought_per_side: u8
                 .self_switch_pending
                 .map(|(slot, _)| field_slot_dto(slot));
         }
-        MatchState::GameOverState { winner } => {
+        MatchState::GameOverState { winner, final_state, .. } => {
             view.winner = Some(player_dto(*winner));
+            // Show the field as it stood when the battle ended (fainted mon,
+            // final HP) behind the winner overlay.
+            view.turn_number = final_state.turn_number;
+            view.p1 = Some(side_view(final_state, Player::P1));
+            view.p2 = Some(side_view(final_state, Player::P2));
+            view.field = Some(field_view(final_state));
         }
     }
 

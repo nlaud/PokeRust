@@ -726,7 +726,8 @@ fn apply_single_hit_branch(
         // folding both into one DamageDealt would understate the true damage, and
         // Pass 3's damage-to-stat inference reads that delta directly (damage is
         // monotone in BSV, so an understated delta can exclude the attacker's true stat).
-        let mut berry_heal_hp_info: Option<(u16, u16)> = None;
+        // The consumed berry rides along so the heal nests under its ItemLost event.
+        let mut berry_heal_hp_info: Option<(u16, u16, Item)> = None;
         let target_env = simulator_helpers::berry_env(&bs, target_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&bs);
 
@@ -753,7 +754,10 @@ fn apply_single_hit_branch(
                 let pre_berry_hp = target_mon.hp;
                 simulator_helpers::on_hp_change(target_mon, &target_env);
                 if bs.event_observer.is_some() && target_mon.hp > pre_berry_hp {
-                    berry_heal_hp_info = Some((target_mon.hp, target_mon.stats[0]));
+                    // consumed_item was just set by try_consume_hp_berry — the
+                    // only mid-hit heal source on this path.
+                    let berry = target_mon.consumed_item.clone().unwrap_or(Item::None);
+                    berry_heal_hp_info = Some((target_mon.hp, target_mon.stats[0], berry));
                 }
             }
             if let Some((spa_boost, raised)) = berserk_snapshot {
@@ -898,13 +902,16 @@ fn apply_single_hit_branch(
             let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
             simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp });
         }
-        // S5: emit the target's pinch-berry heal (if one fired) as its own Healed
-        // event, separate from the DamageDealt above. The berry's ItemLost is emitted
-        // generically later by process_item_loss_events (item snapshot diff over the
-        // whole move action), so only the HP-change side needs handling here.
-        if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, berry_heal_hp_info) {
+        // S5: emit the target's pinch-berry heal (if one fired) separately from the
+        // DamageDealt above, nested under the berry's ItemLost — "used its Sitrus
+        // Berry!" is the popup a player sees, the heal is its consequence. The
+        // early emission marks item_lost so the end-of-action ledger sweep
+        // (process_item_loss_events) doesn't emit a duplicate.
+        if let (Some(observer), Some((new_hp, max_hp, berry))) = (bs.event_observer, berry_heal_hp_info) {
             let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
-            simulator_helpers::emit(&mut bs, EventKind::Healed { target: target_slot, new_hp: pokemon_hp });
+            simulator_helpers::emit_item_consumed_with(&mut bs, target_slot, berry, |bs| {
+                simulator_helpers::emit(bs, EventKind::Healed { target: target_slot, new_hp: pokemon_hp });
+            });
         }
 
         // Emit Smack Down's volatile removals now that the target_mon borrow has ended.
@@ -5581,6 +5588,15 @@ fn generate_commands_for_active(
         // Belch: cannot be selected unless the user has eaten a Berry this battle.
         if *move_name == PokemonMove::Belch && !mon.ate_berry_this_battle { continue; }
 
+        // Fake Out / First Impression: newest-gen behaviour — not selectable at all
+        // after the user's first turn on the field (the window resets on re-entry).
+        // The execution-time first_move_on_field check stays as defence in depth.
+        if matches!(move_name, PokemonMove::FakeOut | PokemonMove::FirstImpression)
+            && !mon.first_move_on_field
+        {
+            continue;
+        }
+
         // CantUseRepeatedly volatile (e.g. Gigaton Hammer): the named move cannot be selected
         // on consecutive turns. Cleared by switch-out (volatile wipe) or after 2 turns.
         let cant_repeat = mon.volatiles.iter().any(|v| matches!(
@@ -5744,11 +5760,19 @@ fn game_over_state_if_battle_finished(state: &BattleState) -> Option<MatchState>
     let p1_has_remaining = simulator_helpers::team_has_remaining_pokemon(state, Player::P1);
     let p2_has_remaining = simulator_helpers::team_has_remaining_pokemon(state, Player::P2);
 
-    match (p1_has_remaining, p2_has_remaining) {
-        (false, true) => Some(MatchState::GameOverState { winner: Player::P2 }),
-        (true, false) => Some(MatchState::GameOverState { winner: Player::P1 }),
-        _ => None,
-    }
+    // The final turn's events ride along into GameOverState so the winning turn
+    // still has a log (empty when no observer is attached), and the final field
+    // rides along for display.
+    let winner = match (p1_has_remaining, p2_has_remaining) {
+        (false, true) => Player::P2,
+        (true, false) => Player::P1,
+        _ => return None,
+    };
+    Some(MatchState::GameOverState {
+        winner,
+        pending_events: state.pending_events.clone(),
+        final_state: Box::new(state.clone()),
+    })
 }
 
 /// Measure total HP damage dealt to `opposing_player` between `baseline` and `after`.
@@ -5925,6 +5949,45 @@ fn apply_forced_switch(
         }
     }
     out
+}
+
+/// Parting Shot only lets the user switch out if its stat drop affected the
+/// target: Clear Body / Mist / both stats already at −6 / Soundproof cancel the
+/// switch. Success traces, checked against the pre-move baseline:
+/// - a targeted opposing active's boost stages moved (covers the plain drop
+///   and the Defiant / Competitive reaction net effect),
+/// - the target holds an unsuppressed Mirror Armor (the bounce counts as a
+///   success even when the reflected drop fizzles on the user),
+/// - the target consumed a White Herb (a landed drop that was then restored).
+fn parting_shot_connected(
+    baseline: &BattleState,
+    after: &BattleState,
+    opposing_player: Player,
+) -> bool {
+    let (opposing_before, opposing_after) = match opposing_player {
+        Player::P1 => (&baseline.p1_active_mons, &after.p1_active_mons),
+        Player::P2 => (&baseline.p2_active_mons, &after.p2_active_mons),
+    };
+    // Restrict to the engine-resolved targets when available (doubles); fall
+    // back to every opposing active (singles: identical).
+    let is_target = |slot_index: usize| {
+        after.resolved_move_targets.is_empty()
+            || after.resolved_move_targets.iter().any(|s| {
+                s.player == opposing_player && s.slot_index as usize == slot_index
+            })
+    };
+    opposing_before
+        .iter()
+        .zip(opposing_after.iter())
+        .enumerate()
+        .filter(|(i, _)| is_target(*i))
+        .any(|(_, (before, now))| {
+            before.boosts != now.boosts
+                || (now.ability == crate::data::ability::Ability::MirrorArmor
+                    && !simulator_helpers::pokemon_ability_is_suppressed(after, now))
+                || (before.item == crate::data::item::Item::WhiteHerb
+                    && now.item != crate::data::item::Item::WhiteHerb)
+        })
 }
 
 fn apply_post_damage_move_effects(
@@ -6408,7 +6471,11 @@ fn apply_post_damage_move_effects(
     }
 
     let mut terminal = if let Some(winner) = forced_winner {
-        MatchState::GameOverState { winner }
+        MatchState::GameOverState {
+            winner,
+            pending_events: bs.pending_events.clone(),
+            final_state: Box::new(bs.clone()),
+        }
     } else if let Some(game_over) = game_over_state_if_battle_finished(&bs) {
         game_over
     } else {
@@ -6431,7 +6498,11 @@ fn apply_post_damage_move_effects(
             // like Sitrus Berry healing after the HP cost cannot mask a successful switch.
             let shed_tail_sub_created = move_data.self_switch != SelfSwitchType::ShedTail
                 || (slot_has_substitute(&bs, attacker_slot) && !slot_has_substitute(baseline, attacker_slot));
-            if attacker_alive && move_connected && shed_tail_sub_created {
+            // Parting Shot: no switch when the stat drop was fully repelled
+            // (Clear Body, Mist, both stats at −6…); Mirror Armor still switches.
+            let parting_shot_ok = move_data.name != PokemonMove::PartingShot
+                || parting_shot_connected(baseline, &bs, opposing_player);
+            if attacker_alive && move_connected && shed_tail_sub_created && parting_shot_ok {
                 bs.self_switch_pending = Some((attacker_slot, move_data.self_switch));
             }
         }
@@ -6555,6 +6626,57 @@ fn log_action_verbose(state: &BattleState, action: &Action) {
     }
 }
 
+/// Run a switch-in's send-out effects and emit the entrant's `Switch` event with
+/// those effects (hazard chip, entry-ability reveals) nested as reactions. Call
+/// AFTER the active/bench swap. Shared by the SwitchAction arm and the
+/// self-switch resolution path (U-turn / Flip Turn / Parting Shot) — the latter
+/// used to run send-out effects with no Switch event at all, so the observer's
+/// slot→species map stayed on the *outgoing* mon's name and the entrant's
+/// Intimidate looked like it came from the old occupant.
+fn send_out_with_switch_event(
+    state: &mut BattleState,
+    slot: FieldSlot,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) {
+    // Capture the entrant's visible state BEFORE send-out effects run: the
+    // in-game switch message shows the bench HP, and hazard chip / entry-ability
+    // reveals follow as *reactions* of the Switch event. Emitting them as
+    // pre-Switch siblings made the inference engine attribute them to the
+    // outgoing mon still occupying the slot. Matches the SimultaneousSwitch path.
+    let switch_state: Option<InfoSwitchState> = state.event_observer.and_then(|observer| {
+        simulator_helpers::get_pokemon_at_slot(state, slot).map(|mon| InfoSwitchState {
+            slot,
+            // Illusion disguise is only installed inside process_pokemon_send_out
+            // (not yet run) — compute the disguise species from party composition
+            // directly, as the SimultaneousSwitch path does.
+            species: if slot.player != observer {
+                simulator_helpers::compute_illusion_disguise(state, slot)
+                    .unwrap_or_else(|| mon.species.clone())
+            } else {
+                mon.species.clone()
+            },
+            level: mon.level,
+            hp: simulator_helpers::observed_hp_value(observer, slot.player, mon.hp, mon.stats[0]),
+            status: mon.status.clone(),
+            // Only reveal tera type if the mon has already Terastallized.
+            tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
+        })
+    });
+    // Item-loss ledger across the entry effects (pinch berry eaten from hazard
+    // chip, terrain seed consumed on entry) — mirrors the MoveAction path.
+    let item_snapshot = simulator_helpers::snapshot_active_items(state);
+    let sendout_start = state.pending_events.len();
+    simulator_helpers::process_pokemon_send_out(state, slot, move_dex);
+    simulator_helpers::process_item_loss_events(state, &item_snapshot);
+    if let Some(switch_state) = switch_state {
+        let reactions = state.pending_events.split_off(sendout_start);
+        state.pending_events.push(InformationEvent {
+            kind: EventKind::Switch(switch_state),
+            reactions,
+        });
+    }
+}
+
 /// Execute a single action on `state`, returning all resulting (MatchState, probability) branches.
 fn execute_action(
     mut state: BattleState,
@@ -6584,40 +6706,59 @@ fn execute_action(
                     possible_damage_outcomes_for_move(&state, &m, move_data, config, move_dex, pokemon_dex, false)
                         .into_iter()
                         .map(|(mut st, p)| {
-                            if let MatchState::BattleState(ref mut bs) = st {
-                                simulator_helpers::process_item_loss_events(bs, &item_snapshot);
-                                // Weather / ability-altering moves may change Castform's form.
-                                simulator_helpers::update_forecast_forms(bs);
-                                // Take the engine-resolved targets (auto-targeting, redirection)
-                                // unconditionally so the transient field never lingers; fall back
-                                // to the command's explicit target for moves handled before the
-                                // targeting step.
-                                let resolved = std::mem::take(&mut bs.resolved_move_targets);
-                                // Wrap all events emitted during this move as reactions of MoveUsed,
-                                // UNLESS the Pokémon couldn't act (Cant) — in that case Showdown
-                                // emits `|cant|` with no `|move|`, so we emit the children flat.
-                                if bs.event_observer.is_some() {
-                                    let reactions = bs.pending_events.split_off(move_start_len);
-                                    if bs.move_was_prevented {
-                                        // Cant branch: the Cant event is already inside `reactions`;
-                                        // push it back flat so it appears as a top-level sibling.
-                                        bs.pending_events.extend(reactions);
-                                    } else {
-                                        let targets = if resolved.is_empty() {
-                                            move_targets.clone()
+                            match &mut st {
+                                MatchState::BattleState(bs) => {
+                                    simulator_helpers::process_item_loss_events(bs, &item_snapshot);
+                                    // Weather / ability-altering moves may change Castform's form.
+                                    simulator_helpers::update_forecast_forms(bs);
+                                    // Take the engine-resolved targets (auto-targeting, redirection)
+                                    // unconditionally so the transient field never lingers; fall back
+                                    // to the command's explicit target for moves handled before the
+                                    // targeting step.
+                                    let resolved = std::mem::take(&mut bs.resolved_move_targets);
+                                    // Wrap all events emitted during this move as reactions of MoveUsed,
+                                    // UNLESS the Pokémon couldn't act (Cant) — in that case Showdown
+                                    // emits `|cant|` with no `|move|`, so we emit the children flat.
+                                    if bs.event_observer.is_some() {
+                                        let reactions = bs.pending_events.split_off(move_start_len);
+                                        if bs.move_was_prevented {
+                                            // Cant branch: the Cant event is already inside `reactions`;
+                                            // push it back flat so it appears as a top-level sibling.
+                                            bs.pending_events.extend(reactions);
                                         } else {
-                                            resolved
-                                        };
-                                        bs.pending_events.push(InformationEvent {
+                                            let targets = if resolved.is_empty() {
+                                                move_targets.clone()
+                                            } else {
+                                                resolved
+                                            };
+                                            bs.pending_events.push(InformationEvent {
+                                                kind: EventKind::MoveUsed {
+                                                    user: move_user,
+                                                    move_used: move_name.clone(),
+                                                    targets,
+                                                },
+                                                reactions,
+                                            });
+                                        }
+                                    }
+                                }
+                                MatchState::GameOverState { pending_events, .. } => {
+                                    // The move ended the battle: wrap this move's events the same
+                                    // way so the final turn's log keeps its MoveUsed node. (Empty
+                                    // when no observer is attached — nothing to wrap then.)
+                                    if pending_events.len() > move_start_len {
+                                        let reactions = pending_events.split_off(move_start_len);
+                                        pending_events.push(InformationEvent {
                                             kind: EventKind::MoveUsed {
                                                 user: move_user,
                                                 move_used: move_name.clone(),
-                                                targets,
+                                                targets: move_targets.clone(),
                                             },
                                             reactions,
                                         });
                                     }
                                 }
+                                _ => {}
                             }
                             (st, p)
                         })
@@ -6628,49 +6769,12 @@ fn execute_action(
         }
         Action::SwitchAction(s) => {
             perform_switch_out_in(&mut state, s.user_slot, s.switch_index, pokemon_dex);
-            // Capture the entrant's visible state BEFORE send-out effects run: the in-game
-            // switch message shows the bench HP, and hazard chip / entry-ability reveals
-            // follow as *reactions* of the Switch event. Emitting them as pre-Switch
-            // siblings (the old shape) made the inference engine attribute them to the
-            // outgoing mon still occupying the slot. Matches the SimultaneousSwitch path.
-            let switch_state: Option<InfoSwitchState> = state.event_observer.and_then(|observer| {
-                simulator_helpers::get_pokemon_at_slot(&state, s.user_slot).map(|mon| InfoSwitchState {
-                    slot: s.user_slot,
-                    // Illusion disguise is only installed inside process_pokemon_send_out
-                    // (not yet run) — compute the disguise species from party composition
-                    // directly, as the SimultaneousSwitch path does.
-                    species: if s.user_slot.player != observer {
-                        simulator_helpers::compute_illusion_disguise(&state, s.user_slot)
-                            .unwrap_or_else(|| mon.species.clone())
-                    } else {
-                        mon.species.clone()
-                    },
-                    level: mon.level,
-                    hp: simulator_helpers::observed_hp_value(observer, s.user_slot.player, mon.hp, mon.stats[0]),
-                    status: mon.status.clone(),
-                    // Only reveal tera type if the mon has already Terastallized;
-                    // matches the SimultaneousSwitch path.
-                    tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
-                })
-            });
-            // Item-loss ledger across the entry effects (pinch berry eaten from hazard
-            // chip, terrain seed consumed on entry) — mirrors the MoveAction path.
-            let item_snapshot = simulator_helpers::snapshot_active_items(&state);
-            let sendout_start = state.pending_events.len();
-            simulator_helpers::process_pokemon_send_out(&mut state, s.user_slot, move_dex);
-            simulator_helpers::process_item_loss_events(&mut state, &item_snapshot);
+            send_out_with_switch_event(&mut state, s.user_slot, move_dex);
             if simulator_helpers::get_verbosity() >= 2 {
                 let user = simulator_helpers::get_pokemon_at_slot(&state, s.user_slot)
                     .map(|p| simulator_helpers::species_name_sim(&p.species))
                     .unwrap_or_else(|| format!("{:?} slot {}", s.user_slot.player, s.user_slot.slot_index + 1));
                 println!("{}", format!("Executed Switch: new active at slot {} is {}", s.user_slot.slot_index + 1, user).bright_green());
-            }
-            if let Some(switch_state) = switch_state {
-                let reactions = state.pending_events.split_off(sendout_start);
-                state.pending_events.push(InformationEvent {
-                    kind: EventKind::Switch(switch_state),
-                    reactions,
-                });
             }
             vec![(MatchState::BattleState(state), 1.0)]
         }
@@ -6680,18 +6784,31 @@ fn execute_action(
             let evolved = mons.get_mut(slot_idx).map(|mon| crate::state::battle::try_mega_evolution(mon, pokemon_dex)).unwrap_or(false);
             match m.user_slot.player { Player::P1 => state.p1_has_mega = false, Player::P2 => state.p2_has_mega = false }
             if evolved {
-                // The mega form may have a different ability; trigger its on-gain effects
-                // (weather/terrain setters, Intimidate) the same way a Pokémon gaining an
-                // ability mid-battle does.
-                simulator_helpers::process_pokemon_gain_ability(&mut state, m.user_slot);
+                // Emit the MegaEvolution node first, with the mega form's on-gain
+                // ability effects (weather/terrain setters, Intimidate…) nested as
+                // its reactions: Mega → AbilityRevealed(Sand Stream) → WeatherChanged.
+                // (The old order ran the effects before emitting the mega event,
+                // which put "The weather became…" in front of the mega line.)
                 if let Some(mega_mon) = simulator_helpers::get_pokemon_at_slot(&state, m.user_slot) {
                     let mega_species = mega_mon.species.clone();
                     let mega_ability = mega_mon.ability.clone();
                     let had_mega_ability = mega_mon.mega_ability.is_some();
-                    simulator_helpers::emit(&mut state, EventKind::MegaEvolution { slot: m.user_slot, into: mega_species });
-                    if had_mega_ability {
-                        simulator_helpers::emit(&mut state, EventKind::AbilityRevealed { slot: m.user_slot, ability: mega_ability });
-                    }
+                    let user_slot = m.user_slot;
+                    simulator_helpers::with_reactions(
+                        &mut state,
+                        EventKind::MegaEvolution { slot: user_slot, into: mega_species },
+                        |bs| {
+                            if had_mega_ability {
+                                simulator_helpers::with_reactions(
+                                    bs,
+                                    EventKind::AbilityRevealed { slot: user_slot, ability: mega_ability },
+                                    |bs| simulator_helpers::process_pokemon_gain_ability(bs, user_slot),
+                                );
+                            } else {
+                                simulator_helpers::process_pokemon_gain_ability(bs, user_slot);
+                            }
+                        },
+                    );
                 }
             }
             vec![(MatchState::BattleState(state), 1.0)]
@@ -6723,11 +6840,37 @@ fn step_action_queue(
     // end_turn now returns Vec<(BattleState, f64)> because probabilistic abilities
     // (Shed Skin, Healer, Moody, Harvest) can branch the outcome tree.
     if next_state.action_queue.is_empty() {
+        // Replacement phase (turn_ended still set from the end-of-turn that produced
+        // the faints): the send-outs are not a turn of their own. Skip end_turn — no
+        // volatile ticks, no turn_number bump, no EndOfTurn node. Only re-check game
+        // over and chained replacements (a switch-in can faint to entry hazards).
+        if next_state.turn_ended {
+            if let Some(game_over) = game_over_state_if_battle_finished(&next_state) {
+                return vec![(game_over, 1.0)];
+            }
+            if !replacement_needed(&next_state) {
+                next_state.turn_started = false;
+                next_state.turn_ended = false;
+            }
+            return vec![(MatchState::BattleState(next_state), 1.0)];
+        }
+
         // Record where this end-of-turn's sub-events begin so EndOfTurn can adopt them.
         let eot_start_len = next_state.pending_events.len();
         let eot_branches = simulator_helpers::end_turn(&mut next_state, move_dex, config);
         let mut result: Vec<(MatchState, f64)> = Vec::with_capacity(eot_branches.len());
         for (mut bs, prob) in eot_branches {
+            // Wrap all end-of-turn events as reactions of the EndOfTurn node.
+            // This happens before the game-over check so a battle-ending EOT
+            // (e.g. a poison faint) still gets its events wrapped and carried
+            // into GameOverState.
+            if bs.event_observer.is_some() {
+                let reactions = bs.pending_events.split_off(eot_start_len);
+                bs.pending_events.push(InformationEvent {
+                    kind: EventKind::EndOfTurn,
+                    reactions,
+                });
+            }
             if let Some(game_over) = game_over_state_if_battle_finished(&bs) {
                 result.push((game_over, prob));
             } else {
@@ -6737,14 +6880,6 @@ fn step_action_queue(
                 } else {
                     bs.turn_started = false;
                     bs.turn_ended = false;
-                }
-                // Wrap all end-of-turn events as reactions of the EndOfTurn node.
-                if bs.event_observer.is_some() {
-                    let reactions = bs.pending_events.split_off(eot_start_len);
-                    bs.pending_events.push(InformationEvent {
-                        kind: EventKind::EndOfTurn,
-                        reactions,
-                    });
                 }
                 result.push((MatchState::BattleState(bs), prob));
             }
@@ -6909,21 +7044,6 @@ fn simulate_turn_impl(
         .collect();
     let initial_branches = simulator_helpers::coalesce_branches(initial_branches);
 
-    // When the queue starts empty, set turn-flag state before expanding
-    let initial_branches: Vec<(MatchState, f64)> = initial_branches
-        .into_iter()
-        .map(|(mut st, prob)| {
-            if let MatchState::BattleState(bs) = &mut st {
-                if bs.action_queue.is_empty() {
-                    bs.turn_started = replacement_needed(bs);
-                    bs.turn_ended = bs.turn_started;
-                }
-            }
-            (st, prob)
-        })
-        .collect();
-    let initial_branches = simulator_helpers::coalesce_branches(initial_branches);
-
     // Beak Blast: before any action resolves, give the user a BeakBlastCharging volatile.
     // Any contact move hitting them this turn will burn the attacker (see apply_contact_hit_reactions).
     let initial_branches: Vec<(MatchState, f64)> = initial_branches
@@ -7021,6 +7141,9 @@ fn simulate_turn_impl(
         .map(|(mut st, p)| {
             let events = match &mut st {
                 MatchState::BattleState(bs) => Some(std::mem::take(&mut bs.pending_events)),
+                MatchState::GameOverState { pending_events, .. } => {
+                    Some(std::mem::take(pending_events))
+                }
                 _ => Some(vec![]),
             };
             ((st, events), p)
@@ -7514,7 +7637,10 @@ fn apply_player_commands_branching(
                 };
                 if let Some(bench_idx) = party_index {
                     perform_self_switch(&mut next_state, pending_slot, bench_idx, switch_type, pokemon_dex);
-                    simulator_helpers::process_pokemon_send_out(&mut next_state, pending_slot, move_dex);
+                    // Emit the entrant's Switch event (with entry effects nested) —
+                    // without it the log keeps calling this slot by the pivot
+                    // user's name for the rest of the battle.
+                    send_out_with_switch_event(&mut next_state, pending_slot, move_dex);
                     next_state.self_switch_pending = None;
                 }
                 return vec![(MatchState::BattleState(next_state), 1.0)];

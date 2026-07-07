@@ -23,6 +23,7 @@ export default function ControlPanel() {
     goBack,
     togglePreviewPick,
     submitPreview,
+    showError,
   } = useBattle()
 
   const currentSlot = draftCommands.length
@@ -47,7 +48,7 @@ export default function ControlPanel() {
   if (!view || view.phase === 'gameOver') return null
 
   const panelClass =
-    'glass absolute inset-x-0 bottom-3 z-20 mx-auto w-fit max-w-3xl rounded-card p-4 shadow-lg'
+    'glass-soft absolute inset-x-0 bottom-3 z-20 mx-auto w-fit max-w-3xl rounded-card p-4 shadow-lg'
 
   const playerBadge = (
     <span
@@ -116,7 +117,7 @@ export default function ControlPanel() {
         </div>
 
         <div className="mt-3 flex items-center justify-between">
-          {backButton(previewPicks.length === 0)}
+          {backButton(currentPlayer === 'p1' && previewPicks.length === 0)}
           <button
             onClick={() => void submitPreview()}
             disabled={previewPicks.length !== needed || busy}
@@ -173,7 +174,14 @@ export default function ControlPanel() {
 
   const attackOptions = slot.options.filter((o) => o.command.kind === 'attack')
   const struggleOptions = slot.options.filter((o) => o.command.kind === 'struggle')
-  const switchOptions = slot.options.filter((o) => o.command.kind === 'switch')
+  // Hide bench mons already claimed by an earlier slot's switch this turn —
+  // two fainted slots can't both take the same replacement.
+  const claimedBench = new Set(
+    draftCommands.flatMap((c) => (c.kind === 'switch' ? [c.partyIndex] : [])),
+  )
+  const switchOptions = slot.options.filter(
+    (o) => o.command.kind === 'switch' && !claimedBench.has(o.command.partyIndex),
+  )
 
   const moveSlots = new Map<number, CommandOption[]>()
   for (const option of attackOptions) {
@@ -245,25 +253,35 @@ export default function ControlPanel() {
         </div>
       </div>
 
-      {moveSlots.size > 0 && (
+      {activeMon && activeMon.moves.some((m) => m) && moveSlots.size > 0 && (
         <div className="grid grid-cols-2 gap-1.5">
-          {[...moveSlots.keys()].sort((a, b) => a - b).map((moveSlot) => {
+          {activeMon.moves.map((moveView, moveSlot) => {
+            if (!moveView) return null
             const group = moveSlots.get(moveSlot) ?? []
             const available = optionsFor(moveSlot)
-            const moveView = activeMon?.moves[moveSlot]
+            // A move with no legal options (Fake Out after turn 1, Disabled,
+            // choice-locked, 0 PP…) stays visible; clicking it explains why
+            // the pick bounced instead of silently vanishing.
+            const usable = group.length > 0
             return (
               <button
                 key={moveSlot}
-                onClick={() => commit(available, moveSlot)}
-                disabled={available.length === 0}
-                className="lift rounded-card bg-primary-soft px-3 py-2 text-left text-sm font-medium text-primary hover:bg-primary hover:text-white disabled:opacity-40"
+                onClick={() =>
+                  usable
+                    ? commit(available, moveSlot)
+                    : showError(`${moveView.name} can't be used right now — choose another move.`)
+                }
+                disabled={usable && available.length === 0}
+                className={`lift rounded-card px-3 py-2 text-left text-sm font-medium disabled:opacity-40 ${
+                  usable
+                    ? 'bg-primary-soft text-primary hover:bg-primary hover:text-white'
+                    : 'bg-subtle text-ink-muted opacity-60 hover:bg-danger/10 hover:text-danger'
+                }`}
               >
-                {group[0]?.label ?? `Move ${moveSlot + 1}`}
-                {moveView && (
-                  <span className="ml-2 text-[10px] opacity-70">
-                    {moveView.pp}/{moveView.maxPp}
-                  </span>
-                )}
+                {moveView.name}
+                <span className="ml-2 text-[10px] opacity-70">
+                  {moveView.pp}/{moveView.maxPp}
+                </span>
               </button>
             )
           })}
@@ -294,7 +312,9 @@ export default function ControlPanel() {
         </div>
       )}
 
-      <div className="mt-2">{backButton(draftCommands.length === 0)}</div>
+      <div className="mt-2">
+        {backButton(currentPlayer === 'p1' && draftCommands.length === 0)}
+      </div>
     </div>
   )
 }

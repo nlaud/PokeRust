@@ -103,9 +103,19 @@ function renderEvent(event: EventNode, depth: number, resolver: NameResolver, ou
     case 'mustRecharge':
       line(`${resolver.name(event.slot)} must recharge!`, 'muted')
       break
-    case 'singleMoveOrTurn':
-      line(`${resolver.name(event.slot)} used ${event.move}!`)
+    case 'singleMoveOrTurn': {
+      // The protection family reads as the in-game line, not "used X!"
+      // (the MoveUsed event above already covers the "used" phrasing).
+      const PROTECTS = ['Protect', 'Detect', 'Spiky Shield', 'Baneful Bunker', "King's Shield"]
+      if (PROTECTS.includes(event.move)) {
+        line(`${resolver.name(event.slot)} protected itself!`, 'primary')
+      } else if (event.move === 'Endure') {
+        line(`${resolver.name(event.slot)} braced itself!`, 'primary')
+      } else {
+        line(`${resolver.name(event.slot)} used ${event.move}!`)
+      }
       break
+    }
     case 'damageDealt':
       line(`${resolver.name(event.target)} took damage (now ${hpText(event.newHp)})`, 'danger')
       break

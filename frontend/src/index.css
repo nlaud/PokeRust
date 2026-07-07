@@ -69,6 +69,14 @@ body {
   border: 1px solid var(--border-subtle);
 }
 
+/* More see-through glass for the floating command panel, so the arena
+   stays visible behind it. */
+.glass-soft {
+  background-color: color-mix(in srgb, var(--surface-glass) 55%, transparent);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border-subtle);
+}
+
 /* Interactive elevation: subtle lift on hover for clickable cards/buttons. */
 .lift {
   transition:

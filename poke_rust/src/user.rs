@@ -366,21 +366,32 @@ fn choose_replacement_command_for_slot(
 
 pub fn replacement_commands_are_valid(state: &BattleState, player: Player, active_mons: &[PokemonState], commands: &[BattleCommand]) -> bool {
     let back_mons = match player { Player::P1 => &state.p1_back_mons, Player::P2 => &state.p2_back_mons };
-    let has_healthy_bench = back_mons.iter().any(|m| !m.fainted);
-    commands.iter().enumerate().all(|(i, cmd)| {
+    let mut claimed: Vec<usize> = Vec::new();
+    let mut fainted_passes = 0usize;
+    for (i, cmd) in commands.iter().enumerate() {
         let Some(mon) = active_mons.get(i) else { return false };
         if mon.fainted {
-            // With an empty bench the slot cannot be refilled — it passes
-            // (the terminal driver expresses this as a whole-player Pass).
             match cmd {
-                BattleCommand::Switch(s) => s.party_index < back_mons.len(),
-                BattleCommand::Pass => !has_healthy_bench,
-                _ => false,
+                // Switches must name a distinct, healthy bench mon.
+                BattleCommand::Switch(s) => {
+                    let healthy = back_mons.get(s.party_index).map(|m| !m.fainted).unwrap_or(false);
+                    if !healthy || claimed.contains(&s.party_index) {
+                        return false;
+                    }
+                    claimed.push(s.party_index);
+                }
+                BattleCommand::Pass => fainted_passes += 1,
+                _ => return false,
             }
-        } else {
-            matches!(cmd, BattleCommand::Pass)
+        } else if !matches!(cmd, BattleCommand::Pass) {
+            return false;
         }
-    })
+    }
+    // A fainted slot may only stay empty (Pass) when every healthy bench mon is
+    // already claimed by another slot's switch — covers both the empty-bench
+    // endgame and the two-faints-one-replacement case.
+    let healthy_bench = back_mons.iter().filter(|m| !m.fainted).count();
+    fainted_passes == 0 || claimed.len() >= healthy_bench
 }
 
 fn choose_replacement_phase_commands(state: &BattleState, player: Player) -> PlayerCommand {
@@ -544,7 +555,7 @@ pub fn simulate_battle(
                 state = next_state;
                 state_chance = probability;
             }
-            MatchState::GameOverState { winner } => {
+            MatchState::GameOverState { winner, .. } => {
                 println!("{}", format!("Game over. Winner: {:?}", winner).bright_green().bold());
                 break;
             }

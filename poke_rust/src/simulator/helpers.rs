@@ -3801,7 +3801,11 @@ pub fn apply_damage_and_check_game_over(
                 Player::P1 => Player::P2,
                 Player::P2 => Player::P1,
             };
-            return Some(crate::state::battle::MatchState::GameOverState { winner });
+            return Some(crate::state::battle::MatchState::GameOverState {
+                winner,
+                pending_events: state.pending_events.clone(),
+                final_state: Box::new(state.clone()),
+            });
         }
     } else {
         if let Some(observer) = state.event_observer {
@@ -4042,6 +4046,31 @@ pub(crate) fn snapshot_active_items(state: &BattleState) -> Vec<(FieldSlot, Spec
 ///
 /// Also diffs HP: any decrease marks `damaged_this_turn` (Assurance), catching indirect
 /// damage (recoil, crash, confusion self-hits) that bypasses `apply_single_hit_branch`.
+/// Emit an item consumption at its point of effect: marks the holder's
+/// `item_lost` (so the end-of-action `process_item_loss_events` sweep skips
+/// it), records it in `items_consumed_this_turn`, and emits
+/// `ItemLost { consumed: true }` with `f`'s events (e.g. the berry's `Healed`)
+/// and the Symbiosis pass nested as reactions — mirroring the sweep's shape.
+pub(crate) fn emit_item_consumed_with(
+    state: &mut BattleState,
+    slot: FieldSlot,
+    item: Item,
+    f: impl FnOnce(&mut BattleState),
+) {
+    if let Some(m) = get_pokemon_at_slot_mut(state, slot) {
+        m.item_lost = true;
+    }
+    state.items_consumed_this_turn.push((slot, item.clone()));
+    with_reactions(
+        state,
+        EventKind::ItemLost { slot, item, consumed: true },
+        |bs| {
+            f(bs);
+            try_symbiosis_pass(bs, slot);
+        },
+    );
+}
+
 pub(crate) fn process_item_loss_events(
     state: &mut BattleState,
     before: &[(FieldSlot, Species, Item, u16)],
@@ -5481,27 +5510,46 @@ pub fn compare_action_order(
             }
 
             // Speed comparison and Trick Room.
-            match (user1, user2) {
-                (Some(p1), Some(p2)) => {
-                    let speed1 = effective_speed_for_slot(state, m1.user_slot, p1);
-                    let speed2 = effective_speed_for_slot(state, m2.user_slot, p2);
-                    let trick_room = trick_room_is_active(state);
+            compare_slot_speed_order(state, m1.user_slot, m2.user_slot)
+        }
+        // Mega Evolutions and Terastallizations within their tier resolve in speed
+        // order (a true speed tie still branches equally via Ordering::Equal).
+        (Action::MegaAction(m1), Action::MegaAction(m2)) => {
+            compare_slot_speed_order(state, m1.user_slot, m2.user_slot)
+        }
+        (Action::TeraAction(t1), Action::TeraAction(t2)) => {
+            compare_slot_speed_order(state, t1.user_slot, t2.user_slot)
+        }
+        _ => Ordering::Equal,
+    }
+}
 
-                    if (speed2 - speed1).abs() < 0.01 {
-                        Ordering::Equal
-                    } else if trick_room {
-                        if speed1 < speed2 {
-                            Ordering::Less
-                        } else {
-                            Ordering::Greater
-                        }
-                    } else if speed2 > speed1 {
-                        Ordering::Greater
-                    } else {
-                        Ordering::Less
-                    }
+/// Speed-order two field slots (Trick Room aware): the faster slot's action comes
+/// first; a genuine speed tie returns Equal (callers branch equally on Equal).
+fn compare_slot_speed_order(
+    state: &BattleState,
+    slot1: FieldSlot,
+    slot2: FieldSlot,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (get_pokemon_at_slot(state, slot1), get_pokemon_at_slot(state, slot2)) {
+        (Some(p1), Some(p2)) => {
+            let speed1 = effective_speed_for_slot(state, slot1, p1);
+            let speed2 = effective_speed_for_slot(state, slot2, p2);
+            let trick_room = trick_room_is_active(state);
+
+            if (speed2 - speed1).abs() < 0.01 {
+                Ordering::Equal
+            } else if trick_room {
+                if speed1 < speed2 {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
                 }
-                _ => Ordering::Equal,
+            } else if speed2 > speed1 {
+                Ordering::Greater
+            } else {
+                Ordering::Less
             }
         }
         _ => Ordering::Equal,
@@ -6101,6 +6149,10 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
                     // +1 Attack, non-deferring path (pure positive delta, no White Herb).
                     apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false)
                 };
+                // The in-game popup attributes the raise to Guard Dog — reveal it.
+                if gd_delta.iter().any(|&s| s != 0) {
+                    emit(state, EventKind::AbilityRevealed { slot: target, ability: Ability::GuardDog });
+                }
                 for (boost_idx, &stages) in gd_delta.iter().enumerate() {
                     if stages != 0 {
                         emit(state, EventKind::BoostChanged { target, boost_idx, stages });
@@ -7322,10 +7374,26 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
     //decrement_volatile_statuses(&mut state.p2_back_mons);
 
     // Emit VolatileEnd for each expired TurnStatus volatile (borrows of active_mons have ended).
+    // Silent expiries are skipped: the game never announces a Flinch or a
+    // protection wearing off at end of turn, so emitting them would leak
+    // engine-internal bookkeeping into the player-visible event stream.
+    fn volatile_expiry_is_visible(vs: &VolatileStatus) -> bool {
+        !matches!(
+            vs,
+            VolatileStatus::Flinch
+                | VolatileStatus::Protect
+                | VolatileStatus::KingsShield
+                | VolatileStatus::SpikyShield
+                | VolatileStatus::BanefulBunker
+                | VolatileStatus::Endure
+        )
+    }
     for (slot_idx, vs) in p1_expired {
+        if !volatile_expiry_is_visible(&vs) { continue; }
         emit(state, EventKind::VolatileEnd { target: FieldSlot { player: Player::P1, slot_index: slot_idx as u8 }, volatile: vs });
     }
     for (slot_idx, vs) in p2_expired {
+        if !volatile_expiry_is_visible(&vs) { continue; }
         emit(state, EventKind::VolatileEnd { target: FieldSlot { player: Player::P2, slot_index: slot_idx as u8 }, volatile: vs });
     }
 
@@ -9597,7 +9665,9 @@ pub(crate) fn apply_opponent_stat_drop(
                 // on a pure positive delta).
                 apply_stat_boosts_to_pokemon(mon, &boost, items_suppressed, false)
             };
-            // Emit BoostChanged for the Defiant/Competitive self-raise (mon borrow ended).
+            // The in-game ability popup attributes the raise to Defiant/Competitive —
+            // reveal it, then emit the BoostChanged (mon borrow ended).
+            emit(state, EventKind::AbilityRevealed { slot: target_slot, ability: target_ability.clone() });
             for i in 0..7 {
                 if def_comp_delta[i] != 0 {
                     emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: def_comp_delta[i] });
@@ -11201,6 +11271,55 @@ pub(crate) fn contact_effects_apply(
     true
 }
 
+/// Run a reaction ability's visible effect; if it emitted any observable event,
+/// insert an AbilityRevealed for the holder in front of those events — the
+/// in-game popup that attributes the reaction. No-op when the effect was fully
+/// blocked (or when no observer is attached: pending_events stays empty then).
+fn reveal_ability_with_effect(
+    bs: &mut BattleState,
+    holder_slot: FieldSlot,
+    ability: Ability,
+    apply: impl FnOnce(&mut BattleState),
+) {
+    let start = bs.pending_events.len();
+    apply(bs);
+    if bs.pending_events.len() > start {
+        bs.pending_events.insert(
+            start,
+            crate::information::information::InformationEvent {
+                kind: EventKind::AbilityRevealed { slot: holder_slot, ability },
+                reactions: Vec::new(),
+            },
+        );
+    }
+}
+
+/// Apply a reaction ability's self stat boost, emitting the AbilityRevealed and
+/// the resulting BoostChanged events. (Weak Armor / Stamina / Justified used to
+/// apply their boosts silently — no events at all.)
+fn apply_reaction_self_boost(
+    bs: &mut BattleState,
+    holder_slot: FieldSlot,
+    ability: Ability,
+    boosts: &[i8; 7],
+) {
+    let items_suppressed = items_are_suppressed(bs);
+    let delta = if let Some(mon) = get_pokemon_at_slot_mut(bs, holder_slot) {
+        apply_stat_boosts_to_pokemon(mon, boosts, items_suppressed, false)
+    } else {
+        [0i8; 7]
+    };
+    if delta.iter().all(|&s| s == 0) {
+        return;
+    }
+    emit(bs, EventKind::AbilityRevealed { slot: holder_slot, ability });
+    for (boost_idx, &stages) in delta.iter().enumerate() {
+        if stages != 0 {
+            emit(bs, EventKind::BoostChanged { target: holder_slot, boost_idx, stages });
+        }
+    }
+}
+
 /// Fire all on-hit reactive ability effects for the ability holder (`holder_slot`) after it
 /// takes `damage_dealt` HP damage from `attacker_slot`'s move. Returns the updated branch set.
 ///
@@ -11375,7 +11494,9 @@ pub fn apply_contact_hit_reactions(
                 ..Default::default()
             };
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
-                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                reveal_ability_with_effect(bs, holder_slot, Ability::FlameBody, |bs| {
+                    apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                });
             })
         }
         Ability::PoisonPoint => {
@@ -11387,7 +11508,9 @@ pub fn apply_contact_hit_reactions(
                 ..Default::default()
             };
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
-                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                reveal_ability_with_effect(bs, holder_slot, Ability::PoisonPoint, |bs| {
+                    apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                });
             })
         }
         Ability::Static => {
@@ -11399,7 +11522,9 @@ pub fn apply_contact_hit_reactions(
                 ..Default::default()
             };
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
-                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                reveal_ability_with_effect(bs, holder_slot, Ability::Static, |bs| {
+                    apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                });
             })
         }
         // Effect Spore: on contact, the attacker has a 30% total chance of a status —
@@ -11436,13 +11561,9 @@ pub fn apply_contact_hit_reactions(
                             ..Default::default()
                         };
                         let mut applied = bs.clone();
-                        apply_effect_to_target(
-                            &mut applied,
-                            holder_slot,
-                            attacker_slot,
-                            &eff,
-                            attacker_slot.player,
-                        );
+                        reveal_ability_with_effect(&mut applied, holder_slot, Ability::EffectSpore, |bs| {
+                            apply_effect_to_target(bs, holder_slot, attacker_slot, &eff, attacker_slot.player);
+                        });
                         out.push((applied, prob * chance));
                         applied_chance += chance;
                     }
@@ -11460,13 +11581,9 @@ pub fn apply_contact_hit_reactions(
             branches
                 .into_iter()
                 .map(|(mut bs, prob)| {
-                    apply_effect_to_target(
-                        &mut bs,
-                        holder_slot,
-                        attacker_slot,
-                        &eff,
-                        attacker_slot.player,
-                    );
+                    reveal_ability_with_effect(&mut bs, holder_slot, Ability::SpicySpray, |bs| {
+                        apply_effect_to_target(bs, holder_slot, attacker_slot, &eff, attacker_slot.player);
+                    });
                     (bs, prob)
                 })
                 .collect()
@@ -11487,7 +11604,9 @@ pub fn apply_contact_hit_reactions(
                 ..Default::default()
             };
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
-                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                reveal_ability_with_effect(bs, holder_slot, Ability::CuteCharm, |bs| {
+                    apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                });
             })
         }
         Ability::CursedBody => {
@@ -11500,7 +11619,9 @@ pub fn apply_contact_hit_reactions(
                 ..Default::default()
             };
             branch_on_secondary_effects(branches, 0.30, std::slice::from_ref(&eff), |bs, e| {
-                apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                reveal_ability_with_effect(bs, holder_slot, Ability::CursedBody, |bs| {
+                    apply_effect_to_target(bs, holder_slot, attacker_slot, e, attacker_slot.player);
+                });
             })
         }
         Ability::Gooey => {
@@ -11514,13 +11635,9 @@ pub fn apply_contact_hit_reactions(
             branches
                 .into_iter()
                 .map(|(mut bs, prob)| {
-                    apply_effect_to_target(
-                        &mut bs,
-                        holder_slot,
-                        attacker_slot,
-                        &eff,
-                        attacker_slot.player,
-                    );
+                    reveal_ability_with_effect(&mut bs, holder_slot, Ability::Gooey, |bs| {
+                        apply_effect_to_target(bs, holder_slot, attacker_slot, &eff, attacker_slot.player);
+                    });
                     (bs, prob)
                 })
                 .collect()
@@ -11539,10 +11656,7 @@ pub fn apply_contact_hit_reactions(
                     if !alive {
                         return (bs, prob);
                     }
-                    let items_suppressed = items_are_suppressed(&bs);
-                    if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
-                        apply_stat_boosts_to_pokemon(mon, &boosts, items_suppressed, false);
-                    }
+                    apply_reaction_self_boost(&mut bs, holder_slot, Ability::WeakArmor, &boosts);
                     (bs, prob)
                 })
                 .collect()
@@ -11559,15 +11673,7 @@ pub fn apply_contact_hit_reactions(
                 if !alive {
                     return (bs, prob);
                 }
-                let items_suppressed = items_are_suppressed(&bs);
-                if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
-                    apply_stat_boosts_to_pokemon(
-                        mon,
-                        &[0, 1, 0, 0, 0, 0, 0],
-                        items_suppressed,
-                        false,
-                    );
-                }
+                apply_reaction_self_boost(&mut bs, holder_slot, Ability::Stamina, &[0, 1, 0, 0, 0, 0, 0]);
                 (bs, prob)
             })
             .collect(),
@@ -11585,15 +11691,7 @@ pub fn apply_contact_hit_reactions(
                     if !alive {
                         return (bs, prob);
                     }
-                    let items_suppressed = items_are_suppressed(&bs);
-                    if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
-                        apply_stat_boosts_to_pokemon(
-                            mon,
-                            &[1, 0, 0, 0, 0, 0, 0],
-                            items_suppressed,
-                            false,
-                        );
-                    }
+                    apply_reaction_self_boost(&mut bs, holder_slot, Ability::Justified, &[1, 0, 0, 0, 0, 0, 0]);
                     (bs, prob)
                 })
                 .collect()
@@ -11613,11 +11711,19 @@ pub fn apply_contact_hit_reactions(
                     if !alive {
                         return (bs, prob);
                     }
-                    if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
-                        if mon.boosts[0] < 6 {
+                    let delta = if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
+                        let old = mon.boosts[0];
+                        if old < 6 {
                             mon.stats_raised_this_turn = true;
                         }
                         mon.boosts[0] = 6; // maximise Attack regardless of current stage
+                        6 - old
+                    } else {
+                        0
+                    };
+                    if delta != 0 {
+                        emit(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::AngerPoint });
+                        emit(&mut bs, EventKind::BoostChanged { target: holder_slot, boost_idx: 0, stages: delta });
                     }
                     (bs, prob)
                 })

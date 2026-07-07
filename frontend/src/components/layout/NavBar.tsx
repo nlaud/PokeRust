@@ -2,9 +2,9 @@ import { NavLink } from 'react-router-dom'
 import { useSettings } from '../../store/settingsStore'
 
 const tabs = [
-  { to: '/', label: 'Simulate' },
-  { to: '/teams', label: 'Teams' },
+  { to: '/', label: 'Teams' },
   { to: '/formats', label: 'Formats' },
+  { to: '/simulate', label: 'Simulate' },
 ]
 
 export default function NavBar() {

@@ -1,9 +1,30 @@
+import type { ReactNode } from 'react'
 import { useSettings, type Theme } from '../../store/settingsStore'
 
-const themes: { value: Theme; label: string; hint: string }[] = [
-  { value: 'light', label: 'Light', hint: 'Default clean look' },
-  { value: 'dark', label: 'Dark', hint: 'Low-light friendly' },
-  { value: 'custom', label: 'Custom', hint: 'Violet accent theme' },
+const sunIcon = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4" />
+  </svg>
+)
+const moonIcon = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z" />
+  </svg>
+)
+const paletteIcon = (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22a10 10 0 1 1 10-10c0 2.2-1.8 3-3 3h-2.5a2.5 2.5 0 0 0-1.8 4.3c.4.4.6.9.6 1.4 0 .7-.6 1.3-1.3 1.3z" />
+    <circle cx="7.5" cy="11.5" r="1" />
+    <circle cx="12" cy="7.5" r="1" />
+    <circle cx="16.5" cy="11.5" r="1" />
+  </svg>
+)
+
+const themes: { value: Theme; label: string; icon: ReactNode }[] = [
+  { value: 'light', label: 'Light', icon: sunIcon },
+  { value: 'dark', label: 'Dark', icon: moonIcon },
+  { value: 'custom', label: 'Custom', icon: paletteIcon },
 ]
 
 export default function SettingsSidebar() {
@@ -34,28 +55,21 @@ export default function SettingsSidebar() {
 
         <section>
           <h3 className="mb-2 text-sm font-medium text-ink-muted">Display</h3>
-          <div className="space-y-2">
+          <div className="flex overflow-hidden rounded-card border border-subtle">
             {themes.map((option) => (
-              <label
+              <button
                 key={option.value}
-                className={`lift flex cursor-pointer items-center gap-3 rounded-card border p-3 ${
+                onClick={() => setTheme(option.value)}
+                aria-pressed={theme === option.value}
+                className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-sm font-medium transition-colors ${
                   theme === option.value
-                    ? 'border-primary bg-primary-soft'
-                    : 'border-subtle'
+                    ? 'bg-primary text-white'
+                    : 'text-ink-muted hover:bg-primary-soft hover:text-ink'
                 }`}
               >
-                <input
-                  type="radio"
-                  name="theme"
-                  checked={theme === option.value}
-                  onChange={() => setTheme(option.value)}
-                  className="accent-(--primary)"
-                />
-                <span>
-                  <span className="block text-sm font-medium">{option.label}</span>
-                  <span className="block text-xs text-ink-muted">{option.hint}</span>
-                </span>
-              </label>
+                {option.icon}
+                {option.label}
+              </button>
             ))}
           </div>
         </section>

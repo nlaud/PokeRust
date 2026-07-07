@@ -21,23 +21,23 @@ export default function PokemonHUD({ mon }: { mon: PokemonView }) {
   const fraction = mon.hp.max > 0 ? mon.hp.current / mon.hp.max : 0
 
   return (
-    <div className={`glass w-52 rounded-card p-2 shadow-sm ${mon.fainted ? 'opacity-50' : ''}`}>
+    <div className={`glass w-full rounded-card p-2.5 shadow-sm ${mon.fainted ? 'opacity-50' : ''}`}>
       <div className="flex items-center justify-between">
-        <span className="truncate text-xs font-semibold">
+        <span className="truncate text-sm font-semibold">
           {mon.species}
           {mon.isTera && <span className="ml-1 text-primary">✦{mon.teraType}</span>}
         </span>
-        <span className="text-[10px] text-ink-muted">Lv{mon.level}</span>
+        <span className="text-[11px] text-ink-muted">Lv{mon.level}</span>
       </div>
 
-      <div className="mt-1 h-2 overflow-hidden rounded-full bg-subtle">
+      <div className="mt-1 h-3 overflow-hidden rounded-full bg-subtle">
         <div
           className={`h-full rounded-full transition-all duration-500 ${hpBarColor(fraction)}`}
           style={{ width: `${Math.max(0, fraction) * 100}%` }}
         />
       </div>
       <div className="mt-0.5 flex items-center justify-between">
-        <span className="text-[10px] text-ink-muted">
+        <span className="text-xs text-ink-muted">
           {mon.hp.current}/{mon.hp.max}
         </span>
         {mon.status && (

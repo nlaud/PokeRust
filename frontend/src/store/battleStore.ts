@@ -51,6 +51,7 @@ interface BattleStore {
   togglePreviewPick: (index: number) => void
   submitPreview: () => Promise<void>
   clearError: () => void
+  showError: (message: string) => void
 }
 
 const BATTLE_ID_KEY = 'pokerust.activeBattleId'
@@ -62,8 +63,13 @@ function appendLog(log: TurnLogEntry[], label: string, events: EventNode[]): Tur
 export const useBattle = create<BattleStore>((set, get) => {
   /** After both players' commands exist, ship the turn to the server. */
   async function maybeSubmitTurn() {
-    const { battleId, view, p1Commands, draftCommands, currentPlayer, commands } = get()
+    const { battleId, view, p1Commands, draftCommands, currentPlayer, commands, busy } = get()
     if (!battleId || !view || !commands) return
+    // Re-entrancy guard: the auto-fill path and the ControlPanel's forced-slot
+    // effect can both complete a draft; without this, the same turn gets
+    // POSTed twice and the second submit re-validates stale commands against
+    // the already-advanced battle ("… is not a legal command", at random).
+    if (busy) return
 
     const slotsNeeded = commands.slots.length
     if (draftCommands.length < slotsNeeded) return
@@ -118,9 +124,13 @@ export const useBattle = create<BattleStore>((set, get) => {
    * if every slot of the current player is forced, submit for them silently.
    */
   async function autoFillForcedSlots() {
-    const { commands } = get()
+    const { commands, busy, draftCommands } = get()
     if (!commands) return
     if (commands.phase !== 'selfSwitch' && commands.phase !== 'replacement') return
+    // If a submit is in flight, or the ControlPanel's forced-slot effect has
+    // already begun filling this draft, leave the draft alone — overwriting it
+    // here can shrink it mid-flow or double-submit the turn.
+    if (busy || draftCommands.length > 0) return
 
     const allForced = commands.slots.every((slot) => slot.forced)
     if (allForced) {
@@ -229,20 +239,43 @@ export const useBattle = create<BattleStore>((set, get) => {
     setPendingAttack: (pendingAttack) => set({ pendingAttack }),
 
     goBack: () => {
-      // Back rewinds to the beginning of the current player's action:
-      // in team preview that clears all picks; in battle it drops the pending
-      // target selection first, then the last committed slot.
-      const { pendingAttack, draftCommands, view } = get()
+      // Back rewinds within the current player's action first (pending target,
+      // then the last committed slot); at the very beginning of P2's turn it
+      // rewinds to the beginning of P1's turn.
+      const { pendingAttack, draftCommands, view, currentPlayer, commands, previewPicks } = get()
       if (view?.phase === 'teamPreview') {
-        set({ previewPicks: [] })
+        if (previewPicks.length > 0) {
+          set({ previewPicks: [] })
+          return
+        }
+        if (currentPlayer === 'p2') {
+          set({ currentPlayer: 'p1', p1Commands: null, previewPicks: [] })
+        }
         return
       }
       if (pendingAttack) {
         set({ pendingAttack: null })
         return
       }
-      if (draftCommands.length > 0) {
-        set({ draftCommands: draftCommands.slice(0, -1) })
+      // Unwind forced auto-fills sitting on top of the last real choice, then
+      // drop that choice. The forced-slot effect re-fills forward as needed.
+      const slots = commands?.slots ?? []
+      let end = draftCommands.length
+      while (end > 0 && slots[end - 1]?.forced) end -= 1
+      if (end > 0) {
+        set({ draftCommands: draftCommands.slice(0, end - 1) })
+        return
+      }
+      // Nothing left to unwind for this player — flip back to P1's turn.
+      if (currentPlayer === 'p2') {
+        set({
+          currentPlayer: 'p1',
+          p1Commands: null,
+          draftCommands: [],
+          pendingAttack: null,
+          commands: null,
+        })
+        void get().fetchCommands()
       }
     },
 
@@ -297,6 +330,8 @@ export const useBattle = create<BattleStore>((set, get) => {
     },
 
     clearError: () => set({ error: null }),
+
+    showError: (message) => set({ error: message }),
   }
 })
 

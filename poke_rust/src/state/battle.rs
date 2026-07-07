@@ -412,11 +412,55 @@ pub struct TeamPreviewState {
     pub p2_mons: Vec<PokemonState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub enum MatchState {
     BattleState(BattleState),
     TeamPreviewState(TeamPreviewState),
-    GameOverState { winner: Player },
+    GameOverState {
+        winner: Player,
+        /// The finished battle's undrained observer event log (the final turn's
+        /// attack/faint events), carried over so the winning turn still has a log.
+        /// Empty when no observer is attached — matching `BattleState`'s
+        /// Eq/Hash convention, which only distinguishes event histories when
+        /// an observer is active.
+        pending_events: Vec<InformationEvent>,
+        /// The field as it stood when the battle ended (fainted mon, final HP),
+        /// for display purposes — the UI renders it behind the winner overlay.
+        /// Deliberately EXCLUDED from Eq/Hash below: game-over branches coalesce
+        /// by winner + event history exactly as before this field existed; a
+        /// merged branch keeps one representative final state.
+        final_state: Box<BattleState>,
+    },
+}
+
+impl PartialEq for MatchState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (MatchState::BattleState(a), MatchState::BattleState(b)) => a == b,
+            (MatchState::TeamPreviewState(a), MatchState::TeamPreviewState(b)) => a == b,
+            (
+                MatchState::GameOverState { winner: w1, pending_events: e1, final_state: _ },
+                MatchState::GameOverState { winner: w2, pending_events: e2, final_state: _ },
+            ) => w1 == w2 && e1 == e2,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for MatchState {}
+
+impl std::hash::Hash for MatchState {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            MatchState::BattleState(bs) => bs.hash(state),
+            MatchState::TeamPreviewState(tp) => tp.hash(state),
+            MatchState::GameOverState { winner, pending_events, final_state: _ } => {
+                winner.hash(state);
+                pending_events.hash(state);
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for MatchState {
@@ -431,7 +475,7 @@ impl std::fmt::Display for MatchState {
                     tp.p2_mons.len()
                 )
             }
-            MatchState::GameOverState { winner } => {
+            MatchState::GameOverState { winner, .. } => {
                 let w = match winner {
                     Player::P1 => "P1",
                     Player::P2 => "P2",

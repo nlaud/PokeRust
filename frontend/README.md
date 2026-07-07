@@ -1,9 +1,10 @@
 # PokeRust Frontend
 
-Minimalist web UI for the PokeRust battle simulator: a **Simulate** page
-(hotseat battles against the Rust engine), a **Teams** page (Showdown-format
-teamsheets in localStorage), and a **Formats** page (ruleset cards, also
-localStorage). React + Vite + TypeScript + Tailwind CSS v4.
+Minimalist web UI for the PokeRust battle simulator: a **Teams** page
+(Showdown-format teamsheets in localStorage, the default route), a **Formats**
+page (ruleset cards with a curated Pokémon Champions item pool for ban lists),
+and a **Simulate** page (hotseat battles against the Rust engine).
+React + Vite + TypeScript + Tailwind CSS v4.
 
 ## Running
 
@@ -60,5 +61,11 @@ src/
   refresh re-fetches state + full event log from `GET /api/battles/{id}`.
   Server sessions are in-memory — restarting the server loses battles.
 - **Sprites**: resolved through the PokeAPI `pokemon/{slug}` endpoint with an
-  exception table for forme names, cached in localStorage. Failures fall back
-  to a gray Pokéball placeholder.
+  exception table for forme names, cached in localStorage. Unknown slugs fall
+  back to the species endpoint's default variety, then progressively strip
+  forme suffixes (Champions-only megas render the base species sprite); total
+  failures show a gray Pokéball placeholder.
+- **Item catalog**: `lib/items.ts` is a static list — exactly the Pokémon
+  Champions held-item pool (general items, Mega Stones, berries) — not a
+  PokeAPI fetch. Item sprite slugs still resolve against the PokeAPI sprites
+  repo; Champions-only Mega Stones have no sprite and render label-only.

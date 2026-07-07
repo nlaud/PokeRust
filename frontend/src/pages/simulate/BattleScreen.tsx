@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import ConfirmDialog from '../../components/common/ConfirmDialog'
 import { useBattle } from '../../store/battleStore'
 import Arena from './Arena'
 import BattleLogSidebar from './BattleLogSidebar'
@@ -6,6 +8,7 @@ import TeamInfoSidebar from './TeamInfoSidebar'
 
 export default function BattleScreen() {
   const { view, error, clearError, leave } = useBattle()
+  const [confirmLeave, setConfirmLeave] = useState(false)
   if (!view) return null
 
   // GameOverState carries only the winner; teamPreview carries only the
@@ -13,10 +16,12 @@ export default function BattleScreen() {
   const inBattle = !!view.p1 && !!view.p2
 
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] gap-3 p-3">
-      <BattleLogSidebar />
+    <div className="flex flex-col gap-3 p-3 lg:h-[calc(100vh-3.5rem)] lg:flex-row">
+      <div className="order-2 lg:order-none lg:contents">
+        <BattleLogSidebar />
+      </div>
 
-      <div className="relative flex flex-1 flex-col">
+      <div className="relative order-1 flex min-h-[440px] min-w-0 flex-1 flex-col lg:order-none">
         {inBattle ? (
           <Arena />
         ) : (
@@ -28,6 +33,15 @@ export default function BattleScreen() {
         )}
 
         <ControlPanel />
+
+        {view.phase !== 'gameOver' && (
+          <button
+            onClick={() => setConfirmLeave(true)}
+            className="lift absolute bottom-3 right-3 z-10 rounded-card border border-subtle bg-card px-3 py-1.5 text-xs font-semibold text-ink-muted shadow-sm hover:text-danger"
+          >
+            New battle
+          </button>
+        )}
 
         {view.phase === 'gameOver' && (
           <div className="absolute inset-0 z-30 flex items-center justify-center rounded-card bg-black/40">
@@ -48,7 +62,21 @@ export default function BattleScreen() {
         )}
       </div>
 
-      <TeamInfoSidebar />
+      <div className="order-3 lg:order-none lg:contents">
+        <TeamInfoSidebar />
+      </div>
+
+      {confirmLeave && (
+        <ConfirmDialog
+          title="End this battle?"
+          message="The current battle will be abandoned and you'll return to the new-battle setup."
+          onConfirm={() => {
+            setConfirmLeave(false)
+            leave()
+          }}
+          onCancel={() => setConfirmLeave(false)}
+        />
+      )}
 
       {error && (
         <div className="fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-card bg-danger px-4 py-2 text-sm font-medium text-white shadow-lg">

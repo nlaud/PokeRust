@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import { loadFormats, loadTeams } from '../../lib/storage'
+import { useEffect, useState } from 'react'
+import Select from '../../components/common/Select'
+import { loadBattleSetup, loadFormats, loadTeams, saveBattleSetup } from '../../lib/storage'
 import { useBattle } from '../../store/battleStore'
 
 export default function SetupPanel() {
@@ -7,9 +8,22 @@ export default function SetupPanel() {
   const [formats] = useState(loadFormats)
   const { createBattle, busy, error, clearError } = useBattle()
 
-  const [formatId, setFormatId] = useState(formats[0]?.id ?? '')
-  const [team1Id, setTeam1Id] = useState(teams[0]?.id ?? '')
-  const [team2Id, setTeam2Id] = useState(teams[1]?.id ?? teams[0]?.id ?? '')
+  // Restore the last-used configuration (ignoring ids that no longer exist);
+  // otherwise Doubles is the default format when present (covers stored
+  // format lists that still have Singles first).
+  const saved = loadBattleSetup()
+  const savedFormat = formats.find((f) => f.id === saved?.formatId)
+  const savedTeam1 = teams.find((t) => t.id === saved?.team1Id)
+  const savedTeam2 = teams.find((t) => t.id === saved?.team2Id)
+  const defaultFormat =
+    savedFormat ?? formats.find((f) => f.id === 'champions-s2-doubles') ?? formats[0]
+  const [formatId, setFormatId] = useState(defaultFormat?.id ?? '')
+  const [team1Id, setTeam1Id] = useState(savedTeam1?.id ?? teams[0]?.id ?? '')
+  const [team2Id, setTeam2Id] = useState(savedTeam2?.id ?? teams[1]?.id ?? teams[0]?.id ?? '')
+
+  useEffect(() => {
+    saveBattleSetup({ formatId, team1Id, team2Id })
+  }, [formatId, team1Id, team2Id])
 
   const format = formats.find((f) => f.id === formatId)
   const team1 = teams.find((t) => t.id === team1Id)
@@ -31,8 +45,8 @@ export default function SetupPanel() {
     })
   }
 
-  const selectClass =
-    'w-full rounded-card border border-subtle bg-surface px-3 py-2 text-sm outline-none focus:border-primary'
+  const formatOptions = formats.map((f) => ({ value: f.id, label: f.name }))
+  const teamOptions = teams.map((t) => ({ value: t.id, label: t.name }))
 
   return (
     <div className="mx-auto max-w-lg p-6">
@@ -44,42 +58,27 @@ export default function SetupPanel() {
 
         <label className="mb-4 block text-sm">
           <span className="mb-1 block font-medium">Ruleset</span>
-          <select value={formatId} onChange={(e) => setFormatId(e.target.value)} className={selectClass}>
-            {formats.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name}
-              </option>
-            ))}
-          </select>
+          <Select value={formatId} options={formatOptions} onChange={setFormatId} />
         </label>
 
         <label className="mb-4 block text-sm">
           <span className="mb-1 block font-medium">Player 1 team</span>
-          <select value={team1Id} onChange={(e) => setTeam1Id(e.target.value)} className={selectClass}>
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
+          <Select value={team1Id} options={teamOptions} onChange={setTeam1Id} />
         </label>
 
         <label className="mb-4 block text-sm">
           <span className="mb-1 block font-medium">Player 2 team</span>
-          <select value={team2Id} onChange={(e) => setTeam2Id(e.target.value)} className={selectClass}>
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
+          <Select value={team2Id} options={teamOptions} onChange={setTeam2Id} />
         </label>
 
         <label className="mb-6 block text-sm">
           <span className="mb-1 block font-medium">Information mode</span>
-          <select className={selectClass} disabled>
-            <option>Perfect Information</option>
-          </select>
+          <Select
+            value="perfect"
+            options={[{ value: 'perfect', label: 'Perfect Information' }]}
+            onChange={() => {}}
+            disabled
+          />
         </label>
 
         {teams.length === 0 && (

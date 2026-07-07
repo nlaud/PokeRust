@@ -133,19 +133,16 @@ function FormatEditor({
 }) {
   const [draft, setDraft] = useState<StoredFormat>(initial)
   const [catalog, setCatalog] = useState<CatalogItem[]>([])
-  const [catalogError, setCatalogError] = useState(false)
   const [search, setSearch] = useState('')
 
   useEffect(() => {
-    fetchItemCatalog()
-      .then(setCatalog)
-      .catch(() => setCatalogError(true))
+    void fetchItemCatalog().then(setCatalog)
   }, [])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    const list = q ? catalog.filter((i) => i.label.toLowerCase().includes(q)) : catalog
-    return list.slice(0, 60)
+    // The curated Champions catalog is small — show it all.
+    return q ? catalog.filter((i) => i.label.toLowerCase().includes(q)) : catalog
   }, [catalog, search])
 
   const banned = new Set(draft.bannedItems)
@@ -206,39 +203,35 @@ function FormatEditor({
           className="w-full rounded-card border border-subtle bg-surface px-2 py-1.5 text-sm outline-none focus:border-primary"
         />
       </div>
-      {catalogError ? (
-        <p className="mb-2 text-xs text-danger">Could not load the item catalog from PokeAPI.</p>
-      ) : (
-        <div className="mb-3 grid max-h-64 grid-cols-6 gap-2 overflow-y-auto">
-          {filtered.map((item) => {
-            const isBanned = banned.has(item.name)
-            return (
-              <button
-                key={item.name}
-                onClick={() => toggleItem(item.name)}
-                title={`${item.label}${isBanned ? ' (banned)' : ''}`}
-                className={`lift flex flex-col items-center rounded-card border p-1.5 text-center ${
-                  isBanned ? 'border-danger opacity-35 grayscale' : 'border-subtle'
-                }`}
-              >
-                <img
-                  src={itemSpriteUrl(item.name)}
-                  alt={item.label}
-                  width={30}
-                  height={30}
-                  loading="lazy"
-                  onError={(e) => {
-                    ;(e.target as HTMLImageElement).style.visibility = 'hidden'
-                  }}
-                />
-                <span className="mt-1 line-clamp-2 text-[10px] leading-tight text-ink-muted">
-                  {item.label}
-                </span>
-              </button>
-            )
-          })}
-        </div>
-      )}
+      <div className="mb-3 grid max-h-64 grid-cols-6 gap-2 overflow-y-auto">
+        {filtered.map((item) => {
+          const isBanned = banned.has(item.name)
+          return (
+            <button
+              key={item.name}
+              onClick={() => toggleItem(item.name)}
+              title={`${item.label}${isBanned ? ' (banned)' : ''}`}
+              className={`lift flex flex-col items-center rounded-card border p-1.5 text-center ${
+                isBanned ? 'border-danger opacity-35 grayscale' : 'border-subtle'
+              }`}
+            >
+              <img
+                src={itemSpriteUrl(item.name)}
+                alt={item.label}
+                width={30}
+                height={30}
+                loading="lazy"
+                onError={(e) => {
+                  ;(e.target as HTMLImageElement).style.visibility = 'hidden'
+                }}
+              />
+              <span className="mt-1 line-clamp-2 text-[10px] leading-tight text-ink-muted">
+                {item.label}
+              </span>
+            </button>
+          )
+        })}
+      </div>
 
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="lift rounded-card border border-subtle px-3 py-1.5 text-sm">

@@ -19,13 +19,13 @@ const EFFECT_COLORS: Record<string, string> = {
   'Light Screen': 'bg-amber-300/70 text-amber-950',
   'Aurora Veil': 'bg-sky-300/70 text-sky-950',
   'Stealth Rock': 'bg-stone-500/70 text-white',
-  'Tail Wind': 'bg-teal-500/70 text-white',
+  Tailwind: 'bg-teal-500/70 text-white',
 }
 
 function chip(name: string, turns: number | undefined, key: string, prefix?: string) {
   const color = EFFECT_COLORS[name] ?? 'bg-slate-400/70 text-white'
   return (
-    <span key={key} className={`rounded px-2 py-0.5 text-[11px] font-semibold backdrop-blur ${color}`}>
+    <span key={key} className={`rounded-md px-2.5 py-1 text-sm font-semibold shadow-sm backdrop-blur ${color}`}>
       {prefix ? `${prefix} ` : ''}
       {name}
       {turns !== undefined ? ` (${turns})` : ''}
@@ -46,5 +46,5 @@ export default function FieldIndicators({ view }: { view: BattleView }) {
   ].filter(Boolean)
 
   if (chips.length === 0) return null
-  return <div className="absolute left-3 top-3 z-10 flex max-w-64 flex-wrap gap-1.5">{chips}</div>
+  return <div className="absolute left-3 top-3 z-10 flex max-w-80 flex-wrap gap-2">{chips}</div>
 }

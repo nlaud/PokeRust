@@ -46,19 +46,19 @@ export function saveTeams(teams: StoredTeam[]) {
 
 const DEFAULT_FORMATS: StoredFormat[] = [
   {
-    id: 'champions-s2-singles',
-    name: 'Pokémon Champions Season 2 Singles',
-    activePokemon: 1,
-    totalPokemon: 6,
-    broughtPokemon: 3,
-    bannedItems: [],
-  },
-  {
     id: 'champions-s2-doubles',
     name: 'Pokémon Champions Season 2 Doubles',
     activePokemon: 2,
     totalPokemon: 6,
     broughtPokemon: 4,
+    bannedItems: [],
+  },
+  {
+    id: 'champions-s2-singles',
+    name: 'Pokémon Champions Season 2 Singles',
+    activePokemon: 1,
+    totalPokemon: 6,
+    broughtPokemon: 3,
     bannedItems: [],
   },
 ]
@@ -78,4 +78,21 @@ export function saveFormats(formats: StoredFormat[]) {
 
 export function newId(): string {
   return crypto.randomUUID()
+}
+
+/** Last-used new-battle configuration, restored between games. */
+export interface BattleSetup {
+  formatId: string
+  team1Id: string
+  team2Id: string
+}
+
+const SETUP_KEY = 'pokerust.battleSetup.v1'
+
+export function loadBattleSetup(): BattleSetup | null {
+  return readJson<BattleSetup>(SETUP_KEY)
+}
+
+export function saveBattleSetup(setup: BattleSetup) {
+  writeJson(SETUP_KEY, setup)
 }

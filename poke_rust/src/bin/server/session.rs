@@ -104,7 +104,14 @@ pub fn legal_commands(
                     let mon = &active_mons(state, player)[slot_idx];
                     if mon.fainted {
                         let switches = healthy_bench_switches(state, player);
-                        if switches.is_empty() {
+                        // Earlier fainted slots claim bench mons first: with two
+                        // fainted actives and one healthy bench mon, slot 0 gets
+                        // the switch and this slot is a forced Pass.
+                        let earlier_fainted = active_mons(state, player)[..slot_idx]
+                            .iter()
+                            .filter(|m| m.fainted)
+                            .count();
+                        if switches.len() <= earlier_fainted {
                             (vec![BattleCommand::Pass], true)
                         } else {
                             (switches, false)
@@ -205,10 +212,8 @@ pub fn reconstruct_player_command(
                     .any(|opt| mapping::battle_command_from_dto(&opt.command) == *command);
                 if !is_legal {
                     return Err(format!(
-                        "{:?} slot {}: {:?} is not a legal command",
-                        player,
-                        slot_idx + 1,
-                        command
+                        "{:?} active slot {} (0-based): {:?} is not a legal command right now",
+                        player, slot_idx, command
                     ));
                 }
             }

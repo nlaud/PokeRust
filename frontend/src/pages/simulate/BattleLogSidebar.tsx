@@ -22,7 +22,7 @@ export default function BattleLogSidebar() {
   }, [turns])
 
   return (
-    <aside className="glass flex w-72 shrink-0 flex-col rounded-card">
+    <aside className="glass flex max-h-64 w-full shrink-0 flex-col rounded-card lg:max-h-none lg:w-72">
       <h2 className="border-b border-subtle px-3 py-2 text-sm font-semibold">Battle Log</h2>
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-3">
         {turns.length === 0 && <p className="text-xs text-ink-muted">No events yet.</p>}
