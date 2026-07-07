@@ -10,3 +10,13 @@ rand = "0.8"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower-http = { version = "0.6", features = ["cors"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Plain-main benchmark (no test harness); run with: cargo bench --bench turn_speed
+[[bench]]
+name = "turn_speed"
+harness = false

@@ -5754,6 +5754,7 @@ fn pass3_direction_b(
     let oracle_config = DamageConfig {
         consider_crit: true,
         damage_rolls: 16,
+        sample: false,
     };
 
     // Spread multiplier (doubles ×0.75 when a move hits all adjacent foes with 2+ active opponents).
@@ -6397,6 +6398,7 @@ fn pass3_direction_a(
     let oracle_config = DamageConfig {
         consider_crit: true,
         damage_rolls: 16,
+        sample: false,
     };
     // Spread multiplier: ×0.75 in doubles when the move targets all adjacent foes.
     // Omitting this caused the back-solved defensive BSV to be off by 1/0.75 for

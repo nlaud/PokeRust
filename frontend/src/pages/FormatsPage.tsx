@@ -1,0 +1,256 @@
+import { useEffect, useMemo, useState } from 'react'
+import ConfirmDialog from '../components/common/ConfirmDialog'
+import { fetchItemCatalog, type CatalogItem } from '../lib/items'
+import { itemSpriteUrl } from '../lib/sprites'
+import { loadFormats, newId, saveFormats, type StoredFormat } from '../lib/storage'
+
+export default function FormatsPage() {
+  const [formats, setFormats] = useState<StoredFormat[]>(loadFormats)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState<StoredFormat | null>(null)
+
+  const update = (next: StoredFormat[]) => {
+    setFormats(next)
+    saveFormats(next)
+  }
+
+  const save = (format: StoredFormat) => {
+    if (formats.some((f) => f.id === format.id)) {
+      update(formats.map((f) => (f.id === format.id ? format : f)))
+    } else {
+      update([...formats, format])
+    }
+    setEditingId(null)
+    setCreating(false)
+  }
+
+  return (
+    <div className="mx-auto max-w-6xl p-6">
+      <h1 className="mb-6 text-xl font-semibold">Formats</h1>
+      <div className="grid grid-cols-3 gap-6">
+        {formats.map((format) =>
+          editingId === format.id ? (
+            <FormatEditor key={format.id} initial={format} onSave={save} onCancel={() => setEditingId(null)} />
+          ) : (
+            <FormatCard
+              key={format.id}
+              format={format}
+              onEdit={() => setEditingId(format.id)}
+              onDelete={() => setPendingDelete(format)}
+            />
+          ),
+        )}
+        {creating ? (
+          <FormatEditor
+            initial={{
+              id: newId(),
+              name: '',
+              activePokemon: 1,
+              totalPokemon: 6,
+              broughtPokemon: 3,
+              bannedItems: [],
+            }}
+            onSave={save}
+            onCancel={() => setCreating(false)}
+          />
+        ) : (
+          <button
+            onClick={() => setCreating(true)}
+            className="lift flex min-h-40 items-center justify-center rounded-card border-2 border-dashed border-subtle text-4xl text-ink-muted hover:border-primary hover:text-primary"
+            aria-label="Add format"
+          >
+            +
+          </button>
+        )}
+      </div>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title={`Delete "${pendingDelete.name}"?`}
+          message="This removes the format from local storage. This cannot be undone."
+          onConfirm={() => {
+            update(formats.filter((f) => f.id !== pendingDelete.id))
+            setPendingDelete(null)
+          }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+function FormatCard({
+  format,
+  onEdit,
+  onDelete,
+}: {
+  format: StoredFormat
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="lift rounded-card bg-card p-4 shadow-sm">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="truncate text-sm font-semibold">{format.name}</h2>
+        <div className="flex gap-1">
+          <button onClick={onEdit} className="lift rounded-card p-1.5 text-ink-muted hover:text-ink" aria-label="Edit" title="Edit">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+            </svg>
+          </button>
+          <button onClick={onDelete} className="lift rounded-card p-1.5 text-ink-muted hover:text-danger" aria-label="Delete" title="Delete">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <p className="text-sm text-ink-muted">
+        {format.activePokemon} active / bring {format.broughtPokemon} of {format.totalPokemon}
+      </p>
+      <p className="mt-1 text-xs text-ink-muted">
+        {format.bannedItems.length === 0
+          ? 'All items allowed'
+          : `${format.bannedItems.length} item(s) banned`}
+      </p>
+    </div>
+  )
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function FormatEditor({
+  initial,
+  onSave,
+  onCancel,
+}: {
+  initial: StoredFormat
+  onSave: (format: StoredFormat) => void
+  onCancel: () => void
+}) {
+  const [draft, setDraft] = useState<StoredFormat>(initial)
+  const [catalog, setCatalog] = useState<CatalogItem[]>([])
+  const [catalogError, setCatalogError] = useState(false)
+  const [search, setSearch] = useState('')
+
+  useEffect(() => {
+    fetchItemCatalog()
+      .then(setCatalog)
+      .catch(() => setCatalogError(true))
+  }, [])
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    const list = q ? catalog.filter((i) => i.label.toLowerCase().includes(q)) : catalog
+    return list.slice(0, 60)
+  }, [catalog, search])
+
+  const banned = new Set(draft.bannedItems)
+  const toggleItem = (name: string) => {
+    const next = new Set(banned)
+    if (next.has(name)) next.delete(name)
+    else next.add(name)
+    setDraft({ ...draft, bannedItems: [...next] })
+  }
+
+  // Enforce active <= brought <= total <= 6 whenever any number changes.
+  const setNumbers = (field: 'activePokemon' | 'broughtPokemon' | 'totalPokemon', raw: number) => {
+    let { activePokemon, broughtPokemon, totalPokemon } = draft
+    if (field === 'totalPokemon') totalPokemon = clamp(raw, 1, 6)
+    if (field === 'broughtPokemon') broughtPokemon = clamp(raw, 1, 6)
+    if (field === 'activePokemon') activePokemon = clamp(raw, 1, 6)
+    totalPokemon = clamp(totalPokemon, 1, 6)
+    broughtPokemon = clamp(broughtPokemon, 1, totalPokemon)
+    activePokemon = clamp(activePokemon, 1, broughtPokemon)
+    setDraft({ ...draft, activePokemon, broughtPokemon, totalPokemon })
+  }
+
+  return (
+    <div className="col-span-2 rounded-card bg-card p-4 shadow-md">
+      <input
+        value={draft.name}
+        onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+        placeholder="Format name"
+        className="mb-3 w-full rounded-card border border-subtle bg-surface px-2 py-1.5 text-sm font-medium outline-none focus:border-primary"
+      />
+      <div className="mb-3 grid grid-cols-3 gap-3">
+        {(
+          [
+            ['activePokemon', 'Active'],
+            ['broughtPokemon', 'Brought'],
+            ['totalPokemon', 'Total'],
+          ] as const
+        ).map(([field, label]) => (
+          <label key={field} className="text-xs text-ink-muted">
+            {label}
+            <input
+              type="number"
+              min={1}
+              max={6}
+              value={draft[field]}
+              onChange={(e) => setNumbers(field, Number(e.target.value))}
+              className="mt-1 w-full rounded-card border border-subtle bg-surface px-2 py-1.5 text-sm text-ink outline-none focus:border-primary"
+            />
+          </label>
+        ))}
+      </div>
+
+      <div className="mb-2">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search items… (click to ban/allow)"
+          className="w-full rounded-card border border-subtle bg-surface px-2 py-1.5 text-sm outline-none focus:border-primary"
+        />
+      </div>
+      {catalogError ? (
+        <p className="mb-2 text-xs text-danger">Could not load the item catalog from PokeAPI.</p>
+      ) : (
+        <div className="mb-3 grid max-h-64 grid-cols-6 gap-2 overflow-y-auto">
+          {filtered.map((item) => {
+            const isBanned = banned.has(item.name)
+            return (
+              <button
+                key={item.name}
+                onClick={() => toggleItem(item.name)}
+                title={`${item.label}${isBanned ? ' (banned)' : ''}`}
+                className={`lift flex flex-col items-center rounded-card border p-1.5 text-center ${
+                  isBanned ? 'border-danger opacity-35 grayscale' : 'border-subtle'
+                }`}
+              >
+                <img
+                  src={itemSpriteUrl(item.name)}
+                  alt={item.label}
+                  width={30}
+                  height={30}
+                  loading="lazy"
+                  onError={(e) => {
+                    ;(e.target as HTMLImageElement).style.visibility = 'hidden'
+                  }}
+                />
+                <span className="mt-1 line-clamp-2 text-[10px] leading-tight text-ink-muted">
+                  {item.label}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="flex justify-end gap-2">
+        <button onClick={onCancel} className="lift rounded-card border border-subtle px-3 py-1.5 text-sm">
+          Cancel
+        </button>
+        <button
+          onClick={() => onSave({ ...draft, name: draft.name.trim() || 'Untitled Format' })}
+          className="lift rounded-card bg-primary px-3 py-1.5 text-sm font-medium text-white"
+        >
+          Save
+        </button>
+      </div>
+    </div>
+  )
+}

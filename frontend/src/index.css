@@ -1,0 +1,85 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/inter';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Design tokens — light is the default theme; .dark and .custom override on <html>. */
+:root {
+  --surface: #f7f9fb;
+  --surface-card: #ffffff;
+  --surface-glass: rgba(255, 255, 255, 0.6);
+  --border-subtle: rgba(15, 23, 42, 0.08);
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --primary: #2563eb;
+  --primary-soft: #dbeafe;
+  --success: #16a34a;
+  --warning: #d97706;
+  --danger: #dc2626;
+}
+
+.dark {
+  --surface: #0f172a;
+  --surface-card: #1e293b;
+  --surface-glass: rgba(30, 41, 59, 0.6);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --primary: #3b82f6;
+  --primary-soft: #1e3a8a;
+}
+
+.custom {
+  --surface: #f5f3ff;
+  --surface-card: #ffffff;
+  --surface-glass: rgba(255, 255, 255, 0.6);
+  --border-subtle: rgba(76, 29, 149, 0.1);
+  --text-primary: #2e1065;
+  --text-secondary: #7c3aed;
+  --primary: #7c3aed;
+  --primary-soft: #ede9fe;
+}
+
+@theme inline {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --color-surface: var(--surface);
+  --color-card: var(--surface-card);
+  --color-glass: var(--surface-glass);
+  --color-subtle: var(--border-subtle);
+  --color-ink: var(--text-primary);
+  --color-ink-muted: var(--text-secondary);
+  --color-primary: var(--primary);
+  --color-primary-soft: var(--primary-soft);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --radius-card: 8px;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--surface);
+  color: var(--text-primary);
+}
+
+/* Glassmorphic panel used for floating battle controls and overlays. */
+.glass {
+  background-color: var(--surface-glass);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-subtle);
+}
+
+/* Interactive elevation: subtle lift on hover for clickable cards/buttons. */
+.lift {
+  transition:
+    transform 150ms ease,
+    box-shadow 150ms ease,
+    background-color 150ms ease;
+}
+.lift:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+}
+.lift:active {
+  transform: translateY(0);
+}

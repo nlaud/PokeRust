@@ -259,6 +259,30 @@ where
     merged
 }
 
+/// Sample mode: keep exactly one branch, chosen proportionally to `weight`, and
+/// discard the rest. The survivor keeps its own absolute weight — since a
+/// branch set's weights sum to the parent branch's weight, repeatedly sampling
+/// at expansion chokepoints leaves a single trajectory whose weight is the
+/// exact joint probability of every sampled choice along the way.
+pub(crate) fn sample_one_weighted<T>(mut items: Vec<T>, weight: impl Fn(&T) -> f64) -> Vec<T> {
+    use rand::distributions::{Distribution, WeightedIndex};
+    if items.len() <= 1 {
+        return items;
+    }
+    let weights: Vec<f64> = items.iter().map(|item| weight(item).max(0.0)).collect();
+    let index = match WeightedIndex::new(&weights) {
+        Ok(dist) => dist.sample(&mut thread_rng()),
+        // All-zero / non-finite weights: degenerate set, keep the first branch.
+        Err(_) => 0,
+    };
+    vec![items.swap_remove(index)]
+}
+
+/// `sample_one_weighted` for the ubiquitous `(state, probability)` branch shape.
+pub(crate) fn sample_one_branch<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)> {
+    sample_one_weighted(branches, |(_, p)| *p)
+}
+
 pub fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
     let mut results: Vec<Vec<T>> = Vec::new();
 

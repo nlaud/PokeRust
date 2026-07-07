@@ -1,20 +1,8 @@
 use clap::Parser;
 use colored::Colorize;
-use state::battle::MatchState;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use crate::data::pokemon_move::PokemonMove;
-
-mod data;
-mod information;
-mod simulator;
-mod state;
-#[cfg(test)]
-mod tests;
-mod user;
-
-pub static VERBOSITY: OnceLock<u8> = OnceLock::new();
-pub static SHARED_MULTIHIT_DAMAGE_ROLLS: AtomicBool = AtomicBool::new(false);
+use poke_rust::state::battle::MatchState;
+use poke_rust::{simulator, state, user, SHARED_MULTIHIT_DAMAGE_ROLLS, VERBOSITY};
+use std::sync::atomic::Ordering;
 
 #[derive(Parser, Debug)]
 #[command(author = "Blazestorm", version = "1.0", about = "Simulates Pokemon Battles")]
@@ -81,12 +69,6 @@ fn main() {
 
     // Used by the inference engine for Illusion narrowing
     let learnset_dex = state::dex_data::parse_learnset_dex(&args.learnset_dex);
-
-    let sample_move = PokemonMove::Roost;
-    if let Some(m) = move_dex.get(&sample_move) {
-        println!("Data:{:#?}", m)
-    }
-    
 
     if args.verbosity >= 1 {
         println!("{}", format!("Loaded {} Pokemon, {} moves, {} abilities, {} learnsets", pokemon_dex.len(), move_dex.len(), ability_dex.len(), learnset_dex.len()).bright_green());

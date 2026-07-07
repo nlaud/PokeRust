@@ -5641,7 +5641,7 @@ fn test_sc_allowlist_completeness_cross_validation() {
     let all_items: Vec<Item> = parse_item_ids("../pokemon_info/showdownItems.txt");
 
     // Single roll, no crit: produces one deterministic (damage, false, 1.0) outcome.
-    let oracle_config = DamageConfig { consider_crit: false, damage_rolls: 1 };
+    let oracle_config = DamageConfig { consider_crit: false, damage_rolls: 1, sample: false };
 
     // Fixed stats (lv50 rough values): attacker hits hard, defender has moderate bulk.
     let atk_stats: [u16; 6] = [150, 150, 80, 150, 80, 100];
@@ -6028,7 +6028,7 @@ fn test_lb_multiscale_hp_gate_and_timer_sentinel() {
     use crate::simulator::DamageConfig;
     use crate::state::dex_data::Weather;
 
-    let oracle_config = DamageConfig { consider_crit: false, damage_rolls: 1 };
+    let oracle_config = DamageConfig { consider_crit: false, damage_rolls: 1, sample: false };
     let atk_stats: [u16; 6] = [200, 250, 100, 100, 100, 100];
     let def_stats: [u16; 6] = [300, 80, 100, 80, 100, 80];
 

@@ -241,7 +241,7 @@ mod tests {
                 attack_slot,
                 target_slot,
                 move_dex.get(&PokemonMove::SurgingStrikes).unwrap(),
-                DamageConfig { consider_crit: false, damage_rolls: 16 },
+                DamageConfig { consider_crit: false, damage_rolls: 16, sample: false },
                 1.0,
                 1.0,
             )
@@ -327,7 +327,7 @@ mod tests {
                 attack_slot,
                 target_slot,
                 move_dex.get(&PokemonMove::TripleAxel).unwrap(),
-                DamageConfig { consider_crit: false, damage_rolls: 16 },
+                DamageConfig { consider_crit: false, damage_rolls: 16, sample: false },
                 1.0,
                 1.0,
                 Some(20),
@@ -343,7 +343,7 @@ mod tests {
                 attack_slot,
                 target_slot,
                 move_dex.get(&PokemonMove::TripleAxel).unwrap(),
-                DamageConfig { consider_crit: false, damage_rolls: 16 },
+                DamageConfig { consider_crit: false, damage_rolls: 16, sample: false },
                 1.0,
                 1.0,
                 Some(40),
@@ -359,7 +359,7 @@ mod tests {
                 attack_slot,
                 target_slot,
                 move_dex.get(&PokemonMove::TripleAxel).unwrap(),
-                DamageConfig { consider_crit: false, damage_rolls: 16 },
+                DamageConfig { consider_crit: false, damage_rolls: 16, sample: false },
                 1.0,
                 1.0,
                 Some(60),
@@ -1243,7 +1243,7 @@ mod tests {
                 attacker_slot,
                 target_slot,
                 move_data,
-                crate::simulator::DamageConfig { consider_crit: true, damage_rolls: 1 },
+                crate::simulator::DamageConfig { consider_crit: true, damage_rolls: 1, sample: false },
                 1.0,
                 1.0,
             );
@@ -1255,7 +1255,7 @@ mod tests {
                 attacker_slot,
                 target_slot,
                 move_data,
-                crate::simulator::DamageConfig { consider_crit: true, damage_rolls: 1 },
+                crate::simulator::DamageConfig { consider_crit: true, damage_rolls: 1, sample: false },
                 1.0,
                 1.0,
             );
@@ -6884,7 +6884,7 @@ mod tests {
                         attacker_slot,
                         target_slot,
                         move_data,
-                        DamageConfig { consider_crit: false, damage_rolls: 1 },
+                        DamageConfig { consider_crit: false, damage_rolls: 1, sample: false },
                         1.0,
                         1.0,
                     );
@@ -10160,7 +10160,7 @@ mod tests {
                 FieldSlot { player: Player::P1, slot_index: 0 },
                 FieldSlot { player: Player::P2, slot_index: 0 },
                 move_dex.get(&PokemonMove::Earthquake).unwrap(),
-                DamageConfig { consider_crit: false, damage_rolls: 1 },
+                DamageConfig { consider_crit: false, damage_rolls: 1, sample: false },
                 0.75,
                 1.0,
             );
@@ -10631,7 +10631,7 @@ mod tests {
                 simulator_helpers::get_pokemon_at_slot(state, atk).unwrap(),
                 simulator_helpers::get_pokemon_at_slot(state, tgt).unwrap(),
                 atk, tgt, md,
-                DamageConfig { consider_crit: false, damage_rolls: 1 }, 1.0, 1.0,
+                DamageConfig { consider_crit: false, damage_rolls: 1, sample: false }, 1.0, 1.0,
             )[0].0
         }
 
@@ -11245,7 +11245,7 @@ mod tests {
                 attack_slot,
                 target_slot,
                 move_dex.get(&move_name).unwrap(),
-                DamageConfig { consider_crit: false, damage_rolls: 16 },
+                DamageConfig { consider_crit: false, damage_rolls: 16, sample: false },
                 targets_mult,
                 1.0,
             )
@@ -11582,7 +11582,7 @@ mod tests {
                 attack_slot,
                 target_slot,
                 &zero_bp_move,
-                DamageConfig { consider_crit: false, damage_rolls: 16 },
+                DamageConfig { consider_crit: false, damage_rolls: 16, sample: false },
                 1.0,
                 1.0,
             )
@@ -33743,6 +33743,121 @@ mod event_round_trip {
                 EventKind::Faint { slot } if *slot == p2s0())),
             "a move KO must emit Faint for the target under MoveUsed;\n\
              reactions = {:#?}", mv.reactions
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sample mode: sample_turn walks a single weighted trajectory
+// ─────────────────────────────────────────────────────────────────────────────
+mod sample_mode {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn mon(species: Species, mv: PokemonMove) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(mv), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        )
+    }
+
+    /// Deterministic scenario (1 roll, no crit, 100%-accuracy move with no
+    /// secondary effect): sample mode must reproduce the unique enumerated
+    /// branch with probability 1.
+    #[test]
+    fn sample_turn_matches_unique_branch_when_deterministic() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p1.stats[5] = 200; // fixed move order: P1 acts first
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let enumerated = crate::simulator::simulate_turn(
+            &state, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), false, 1, None,
+        );
+        assert_eq!(enumerated.len(), 1, "scenario must be fully deterministic");
+
+        let (sampled, _events, probability) = crate::simulator::sample_turn(
+            &state, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), false, 1, None,
+        );
+        assert_eq!(sampled, enumerated[0].0, "sampled state must equal the unique branch");
+        assert!(
+            (probability - 1.0).abs() < 1e-9,
+            "deterministic trajectory must have probability 1, got {probability}"
+        );
+    }
+
+    /// Stochastic scenario (16 rolls, crit branching, 90%-accuracy move with a
+    /// flinch secondary): every sampled trajectory must land on one of the
+    /// enumerated outcome states, with 0 < p ≤ that state's enumerated mass
+    /// (the enumerated figure sums all paths that coalesce into the state; a
+    /// single trajectory's probability can only be at most that sum).
+    #[test]
+    fn sample_turn_is_member_of_enumeration() {
+        let mut p1 = mon(Species::Snorlax, PokemonMove::RockSlide);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let enumerated = crate::simulator::simulate_turn(
+            &state, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), true, 16, None,
+        );
+        assert!(enumerated.len() > 1, "scenario must actually branch");
+
+        for _ in 0..20 {
+            let (sampled, _events, probability) = crate::simulator::sample_turn(
+                &state, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), true, 16, None,
+            );
+            let matched = enumerated.iter().find(|(st, _, _)| *st == sampled);
+            let Some((_, _, enumerated_p)) = matched else {
+                panic!("sampled state is not among the enumerated outcomes");
+            };
+            assert!(
+                probability > 0.0 && probability <= enumerated_p + 1e-9,
+                "trajectory probability {probability} must be in (0, {enumerated_p}]"
+            );
+        }
+    }
+
+    /// Multihit at full roll granularity: enumeration grows multiplicatively
+    /// per hit, sample mode must stay bounded and return one trajectory.
+    #[test]
+    fn sample_turn_multihit_is_bounded() {
+        let mut p1 = mon(Species::Cloyster, PokemonMove::IcicleSpear);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        p2.stats[0] = 1000;
+        p2.hp = 1000;
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let (sampled, _events, probability) = crate::simulator::sample_turn(
+            &state, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), true, 16, None,
+        );
+        assert!(probability > 0.0 && probability <= 1.0);
+        let MatchState::BattleState(bs) = sampled else {
+            panic!("battle must still be running");
+        };
+        assert!(
+            bs.p2_active_mons[0].hp < 1000,
+            "Icicle Spear (100% accuracy) must have dealt damage in the sampled trajectory"
         );
     }
 }

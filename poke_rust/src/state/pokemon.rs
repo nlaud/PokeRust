@@ -904,6 +904,17 @@ pub fn parse_team_sheet(
     use_stat_points: bool,
 ) -> Vec<PokemonState> {
     let content = fs::read_to_string(path).expect("Failed to read team sheet file");
+    parse_team_sheet_str(&content, pokemon_dex, move_dex, use_stat_points)
+}
+
+/// Parses Showdown-format teamsheet text (as from a paste or an API request)
+/// and returns a Vec of PokemonStates.
+pub fn parse_team_sheet_str(
+    content: &str,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    use_stat_points: bool,
+) -> Vec<PokemonState> {
     let content = content.replace("\r\n", "\n");
     let mut team = Vec::new();
 

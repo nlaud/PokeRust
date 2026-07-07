@@ -110,7 +110,7 @@ fn print_battle_state_enhanced(state: &BattleState, chance: f64) {
     }
 }
 
-fn humanize_identifier(value: impl AsRef<str>) -> String {
+pub fn humanize_identifier(value: impl AsRef<str>) -> String {
     let value = value.as_ref();
     let mut result = String::new();
     let mut previous: Option<char> = None;
@@ -134,22 +134,22 @@ fn humanize_identifier(value: impl AsRef<str>) -> String {
     result
 }
 
-fn species_name(species: &Species) -> String {
+pub fn species_name(species: &Species) -> String {
     humanize_identifier(format!("{:?}", species))
 }
 
-fn move_name(mov: &PokemonMove) -> String {
+pub fn move_name(mov: &PokemonMove) -> String {
     humanize_identifier(format!("{:?}", mov))
 }
 
-fn player_name(player: Player) -> &'static str {
+pub fn player_name(player: Player) -> &'static str {
     match player {
         Player::P1 => "P1",
         Player::P2 => "P2",
     }
 }
 
-fn active_mon_name(state: &BattleState, slot: FieldSlot) -> String {
+pub fn active_mon_name(state: &BattleState, slot: FieldSlot) -> String {
     let mon = match slot.player {
         Player::P1 => state.p1_active_mons.get(slot.slot_index as usize),
         Player::P2 => state.p2_active_mons.get(slot.slot_index as usize),
@@ -158,7 +158,7 @@ fn active_mon_name(state: &BattleState, slot: FieldSlot) -> String {
     mon.map(|mon| species_name(&mon.species)).unwrap_or_else(|| format!("Slot {}", slot.slot_index + 1))
 }
 
-fn back_mon_name(state: &BattleState, player: Player, party_index: usize) -> String {
+pub fn back_mon_name(state: &BattleState, player: Player, party_index: usize) -> String {
     let mon = match player {
         Player::P1 => state.p1_back_mons.get(party_index),
         Player::P2 => state.p2_back_mons.get(party_index),
@@ -167,7 +167,7 @@ fn back_mon_name(state: &BattleState, player: Player, party_index: usize) -> Str
     mon.map(|mon| species_name(&mon.species)).unwrap_or_else(|| format!("Bench {}", party_index + 1))
 }
 
-fn battle_command_description(state: &BattleState, player: Player, slot_idx: usize, command: &BattleCommand) -> String {
+pub fn battle_command_description(state: &BattleState, player: Player, slot_idx: usize, command: &BattleCommand) -> String {
     let active_mon = match player {
         Player::P1 => state.p1_active_mons.get(slot_idx),
         Player::P2 => state.p2_active_mons.get(slot_idx),
@@ -364,13 +364,19 @@ fn choose_replacement_command_for_slot(
     }
 }
 
-fn replacement_commands_are_valid(state: &BattleState, player: Player, active_mons: &[PokemonState], commands: &[BattleCommand]) -> bool {
+pub fn replacement_commands_are_valid(state: &BattleState, player: Player, active_mons: &[PokemonState], commands: &[BattleCommand]) -> bool {
+    let back_mons = match player { Player::P1 => &state.p1_back_mons, Player::P2 => &state.p2_back_mons };
+    let has_healthy_bench = back_mons.iter().any(|m| !m.fainted);
     commands.iter().enumerate().all(|(i, cmd)| {
         let Some(mon) = active_mons.get(i) else { return false };
         if mon.fainted {
-            let BattleCommand::Switch(s) = cmd else { return false };
-            let back_mons = match player { Player::P1 => &state.p1_back_mons, Player::P2 => &state.p2_back_mons };
-            s.party_index < back_mons.len()
+            // With an empty bench the slot cannot be refilled — it passes
+            // (the terminal driver expresses this as a whole-player Pass).
+            match cmd {
+                BattleCommand::Switch(s) => s.party_index < back_mons.len(),
+                BattleCommand::Pass => !has_healthy_bench,
+                _ => false,
+            }
         } else {
             matches!(cmd, BattleCommand::Pass)
         }

@@ -7,7 +7,7 @@ use crate::state::battle::{
     Action, MoveAction, SwitchAction, MegaAction, TeraAction,
 };
 use crate::state::pokemon::{
-    PokemonState, parse_team_sheet
+    PokemonState, parse_team_sheet_str
 };
 use crate::state::dex_data::{MoveData, MoveFlag, MoveTarget, PokemonData, MoveCategory, SelfDestructType, SelfSwitchType, SideCondition, Status, VolatileStatus, PokemonType};
 use crate::data::ability::Ability;
@@ -23,6 +23,11 @@ use self::helpers as simulator_helpers;
 pub struct DamageConfig {
     pub consider_crit: bool,
     pub damage_rolls: u8,
+    /// Sample mode: at each branch-expansion chokepoint keep a single branch,
+    /// chosen proportionally to weight, instead of enumerating the full tree.
+    /// The surviving branch's weight is the joint probability of the sampled
+    /// trajectory. Used for interactive play (`sample_turn`).
+    pub sample: bool,
 }
 
 fn mon_at_slot_mut(state: &mut BattleState, slot: FieldSlot) -> Option<&mut PokemonState> {
@@ -1183,7 +1188,13 @@ fn resolve_multihit_move_for_target(
                 }
             }
 
-            sequence_branches = next_sequence_branches;
+            // Sample mode: without this, per-hit branches multiply (rolls × crit
+            // per hit → 5-hit moves at 16 rolls explode).
+            sequence_branches = if config.sample {
+                simulator_helpers::sample_one_weighted(next_sequence_branches, |b| b.1)
+            } else {
+                next_sequence_branches
+            };
         }
 
         // Apply King's Rock and Stench flinch once per move per target using the combined
@@ -4943,8 +4954,15 @@ fn possible_damage_outcomes_for_move(
                         new_all_outcomes.push((MatchState::BattleState(bs), prob));
                     }
                 } else {
-                    // Miss: only thaw a frozen target if a thaws_target move is used in harsh sun
                     let mut branch_state = branch_state;
+                    // A no-hit tuple that shares its target with hit tuples is an accuracy
+                    // miss (the deterministic blocks — Protect, immunities, priority
+                    // failures — each push a sole tuple and announce themselves via
+                    // MoveFailed/Blocked/Immune before branching starts).
+                    if target_outcomes.len() > 1 {
+                        simulator_helpers::emit(&mut branch_state, EventKind::Missed { target: *target_slot });
+                    }
+                    // Miss: only thaw a frozen target if a thaws_target move is used in harsh sun
                     if simulator_helpers::weather_is_harsh_sunlight(&branch_state)
                         && move_data.thaws_target
                     {
@@ -4972,7 +4990,13 @@ fn possible_damage_outcomes_for_move(
             }
         }
 
-        all_outcomes = new_all_outcomes;
+        // Sample mode: without this, spread moves cross-multiply per target
+        // (rolls × crit × secondaries per target).
+        all_outcomes = if config.sample {
+            simulator_helpers::sample_one_branch(new_all_outcomes)
+        } else {
+            new_all_outcomes
+        };
     }
 
     // Apply post-damage move effects that depend on total HP damage dealt.
@@ -5197,9 +5221,23 @@ pub fn team_preview_state_from_teamsheets(
     brought_per_side: u8,
     use_stat_points: bool,
 ) -> TeamPreviewState {
-    let p1_mons = parse_team_sheet(p1_path, pokemon_dex, move_dex, use_stat_points);
+    let p1_text = std::fs::read_to_string(p1_path).expect("Failed to read team sheet file");
+    let p2_text = std::fs::read_to_string(p2_path).expect("Failed to read team sheet file");
+    team_preview_state_from_team_strings(&p1_text, &p2_text, pokemon_dex, move_dex, active_per_side, brought_per_side, use_stat_points)
+}
+
+pub fn team_preview_state_from_team_strings(
+    p1_text: &str,
+    p2_text: &str,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    active_per_side: u8,
+    brought_per_side: u8,
+    use_stat_points: bool,
+) -> TeamPreviewState {
+    let p1_mons = parse_team_sheet_str(p1_text, pokemon_dex, move_dex, use_stat_points);
     let p1_size = p1_mons.len() as u8;
-    let mut p2_mons = parse_team_sheet(p2_path, pokemon_dex, move_dex, use_stat_points);
+    let mut p2_mons = parse_team_sheet_str(p2_text, pokemon_dex, move_dex, use_stat_points);
     // Offset P2's mon_ids so they are globally unique across both teams (P1 = 0..n, P2 = n..2n).
     // This lets a single u8 identify any Pokémon on the field, which is needed to track the
     // source of binding/trapping volatiles (ends when the trapper leaves the field).
@@ -5432,7 +5470,15 @@ fn generate_commands_for_active(
         vec![]
     };
 
-    if mon.fainted { return cmds; }
+    if mon.fainted {
+        // Doubles endgame: a fainted mon with an empty bench holds its slot and
+        // passes (its ally fights on). With a healthy bench this is unreachable —
+        // the replacement phase forces the switch before a normal turn starts.
+        if cmds.is_empty() {
+            return vec![BattleCommand::Pass];
+        }
+        return cmds;
+    }
 
     let can_tera = !has_tera && !mon.is_tera;
     let can_mega = has_mega && mon.has_mega_form && {
@@ -6748,10 +6794,58 @@ pub fn simulate_turn(
     damage_rolls: u8,
     observer: Option<Player>,
 ) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
-    let config = DamageConfig { consider_crit, damage_rolls };
+    let config = DamageConfig { consider_crit, damage_rolls, sample: false };
+    simulate_turn_impl(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, config, observer)
+}
 
-    // Populate the action queue; may branch due to speed-tied send-outs
-    let initial_branches = apply_player_commands_branching(state, p1_cmd, p2_cmd, move_dex, pokemon_dex);
+/// Sample mode: resolve the turn as a single weighted trajectory. At every
+/// branch-expansion chokepoint one branch is kept (chosen proportionally to
+/// weight) and the rest are discarded, so memory stays bounded by a single
+/// expansion's fan-out instead of the full outcome tree.
+///
+/// The returned probability is the joint probability of the sampled
+/// trajectory. Where several paths coalesce into the same final state, full
+/// enumeration would report their sum, so this figure can be a lower bound on
+/// the resulting *state*'s probability — it is the chance of the specific
+/// sequence of intermediate outcomes that was rolled.
+pub fn sample_turn(
+    state: &MatchState,
+    p1_cmd: &PlayerCommand,
+    p2_cmd: &PlayerCommand,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    consider_crit: bool,
+    damage_rolls: u8,
+    observer: Option<Player>,
+) -> (MatchState, Option<Vec<InformationEvent>>, f64) {
+    let config = DamageConfig { consider_crit, damage_rolls, sample: true };
+    let results = simulate_turn_impl(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, config, observer);
+
+    // The chokepoints leave exactly one branch; sample defensively if a path
+    // without one slips through, and fall back to an unchanged state when the
+    // engine produced nothing (mirrors the interactive drivers' behaviour).
+    let pairs: Vec<((MatchState, Option<Vec<InformationEvent>>), f64)> =
+        results.into_iter().map(|(st, ev, p)| ((st, ev), p)).collect();
+    match simulator_helpers::sample_one_branch(pairs).pop() {
+        Some(((st, ev), p)) => (st, ev, p),
+        None => (state.clone(), observer.map(|_| Vec::new()), 1.0),
+    }
+}
+
+fn simulate_turn_impl(
+    state: &MatchState,
+    p1_cmd: &PlayerCommand,
+    p2_cmd: &PlayerCommand,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    config: DamageConfig,
+    observer: Option<Player>,
+) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
+
+    // Populate the action queue; may branch due to speed-tied send-outs.
+    // The observer must be installed before this step: lead send-outs (team preview)
+    // and replacement/self-switch send-ins emit their events inside it.
+    let initial_branches = apply_player_commands_branching(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, observer);
 
     // moves_first flag: combines Quick Claw (item, 20%) and Quick Draw (ability, 30%).
     //
@@ -6843,6 +6937,14 @@ pub fn simulate_turn(
         .collect();
     let initial_branches = simulator_helpers::coalesce_branches(initial_branches);
 
+    // Sample mode: collapse the pre-expansion branch set (speed-tied send-outs,
+    // Quick Claw / Quick Draw activation combinations) to one trajectory.
+    let initial_branches = if config.sample {
+        simulator_helpers::sample_one_branch(initial_branches)
+    } else {
+        initial_branches
+    };
+
     fn expand_branch(
         state: &MatchState,
         move_dex: &HashMap<PokemonMove, MoveData>,
@@ -6861,6 +6963,15 @@ pub fn simulate_turn(
         }
 
         let outcomes = step_action_queue(battle, move_dex, pokemon_dex, config);
+
+        // Sample mode: keep one branch per action step, so the recursion below
+        // never cross-multiplies branch sets across actions — this is what
+        // bounds a turn's memory to a single action's fan-out.
+        let outcomes = if config.sample {
+            simulator_helpers::sample_one_branch(simulator_helpers::coalesce_branches(outcomes))
+        } else {
+            outcomes
+        };
 
         if battle.action_queue.is_empty() {
             return simulator_helpers::coalesce_branches(outcomes);
@@ -7272,6 +7383,7 @@ fn battle_state_from_preview_branching(
     p1_preview: &TeamPreviewCommand,
     p2_preview: &TeamPreviewCommand,
     move_dex: &HashMap<PokemonMove, MoveData>,
+    observer: Option<Player>,
 ) -> Vec<(MatchState, f64)> {
     let p1_active_mons: Vec<PokemonState> = p1_preview.active_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
     let p1_back_mons: Vec<PokemonState> = p1_preview.back_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
@@ -7313,7 +7425,7 @@ fn battle_state_from_preview_branching(
         move_was_prevented: false,
         resolved_move_targets: vec![],
         pending_events: vec![],
-        event_observer: None,
+        event_observer: observer,
     };
 
     let mut slots: Vec<FieldSlot> = Vec::new();
@@ -7334,12 +7446,13 @@ fn apply_player_commands_branching(
     p2_cmd: &PlayerCommand,
     move_dex: &HashMap<PokemonMove, MoveData>,
     pokemon_dex: &HashMap<Species, PokemonData>,
+    observer: Option<Player>,
 ) -> Vec<(MatchState, f64)> {
     match state {
         MatchState::TeamPreviewState(preview) => {
             let p1_preview = match p1_cmd { PlayerCommand::TeamPreview(c) => c, _ => panic!("Expected TeamPreview command for P1"), };
             let p2_preview = match p2_cmd { PlayerCommand::TeamPreview(c) => c, _ => panic!("Expected TeamPreview command for P2"), };
-            simulator_helpers::coalesce_branches(battle_state_from_preview_branching(preview, p1_preview, p2_preview, move_dex))
+            simulator_helpers::coalesce_branches(battle_state_from_preview_branching(preview, p1_preview, p2_preview, move_dex, observer))
         }
         MatchState::BattleState(battle) => {
             if let Some(game_over_state) = game_over_state_if_battle_finished(battle) {
@@ -7347,6 +7460,7 @@ fn apply_player_commands_branching(
             }
 
             let mut next_state = battle.clone();
+            next_state.event_observer = observer;
 
             if !battle.turn_started && !battle.turn_ended {
                 next_state.turn_started = true;

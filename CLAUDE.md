@@ -244,4 +244,50 @@ Inference regression tests are named `test_s<NN>_*` / `roundtrip_s<NN>_*` after
 the `AUDIT.md` finding they cover.
 
 ## Frontend
-Write this as you go.
+
+A React web UI (`frontend/` at the repo root) backed by an Axum HTTP server
+(`poke_rust/src/bin/server/`). Full run instructions and frontend architecture
+live in `frontend/README.md` — this section covers what backend-side work needs
+to know.
+
+### Crate layout
+
+`poke_rust` is a lib + two bins: `src/lib.rs` declares the module tree and the
+global statics; `src/main.rs` is the CLI driver; `src/bin/server/` is the HTTP
+server (`main`, `routes`, `session`, `dto`, `mapping`). The in-crate test suite
+imports via `crate::` paths and is unaffected by the split.
+
+### Server design rules
+
+- **Hand-written DTOs** (`dto.rs`), not serde derives on engine types — the
+  payload enums are code-generated and DTOs emit display-name strings. The
+  frontend mirrors them by hand in `frontend/src/api/types.ts`; changing
+  `dto.rs` means updating that file too.
+- `mapping.rs::event_kind_dto` has one exhaustive match over `EventKind` — a
+  new engine event variant is a compile error there (by design; add the DTO
+  variant, then the TS type, then a phrasing in `frontend/src/lib/eventText.ts`).
+- Inbound commands are validated by membership: the server re-enumerates legal
+  commands and checks the reconstructed `BattleCommand` against them, then
+  runs `validate_battle_command_combination`. 422 with a reason on failure.
+- Turn resolution uses `simulator::sample_turn` (engine sample mode), observer
+  = `Some(Player::P1)`.
+- Sessions are in-memory (`HashMap` behind a mutex) — a server restart loses
+  battles.
+
+### Performance constraint (important)
+
+Full enumeration (`simulate_turn`) grows the branch tree multiplicatively
+across actions: a doubles turn with two spread moves + secondary effects at
+16 damage rolls exceeds system memory (observed >15 GB). For interactive
+play use `simulator::sample_turn` — engine sample mode
+(`DamageConfig::sample`) keeps a single weighted branch at every expansion
+chokepoint and returns one `(state, events, probability)` where the
+probability is the joint probability of the sampled trajectory. The server
+uses it for all turns, so the frontend always requests 16 damage rolls.
+Still run the server with `--release`.
+
+### Testing the server
+
+`helper_scripts/` has none for this; smoke-test with curl against
+`http://127.0.0.1:3001/api` (create battle → preview turn → commands →
+attack turn), or the flow in `frontend/README.md`.
