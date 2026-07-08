@@ -6,7 +6,7 @@ The backend is a mature, heavily-tested probabilistic battle simulator: turn
 resolution, damage calculation, and a full fog-of-war inference engine (see
 below) have all been through multiple audit rounds. The project is now
 transitioning focus from backend to **frontend development** — see the
-"Frontend Development" section below for what exists (nothing yet) and what's
+"Frontend Development" section below for what exists and what's
 planned.
 
 ## Game Version
