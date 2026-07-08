@@ -715,6 +715,7 @@ fn apply_single_hit_branch(
         let mut sand_spit_triggered = false;
         let mut seed_sower_triggered = false;
         let mut target_fainted = false;
+        let mut berserk_delta_for_emit: Option<i8> = None;
         let mut smack_down_removed_magnet_rise = false;
         let mut smack_down_removed_telekinesis = false;
         // Captures (new_hp, max_hp) after take_damage so DamageDealt can be emitted once
@@ -740,11 +741,35 @@ fn apply_single_hit_branch(
             } else {
                 None
             };
+            // Pre-damage snapshot for Berserk event emission (non-sheer-force only).
+            let berserk_pre_for_emit = if !sheer_force_boosted
+                && eff_damage > 0
+                && target_mon.ability == Ability::Berserk
+                && !simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::GastroAcid)
+                && !as_
+            {
+                Some((target_mon.hp, target_mon.stats[0].max(1), target_mon.boosts[2]))
+            } else {
+                None
+            };
             // Split take_damage's two internal steps (apply_damage, then the
             // on_hp_change berry-trigger check) so the PRE-berry HP can be captured
             // for DamageDealt before on_hp_change potentially heals the target back up.
             if eff_damage > 0 {
                 simulator_helpers::apply_damage(target_mon, eff_damage, as_);
+            }
+            // Detect Berserk trigger (HP crossed 50%, SpA boost increased) for emission
+            // after this block when the BattleState borrow is free again.
+            if let Some((hp_before, max_hp_b, old_boost)) = berserk_pre_for_emit {
+                if !target_mon.fainted
+                    && (hp_before as u32) * 2 > (max_hp_b as u32)
+                    && (target_mon.hp as u32) * 2 <= (max_hp_b as u32)
+                {
+                    let delta = target_mon.boosts[2] - old_boost;
+                    if delta > 0 {
+                        berserk_delta_for_emit = Some(delta);
+                    }
+                }
             }
             // Capture post-damage (pre-berry) HP for DamageDealt emission below.
             if bs.event_observer.is_some() && eff_damage > 0 {
@@ -914,6 +939,13 @@ fn apply_single_hit_branch(
             });
         }
 
+        // Berserk: HP crossed from above 50% to ≤ 50% — emit reveal + SpA boost nested under it.
+        if let Some(delta) = berserk_delta_for_emit {
+            simulator_helpers::with_reactions(&mut bs, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::Berserk }, |bs| {
+                simulator_helpers::emit(bs, EventKind::BoostChanged { target: target_slot, boost_idx: 2, stages: delta });
+            });
+        }
+
         // Emit Smack Down's volatile removals now that the target_mon borrow has ended.
         if smack_down_removed_magnet_rise {
             simulator_helpers::emit(&mut bs, EventKind::VolatileEnd { target: target_slot, volatile: VolatileStatus::MagnetRise });
@@ -992,14 +1024,18 @@ fn apply_single_hit_branch(
 
         if sand_spit_triggered {
             // Sand Spit also respects Smooth Rock (8 turns instead of 5).
-            let dur = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
+            let dur = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
                 .map(|m| simulator_helpers::weather_rock_duration(m, &crate::state::dex_data::Weather::Sandstorm))
                 .unwrap_or(5);
-            simulator_helpers::set_weather(&mut bs, crate::state::dex_data::Weather::Sandstorm, dur);
+            simulator_helpers::with_reactions(&mut bs, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::SandSpit }, |bs| {
+                simulator_helpers::set_weather(bs, crate::state::dex_data::Weather::Sandstorm, dur);
+            });
         }
 
         if seed_sower_triggered {
-            simulator_helpers::set_terrain(&mut bs, crate::state::dex_data::Terrain::GrassyTerrain, 5);
+            simulator_helpers::with_reactions(&mut bs, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::SeedSower }, |bs| {
+                simulator_helpers::set_terrain(bs, crate::state::dex_data::Terrain::GrassyTerrain, 5);
+            });
         }
 
         if matches!(move_name, PokemonMove::IceSpinner | PokemonMove::SteelRoller) {
@@ -6857,14 +6893,20 @@ fn step_action_queue(
 
         // Record where this end-of-turn's sub-events begin so EndOfTurn can adopt them.
         let eot_start_len = next_state.pending_events.len();
+        // Identify the battle-start setup pass (team-preview → first-turn transition)
+        // before calling end_turn, which modifies turn_started/turn_ended.
+        let is_battle_start_setup = !next_state.turn_started && !next_state.turn_ended;
         let eot_branches = simulator_helpers::end_turn(&mut next_state, move_dex, config);
         let mut result: Vec<(MatchState, f64)> = Vec::with_capacity(eot_branches.len());
         for (mut bs, prob) in eot_branches {
             // Wrap all end-of-turn events as reactions of the EndOfTurn node.
+            // Skipped for the battle-start setup pass (team-preview → first-turn
+            // transition): there are no visible EOT events then, and adding an
+            // empty EndOfTurn node would cause the frontend to show one.
             // This happens before the game-over check so a battle-ending EOT
             // (e.g. a poison faint) still gets its events wrapped and carried
             // into GameOverState.
-            if bs.event_observer.is_some() {
+            if bs.event_observer.is_some() && !is_battle_start_setup {
                 let reactions = bs.pending_events.split_off(eot_start_len);
                 bs.pending_events.push(InformationEvent {
                     kind: EventKind::EndOfTurn,

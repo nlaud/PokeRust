@@ -259,14 +259,26 @@ function renderEvent(event: EventNode, depth: number, resolver: NameResolver, ou
   }
 }
 
-/** Render the full battle log in one chronological pass. */
+/** Render the full battle log in one chronological pass.
+ *
+ * Consecutive entries with the same label (e.g. a U-turn self-switch that
+ * arrives as a separate server round-trip at the same turn number) are
+ * coalesced into a single RenderedTurn so the sidebar only draws one divider. */
 export function renderLog(entries: TurnLogEntry[]): RenderedTurn[] {
   const resolver = new NameResolver()
-  return entries.map((entry) => {
+  const out: RenderedTurn[] = []
+  for (const entry of entries) {
     const lines: LogLine[] = []
     for (const event of entry.events) {
       renderEvent(event, 0, resolver, lines)
     }
-    return { label: entry.label, lines }
-  })
+    const prev = out[out.length - 1]
+    if (prev && prev.label === entry.label) {
+      // Same turn — append to the existing block instead of opening a new one.
+      prev.lines.push(...lines)
+    } else {
+      out.push({ label: entry.label, lines })
+    }
+  }
+  return out
 }

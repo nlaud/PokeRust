@@ -3754,6 +3754,65 @@ pub fn team_has_remaining_pokemon(state: &BattleState, player: Player) -> bool {
     }
 }
 
+/// Snapshot `(slot, hp, max_hp, spa_boost)` for all active mons. Used to detect
+/// Berserk triggers (HP crossing 50%) after a round of residual damage where the
+/// individual callers don't have BattleState access.
+pub(crate) fn snapshot_for_berserk(state: &BattleState) -> Vec<(FieldSlot, u16, u16, i8)> {
+    let mut out = Vec::with_capacity(
+        state.p1_active_mons.len() + state.p2_active_mons.len(),
+    );
+    for (i, m) in state.p1_active_mons.iter().enumerate() {
+        out.push((
+            FieldSlot { player: Player::P1, slot_index: i as u8 },
+            m.hp,
+            m.stats[0].max(1),
+            m.boosts[2],
+        ));
+    }
+    for (i, m) in state.p2_active_mons.iter().enumerate() {
+        out.push((
+            FieldSlot { player: Player::P2, slot_index: i as u8 },
+            m.hp,
+            m.stats[0].max(1),
+            m.boosts[2],
+        ));
+    }
+    out
+}
+
+/// After residual damage has been applied, emit `AbilityRevealed{Berserk}` +
+/// nested `BoostChanged{SpA}` for every mon whose HP crossed from above 50% to
+/// ≤ 50% and whose SpA boost actually increased.
+pub(crate) fn emit_berserk_eot_events(
+    state: &mut BattleState,
+    before: &[(FieldSlot, u16, u16, i8)],
+) {
+    let suppressed = abilities_are_suppressed(state);
+    for &(slot, hp_before, max_hp, old_boost) in before {
+        let (triggered, new_boost) = if let Some(m) = get_pokemon_at_slot(state, slot) {
+            let ok = !m.fainted
+                && !suppressed
+                && m.ability == Ability::Berserk
+                && !has_status_volatile(m, &VolatileStatus::GastroAcid)
+                && (hp_before as u32) * 2 > (max_hp as u32) // was above 50%
+                && (m.hp as u32) * 2 <= (max_hp as u32);   // now at/below 50%
+            (ok, m.boosts[2])
+        } else {
+            continue;
+        };
+        let delta = new_boost - old_boost;
+        if triggered && delta > 0 {
+            with_reactions(
+                state,
+                EventKind::AbilityRevealed { slot, ability: Ability::Berserk },
+                |bs| {
+                    emit(bs, EventKind::BoostChanged { target: slot, boost_idx: 2, stages: delta });
+                },
+            );
+        }
+    }
+}
+
 pub fn apply_damage_and_check_game_over(
     state: &mut BattleState,
     target_slot: FieldSlot,
@@ -3765,6 +3824,9 @@ pub fn apply_damage_and_check_game_over(
     let target_env = berry_env(state, target_slot);
     // Compute before mutable borrow of state below.
     let field_suppressed = abilities_are_suppressed(state);
+    // Capture Berserk-relevant snapshot before damage is applied.
+    let berserk_pre = get_pokemon_at_slot(state, target_slot)
+        .map(|m| (m.hp, m.stats[0].max(1), m.boosts[2]));
     let target_mon = match target_slot.player {
         Player::P1 => state
             .p1_active_mons
@@ -3781,6 +3843,8 @@ pub fn apply_damage_and_check_game_over(
     let post_hp = target_mon.hp;
     let max_hp = target_mon.stats[0];
     let fainted = target_mon.fainted;
+    // Also capture post-damage Berserk info while we have the borrow.
+    let berserk_post_boost = target_mon.boosts[2];
 
     if damage > 0 && item_active && matches!(target_mon.item, Item::AirBalloon) {
         target_mon.item = Item::None;
@@ -3811,6 +3875,26 @@ pub fn apply_damage_and_check_game_over(
         if let Some(observer) = state.event_observer {
             let new_hp = observed_hp_value(observer, target_slot.player, post_hp, max_hp);
             emit(state, EventKind::DamageDealt { target: target_slot, new_hp });
+        }
+        // Berserk: if HP crossed from above 50% to ≤ 50%, emit the reveal + boost event.
+        if let Some((hp_before, max_hp_b, old_boost)) = berserk_pre {
+            let delta = berserk_post_boost - old_boost;
+            if delta > 0
+                && (hp_before as u32) * 2 > (max_hp_b as u32)
+                && (post_hp as u32) * 2 <= (max_hp_b as u32)
+            {
+                with_reactions(
+                    state,
+                    EventKind::AbilityRevealed { slot: target_slot, ability: Ability::Berserk },
+                    |bs| {
+                        emit(bs, EventKind::BoostChanged {
+                            target: target_slot,
+                            boost_idx: 2,
+                            stages: delta,
+                        });
+                    },
+                );
+            }
         }
     }
 
@@ -7417,43 +7501,63 @@ pub fn end_turn(
     move_dex: &HashMap<PokemonMove, MoveData>,
     config: crate::simulator::DamageConfig,
 ) -> Vec<(BattleState, f64)> {
+    // The team-preview → first-turn transition runs end_turn for bookkeeping:
+    // it bumps turn_number (0→1), preserves first_move_on_field via Phase 5's
+    // first_turn_on_field_pending logic, and skips Speed Boost on the first entry
+    // turn. However, it must NOT apply residual damage (weather, burn/poison chips,
+    // future moves, berries) — those only start at end of the first real turn.
+    // `turn_started == false && turn_ended == false` uniquely identifies this pass;
+    // real EOTs always enter with turn_started == true, and the replacement
+    // mini-turn (turn_ended == true) returns before reaching end_turn.
+    let is_battle_start_setup = !state.turn_started && !state.turn_ended;
+
     // Item-loss ledger snapshot: residual damage in Phases 1–3 can consume berries
     // (e.g. Sitrus after burn chip); the diff after Phase 3 fires Unburden / Pickup /
     // Symbiosis reactions before Pickup resolves in Phase 4.
     let item_snapshot = snapshot_active_items(state);
 
-    decrement_effect_timers(state);
+    if !is_battle_start_setup {
+        decrement_effect_timers(state);
+    }
 
     // Weather may have just expired — re-evaluate Castform's Forecast form.
     update_forecast_forms(state);
 
     state.turn_number = state.turn_number.saturating_add(1);
 
-    // Phase 1: weather/terrain/item healing (deterministic, &mut in-place).
-    // Also ticks Future Sight / Doom Desire; fires that have resolved are returned
-    // so their branched damage can be applied before Phase 2.
-    apply_pre_status_residuals(state);
-    let fired_future_moves = extract_fired_future_moves(state);
+    // Phases 1–4 apply residual damage / healing / probabilistic abilities.
+    // These are intentionally skipped during the battle-start setup pass so no
+    // sandstorm chip, burn damage, etc. occurs before the first real turn.
+    let mut branches = if is_battle_start_setup {
+        vec![(state.clone(), 1.0)]
+    } else {
+        // Phase 1: weather/terrain/item healing (deterministic, &mut in-place).
+        // Also ticks Future Sight / Doom Desire; fires that have resolved are returned
+        // so their branched damage can be applied before Phase 2.
+        apply_pre_status_residuals(state);
+        let fired_future_moves = extract_fired_future_moves(state);
 
-    // Phase 1.5: apply branched Future Sight / Doom Desire damage on all branches.
-    let mut branches = apply_future_move_damage(
-        vec![(state.clone(), 1.0)],
-        &fired_future_moves,
-        move_dex,
-        config,
-    );
+        // Phase 1.5: apply branched Future Sight / Doom Desire damage on all branches.
+        let initial_branches = apply_future_move_damage(
+            vec![(state.clone(), 1.0)],
+            &fired_future_moves,
+            move_dex,
+            config,
+        );
 
-    // Phase 2: probabilistic status-cure abilities. Branches if Shed Skin or Healer fires.
-    branches = apply_status_cure_abilities(branches);
+        // Phase 2: probabilistic status-cure abilities. Branches if Shed Skin or Healer fires.
+        let initial_branches = apply_status_cure_abilities(initial_branches);
 
-    // Phase 3: burn/poison/toxic damage (deterministic per branch).
-    for (bs, _) in branches.iter_mut() {
-        apply_status_damage(bs);
-        process_item_loss_events(bs, &item_snapshot);
-    }
+        // Phase 3: burn/poison/toxic damage (deterministic per branch).
+        let mut bs_list = initial_branches;
+        for (bs, _) in bs_list.iter_mut() {
+            apply_status_damage(bs);
+            process_item_loss_events(bs, &item_snapshot);
+        }
 
-    // Phase 4: late ability effects (Speed Boost, Moody, Harvest, Hunger Switch).
-    branches = apply_late_eot_abilities(branches);
+        // Phase 4: late ability effects (Speed Boost, Moody, Harvest, Hunger Switch).
+        apply_late_eot_abilities(bs_list)
+    };
 
     // Phase 5: clear the entry-turn flag so Speed Boost fires normally next turn,
     // the per-turn event flags (Assurance / Avalanche / Lash Out / Burning Jealousy),
@@ -7932,6 +8036,7 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
     // shared helper (Healed / DamageDealt + Faint + on-faint hooks) so the event stream and
     // the inference engine reflect the change; previously silent.
     let weather_before = snapshot_active_hp(state);
+    let berserk_before_weather = snapshot_for_berserk(state);
     for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
         apply_weather_residual(mon, &ctx, p1_envs[i]);
     }
@@ -7939,6 +8044,7 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
         apply_weather_residual(mon, &ctx, p2_envs[i]);
     }
     emit_eot_hp_deltas(state, &weather_before);
+    emit_berserk_eot_events(state, &berserk_before_weather);
 
     // Batch-collect (slot, post-heal hp, max-hp) for Healed event emission after each
     // iter_mut loop (the mutable slice borrow prevents inline emit; emit_healed_batch fires
@@ -8693,6 +8799,7 @@ fn apply_status_damage(state: &mut BattleState) {
         })
         .collect();
     let before = snapshot_active_hp(state);
+    let berserk_before_status = snapshot_for_berserk(state);
     for (i, mon) in state.p1_active_mons.iter_mut().enumerate() {
         apply_status_residual(mon, abilities_suppressed, p1_envs[i]);
     }
@@ -8700,6 +8807,7 @@ fn apply_status_damage(state: &mut BattleState) {
         apply_status_residual(mon, abilities_suppressed, p2_envs[i]);
     }
     emit_eot_hp_deltas(state, &before);
+    emit_berserk_eot_events(state, &berserk_before_status);
 }
 
 /// Public wrapper that combines all three deterministic EoT phases (pre-residuals + cure + damage).
@@ -11275,9 +11383,10 @@ pub(crate) fn contact_effects_apply(
 }
 
 /// Run a reaction ability's visible effect; if it emitted any observable event,
-/// insert an AbilityRevealed for the holder in front of those events — the
-/// in-game popup that attributes the reaction. No-op when the effect was fully
-/// blocked (or when no observer is attached: pending_events stays empty then).
+/// wrap them as reactions of an AbilityRevealed node — the in-game popup that
+/// attributes the reaction, with the effect indented beneath it.
+/// No-op when the effect was fully blocked (or when no observer is attached:
+/// pending_events stays empty then).
 fn reveal_ability_with_effect(
     bs: &mut BattleState,
     holder_slot: FieldSlot,
@@ -11287,19 +11396,18 @@ fn reveal_ability_with_effect(
     let start = bs.pending_events.len();
     apply(bs);
     if bs.pending_events.len() > start {
-        bs.pending_events.insert(
-            start,
-            crate::information::information::InformationEvent {
-                kind: EventKind::AbilityRevealed { slot: holder_slot, ability },
-                reactions: Vec::new(),
-            },
-        );
+        // Adopt all events emitted by `apply` as reactions of the reveal node.
+        let reactions = bs.pending_events.split_off(start);
+        bs.pending_events.push(crate::information::information::InformationEvent {
+            kind: EventKind::AbilityRevealed { slot: holder_slot, ability },
+            reactions,
+        });
     }
 }
 
 /// Apply a reaction ability's self stat boost, emitting the AbilityRevealed and
-/// the resulting BoostChanged events. (Weak Armor / Stamina / Justified used to
-/// apply their boosts silently — no events at all.)
+/// the resulting BoostChanged events nested under it. (Weak Armor / Stamina /
+/// Justified used to apply their boosts silently — no events at all.)
 fn apply_reaction_self_boost(
     bs: &mut BattleState,
     holder_slot: FieldSlot,
@@ -11315,12 +11423,14 @@ fn apply_reaction_self_boost(
     if delta.iter().all(|&s| s == 0) {
         return;
     }
-    emit(bs, EventKind::AbilityRevealed { slot: holder_slot, ability });
-    for (boost_idx, &stages) in delta.iter().enumerate() {
-        if stages != 0 {
-            emit(bs, EventKind::BoostChanged { target: holder_slot, boost_idx, stages });
+    // Nest all BoostChanged events as reactions of the AbilityRevealed node.
+    with_reactions(bs, EventKind::AbilityRevealed { slot: holder_slot, ability }, |bs| {
+        for (boost_idx, &stages) in delta.iter().enumerate() {
+            if stages != 0 {
+                emit(bs, EventKind::BoostChanged { target: holder_slot, boost_idx, stages });
+            }
         }
-    }
+    });
 }
 
 /// Fire all on-hit reactive ability effects for the ability holder (`holder_slot`) after it
@@ -11447,8 +11557,9 @@ pub fn apply_contact_hit_reactions(
             branches
                 .into_iter()
                 .map(|(mut bs, prob)| {
-                    emit(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::RoughSkin });
-                    apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 8);
+                    with_reactions(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::RoughSkin }, |bs| {
+                        apply_hp_damage_to_attacker(bs, attacker_slot, 1, 8);
+                    });
                     (bs, prob)
                 })
                 .collect()
@@ -11461,8 +11572,9 @@ pub fn apply_contact_hit_reactions(
             branches
                 .into_iter()
                 .map(|(mut bs, prob)| {
-                    emit(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::IronBarbs });
-                    apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 8);
+                    with_reactions(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::IronBarbs }, |bs| {
+                        apply_hp_damage_to_attacker(bs, attacker_slot, 1, 8);
+                    });
                     (bs, prob)
                 })
                 .collect()
@@ -11483,7 +11595,9 @@ pub fn apply_contact_hit_reactions(
                     if active_mons_have_ability(&bs, &Ability::Damp) {
                         return (bs, prob);
                     }
-                    apply_hp_damage_to_attacker(&mut bs, attacker_slot, 1, 4);
+                    with_reactions(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::Aftermath }, |bs| {
+                        apply_hp_damage_to_attacker(bs, attacker_slot, 1, 4);
+                    });
                     (bs, prob)
                 })
                 .collect()
@@ -11725,8 +11839,9 @@ pub fn apply_contact_hit_reactions(
                         0
                     };
                     if delta != 0 {
-                        emit(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::AngerPoint });
-                        emit(&mut bs, EventKind::BoostChanged { target: holder_slot, boost_idx: 0, stages: delta });
+                        with_reactions(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::AngerPoint }, |bs| {
+                            emit(bs, EventKind::BoostChanged { target: holder_slot, boost_idx: 0, stages: delta });
+                        });
                     }
                     (bs, prob)
                 })
@@ -11744,13 +11859,16 @@ pub fn apply_contact_hit_reactions(
                     if !alive {
                         return (bs, prob);
                     }
-                    if let Some(mon) = get_pokemon_at_slot_mut(&mut bs, holder_slot) {
-                        // Remove any existing Charge volatile first (no stacking),
-                        // then push a fresh one.
-                        remove_status_volatile(mon, &VolatileStatus::Charge);
-                        mon.volatiles
-                            .push(VolatileStatusState::TurnStatus(VolatileStatus::Charge, 0));
-                    }
+                    with_reactions(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::Electromorphosis }, |bs| {
+                        if let Some(mon) = get_pokemon_at_slot_mut(bs, holder_slot) {
+                            // Remove any existing Charge volatile first (no stacking),
+                            // then push a fresh one.
+                            remove_status_volatile(mon, &VolatileStatus::Charge);
+                            mon.volatiles
+                                .push(VolatileStatusState::TurnStatus(VolatileStatus::Charge, 0));
+                        }
+                        emit(bs, EventKind::VolatileStart { target: holder_slot, volatile: VolatileStatus::Charge });
+                    });
                     (bs, prob)
                 })
                 .collect()
@@ -11883,7 +12001,9 @@ pub fn apply_contact_hit_reactions(
                 if !holder_fainted {
                     return (bs, prob);
                 }
-                apply_flat_hp_damage_to_attacker(&mut bs, attacker_slot, damage_dealt);
+                with_reactions(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::InnardsOut }, |bs| {
+                    apply_flat_hp_damage_to_attacker(bs, attacker_slot, damage_dealt);
+                });
                 (bs, prob)
             })
             .collect(),
@@ -11898,12 +12018,14 @@ pub fn apply_contact_hit_reactions(
             branches
                 .into_iter()
                 .map(|(mut bs, prob)| {
-                    add_side_condition(
-                        &mut bs,
-                        attacker_slot.player,
-                        SideCondition::ToxicSpikes(1),
-                        0,
-                    );
+                    with_reactions(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::ToxicDebris }, |bs| {
+                        add_side_condition(
+                            bs,
+                            attacker_slot.player,
+                            SideCondition::ToxicSpikes(1),
+                            0,
+                        );
+                    });
                     (bs, prob)
                 })
                 .collect()
