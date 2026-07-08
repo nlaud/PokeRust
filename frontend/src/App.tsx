@@ -7,9 +7,10 @@ import FormatsPage from './pages/FormatsPage'
 
 export default function App() {
   return (
-    <div className="min-h-screen">
+    <div className="flex h-screen flex-col">
       <NavBar />
-      <main>
+      {/* The window never scrolls — pages scroll inside main (themed scrollbar). */}
+      <main className="min-h-0 flex-1 overflow-y-auto">
         <Routes>
           <Route path="/" element={<TeamsPage />} />
           <Route path="/formats" element={<FormatsPage />} />

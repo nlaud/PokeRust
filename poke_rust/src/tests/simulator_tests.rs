@@ -34349,6 +34349,45 @@ mod fake_out_selectability {
         assert!(offers_move_slot(&state, 0),
             "Fake Out must be selectable again after re-entering the field");
     }
+
+    /// The REAL battle-start flow: team-preview resolution runs its own
+    /// end-of-turn before turn 1 — first_move_on_field must survive it.
+    /// (Regression: battle-start entries never set the pending marker, so the
+    /// preview EOT cleared the flag and turn-1 Fake Out was dead.)
+    #[test]
+    fn fake_out_selectable_on_turn_one_via_real_preview_flow() {
+        let p1_team = "Incineroar\nAbility: Intimidate\nLevel: 50\n- Fake Out\n- Tackle";
+        let p2_team = "Shuckle\nAbility: Sturdy\nLevel: 50\n- Splash";
+        let preview = crate::simulator::team_preview_state_from_team_strings(
+            p1_team, p2_team, pokemon_dex(), move_dex(), 1, 1, true,
+        );
+        let pv = PlayerCommand::TeamPreview(crate::state::battle::TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![],
+        });
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::TeamPreviewState(preview), &pv, &pv,
+            move_dex(), pokemon_dex(), false, 1, None,
+        );
+        let state = outcomes
+            .into_iter()
+            .find_map(|(s, _, _)| match s {
+                MatchState::BattleState(bs) => Some(bs),
+                _ => None,
+            })
+            .expect("preview resolution yields a battle state");
+
+        assert!(offers_move_slot(&state, 0),
+            "Fake Out must be selectable on turn 1 of the battle");
+
+        // Turn 1: use Tackle instead — from turn 2, Fake Out is gone.
+        let state = run_turn(state, BattleCommand::Attack(AttackCommand {
+            move_slot: 1, target: None, terastallize: false, mega_evolve: false,
+        }));
+        assert!(!offers_move_slot(&state, 0),
+            "Fake Out must be unselectable from turn 2");
+        assert!(offers_move_slot(&state, 1), "other moves stay selectable");
+    }
 }
 
 // A mid-hit berry proc must be announced as ItemLost("used its Sitrus Berry!")

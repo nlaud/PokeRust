@@ -57,9 +57,11 @@ export default function Arena() {
           } ${targetable ? 'cursor-pointer' : ''}`}
           onClick={targetable ? () => pickTarget(slot) : undefined}
         >
-          {player === 'p1' && <PokemonHUD mon={mon} />}
+          {/* Below xl the HUD overlaps the sprite (negative margin + z-index)
+              so the column fits smaller arenas without pushing anything out. */}
+          {player === 'p1' && <div className="z-10 w-full max-xl:-mb-12"><PokemonHUD mon={mon} /></div>}
           {sprite}
-          {player === 'p2' && <PokemonHUD mon={mon} />}
+          {player === 'p2' && <div className="z-10 w-full max-xl:-mt-12"><PokemonHUD mon={mon} /></div>}
         </div>
       )
     })

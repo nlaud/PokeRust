@@ -9,6 +9,18 @@ import type {
   PlayerId,
   TurnLogEntry,
 } from '../api/types'
+import { megaFormeNames, preloadSprites } from '../lib/sprites'
+
+/** Warm the sprite caches for every mon in the battle (plus possible mega
+ * formes from held stones) so in-battle sprites render without placeholders. */
+function preloadBattleSprites(view: BattleView) {
+  const mons = [
+    ...(view.preview ? [...view.preview.p1Mons, ...view.preview.p2Mons] : []),
+    ...(view.p1 ? [...view.p1.active, ...view.p1.back] : []),
+    ...(view.p2 ? [...view.p2.active, ...view.p2.back] : []),
+  ]
+  preloadSprites(mons.flatMap((m) => [m.species, ...megaFormeNames(m.species, m.item)]))
+}
 
 /**
  * Hotseat command wizard. One user enters P1's commands slot by slot, then
@@ -166,6 +178,7 @@ export const useBattle = create<BattleStore>((set, get) => {
       try {
         const response = await api.createBattle(req)
         sessionStorage.setItem(BATTLE_ID_KEY, response.battleId)
+        preloadBattleSprites(response.state)
         set({
           battleId: response.battleId,
           view: response.state,
@@ -187,6 +200,7 @@ export const useBattle = create<BattleStore>((set, get) => {
     restore: async (battleId) => {
       try {
         const response = await api.getBattle(battleId)
+        preloadBattleSprites(response.state)
         set({
           battleId,
           view: response.state,

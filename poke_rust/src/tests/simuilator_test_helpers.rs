@@ -100,6 +100,14 @@ pub fn battle_state_from_lists(
         );
     }
 
+    // This helper builds "start of turn 1" directly — in the real flow the
+    // team-preview resolution's end-of-turn has already consumed the
+    // first_turn_on_field_pending marker by this point. Mirror that state,
+    // or every helper-built battle would keep Fake Out legal through turn 2.
+    for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+        mon.first_turn_on_field_pending = false;
+    }
+
     state
 }
 

@@ -5917,13 +5917,16 @@ pub fn process_pokemon_send_out(
     }
     // Always mark the Pokémon as on their first turn on field (for Fake Out / First Impression).
     // Unlike `entered_this_turn`, this applies to faint-replacements too.
-    // For U-turn/Volt Switch mid-turn entries (turn_started=true, turn_ended=false), EOT will
-    // still run this turn BEFORE the Pokémon gets to act. Set the pending flag so EOT skips
-    // clearing first_move_on_field once, preserving it to the Pokémon's actual first turn.
-    let is_mid_turn_pre_eot = is_replacement_turn && !state.turn_ended;
+    // Whenever an EOT will still run BEFORE the Pokémon gets to act — U-turn/Volt Switch
+    // mid-turn entries (turn_started=true, turn_ended=false) AND battle-start send-outs
+    // during team-preview resolution (both flags false; the preview's own EOT follows) —
+    // set the pending flag so that EOT skips clearing first_move_on_field once, preserving
+    // it to the Pokémon's actual first turn. Faint replacements (turn_ended=true) run no
+    // EOT of their own, so the flag survives to the next real turn without the marker.
+    let survives_pre_action_eot = !state.turn_ended;
     if let Some(mon_mut) = get_pokemon_at_slot_mut(state, slot) {
         mon_mut.first_move_on_field = true;
-        mon_mut.first_turn_on_field_pending = is_mid_turn_pre_eot;
+        mon_mut.first_turn_on_field_pending = survives_pre_action_eot;
         mon_mut.used_moves_this_field = [false; 4];
     }
 

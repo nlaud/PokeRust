@@ -172,3 +172,40 @@ async function resolveSprites(slug: string): Promise<SpriteUrls | null> {
 export function itemSpriteUrl(itemSlug: string): string {
   return `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/${itemSlug}.png`
 }
+
+/**
+ * Mega forme display names a mon could turn into, derived from its held item:
+ * "Charizardite X" → "Charizard-Mega-X"; any other "…ite" stone whose stem
+ * prefixes the species name ("Tyranitarite" → "Tyranitar-Mega"). Champions-only
+ * megas resolve through the 404 fallback chain to the base sprite — the same
+ * URL the in-battle mega display will use, so preloading it is still a win.
+ */
+export function megaFormeNames(species: string, item: string | null | undefined): string[] {
+  if (!item) return []
+  const xy = item.match(/^(.+)ite ([XY])$/)
+  if (xy && species.toLowerCase().startsWith(xy[1].toLowerCase().slice(0, 4))) {
+    return [`${species}-Mega-${xy[2]}`]
+  }
+  const plain = item.match(/^(.+)ite$/)
+  if (plain && species.toLowerCase().startsWith(plain[1].toLowerCase().slice(0, 4))) {
+    return [`${species}-Mega`]
+  }
+  return []
+}
+
+/**
+ * Resolve and warm the browser image cache for a batch of species in the
+ * background, so battle sprites render without loading placeholders. Safe to
+ * call repeatedly: URL lookups hit the memory/localStorage caches and the
+ * browser dedupes the image fetches.
+ */
+export function preloadSprites(speciesList: string[]) {
+  for (const species of new Set(speciesList)) {
+    if (!species) continue
+    void fetchSprites(species).then((urls) => {
+      for (const url of [urls.front, urls.back]) {
+        if (url) new Image().src = url
+      }
+    })
+  }
+}

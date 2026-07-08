@@ -183,8 +183,14 @@ export default function TeamInfoSidebar() {
   }
 
   const side = tab === 'p1' ? view?.p1 : view?.p2
+  // During team preview there are no sides yet, but the preview payload
+  // already carries full PokemonViews for both teams — show those.
+  const previewMons =
+    !side && view?.preview
+      ? (tab === 'p1' ? view.preview.p1Mons : view.preview.p2Mons)
+      : []
   const active = side?.active ?? []
-  const back = side?.back ?? []
+  const back = side?.back ?? previewMons
 
   const row = (mon: PokemonView, isActive: boolean) => {
     const key = `${tab}-${mon.monId}`
@@ -216,7 +222,9 @@ export default function TeamInfoSidebar() {
       </div>
 
       <div className="flex-1 space-y-1 overflow-y-auto p-2">
-        {!side && <p className="p-2 text-xs text-ink-muted">No team data yet.</p>}
+        {!side && previewMons.length === 0 && (
+          <p className="p-2 text-xs text-ink-muted">No team data yet.</p>
+        )}
         {active.map((mon) => row(mon, true))}
         {back.map((mon) => row(mon, false))}
       </div>

@@ -16,7 +16,7 @@ export default function BattleScreen() {
   const inBattle = !!view.p1 && !!view.p2
 
   return (
-    <div className="flex flex-col gap-3 p-3 lg:h-[calc(100vh-3.5rem)] lg:flex-row">
+    <div className="flex flex-col gap-3 p-3 lg:h-full lg:flex-row">
       <div className="order-2 lg:order-none lg:contents">
         <BattleLogSidebar />
       </div>
