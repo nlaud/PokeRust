@@ -142,6 +142,7 @@ pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
         stats: mon.stats,
         boosts: mon.boosts,
         nature: format!("{:?}", mon.nature),
+        evs: mon.evs,
         item: item_name(&mon.item),
         ability: mon.ability.to_string(),
         moves: (0..4)

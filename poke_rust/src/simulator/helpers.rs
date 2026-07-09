@@ -6229,22 +6229,11 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
                 !pokemon_ability_is_suppressed(state, m) && m.ability == Ability::GuardDog
             });
             if guard_dog {
-                let gd_delta = {
-                    let Some(mon) = get_pokemon_at_slot_mut(state, target) else {
-                        continue;
-                    };
-                    // +1 Attack, non-deferring path (pure positive delta, no White Herb).
-                    apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false)
-                };
-                // The in-game popup attributes the raise to Guard Dog — reveal it.
-                if gd_delta.iter().any(|&s| s != 0) {
-                    emit(state, EventKind::AbilityRevealed { slot: target, ability: Ability::GuardDog });
-                }
-                for (boost_idx, &stages) in gd_delta.iter().enumerate() {
-                    if stages != 0 {
-                        emit(state, EventKind::BoostChanged { target, boost_idx, stages });
-                    }
-                }
+                // +1 Attack, non-deferring path (pure positive delta, no White Herb). Nest the
+                // BoostChanged as a reaction of the reveal — the in-game popup attributes the
+                // raise to Guard Dog. `apply_reaction_self_boost` no-ops (no reveal) if the
+                // stat is already capped and nothing actually changed.
+                apply_reaction_self_boost(state, target, Ability::GuardDog, &[1, 0, 0, 0, 0, 0, 0]);
                 continue;
             }
             // apply_opponent_stat_drop handles Clear Body / Hyper Cutter / Mirror Armor /
@@ -8973,27 +8962,13 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
             // Speed Boost: +1 Speed every turn, but not on the turn the Pokémon switched in.
             Ability::SpeedBoost => {
                 for (bs, _) in result.iter_mut() {
-                    let items_suppressed = items_are_suppressed(bs);
-                    let delta = if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
-                        if !mon.fainted && !mon.entered_this_turn {
-                            apply_stat_boosts_to_pokemon(
-                                mon,
-                                &[0, 0, 0, 0, 1, 0, 0],
-                                items_suppressed,
-                                false,
-                            )
-                        } else { [0; 7] }
-                    } else { [0; 7] };
-                    // Emit after the get_pokemon_at_slot_mut borrow ends. The in-game
-                    // message attributes the boost to the ability, so reveal it too.
-                    if delta.iter().any(|&s| s != 0) {
-                        emit(bs, EventKind::AbilityRevealed { slot: *slot, ability: Ability::SpeedBoost });
+                    let skip = get_pokemon_at_slot(bs, *slot).map_or(true, |m| m.fainted || m.entered_this_turn);
+                    if skip {
+                        continue;
                     }
-                    for (boost_idx, &stages) in delta.iter().enumerate() {
-                        if stages != 0 {
-                            emit(bs, EventKind::BoostChanged { target: *slot, boost_idx, stages });
-                        }
-                    }
+                    // Nests the BoostChanged as a reaction of the reveal — the in-game
+                    // message attributes the boost to the ability.
+                    apply_reaction_self_boost(bs, *slot, Ability::SpeedBoost, &[0, 0, 0, 0, 1, 0, 0]);
                 }
             }
             // Moody: +2 to one random stat, -1 to a different random stat (Gen VIII+: 5 main
@@ -9154,8 +9129,9 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                         {
                             bs.items_consumed_this_turn.remove(pos);
                         }
-                        emit(bs, EventKind::AbilityRevealed { slot: *slot, ability: Ability::Harvest });
-                        emit(bs, EventKind::ItemGained { slot: *slot, item: berry_item.clone() });
+                        with_reactions(bs, EventKind::AbilityRevealed { slot: *slot, ability: Ability::Harvest }, |bs| {
+                            emit(bs, EventKind::ItemGained { slot: *slot, item: berry_item.clone() });
+                        });
                     }
                 }
             }
@@ -9187,9 +9163,10 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                         BerryCure::none()
                     };
                     // "X found one Y!" — Pickup is announced with the gain.
-                    emit(bs, EventKind::AbilityRevealed { slot: *slot, ability: Ability::Pickup });
-                    emit(bs, EventKind::ItemGained { slot: *slot, item });
-                    emit_berry_cure(bs, *slot, &cure);
+                    with_reactions(bs, EventKind::AbilityRevealed { slot: *slot, ability: Ability::Pickup }, |bs| {
+                        emit(bs, EventKind::ItemGained { slot: *slot, item });
+                        emit_berry_cure(bs, *slot, &cure);
+                    });
                 }
             }
             // Cud Chew: re-apply a consumed berry's effect at the end of the turn
@@ -9690,15 +9667,20 @@ pub(crate) fn apply_opponent_stat_drop(
         }
         // Bounce: the drop now originates from the holder (target_slot) targeting the source.
         // already_reflected = true prevents the source's Mirror Armor from sending it back.
+        // Reveal Mirror Armor and nest the bounced drop underneath it — the in-game popup
+        // attributes the reflected stat change to the ability. No-ops (no reveal) if the
+        // bounced drop was itself fully blocked/no-op on the source side.
         if bounced != [0; 7] {
-            apply_opponent_stat_drop(
-                state,
-                source_slot,
-                target_slot,
-                bounced,
-                items_suppressed,
-                true,
-            );
+            reveal_ability_with_effect(state, target_slot, Ability::MirrorArmor, |state| {
+                apply_opponent_stat_drop(
+                    state,
+                    source_slot,
+                    target_slot,
+                    bounced,
+                    items_suppressed,
+                    true,
+                );
+            });
         }
         // Apply any positive boosts (e.g. from Decorate) directly to the holder.
         if kept != [0; 7] {
@@ -9730,9 +9712,40 @@ pub(crate) fn apply_opponent_stat_drop(
         };
         apply_boosts_returning_delta(mon, &filtered)
     };
+    // ── 4b. Defiant / Competitive: +2 per stat actually lowered ────────────────────────────
+    // Each *distinct* stat that moved lower (after clamping) triggers once regardless of the
+    // stage amount (e.g. Charm −2 Atk → one trigger; Memento −1 Atk −1 SpA → two triggers).
+    // Determined here (before emitting the drops below) so the reaction can nest under the
+    // triggering drop's own BoostChanged event.
+    let stats_lowered = delta.iter().filter(|&&d| d < 0).count() as i8;
+    let reaction: Option<(usize, Ability)> = if stats_lowered > 0 && !target_suppressed {
+        match target_ability {
+            Ability::Defiant => Some((0, target_ability.clone())),     // +2 Attack per stat lowered
+            Ability::Competitive => Some((2, target_ability.clone())), // +2 Sp. Atk per stat lowered
+            _ => None,
+        }
+    } else {
+        None
+    };
+    // The *last* lowered stat is the one whose BoostChanged the reveal nests under — matching
+    // the in-game flow of "stat fell -> ability activates in response".
+    let last_lowered_idx = reaction.as_ref().and_then(|_| (0..7).rev().find(|&i| delta[i] < 0));
+
     // Emit one BoostChanged per stat that actually changed (NLL: mon borrow ended above).
     for i in 0..7 {
-        if delta[i] != 0 {
+        if delta[i] == 0 {
+            continue;
+        }
+        if Some(i) == last_lowered_idx {
+            let (boost_idx, ability) = reaction.clone().unwrap();
+            with_reactions(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: delta[i] }, |state| {
+                let mut boost = [0i8; 7];
+                boost[boost_idx] = 2 * stats_lowered;
+                // Self-boost from Defiant/Competitive — use the non-deferring path (no White
+                // Herb on a pure positive delta). Nests the reveal + boost under this drop.
+                apply_reaction_self_boost(state, target_slot, ability, &boost);
+            });
+        } else {
             emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: delta[i] });
         }
     }
@@ -9751,39 +9764,7 @@ pub(crate) fn apply_opponent_stat_drop(
             p
         };
         if positive != [0; 7] {
-            mirror_opportunist_raises(state, target_slot, &positive, items_suppressed);
-        }
-    }
-
-    // ── 4b. Defiant / Competitive: +2 per stat actually lowered ────────────────────────────
-    // Each *distinct* stat that moved lower (after clamping) triggers once regardless of the
-    // stage amount (e.g. Charm −2 Atk → one trigger; Memento −1 Atk −1 SpA → two triggers).
-    let stats_lowered = delta.iter().filter(|&&d| d < 0).count() as i8;
-    if stats_lowered > 0 && !target_suppressed {
-        let reaction_idx: Option<usize> = match target_ability {
-            Ability::Defiant => Some(0),     // +2 Attack per stat lowered
-            Ability::Competitive => Some(2), // +2 Sp. Atk per stat lowered
-            _ => None,
-        };
-        if let Some(idx) = reaction_idx {
-            let def_comp_delta = {
-                let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) else {
-                    return;
-                };
-                let mut boost = [0i8; 7];
-                boost[idx] = 2 * stats_lowered;
-                // Self-boost from Defiant/Competitive — use the non-deferring path (no White Herb
-                // on a pure positive delta).
-                apply_stat_boosts_to_pokemon(mon, &boost, items_suppressed, false)
-            };
-            // The in-game ability popup attributes the raise to Defiant/Competitive —
-            // reveal it, then emit the BoostChanged (mon borrow ended).
-            emit(state, EventKind::AbilityRevealed { slot: target_slot, ability: target_ability.clone() });
-            for i in 0..7 {
-                if def_comp_delta[i] != 0 {
-                    emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: def_comp_delta[i] });
-                }
-            }
+            mirror_opportunist_raises(state, target_slot, &positive);
         }
     }
 
@@ -9849,7 +9830,6 @@ fn mirror_opportunist_raises(
     state: &mut BattleState,
     raiser_slot: FieldSlot,
     raised_boosts: &[i8; 7],
-    items_suppressed: bool,
 ) {
     // Extract positive portion only.
     let mut positive = [0i8; 7];
@@ -9876,12 +9856,9 @@ fn mirror_opportunist_raises(
             })
             .unwrap_or(false);
         if has_opportunist {
-            let opp_delta = if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
-                apply_stat_boosts_to_pokemon(mon, &positive, items_suppressed, false)
-            } else { [0i8; 7] };
-            for (boost_idx, &stages) in opp_delta.iter().enumerate() {
-                if stages != 0 { emit(state, EventKind::BoostChanged { target: slot, boost_idx, stages }); }
-            }
+            // Nest the mirrored raise under an Opportunist reveal — the in-game popup
+            // attributes the mirrored boost to the ability.
+            apply_reaction_self_boost(state, slot, Ability::Opportunist, &positive);
         }
     }
 }
@@ -10327,7 +10304,7 @@ fn apply_effect_to_attacker(state: &mut BattleState, attacker_slot: FieldSlot, e
     // Opportunist: mirror any positive self-boost the attacker just applied to opponents
     // who hold Opportunist.  Negative drops (Leaf Storm −2 SpA, etc.) are ignored.
     if effect.boosts.iter().any(|&b| b > 0) {
-        mirror_opportunist_raises(state, attacker_slot, &effect.boosts, items_suppressed);
+        mirror_opportunist_raises(state, attacker_slot, &effect.boosts);
     }
 
     if let Some(side_condition) = &effect.side_condition {
@@ -11387,7 +11364,7 @@ pub(crate) fn contact_effects_apply(
 /// attributes the reaction, with the effect indented beneath it.
 /// No-op when the effect was fully blocked (or when no observer is attached:
 /// pending_events stays empty then).
-fn reveal_ability_with_effect(
+pub(crate) fn reveal_ability_with_effect(
     bs: &mut BattleState,
     holder_slot: FieldSlot,
     ability: Ability,
@@ -11408,7 +11385,7 @@ fn reveal_ability_with_effect(
 /// Apply a reaction ability's self stat boost, emitting the AbilityRevealed and
 /// the resulting BoostChanged events nested under it. (Weak Armor / Stamina /
 /// Justified used to apply their boosts silently — no events at all.)
-fn apply_reaction_self_boost(
+pub(crate) fn apply_reaction_self_boost(
     bs: &mut BattleState,
     holder_slot: FieldSlot,
     ability: Ability,
@@ -12108,64 +12085,58 @@ pub(crate) fn try_absorb_move(
                     healed_to = Some((mon.hp, mon.stats[0].max(1)));
                 }
             }
-            emit(state, EventKind::AbilityRevealed {
-                slot: target_slot,
-                ability: target_ability.clone(),
+            // Reveal unconditionally (the ability absorbing the move is itself observable
+            // even if the heal is a no-op at full HP); nest the heal underneath it.
+            with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: target_ability.clone() }, |state| {
+                if let (Some(observer), Some((hp, max))) = (state.event_observer, healed_to) {
+                    let new_hp = observed_hp_value(observer, target_slot.player, hp, max);
+                    emit(state, EventKind::Healed { target: target_slot, new_hp });
+                }
             });
-            if let (Some(observer), Some((hp, max))) = (state.event_observer, healed_to) {
-                let new_hp = observed_hp_value(observer, target_slot.player, hp, max);
-                emit(state, EventKind::Healed { target: target_slot, new_hp });
-            }
             true
         }
         (PokemonType::Grass, Ability::SapSipper) => {
-            let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false)
-            } else {
-                [0i8; 7]
-            };
-            emit(state, EventKind::AbilityRevealed {
-                slot: target_slot,
-                ability: Ability::SapSipper,
+            with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::SapSipper }, |state| {
+                let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                    apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false)
+                } else {
+                    [0i8; 7]
+                };
+                emit_boost_deltas(state, target_slot, &delta);
             });
-            emit_boost_deltas(state, target_slot, &delta);
             true
         }
         (PokemonType::Electric, Ability::MotorDrive) => {
-            let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false)
-            } else {
-                [0i8; 7]
-            };
-            emit(state, EventKind::AbilityRevealed {
-                slot: target_slot,
-                ability: Ability::MotorDrive,
+            with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::MotorDrive }, |state| {
+                let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                    apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false)
+                } else {
+                    [0i8; 7]
+                };
+                emit_boost_deltas(state, target_slot, &delta);
             });
-            emit_boost_deltas(state, target_slot, &delta);
             true
         }
         (PokemonType::Fire, Ability::FlashFire) => {
-            let mut started = false;
-            if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                if !has_status_volatile(mon, &VolatileStatus::FlashFire) {
-                    mon.volatiles
-                        .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
-                            VolatileStatus::FlashFire,
-                            0,
-                        ));
-                    started = true;
+            with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::FlashFire }, |state| {
+                let mut started = false;
+                if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                    if !has_status_volatile(mon, &VolatileStatus::FlashFire) {
+                        mon.volatiles
+                            .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
+                                VolatileStatus::FlashFire,
+                                0,
+                            ));
+                        started = true;
+                    }
                 }
-            }
-            emit(state, EventKind::AbilityRevealed {
-                slot: target_slot,
-                ability: Ability::FlashFire,
+                if started {
+                    emit(state, EventKind::VolatileStart {
+                        target: target_slot,
+                        volatile: VolatileStatus::FlashFire,
+                    });
+                }
             });
-            if started {
-                emit(state, EventKind::VolatileStart {
-                    target: target_slot,
-                    volatile: VolatileStatus::FlashFire,
-                });
-            }
             true
         }
         _ => false,
@@ -12213,17 +12184,16 @@ pub(crate) fn try_drawin_negate(
     let negated = match (&move_type, &target_ability) {
         (PokemonType::Electric, Ability::LightningRod)
         | (PokemonType::Water, Ability::StormDrain) => {
-            let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                apply_stat_boosts_to_pokemon(mon, &[0, 0, 1, 0, 0, 0, 0], items_suppressed, false)
-            } else {
-                [0i8; 7]
-            };
-            // "X took the attack!" + the Sp. Atk boost are announced in-game.
-            emit(state, EventKind::AbilityRevealed {
-                slot: target_slot,
-                ability: target_ability.clone(),
+            // "X took the attack!" + the Sp. Atk boost are announced in-game; nest the
+            // boost as a reaction of the reveal.
+            with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: target_ability.clone() }, |state| {
+                let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
+                    apply_stat_boosts_to_pokemon(mon, &[0, 0, 1, 0, 0, 0, 0], items_suppressed, false)
+                } else {
+                    [0i8; 7]
+                };
+                emit_boost_deltas(state, target_slot, &delta);
             });
-            emit_boost_deltas(state, target_slot, &delta);
             true
         }
         _ => false,
@@ -12606,12 +12576,22 @@ pub fn apply_secondary_effects(
                 boosts[0] = boosts[0].saturating_add(1);
                 boosts[2] = boosts[2].saturating_add(1);
             }
-            if let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
-                apply_stat_boosts_to_pokemon(attacker_mon, &boosts, items_suppressed, false);
+            let delta = if let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) {
+                apply_stat_boosts_to_pokemon(attacker_mon, &boosts, items_suppressed, false)
+            } else {
+                [0i8; 7]
+            };
+            // Emit one BoostChanged per stat that actually changed — previously discarded,
+            // so self-boost moves (Dragon Dance, Swords Dance, Nasty Plot, ...) applied the
+            // boost to state but never surfaced it in the event stream.
+            for (boost_idx, &stages) in delta.iter().enumerate() {
+                if stages != 0 {
+                    emit(bs, EventKind::BoostChanged { target: attacker_slot, boost_idx, stages });
+                }
             }
             // Opportunist: mirror any positive raise to opponents holding the ability.
             if boosts.iter().any(|&b| b > 0) {
-                mirror_opportunist_raises(bs, attacker_slot, &boosts, items_suppressed);
+                mirror_opportunist_raises(bs, attacker_slot, &boosts);
             }
         }
     }

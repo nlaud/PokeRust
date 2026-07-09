@@ -48,9 +48,17 @@ function MonRow({
         <Sprite species={mon.species} size={44} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between">
-            <span className="truncate text-xs font-semibold">
-              {mon.species}
-              {mon.isTera && <span className="ml-1 text-primary">✦{mon.teraType}</span>}
+            <span className="flex min-w-0 items-center gap-1 truncate text-xs font-semibold">
+              <span className="truncate">{mon.species}</span>
+              {mon.isTera && <span className="text-primary">✦{mon.teraType}</span>}
+              {mon.types.map((t) => (
+                <span
+                  key={t}
+                  className="shrink-0 rounded bg-subtle px-1 text-[9px] font-medium uppercase text-ink-muted"
+                >
+                  {t}
+                </span>
+              ))}
             </span>
             <span className="flex items-center gap-1 text-[10px] text-ink-muted">
               Lv{mon.level}
@@ -129,6 +137,17 @@ function MonRow({
                   {STAT_NAMES[i]} <span className="font-medium text-ink">{value}</span>
                 </span>
               ))}
+              <span className="italic">{mon.nature}</span>
+            </div>
+
+            <div className="flex flex-wrap gap-x-2 text-ink-muted">
+              {mon.evs.map((value, i) =>
+                value !== 0 ? (
+                  <span key={STAT_NAMES[i]}>
+                    {STAT_NAMES[i]} <span className="font-medium text-ink">{value}</span> EV
+                  </span>
+                ) : null,
+              )}
             </div>
 
             {mon.boosts.some((b) => b !== 0) && (

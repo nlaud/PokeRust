@@ -32527,17 +32527,22 @@ mod event_round_trip {
             .expect("MoveUsed for P1 slot 0 not found");
         let reactions = &move_ev.reactions;
 
-        let crit_count = reactions.iter()
-            .filter(|e| matches!(&e.kind, EventKind::Crit { target } if *target == p2s0()))
-            .count();
-        assert_eq!(crit_count, 3, "expected 3 Crit reactions, got {crit_count};\n\
-            reactions = {reactions:#?}");
-
-        let damage_count = reactions.iter()
+        // Crit nests one level deeper than before: it's a reaction to the DamageDealt
+        // it caused, not a flat sibling of it. So each of the 3 DamageDealt reactions
+        // under MoveUsed must itself carry a nested Crit.
+        let damage_events: Vec<&InformationEvent> = reactions.iter()
             .filter(|e| matches!(&e.kind, EventKind::DamageDealt { target, .. } if *target == p2s0()))
-            .count();
-        assert_eq!(damage_count, 3, "expected 3 DamageDealt reactions, got {damage_count};\n\
-            reactions = {reactions:#?}");
+            .collect();
+        assert_eq!(damage_events.len(), 3, "expected 3 DamageDealt reactions, got {};\n\
+            reactions = {reactions:#?}", damage_events.len());
+
+        for dmg in &damage_events {
+            assert!(
+                dmg.reactions.iter().any(|r| matches!(&r.kind, EventKind::Crit { target } if *target == p2s0())),
+                "expected a nested Crit reaction under this hit's DamageDealt;\n\
+                 dmg = {dmg:#?}"
+            );
+        }
 
         // HitCount is emitted after the per-hit loop and should be the final reaction.
         assert!(
@@ -32752,9 +32757,12 @@ mod event_round_trip {
             "expect at least 2 branches (crit + non-crit) with consider_crit=true, got {}",
             branches.len());
 
+        // Crit now nests under DamageDealt (a reaction to the damage that caused it)
+        // rather than sitting as a flat sibling of it, so this must search the whole
+        // MoveUsed subtree rather than only its immediate reactions.
         let has_crit_event = |events: &[InformationEvent]| -> bool {
             find_move_used(events, p1s0())
-                .map(|mv| any_kind(&mv.reactions, |k| matches!(k, EventKind::Crit { .. })))
+                .map(|mv| any_event_deep(&mv.reactions, |k| matches!(k, EventKind::Crit { .. })))
                 .unwrap_or(false)
         };
 
@@ -33735,8 +33743,10 @@ mod event_round_trip {
         let events = branches.remove(0).1.expect("observer set — events must be Some");
         let mv = find_move_used(&events, p1s0())
             .expect("MoveUsed for P1 slot 0 must be present");
+        // Faint now nests under DamageDealt (a reaction to the damage that caused it)
+        // rather than sitting as a flat sibling of it, so search the whole subtree.
         assert!(
-            any_kind(&mv.reactions, |k| matches!(k,
+            any_event_deep(&mv.reactions, |k| matches!(k,
                 EventKind::Faint { slot } if *slot == p2s0())),
             "a move KO must emit Faint for the target under MoveUsed;\n\
              reactions = {:#?}", mv.reactions
@@ -34815,5 +34825,424 @@ mod mega_ordering {
                 "the weather change must nest under the ability reveal"
             );
         }
+    }
+}
+
+// Regression coverage for the playtest fix batch: Illusion only breaks on real damage
+// (not immune hits / status-self moves), Fake Out doesn't affect Ghost-type targets,
+// self-boost moves (Dragon Dance, etc.) surface a BoostChanged event, and reactive
+// abilities (Competitive/Defiant/Moxie) nest under the stat-drop/faint that triggered
+// them rather than sitting as flat siblings.
+mod playtest_fix_batch {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, run_single_turn_with_events_opts,
+        simple_attack,
+    };
+
+    fn p1s0() -> FieldSlot { FieldSlot { player: Player::P1, slot_index: 0 } }
+    fn p2s0() -> FieldSlot { FieldSlot { player: Player::P2, slot_index: 0 } }
+
+    fn find_move_used<'a>(events: &'a [InformationEvent], user: FieldSlot) -> Option<&'a InformationEvent> {
+        events.iter().find(|e| matches!(&e.kind, EventKind::MoveUsed { user: u, .. } if *u == user))
+    }
+
+    fn any_event_deep(events: &[InformationEvent], pred: impl Fn(&EventKind) -> bool + Copy) -> bool {
+        events.iter().any(|e| pred(&e.kind) || any_event_deep(&e.reactions, pred))
+    }
+
+    // ── Illusion: breaks only on real damage ───────────────────────────────────
+
+    /// A type-immune hit (Normal vs. a true-Ghost-type Illusion user) must not clear
+    /// the disguise or emit IllusionEnded — only a damaging hit does.
+    #[test]
+    fn illusion_survives_type_immune_hit() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // Gengar is Ghost/Poison — immune to Normal. Illusion disguises it as the
+        // back mon on send-out; the *real* type (Gengar's) governs immunity.
+        let p1 = build_pokemon_state(
+            Species::Gengar, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Illusion), Some(Nature::Hardy),
+            None, None, None, None, false,
+        );
+        let p1_back = build_pokemon_state(
+            Species::Charmander, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![p1_back], vec![p2], vec![]),
+        );
+
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(branches.len(), 1);
+        let (result_state, events_opt, _) = branches.remove(0);
+        let MatchState::BattleState(bs) = result_state else { panic!("battle continues") };
+        assert!(
+            bs.p1_active_mons[0].illusion_disguise.is_some(),
+            "a type-immune hit must not break Illusion"
+        );
+
+        let events = events_opt.expect("observer set — events must be Some");
+        assert!(
+            !any_event_deep(&events, |k| matches!(k, EventKind::IllusionEnded { .. })),
+            "no IllusionEnded should be emitted for a type-immune hit"
+        );
+    }
+
+    /// A real damaging hit against the same Illusion user must clear the disguise
+    /// and emit IllusionEnded.
+    #[test]
+    fn illusion_breaks_on_real_damage() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Gengar, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Illusion), Some(Nature::Hardy),
+            None, None, None, None, false,
+        );
+        let p1_back = build_pokemon_state(
+            Species::Charmander, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        // Aerial Ace is neutral against Ghost/Poison, never misses, and has no
+        // secondary effect — a clean, single-branch damaging hit (not immune).
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::AerialAce), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![p1_back], vec![p2], vec![]),
+        );
+
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(branches.len(), 1);
+        let (result_state, events_opt, _) = branches.remove(0);
+        let MatchState::BattleState(bs) = result_state else { panic!("battle continues") };
+        assert!(
+            bs.p1_active_mons[0].illusion_disguise.is_none(),
+            "a real damaging hit must break Illusion"
+        );
+
+        let events = events_opt.expect("observer set — events must be Some");
+        assert!(
+            any_event_deep(&events, |k| matches!(k, EventKind::IllusionEnded { .. })),
+            "IllusionEnded must be emitted for a real damaging hit"
+        );
+    }
+
+    /// A self-targeting move used by the Illusion holder itself must not break the
+    /// disguise (it never routes the holder through the damage-hit path at all).
+    #[test]
+    fn illusion_survives_self_targeting_move() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Gengar, pd, md, Some(50),
+            Some([Some(PokemonMove::SwordsDance), None, None, None]),
+            None, Some(Ability::Illusion), Some(Nature::Hardy),
+            None, None, None, None, false,
+        );
+        let p1_back = build_pokemon_state(
+            Species::Charmander, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![p1_back], vec![p2], vec![]),
+        );
+
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(branches.len(), 1);
+        let (result_state, _, _) = branches.remove(0);
+        let MatchState::BattleState(bs) = result_state else { panic!("battle continues") };
+        assert!(
+            bs.p1_active_mons[0].illusion_disguise.is_some(),
+            "using a self-targeting move must not break the user's own Illusion"
+        );
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 2, "Swords Dance should still apply +2 Atk");
+    }
+
+    // ── Fake Out: no secondary effects on a type-immune hit ────────────────────
+
+    /// Fake Out (Normal) dealt 0 damage to a Ghost-type target must not flinch it —
+    /// the target's own move (Growl) must still execute this turn.
+    #[test]
+    fn fake_out_does_not_flinch_ghost_type() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Pikachu, pd, md, Some(50),
+            Some([Some(PokemonMove::FakeOut), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        // Gengar (Ghost/Poison) is immune to Normal-type Fake Out.
+        let p2 = build_pokemon_state(
+            Species::Gengar, pd, md, Some(50),
+            Some([Some(PokemonMove::Growl), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(branches.len(), 1);
+        let (result_state, events_opt, _) = branches.remove(0);
+        let MatchState::BattleState(bs) = result_state else { panic!("battle continues") };
+
+        assert_eq!(bs.p2_active_mons[0].hp, bs.p2_active_mons[0].stats[0], "Fake Out must deal 0 damage to a Ghost type");
+        assert!(
+            !bs.p2_active_mons[0].volatiles.iter().any(|v| matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Flinch, _) | VolatileStatusState::MoveStatus(VolatileStatus::Flinch, _))),
+            "the Ghost-type target must not carry a Flinch volatile"
+        );
+        // Growl still fired (proves the target was not prevented from moving): P1's Atk fell.
+        assert_eq!(bs.p1_active_mons[0].boosts[0], -1, "Growl must still execute — the target was never flinched");
+
+        let events = events_opt.expect("observer set — events must be Some");
+        assert!(
+            !any_event_deep(&events, |k| matches!(k, EventKind::Cant { .. })),
+            "the Ghost-type target must not Cant{{Flinch}} this turn"
+        );
+    }
+
+    /// Control: Fake Out against a non-immune type still flinches normally.
+    #[test]
+    fn fake_out_still_flinches_non_ghost_type() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Pikachu, pd, md, Some(50),
+            Some([Some(PokemonMove::FakeOut), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Growl), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(branches.len(), 1);
+        let (result_state, _, _) = branches.remove(0);
+        let MatchState::BattleState(bs) = result_state else { panic!("battle continues") };
+
+        assert!(bs.p2_active_mons[0].hp < bs.p2_active_mons[0].stats[0], "Fake Out must deal damage to a non-immune type");
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 0, "Growl must be prevented by the flinch — P1's Atk must not fall");
+    }
+
+    // ── Self-boost moves emit BoostChanged ──────────────────────────────────────
+
+    /// Dragon Dance's +1 Atk / +1 Spe must surface as BoostChanged events nested
+    /// under MoveUsed, not just silently mutate state.
+    #[test]
+    fn dragon_dance_emits_boost_changed() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Gyarados, pd, md, Some(50),
+            Some([Some(PokemonMove::DragonDance), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(branches.len(), 1);
+        let (result_state, events_opt, _) = branches.remove(0);
+        let MatchState::BattleState(bs) = result_state else { panic!("battle continues") };
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 1);
+        assert_eq!(bs.p1_active_mons[0].boosts[4], 1);
+
+        let events = events_opt.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0()).expect("MoveUsed for P1 slot 0 must be present");
+        assert!(
+            mv.reactions.iter().any(|e| matches!(&e.kind, EventKind::BoostChanged { target, boost_idx: 0, stages: 1 } if *target == p1s0())),
+            "Dragon Dance must emit a +1 Atk BoostChanged; reactions = {:#?}", mv.reactions
+        );
+        assert!(
+            mv.reactions.iter().any(|e| matches!(&e.kind, EventKind::BoostChanged { target, boost_idx: 4, stages: 1 } if *target == p1s0())),
+            "Dragon Dance must emit a +1 Spe BoostChanged; reactions = {:#?}", mv.reactions
+        );
+    }
+
+    // ── Reaction nesting: Competitive nests under the triggering drop ──────────
+
+    /// Parting Shot lowers Atk and SpA by 1 each; a Competitive target's +4 SpA
+    /// reaction (and its AbilityRevealed) must nest under the SpA drop that
+    /// triggered it, not sit as a flat sibling of it.
+    #[test]
+    fn competitive_nests_under_triggering_drop() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Incineroar, pd, md, Some(50),
+            Some([Some(PokemonMove::PartingShot), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p1_back = build_pokemon_state(
+            Species::Charmander, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Milotic, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Competitive), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![p1_back], vec![p2], vec![]),
+        );
+
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        assert_eq!(branches.len(), 1);
+        let (_, events_opt, _) = branches.remove(0);
+        let events = events_opt.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0()).expect("MoveUsed for P1 slot 0 must be present");
+
+        let spa_drop = mv.reactions.iter()
+            .find(|e| matches!(&e.kind, EventKind::BoostChanged { target, boost_idx: 2, stages: -1 } if *target == p2s0()))
+            .expect("the -1 SpA drop must be present; reactions = {:#?}");
+        let reveal = spa_drop.reactions.iter()
+            .find(|r| matches!(&r.kind, EventKind::AbilityRevealed { slot, ability } if *slot == p2s0() && *ability == Ability::Competitive))
+            .expect("Competitive's reveal must nest under the triggering SpA drop");
+        assert!(
+            reveal.reactions.iter().any(|rr| matches!(&rr.kind, EventKind::BoostChanged { target, boost_idx: 2, stages: 4 } if *target == p2s0())),
+            "Competitive's +4 SpA must nest under its own reveal"
+        );
+    }
+
+    // ── Reaction nesting: crit + faint under DamageDealt, Moxie under Faint ────
+
+    /// A crit KO: Crit and Faint must both nest under the DamageDealt they're a
+    /// reaction to, and the attacker's Moxie reveal + boost must nest under Faint.
+    #[test]
+    fn crit_ko_nests_faint_and_moxie_under_damage() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        // Storm Throw always crits and never misses, removing RNG from the test.
+        let p1 = build_pokemon_state(
+            Species::Articuno, pd, md, Some(50),
+            Some([Some(PokemonMove::StormThrow), None, None, None]),
+            None, Some(Ability::Moxie), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(1),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_back = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![p2_back]),
+        );
+
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, true, 1,
+        );
+        assert_eq!(branches.len(), 1, "Frost Breath always crits: expect 1 branch");
+        let (result_state, events_opt, _) = branches.remove(0);
+        let MatchState::BattleState(bs) = result_state else { panic!("battle continues") };
+        assert!(bs.p2_active_mons[0].fainted, "a level-1 Shuckle must be OHKO'd by a crit Frost Breath");
+        assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Moxie must grant +1 Atk on the KO");
+
+        let events = events_opt.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0()).expect("MoveUsed for P1 slot 0 must be present");
+        let dmg = mv.reactions.iter()
+            .find(|e| matches!(&e.kind, EventKind::DamageDealt { target, .. } if *target == p2s0()))
+            .expect("a DamageDealt reaction for the target must be present");
+        assert!(
+            dmg.reactions.iter().any(|r| matches!(&r.kind, EventKind::Crit { target } if *target == p2s0())),
+            "Crit must nest under DamageDealt; dmg = {dmg:#?}"
+        );
+        let faint = dmg.reactions.iter()
+            .find(|r| matches!(&r.kind, EventKind::Faint { slot } if *slot == p2s0()))
+            .expect("Faint must nest under DamageDealt");
+        let moxie_reveal = faint.reactions.iter()
+            .find(|r| matches!(&r.kind, EventKind::AbilityRevealed { slot, ability } if *slot == p1s0() && *ability == Ability::Moxie))
+            .expect("Moxie's reveal must nest under Faint");
+        assert!(
+            moxie_reveal.reactions.iter().any(|r| matches!(&r.kind, EventKind::BoostChanged { target, boost_idx: 0, stages: 1 } if *target == p1s0())),
+            "Moxie's +1 Atk must nest under its own reveal"
+        );
     }
 }

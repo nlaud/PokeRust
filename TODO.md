@@ -3,7 +3,7 @@
 - Illusion wears off on immune hits and self targeting moves. Research this ability extensively before implementing. https://bulbapedia.bulbagarden.net/wiki/Illusion_(Ability)
 ### New features
 - Frontend features
-  - Other information modes such as open team sheets, open team sheets - natures
+  - Other information modes such as open team sheets, open team sheets - natures (plan in depth how to implement the representation of this information, that's the hardest part)
   - Music within settings w/ youtube api (VanilluxePavillion?)
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)
 - Create a meta sampler from pikalytics, and then get the algorithm to understand that

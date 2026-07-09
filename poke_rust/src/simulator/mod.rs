@@ -663,11 +663,10 @@ fn apply_single_hit_branch(
         }
     }
 
-    // Emit Crit before DamageDealt — only when the hit actually deals damage. Disguise
-    // already zeroed `damage` above; Substitute and type-absorb returned early above.
-    if is_crit && damage > 0 {
-        simulator_helpers::emit(&mut branch_state, EventKind::Crit { target: target_slot });
-    }
+    // Crit is now emitted per endure-outcome iteration below (nested as a reaction under
+    // DamageDealt, alongside Faint) rather than here — see the `run_damage_reactions`
+    // closure further down, which uses `eff_damage` (the per-iteration, endure-adjusted
+    // damage) rather than the raw `damage` this function was called with.
 
     // Snapshot pre-hit HP for Innards Out, which deals back min(computed_damage, pre_hit_hp).
     let target_pre_hit_hp = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
@@ -906,11 +905,22 @@ fn apply_single_hit_branch(
             }
         }
 
-        // Any direct damaging hit dispels Illusion. This must happen unconditionally (not
-        // observer-gated) since illusion_disguise may be read mechanically elsewhere.
-        // Grab the true species before the mutable clear so the borrows don't overlap.
-        let illusion_species: Option<Species> = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
-            .and_then(|m| m.illusion_disguise.as_ref().map(|_| m.species.clone()));
+        // Illusion breaks only when the holder actually takes damage from a damaging move
+        // (Bulbapedia: "takes damage from a damaging move" — indirect damage, Substitute
+        // damage, type-immune 0-damage hits, and status/self-targeting moves do NOT break
+        // it). Substitute-absorbed hits already returned early above; gating on eff_damage
+        // > 0 here additionally excludes type-immune hits (which keep hit=true but deal 0,
+        // see the crash-damage handling below) and status/self-target moves (which always
+        // carry eff_damage == 0 on this path).
+        // This must happen unconditionally (not observer-gated) since illusion_disguise may
+        // be read mechanically elsewhere. Grab the true species before the mutable clear so
+        // the borrows don't overlap.
+        let illusion_species: Option<Species> = if eff_damage > 0 {
+            simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+                .and_then(|m| m.illusion_disguise.as_ref().map(|_| m.species.clone()))
+        } else {
+            None
+        };
         if let Some(actual_species) = illusion_species {
             if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, target_slot) {
                 mon.illusion_disguise = None;
@@ -922,10 +932,90 @@ fn apply_single_hit_branch(
             }
         }
 
-        // Emit DamageDealt now that the target_mon borrow has ended.
+        // DamageDealt's reactions: Crit (if this iteration is a crit that dealt real damage)
+        // and the target's Faint (with Moxie/Eelevate/Fell Stinger nested under the Faint
+        // node, since they're triggered by — and only make sense after — the KO). Bundled
+        // into one closure so it can nest under DamageDealt when that's emitted, or run
+        // unnested when there's no DamageDealt to attach to (no observer, or this endure
+        // iteration dealt no real damage — target_fainted is then never true in practice).
+        let run_damage_reactions = |bs: &mut BattleState| {
+            if is_crit && eff_damage > 0 {
+                simulator_helpers::emit(bs, EventKind::Crit { target: target_slot });
+            }
+
+            if target_fainted {
+                simulator_helpers::handle_pokemon_faint(bs, target_slot.player, target_slot.slot_index);
+                simulator_helpers::with_reactions(bs, EventKind::Faint { slot: target_slot }, |bs| {
+                    // Moxie: +1 Attack on a direct KO, only if the attacker survived (no
+                    // recoil-KO trigger). Stacks naturally across multi-target / multi-hit KOs.
+                    let items_suppressed = simulator_helpers::items_are_suppressed(bs);
+                    let attacker_alive = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                        .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(bs, m)
+                            && m.ability == Ability::Moxie)
+                        .unwrap_or(false);
+                    if attacker_alive {
+                        simulator_helpers::apply_reaction_self_boost(bs, attack_slot, Ability::Moxie, &[1, 0, 0, 0, 0, 0, 0]);
+                    }
+
+                    // Eelevate: +1 in the holder's highest non-HP base stat when it directly KOs a
+                    // target with a damaging move. Fires after Moxie for ordering consistency.
+                    let eelevate_alive = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                        .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(bs, m)
+                            && m.ability == Ability::Eelevate)
+                        .unwrap_or(false);
+                    if eelevate_alive {
+                        let boost_index = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                            .map(|atk| simulator_helpers::highest_boostable_stat_index(atk));
+                        if let Some(boost_index) = boost_index {
+                            let mut boosts = [0i8; 7];
+                            boosts[boost_index] = 1;
+                            simulator_helpers::apply_reaction_self_boost(bs, attack_slot, Ability::Eelevate, &boosts);
+                        }
+                    }
+
+                    // Fell Stinger: +3 Attack when the user directly KOs a target with this move.
+                    // Fires regardless of ability; only requires the attacker is still alive.
+                    // This is a move effect (no ability reveal), so its BoostChanged nests
+                    // directly under Faint rather than under a reveal.
+                    if *move_name == PokemonMove::FellStinger {
+                        let attacker_still_alive = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                            .map(|m| !m.fainted)
+                            .unwrap_or(false);
+                        if attacker_still_alive {
+                            let fs_delta = if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(bs, attack_slot) {
+                                simulator_helpers::apply_stat_boost_external(atk, &[3, 0, 0, 0, 0, 0, 0], items_suppressed)
+                            } else { [0i8; 7] };
+                            for (boost_idx, &stages) in fs_delta.iter().enumerate() {
+                                if stages != 0 { simulator_helpers::emit(bs, EventKind::BoostChanged { target: attack_slot, boost_idx, stages }); }
+                            }
+                        }
+                    }
+                });
+
+                // Destiny Bond: if the attacker was taken down by the target's Destiny Bond,
+                // process their faint now (after all KO bonuses so Moxie/Fell Stinger can't
+                // fire on a mon that killed itself via Destiny Bond). This Faint belongs to the
+                // ATTACKER — a different Pokemon than the one whose Faint reactions we just
+                // nested above — so it stays a sibling rather than nesting further.
+                let attacker_destiny_bonded = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                    .map(|m| m.fainted)
+                    .unwrap_or(false);
+                if attacker_destiny_bonded {
+                    simulator_helpers::handle_pokemon_faint(bs, attack_slot.player, attack_slot.slot_index);
+                    // A self-faint shows no damage line in-game — Faint alone conveys HP 0
+                    // (the inference Faint handler zeroes HP).
+                    simulator_helpers::emit(bs, EventKind::Faint { slot: attack_slot });
+                }
+            }
+        };
+
+        // Emit DamageDealt now that the target_mon borrow has ended, nesting Crit/Faint (and
+        // Faint's own KO-triggered reactions) underneath it.
         if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, damage_dealt_hp_info) {
             let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
-            simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp });
+            simulator_helpers::with_reactions(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp }, run_damage_reactions);
+        } else {
+            run_damage_reactions(&mut bs);
         }
         // S5: emit the target's pinch-berry heal (if one fired) separately from the
         // DamageDealt above, nested under the berry's ItemLost — "used its Sitrus
@@ -952,74 +1042,6 @@ fn apply_single_hit_branch(
         }
         if smack_down_removed_telekinesis {
             simulator_helpers::emit(&mut bs, EventKind::VolatileEnd { target: target_slot, volatile: VolatileStatus::Telekinesis });
-        }
-
-        if target_fainted {
-            simulator_helpers::handle_pokemon_faint(&mut bs, target_slot.player, target_slot.slot_index);
-            simulator_helpers::emit(&mut bs, EventKind::Faint { slot: target_slot });
-
-            // Moxie: +1 Attack on a direct KO, only if the attacker survived (no recoil-KO trigger).
-            // Stacks naturally across multi-target / multi-hit KOs.
-            let items_suppressed = simulator_helpers::items_are_suppressed(&bs);
-            let attacker_alive = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
-                .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(&bs, m)
-                    && m.ability == Ability::Moxie)
-                .unwrap_or(false);
-            if attacker_alive {
-                let moxie_delta = if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, attack_slot) {
-                    simulator_helpers::apply_stat_boost_external(atk, &[1, 0, 0, 0, 0, 0, 0], items_suppressed)
-                } else { [0i8; 7] };
-                for (boost_idx, &stages) in moxie_delta.iter().enumerate() {
-                    if stages != 0 { simulator_helpers::emit(&mut bs, EventKind::BoostChanged { target: attack_slot, boost_idx, stages }); }
-                }
-            }
-
-            // Eelevate: +1 in the holder's highest non-HP base stat when it directly KOs a
-            // target with a damaging move. Fires after Moxie for ordering consistency.
-            let eelevate_alive = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
-                .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(&bs, m)
-                    && m.ability == Ability::Eelevate)
-                .unwrap_or(false);
-            if eelevate_alive {
-                let eelevate_delta = if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, attack_slot) {
-                    let boost_index = simulator_helpers::highest_boostable_stat_index(atk);
-                    let mut boosts = [0i8; 7];
-                    boosts[boost_index] = 1;
-                    simulator_helpers::apply_stat_boost_external(atk, &boosts, items_suppressed)
-                } else { [0i8; 7] };
-                for (boost_idx, &stages) in eelevate_delta.iter().enumerate() {
-                    if stages != 0 { simulator_helpers::emit(&mut bs, EventKind::BoostChanged { target: attack_slot, boost_idx, stages }); }
-                }
-            }
-
-            // Fell Stinger: +3 Attack when the user directly KOs a target with this move.
-            // Fires regardless of ability; only requires the attacker is still alive.
-            if *move_name == PokemonMove::FellStinger {
-                let attacker_still_alive = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
-                    .map(|m| !m.fainted)
-                    .unwrap_or(false);
-                if attacker_still_alive {
-                    let fs_delta = if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, attack_slot) {
-                        simulator_helpers::apply_stat_boost_external(atk, &[3, 0, 0, 0, 0, 0, 0], items_suppressed)
-                    } else { [0i8; 7] };
-                    for (boost_idx, &stages) in fs_delta.iter().enumerate() {
-                        if stages != 0 { simulator_helpers::emit(&mut bs, EventKind::BoostChanged { target: attack_slot, boost_idx, stages }); }
-                    }
-                }
-            }
-
-            // Destiny Bond: if the attacker was taken down by the target's Destiny Bond,
-            // process their faint now (after all KO bonuses so Moxie/Fell Stinger can't
-            // fire on a mon that killed itself via Destiny Bond).
-            let attacker_destiny_bonded = simulator_helpers::get_pokemon_at_slot(&bs, attack_slot)
-                .map(|m| m.fainted)
-                .unwrap_or(false);
-            if attacker_destiny_bonded {
-                simulator_helpers::handle_pokemon_faint(&mut bs, attack_slot.player, attack_slot.slot_index);
-                // A self-faint shows no damage line in-game — Faint alone conveys HP 0
-                // (the inference Faint handler zeroes HP).
-                simulator_helpers::emit(&mut bs, EventKind::Faint { slot: attack_slot });
-            }
         }
 
         if sand_spit_triggered {
@@ -1065,9 +1087,22 @@ fn apply_single_hit_branch(
             }
         }
 
-        let sec_branches = simulator_helpers::apply_secondary_effects(&bs, attack_slot, target_slot, move_data);
-        for (sec_bs, sec_prob) in sec_branches {
-            outcomes.push((sec_bs, branch_probability * endure_prob * sec_prob));
+        // A type-immune hit from a damaging move (Physical/Special, eff_damage == 0 despite
+        // hit == true — see the crash-damage comment above) doesn't affect the target at
+        // all: no target secondaries (e.g. Fake Out's flinch must not land on a Ghost) and
+        // no self secondaries/self_boost (e.g. Draco Meteor's SpA drop shouldn't fire off an
+        // immune hit either). Status/self-targeting moves (Dragon Dance, etc.) always carry
+        // eff_damage == 0 here but are not gated — their self_boost must still apply and
+        // emit, so the gate is scoped to the damaging categories only.
+        let immune_zero_damage = eff_damage == 0
+            && matches!(move_data.category, crate::state::dex_data::MoveCategory::Physical | crate::state::dex_data::MoveCategory::Special);
+        if immune_zero_damage {
+            outcomes.push((bs, branch_probability * endure_prob));
+        } else {
+            let sec_branches = simulator_helpers::apply_secondary_effects(&bs, attack_slot, target_slot, move_data);
+            for (sec_bs, sec_prob) in sec_branches {
+                outcomes.push((sec_bs, branch_probability * endure_prob * sec_prob));
+            }
         }
     }
 
@@ -1588,14 +1623,15 @@ fn possible_damage_outcomes_for_move(
                 mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ProteanActivated, 0));
             }
             // The in-game message attributes the type change to the ability
-            // ("[from] ability: Protean"), so reveal it alongside.
-            simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed {
+            // ("[from] ability: Protean"), so nest the TypeChanged under the reveal.
+            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
                 slot: action.user_slot,
                 ability: protean_ability,
-            });
-            simulator_helpers::emit(&mut next_state, EventKind::TypeChanged {
-                slot: action.user_slot,
-                new_types: vec![new_type],
+            }, |next_state| {
+                simulator_helpers::emit(next_state, EventKind::TypeChanged {
+                    slot: action.user_slot,
+                    new_types: vec![new_type],
+                });
             });
         }
     }
@@ -4577,12 +4613,14 @@ fn possible_damage_outcomes_for_move(
             && action.user_slot.player != target_slot.player
             && target_has_priority_block_ability
         {
-            // In-game the blocking ability is announced ("X cannot use Y!").
-            simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed {
+            // In-game the blocking ability is announced ("X cannot use Y!"); nest the
+            // resulting failure under the reveal.
+            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
                 slot: *target_slot,
                 ability: target.ability.clone(),
+            }, |next_state| {
+                simulator_helpers::emit(next_state, EventKind::MoveFailed { slot: *target_slot });
             });
-            simulator_helpers::emit(&mut next_state, EventKind::MoveFailed { slot: *target_slot });
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;

@@ -56,6 +56,8 @@ export interface PokemonView {
   /** Atk, Def, SpA, SpD, Spe, Acc, Eva stages */
   boosts: [number, number, number, number, number, number, number]
   nature: string
+  /** HP, Atk, Def, SpA, SpD, Spe EVs. */
+  evs: [number, number, number, number, number, number]
   item: string | null
   ability: string
   moves: (MoveView | null)[]

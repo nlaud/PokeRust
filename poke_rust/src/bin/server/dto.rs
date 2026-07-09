@@ -89,6 +89,8 @@ pub struct PokemonView {
     /// Atk, Def, SpA, SpD, Spe, Acc, Eva stages.
     pub boosts: [i8; 7],
     pub nature: String,
+    /// HP, Atk, Def, SpA, SpD, Spe EVs.
+    pub evs: [u8; 6],
     pub item: Option<String>,
     pub ability: String,
     pub moves: Vec<Option<MoveViewDto>>,
