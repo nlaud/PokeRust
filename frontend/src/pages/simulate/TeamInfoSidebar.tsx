@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { PlayerId, PokemonView } from '../../api/types'
 import Sprite from '../../components/common/Sprite'
+import { typeStyle } from '../../lib/typeColors'
 import { useBattle } from '../../store/battleStore'
 
 const STAT_NAMES = ['HP', 'Atk', 'Def', 'SpA', 'SpD', 'Spe']
@@ -54,7 +55,8 @@ function MonRow({
               {mon.types.map((t) => (
                 <span
                   key={t}
-                  className="shrink-0 rounded bg-subtle px-1 text-[9px] font-medium uppercase text-ink-muted"
+                  style={typeStyle(t)}
+                  className="shrink-0 rounded px-1 text-[9px] font-medium uppercase"
                 >
                   {t}
                 </span>

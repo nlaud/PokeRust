@@ -10228,8 +10228,16 @@ fn apply_effect_to_target(
         }
     }
 
-    apply_weather_effects(state, effect, attacker_slot);
-    apply_terrain_effects(state, effect);
+    // Whole-field effects (weather / terrain / pseudo-weather like Trick Room) belong to the
+    // field, not to any one target. For MoveTarget::All moves the per-target loop calls this
+    // function once per living active mon, so applying them here unconditionally toggles Trick
+    // Room / Wonder Room once per mon (and redundantly re-sets weather/terrain). Every
+    // field-effect move includes the user's own slot in its target list, so apply these exactly
+    // once, when we reach the user's slot.
+    if target_slot == attacker_slot {
+        apply_weather_effects(state, effect, attacker_slot);
+        apply_terrain_effects(state, effect);
+    }
 }
 
 /// Apply all effects from a HitEffect to the attacker pokemon.

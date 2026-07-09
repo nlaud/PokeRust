@@ -10255,6 +10255,86 @@ mod tests {
             simulator_helpers::apply_end_of_turn_status_effects(&mut magic_room);
             assert!(magic_room.p2_active_mons[0].hp < magic_before);
         }
+
+        // Regression: Trick Room is MoveTarget::All, so resolve_move_targets returns every
+        // living active mon on the field (user included). The pseudo-weather toggle used to be
+        // applied once per *target slot* instead of once per move use, so a single cast toggled
+        // Trick Room on and off repeatedly (net "off" in singles with 2 slots, "on" with a
+        // spurious extra end/start pair in doubles with 3+ slots) — see
+        // apply_effect_to_target/apply_weather_effects in helpers.rs.
+        #[test]
+        fn trick_room_sets_once_per_use_singles() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let user = build_pokemon_state(
+                Species::Sinistcha, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::TrickRoom), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let foe = build_pokemon_state(
+                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+            let state = battle_state_from_lists(vec![user], vec![], vec![foe], vec![]);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+            let after = extract_battle_state(outcomes).0;
+
+            let count = after.pseudo_weathers.iter()
+                .filter(|pw| matches!(pw, PseudoWeather::TrickRoom))
+                .count();
+            assert_eq!(count, 1, "a single Trick Room use must leave it active exactly once, \
+                not net-toggled off by being applied once per resolved target");
+            let idx = after.pseudo_weathers.iter()
+                .position(|pw| matches!(pw, PseudoWeather::TrickRoom)).unwrap();
+            // Set to 5 turns during move resolution, then decremented once by this same
+            // turn's end-of-turn effects (prune_timed_effects) -> 4.
+            assert_eq!(after.pseudo_weather_turns[idx], 4);
+        }
+
+        #[test]
+        fn trick_room_sets_once_per_use_doubles() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let mon = |species, mv| build_pokemon_state(
+                species, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(mv), None, None, None]),
+                None, Some(Ability::None), None, None, None, None, None, false,
+            );
+
+            // Doubles: Trick Room's MoveTarget::All resolves to all 4 living active slots
+            // (user's own side + both foes), reproducing the reported bug where a single cast
+            // toggled the field effect once per slot instead of once per move use.
+            let user = mon(Species::Sinistcha, PokemonMove::TrickRoom);
+            let ally = mon(Species::Tyranitar, PokemonMove::Splash);
+            let foe_a = mon(Species::Palafin, PokemonMove::Splash);
+            let foe_b = mon(Species::Pelipper, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![user, ally], vec![], vec![foe_a, foe_b], vec![]);
+
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
+                &move_dex,
+                &pokemon_dex,
+            );
+            let after = extract_battle_state(outcomes).0;
+
+            let count = after.pseudo_weathers.iter()
+                .filter(|pw| matches!(pw, PseudoWeather::TrickRoom))
+                .count();
+            assert_eq!(count, 1, "a single Trick Room use in doubles (4 living slots) must still \
+                leave it active exactly once, not toggled on/off/on by the per-slot loop");
+        }
     }
 
     mod move_effects {
