@@ -881,7 +881,21 @@ fn parse_pokemon_header(
             normalize_string(text_before)
         }
     };
-    let species_key = Species::from_str(&key_str);
+    let mut species_key = Species::from_str(&key_str);
+    // A teamsheet may name a Mega form directly (e.g. "Tyranitar-Mega"). Mega
+    // Evolution is an in-battle action driven by the held stone, not a build-time
+    // state, so reduce such a line to its base species. build_pokemon_state's
+    // resolve_mega_info then re-derives mega_species/has_mega_form from the held
+    // mega stone, exactly as a "Tyranitar @ Tyranitarite" sheet would.
+    if let Some(data) = pokemon_dex.get(&species_key) {
+        if is_mega_dex_entry(&species_key, data) {
+            if let Some(base) = data.base_species.clone() {
+                if base != species_key {
+                    species_key = base;
+                }
+            }
+        }
+    }
     if pokemon_dex.get(&species_key).is_none() {
         eprintln!(
             "Warning: '{}' not found in dex (key: '{:?}')",

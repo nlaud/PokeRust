@@ -35246,3 +35246,93 @@ mod playtest_fix_batch {
         );
     }
 }
+
+// ── Teamsheet parsing: a directly-named Mega form resolves to its base species ─
+//
+// Showdown-style teamsheets sometimes name a Mega form on the header line
+// itself (e.g. "Tyranitar-Mega @ Tyranitarite") rather than the base species.
+// Mega Evolution is an in-battle action driven by the held stone
+// (`state::battle::try_mega_evolution`), not a build-time state, so the parser
+// must reduce such a header to the base species + held stone, letting
+// `resolve_mega_info`/`resolve_mega_species` (state::pokemon) re-derive
+// `mega_species`/`has_mega_form` exactly as a "Tyranitar @ Tyranitarite" sheet
+// already does.
+mod teamsheet_mega_parsing {
+    use crate::data::item::Item;
+    use crate::data::species::Species;
+    use crate::state::pokemon::parse_team_sheet_str;
+    use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
+
+    #[test]
+    fn mega_suffix_header_resolves_to_base_species() {
+        let sheet = "\
+Tyranitar-Mega @ Tyranitarite
+Ability: Sand Stream
+Level: 50
+EVs: 32 HP / 32 Atk / 2 Spe
+Adamant Nature
+- Rock Slide
+- Knock Off
+- Ice Punch
+- Protect
+";
+        let team = parse_team_sheet_str(sheet, pokemon_dex(), move_dex(), false);
+        assert_eq!(team.len(), 1);
+        let mon = &team[0];
+        assert_eq!(mon.species, Species::Tyranitar, "header must resolve to the base species, not the Mega form");
+        assert_eq!(mon.item, Item::Tyranitarite);
+        assert!(!mon.is_mega, "must not start the battle already mega-evolved");
+        assert!(mon.has_mega_form, "must be eligible to mega-evolve in-battle");
+        assert_eq!(mon.mega_species, Some(Species::TyranitarMega), "mega_species must be re-derived from the held stone");
+    }
+
+    /// The "-Mega-X"/"-Mega-Y" suffix must reduce to the shared base species,
+    /// while the stone (not the stripped suffix) determines which mega variant
+    /// mega_species resolves to.
+    #[test]
+    fn mega_xy_suffix_header_resolves_to_base_species_and_correct_variant() {
+        let sheet = "\
+Raichu-Mega-Y @ Raichunite Y
+Ability: Lightning Rod
+Level: 50
+EVs: 2 HP / 32 SpA / 32 Spe
+Timid Nature
+- Fake Out
+- Zap Cannon
+- Focus Blast
+- Protect
+";
+        let team = parse_team_sheet_str(sheet, pokemon_dex(), move_dex(), false);
+        assert_eq!(team.len(), 1);
+        let mon = &team[0];
+        assert_eq!(mon.species, Species::Raichu, "Mega-Y header must resolve to base Raichu");
+        assert_eq!(mon.item, Item::RaichuniteY);
+        assert!(!mon.is_mega);
+        assert!(mon.has_mega_form);
+        assert_eq!(mon.mega_species, Some(Species::RaichuMegaY), "the Y variant must come from the held stone");
+    }
+
+    /// Guard against the "mega" substring false positive: Yanmega's name
+    /// contains "mega" but it is not a Mega form (no baseSpecies in the dex)
+    /// and must parse as itself, untouched.
+    #[test]
+    fn species_containing_mega_substring_is_not_reduced() {
+        let sheet = "\
+Yanmega @ Leftovers
+Ability: Speed Boost
+Level: 50
+EVs: 32 HP / 32 SpA / 2 Spe
+Modest Nature
+- Bug Buzz
+- Air Slash
+- Protect
+- Detect
+";
+        let team = parse_team_sheet_str(sheet, pokemon_dex(), move_dex(), false);
+        assert_eq!(team.len(), 1);
+        let mon = &team[0];
+        assert_eq!(mon.species, Species::Yanmega);
+        assert!(!mon.has_mega_form);
+        assert_eq!(mon.mega_species, None);
+    }
+}
