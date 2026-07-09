@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import ConfirmDialog from '../components/common/ConfirmDialog'
 import { fetchItemCatalog, type CatalogItem } from '../lib/items'
-import { itemSpriteUrl } from '../lib/sprites'
+import { cachedImageUrl, itemSpriteUrl } from '../lib/sprites'
 import { loadFormats, newId, saveFormats, type StoredFormat } from '../lib/storage'
 
 export default function FormatsPage() {
@@ -216,7 +216,7 @@ function FormatEditor({
               }`}
             >
               <img
-                src={itemSpriteUrl(item.name)}
+                src={cachedImageUrl(itemSpriteUrl(item.name))}
                 alt={item.label}
                 width={30}
                 height={30}

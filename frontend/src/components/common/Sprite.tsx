@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { fetchSprites } from '../../lib/sprites'
+import { useEffect, useState } from 'react'
+import { cachedImageUrl, fetchSprites } from '../../lib/sprites'
 
 interface SpriteProps {
   species: string
@@ -47,7 +47,8 @@ const MAX_IMG_RETRIES = 2
 export default function Sprite({ species, facing = 'front', size = 64, className = '' }: SpriteProps) {
   const [url, setUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
-  const imgRetries = useRef(0)
+  const [loaded, setLoaded] = useState(false)
+  const [useProxy, setUseProxy] = useState(true)
 
   useEffect(() => {
     let cancelled = false
@@ -56,7 +57,6 @@ export default function Sprite({ species, facing = 'front', size = 64, className
 
     setUrl(null)
     setFailed(false)
-    imgRetries.current = 0
 
     function attemptFetch() {
       fetchSprites(species).then(
@@ -93,30 +93,63 @@ export default function Sprite({ species, facing = 'front', size = 64, className
     }
   }, [species, facing])
 
+  // Resolving a sprite URL is only half the load — the image bytes still have
+  // to come down (through the disk-cache proxy, or GitHub on a cold miss).
+  // Warm the browser's cache with a detached Image() first (same idiom as
+  // lib/sprites.ts's preloadSprites) and only flip `loaded` once it actually
+  // fires onload, so the spinner in the render below stays up for the whole
+  // download instead of vanishing the instant the URL is known. The real
+  // <img> mounted below then loads instantly from that warmed cache.
+  useEffect(() => {
+    if (!url) return
+    const resolvedUrl = url
+    let cancelled = false
+    let retries = 0
+    let proxy = true
+    setLoaded(false)
+    setUseProxy(true)
+
+    function attemptLoad() {
+      const probe = new Image()
+      probe.onload = () => {
+        if (!cancelled) setLoaded(true)
+      }
+      probe.onerror = () => {
+        if (cancelled) return
+        // The disk-cache proxy or the GitHub-hosted sprite occasionally
+        // drops mid-load under burst. Retry the same src a couple of times,
+        // then fall back to the direct (un-proxied) URL once before
+        // conceding — a genuine 404 here would already have been caught
+        // upstream as a `resolved === null` case, not this.
+        if (retries < MAX_IMG_RETRIES) {
+          retries += 1
+          setTimeout(attemptLoad, 300 * retries)
+        } else if (proxy) {
+          proxy = false
+          setUseProxy(false)
+          attemptLoad()
+        } else {
+          setFailed(true)
+        }
+      }
+      probe.src = proxy ? cachedImageUrl(resolvedUrl) : resolvedUrl
+    }
+
+    attemptLoad()
+    return () => {
+      cancelled = true
+    }
+  }, [url])
+
   if (failed || (!url && !species)) return <Placeholder size={size} />
-  if (!url) return <Spinner size={size} className={className} />
+  if (!url || !loaded) return <Spinner size={size} className={className} />
   return (
     <img
-      src={url}
+      src={useProxy ? cachedImageUrl(url) : url}
       alt={species}
       width={size}
       height={size}
       className={`[image-rendering:pixelated] ${className}`}
-      onError={() => {
-        // The image URL resolved fine but the actual GitHub-hosted sprite
-        // occasionally drops mid-load under burst too. Force the <img> to
-        // re-mount with the same src (a couple of times) before conceding —
-        // a genuine 404 here would already have been caught upstream as a
-        // `resolved === null` case, not this onError.
-        if (imgRetries.current < MAX_IMG_RETRIES) {
-          imgRetries.current += 1
-          const retryUrl = url
-          setUrl(null)
-          setTimeout(() => setUrl(retryUrl), 300 * imgRetries.current)
-        } else {
-          setFailed(true)
-        }
-      }}
     />
   )
 }

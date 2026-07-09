@@ -270,6 +270,18 @@ export function itemSpriteUrl(itemSlug: string): string {
 }
 
 /**
+ * Route a raw.githubusercontent sprite URL through the server's on-disk cache
+ * (`GET /api/sprites?url=...`, see `poke_rust/src/bin/server/routes.rs`), so the
+ * bytes are fetched from GitHub once and served from local disk on every load
+ * after. Resolved-URL caching (`memoryCache`/localStorage above) still keys off
+ * the raw external URL — this wrapping only happens at the point of an actual
+ * image request, keeping the cache key stable if the proxy path ever changes.
+ */
+export function cachedImageUrl(url: string): string {
+  return `/api/sprites?url=${encodeURIComponent(url)}`
+}
+
+/**
  * Mega forme display names a mon could turn into, derived from its held item:
  * "Charizardite X" → "Charizard-Mega-X"; any other "…ite" stone whose stem
  * prefixes the species name ("Tyranitarite" → "Tyranitar-Mega"). Champions-only
@@ -301,7 +313,7 @@ export function preloadSprites(speciesList: string[]) {
     void fetchSprites(species)
       .then((urls) => {
         for (const url of [urls.front, urls.back]) {
-          if (url) new Image().src = url
+          if (url) new Image().src = cachedImageUrl(url)
         }
       })
       .catch(() => {

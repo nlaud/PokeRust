@@ -2,9 +2,11 @@
 //! and a mutex-guarded session map (single-user local tool — coarse locking is fine).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, State};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -21,6 +23,10 @@ use crate::session::{self, BattleSession, Dexes, SessionConfig};
 pub struct AppState {
     pub dexes: Arc<Dexes>,
     pub sessions: Arc<Mutex<HashMap<String, BattleSession>>>,
+    /// On-disk sprite cache directory (gitignored) — see `get_sprite`.
+    pub sprite_cache_dir: PathBuf,
+    /// Shared client for the one-time upstream fetch on a cache miss.
+    pub http: reqwest::Client,
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -172,4 +178,75 @@ pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) 
     } else {
         not_found()
     }
+}
+
+/// Sprites live outside the repo on GitHub (see `frontend/src/lib/sprites.ts`); nothing
+/// is ever bundled here. This is a caching proxy: a disk hit serves straight from
+/// `sprite_cache_dir`, a miss fetches the PNG from GitHub exactly once, writes it to
+/// disk, and serves it. Only `raw.githubusercontent.com` URLs are accepted — this is
+/// not a general-purpose proxy.
+const ALLOWED_SPRITE_HOST_PREFIX: &str = "https://raw.githubusercontent.com/";
+
+#[derive(Deserialize)]
+pub struct SpriteQuery {
+    url: String,
+}
+
+fn sprite_bytes_response(bytes: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (CONTENT_TYPE, "image/png"),
+            // Sprite bytes are content-addressed by the upstream URL and never change
+            // once cached, so both the browser and any intermediary can cache forever.
+            (CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+pub async fn get_sprite(State(app): State<AppState>, Query(query): Query<SpriteQuery>) -> Response {
+    let url = query.url;
+    if !url.starts_with(ALLOWED_SPRITE_HOST_PREFIX) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "only raw.githubusercontent.com sprite URLs are proxied",
+        );
+    }
+    let remote_path = &url[ALLOWED_SPRITE_HOST_PREFIX.len()..];
+    // Reject path traversal / empty segments (e.g. "..", "a//b") before ever joining
+    // this onto a filesystem path.
+    if remote_path.is_empty() || remote_path.split('/').any(|seg| seg.is_empty() || seg == "..") {
+        return error(StatusCode::BAD_REQUEST, "invalid sprite path");
+    }
+
+    let cache_path = app.sprite_cache_dir.join(remote_path);
+
+    if let Ok(bytes) = tokio::fs::read(&cache_path).await {
+        return sprite_bytes_response(bytes);
+    }
+
+    let upstream = match app.http.get(&url).send().await {
+        Ok(resp) => resp,
+        Err(_) => return error(StatusCode::BAD_GATEWAY, "failed to reach sprite upstream"),
+    };
+    if !upstream.status().is_success() {
+        // e.g. a genuine 404 for a species/form GitHub doesn't have — don't cache
+        // this, let the frontend's own fallback chain (see sprites.ts) handle it.
+        return upstream.status().into_response();
+    }
+    let bytes = match upstream.bytes().await {
+        Ok(b) => b,
+        Err(_) => return error(StatusCode::BAD_GATEWAY, "failed reading sprite upstream body"),
+    };
+
+    if let Some(parent) = cache_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    // Best-effort write: a failure to cache (e.g. disk full) shouldn't fail the
+    // response — just serve the bytes we already fetched.
+    let _ = tokio::fs::write(&cache_path, &bytes).await;
+
+    sprite_bytes_response(bytes.to_vec())
 }
