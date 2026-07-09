@@ -85,6 +85,10 @@ function readPersistentCache(): Record<string, SpriteUrls> {
 }
 
 function persist(slug: string, urls: SpriteUrls) {
+  // Read-modify-write, but synchronous end-to-end (no `await` between the
+  // read and the write) — JS's single-threaded execution means this can't
+  // interleave with another `persist()` call, even though many sprite
+  // resolutions are in flight concurrently.
   const cache = readPersistentCache()
   cache[slug] = urls
   try {
@@ -94,12 +98,88 @@ function persist(slug: string, urls: SpriteUrls) {
   }
 }
 
+/** Requests in flight against pokeapi.co at once. Keeps a cold Teams-page
+ *  load (dozens of sprites mounting at once) from bursting past what PokeAPI
+ *  will tolerate — the burst was the main cause of dropped sprites. */
+const MAX_CONCURRENT_REQUESTS = 5
+
+function createLimiter(max: number) {
+  let active = 0
+  const queue: (() => void)[] = []
+
+  function schedule() {
+    if (active >= max || queue.length === 0) return
+    active++
+    const run = queue.shift()!
+    run()
+  }
+
+  return function limit<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      queue.push(() => {
+        task()
+          .then(resolve, reject)
+          .finally(() => {
+            active--
+            schedule()
+          })
+      })
+      schedule()
+    })
+  }
+}
+
+const limit = createLimiter(MAX_CONCURRENT_REQUESTS)
+
+const REQUEST_TIMEOUT_MS = 8000
+const MAX_FETCH_RETRIES = 3
+const RETRY_BASE_DELAY_MS = 300
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Fetch a PokeAPI URL through the concurrency limiter, with a timeout and
+ * retry-with-backoff on transient failures (network error, timeout, 429,
+ * 5xx). A 404 is a definitive "not found" — it's returned as a normal
+ * (non-ok) Response, not retried. Throws only once every retry on a
+ * transient failure has been exhausted; callers treat that throw as "try
+ * again later," never as "this sprite doesn't exist."
+ */
+function pokeApiFetch(url: string): Promise<Response> {
+  return limit(async () => {
+    let lastError: unknown
+    for (let attempt = 0; attempt <= MAX_FETCH_RETRIES; attempt++) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+      try {
+        const response = await fetch(url, { signal: controller.signal })
+        if (response.ok || response.status === 404) return response
+        lastError = new Error(`PokeAPI ${response.status} for ${url}`)
+      } catch (err) {
+        lastError = err
+      } finally {
+        clearTimeout(timer)
+      }
+      if (attempt < MAX_FETCH_RETRIES) {
+        const backoff = RETRY_BASE_DELAY_MS * 2 ** attempt
+        await delay(backoff + Math.random() * backoff * 0.5)
+      }
+    }
+    throw lastError
+  })
+}
+
 export function fetchSprites(species: string): Promise<SpriteUrls> {
   const slug = showdownToSlug(species)
 
   const cached = memoryCache.get(slug)
   if (cached) return cached
 
+  // A stored `{front: null, back: null}` is a truthy object, so a
+  // previously-confirmed "this sprite doesn't exist" result is served from
+  // cache here too, instead of re-running the whole resolution chain.
   const persisted = readPersistentCache()[slug]
   if (persisted) {
     const resolved = Promise.resolve(persisted)
@@ -108,13 +188,26 @@ export function fetchSprites(species: string): Promise<SpriteUrls> {
   }
 
   const promise = (async (): Promise<SpriteUrls> => {
-    const urls = await resolveSprites(slug)
-    if (urls) {
-      persist(slug, urls)
-      return urls
+    try {
+      const urls = await resolveSprites(slug)
+      if (urls) {
+        persist(slug, urls)
+        return urls
+      }
+      // Every candidate in the fallback chain came back a clean 404 — this
+      // sprite genuinely doesn't exist. Persist the null result so future
+      // loads don't pay the resolution chain's network cost again.
+      console.warn(`PokeAPI sprite lookup failed for "${species}" (slug "${slug}")`)
+      persist(slug, { front: null, back: null })
+      return { front: null, back: null }
+    } catch (err) {
+      // Transient failure (network error/timeout/5xx surviving every
+      // retry) — never cache this outcome. Evict the in-flight promise so
+      // the next caller (e.g. Sprite's own retry effect) re-attempts the
+      // network instead of being stuck behind a memoized rejection.
+      memoryCache.delete(slug)
+      throw err
     }
-    console.warn(`PokeAPI sprite lookup failed for "${species}" (slug "${slug}")`)
-    return { front: null, back: null }
   })()
 
   memoryCache.set(slug, promise)
@@ -123,7 +216,7 @@ export function fetchSprites(species: string): Promise<SpriteUrls> {
 
 /** GET /pokemon/{slug} and pull out the default sprite URLs, or null on 404. */
 async function spritesFromPokemonEndpoint(slug: string): Promise<SpriteUrls | null> {
-  const response = await fetch(`https://pokeapi.co/api/v2/pokemon/${slug}`)
+  const response = await pokeApiFetch(`https://pokeapi.co/api/v2/pokemon/${slug}`)
   if (!response.ok) return null
   const data = await response.json()
   return {
@@ -140,6 +233,13 @@ async function spritesFromPokemonEndpoint(slug: string): Promise<SpriteUrls | nu
  * 3. progressively strip trailing hyphen tokens (Champions-only megas like
  *    "chandelure-mega" fall back to the base "chandelure" sprite), retrying
  *    1–2 each time.
+ *
+ * `pokeApiFetch` already retries transient failures internally; if it still
+ * throws, that error propagates straight out of this function (and out to
+ * `fetchSprites`) rather than being swallowed into "try the next candidate."
+ * Otherwise a real outage would silently walk the whole fallback chain and
+ * land on a false "doesn't exist" — exactly the permanent-placeholder bug
+ * this rework fixes.
  */
 async function resolveSprites(slug: string): Promise<SpriteUrls | null> {
   let candidate = slug
@@ -147,19 +247,15 @@ async function resolveSprites(slug: string): Promise<SpriteUrls | null> {
     const direct = await spritesFromPokemonEndpoint(candidate)
     if (direct) return direct
 
-    try {
-      const speciesResponse = await fetch(`https://pokeapi.co/api/v2/pokemon-species/${candidate}`)
-      if (speciesResponse.ok) {
-        const data = await speciesResponse.json()
-        const varieties = data.varieties as { is_default: boolean; pokemon: { name: string } }[]
-        const defaultName = varieties?.find((v) => v.is_default)?.pokemon.name
-        if (defaultName && defaultName !== candidate) {
-          const viaSpecies = await spritesFromPokemonEndpoint(defaultName)
-          if (viaSpecies) return viaSpecies
-        }
+    const speciesResponse = await pokeApiFetch(`https://pokeapi.co/api/v2/pokemon-species/${candidate}`)
+    if (speciesResponse.ok) {
+      const data = await speciesResponse.json()
+      const varieties = data.varieties as { is_default: boolean; pokemon: { name: string } }[]
+      const defaultName = varieties?.find((v) => v.is_default)?.pokemon.name
+      if (defaultName && defaultName !== candidate) {
+        const viaSpecies = await spritesFromPokemonEndpoint(defaultName)
+        if (viaSpecies) return viaSpecies
       }
-    } catch {
-      // Network hiccup on the fallback path — fall through to suffix stripping.
     }
 
     const lastHyphen = candidate.lastIndexOf('-')
@@ -202,10 +298,15 @@ export function megaFormeNames(species: string, item: string | null | undefined)
 export function preloadSprites(speciesList: string[]) {
   for (const species of new Set(speciesList)) {
     if (!species) continue
-    void fetchSprites(species).then((urls) => {
-      for (const url of [urls.front, urls.back]) {
-        if (url) new Image().src = url
-      }
-    })
+    void fetchSprites(species)
+      .then((urls) => {
+        for (const url of [urls.front, urls.back]) {
+          if (url) new Image().src = url
+        }
+      })
+      .catch(() => {
+        // Transient failure — not our job to retry here. A mounted
+        // Sprite component (or a later preload pass) will pick it up.
+      })
   }
 }
