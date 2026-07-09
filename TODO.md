@@ -1,32 +1,5 @@
 # TODO
 ### Fixes
-- Confusion damage should be a reaction to taking the damage
-- Rage powder does not work properly (also follow me ??? P1's Sinistcha used Rage Powder!
-
-P2's Aerodactyl used Dual Wingbeat!
-
-The attack missed P1's Tyranitar-Mega!
-
-P1's Tyranitar-Mega took damage (now 192 HP)
-
-Hit 1 time(s)!)
-- Same test case, cannot miss a hit of an attack then hit the next one, once one misses all future multstrike hits miss
-- Trick room should not effect mega evolution order
-- Armor tail does not properely block fake out for moves targeting allies at least (P1's Raichu Mega Evolved into Raichu-Mega-Y!
-
-P1's Raichu-Mega-Y's No Guard!
-
-P1's Raichu-Mega-Y used Fake Out!
-
-P2's Incineroar took damage (now 95%)
-
-P2's Incineroar can't act (Flinch)
-
-P1's Sinistcha used Imprison!
-
-P2's Farigiraf can't act (Imprison))
-- No guard does not work properly: (P1's Raichu-Mega-Y used Focus Blast!
-The attack missed P2's Incineroar!)
 - Toxic spikes from toxic debris are set on wrong side (presumable also applies to other spikes and poison spike setting points? P1's Glimmora's Toxic Debris!
 
 Toxic Spikes (1) was set on P1's side!)

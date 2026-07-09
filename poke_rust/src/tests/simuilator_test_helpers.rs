@@ -312,6 +312,10 @@ pub fn repeat_hit_distribution(hit_distribution: &[(u16, f64)], hit_count: usize
     distribution
 }
 
+/// Combine per-hit damage distributions for a move whose hits each carry their own accuracy
+/// check (Triple Kick / Triple Axel / Population Bomb style). A miss on any hit **ends the
+/// move** — the damage accumulated so far is final, it is not carried forward to re-roll a
+/// later hit — matching Bulbapedia's per-hit-accuracy multi-strike semantics.
 pub fn combine_hit_distributions_with_hit_chances(
     hit_distributions: &[Vec<(u16, f64)>],
     hit_chances: &[f64],
@@ -323,7 +327,13 @@ pub fn combine_hit_distributions_with_hit_chances(
         let mut next_active = HashMap::new();
 
         for (damage_so_far, damage_probability) in &active {
-            *next_active.entry(*damage_so_far).or_insert(0.0) += damage_probability * (1.0 - hit_chance);
+            // A miss ends the sequence: the running total is final, not carried forward.
+            // Skip entirely when hit_chance is exactly 1.0 (e.g. No Guard) — inserting a
+            // zero-probability entry would still create a HashMap key, inflating `finished`'s
+            // length past the true number of distinct nonzero outcomes.
+            if *hit_chance < 1.0 {
+                *finished.entry(*damage_so_far).or_insert(0.0) += damage_probability * (1.0 - hit_chance);
+            }
 
             for (hit_damage, hit_probability) in hit_distribution {
                 *next_active.entry(damage_so_far.saturating_add(*hit_damage)).or_insert(0.0) += damage_probability * hit_chance * hit_probability;

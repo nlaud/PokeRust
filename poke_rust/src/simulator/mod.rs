@@ -199,13 +199,40 @@ fn resolve_confusion_self_hit_outcomes(
     for (damage, probability) in damage_outcomes {
         let mut branch_state = state.clone();
         decrement_move_pp(&mut branch_state, user_slot, move_name, None);
-        // Hurting itself in confusion means the chosen move never executed.
-        simulator_helpers::note_move_outcome(&mut branch_state, user_slot, simulator_helpers::MoveOutcome::Cant(CantReason::Confusion));
 
-        if let Some(game_over_state) = simulator_helpers::apply_damage_and_check_game_over(&mut branch_state, user_slot, damage) {
-            outcomes.push((game_over_state, probability));
-        } else {
-            outcomes.push((MatchState::BattleState(branch_state), probability));
+        // Hurting itself in confusion means the chosen move never executed. Replicate the
+        // bookkeeping `note_move_outcome` would do for a `Cant`, but emit the `Cant` event as
+        // the PARENT of the self-hit damage (via `with_reactions`) instead of a flat sibling —
+        // recoil / Life Orb self-damage already nests under its cause (MoveUsed); the
+        // confusion self-hit should nest under Cant{Confusion} the same way.
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, user_slot) {
+            mon.last_move_failed = true;
+        }
+        branch_state.move_was_prevented = true;
+
+        let game_over = simulator_helpers::with_reactions(
+            &mut branch_state,
+            EventKind::Cant { slot: user_slot, reason: CantReason::Confusion },
+            |bs| simulator_helpers::apply_damage_and_check_game_over(bs, user_slot, damage),
+        );
+
+        match game_over {
+            Some(MatchState::GameOverState { winner, final_state, .. }) => {
+                // `apply_damage_and_check_game_over` snapshots `pending_events` for the
+                // GameOverState *before* `with_reactions` finishes nesting DamageDealt/Faint
+                // under Cant (the nesting only happens once the closure returns), so that
+                // snapshot is stale/flat. `branch_state.pending_events` now holds the
+                // correctly-nested version — rebuild the GameOverState with it.
+                let mut final_state = final_state;
+                final_state.pending_events = branch_state.pending_events.clone();
+                outcomes.push((MatchState::GameOverState {
+                    winner,
+                    pending_events: branch_state.pending_events.clone(),
+                    final_state,
+                }, probability));
+            }
+            Some(other) => outcomes.push((other, probability)),
+            None => outcomes.push((MatchState::BattleState(branch_state), probability)),
         }
     }
 
@@ -1143,21 +1170,29 @@ fn resolve_multihit_move_for_target(
     let mut final_outcomes: Vec<(BattleState, f64)> = Vec::new();
 
     for (hit_count, hit_probability) in hit_count_branches {
-        // (state, probability, shared_roll, hits_landed) — hits_landed feeds King's Rock's
-        // combined-chance flinch calc.
-        let mut sequence_branches: Vec<(BattleState, f64, Option<u8>, u32)> = vec![(state.clone(), hit_probability, None, 0)];
+        // (state, probability, shared_roll, hits_landed, stopped) — hits_landed feeds King's
+        // Rock's combined-chance flinch calc; `stopped` marks a branch whose sequence ended
+        // early because a hit missed (a miss on any hit ends the move — all-or-nothing for
+        // default multi-hit moves, "keep what already landed" for per-hit-accuracy moves like
+        // Triple Kick — it must not let a later hit in the same branch auto-hit).
+        let mut sequence_branches: Vec<(BattleState, f64, Option<u8>, u32, bool)> = vec![(state.clone(), hit_probability, None, 0, false)];
 
         for hit_index in 0..hit_count {
-            let mut next_sequence_branches: Vec<(BattleState, f64, Option<u8>, u32)> = Vec::new();
+            let mut next_sequence_branches: Vec<(BattleState, f64, Option<u8>, u32, bool)> = Vec::new();
 
-            for (branch_state, branch_probability, shared_roll, hits_landed) in sequence_branches {
+            for (branch_state, branch_probability, shared_roll, hits_landed, stopped) in sequence_branches {
+                if stopped {
+                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed, stopped));
+                    continue;
+                }
+
                 let Some(current_target) = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot).cloned() else {
-                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed));
+                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed, stopped));
                     continue;
                 };
 
                 if current_target.fainted {
-                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed));
+                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed, stopped));
                     continue;
                 }
 
@@ -1169,7 +1204,7 @@ fn resolve_multihit_move_for_target(
 
                 let hit_accuracy_probability = if needs_accuracy_check {
                     simulator_helpers::accuracy_hit_probability(
-                        state,
+                        &branch_state,
                         attacker,
                         &current_target,
                         attack_slot,
@@ -1183,7 +1218,7 @@ fn resolve_multihit_move_for_target(
                 if hit_accuracy_probability < 1.0 {
                     let mut miss_state = branch_state.clone();
                     simulator_helpers::emit(&mut miss_state, EventKind::Missed { target: target_slot });
-                    next_sequence_branches.push((miss_state, branch_probability * (1.0 - hit_accuracy_probability), shared_roll, hits_landed));
+                    next_sequence_branches.push((miss_state, branch_probability * (1.0 - hit_accuracy_probability), shared_roll, hits_landed, true));
                 }
 
                 if hit_accuracy_probability <= 0.0 {
@@ -1227,7 +1262,7 @@ fn resolve_multihit_move_for_target(
                             ) {
                                 // Count only damaging hits toward King's Rock combined chance.
                                 let new_hits = if damage > 0 { hits_landed + 1 } else { hits_landed };
-                                next_sequence_branches.push((next_state, next_probability, Some(roll), new_hits));
+                                next_sequence_branches.push((next_state, next_probability, Some(roll), new_hits, false));
                             }
                         }
                     }
@@ -1260,7 +1295,7 @@ fn resolve_multihit_move_for_target(
                         ) {
                             // Count only damaging hits toward King's Rock combined chance.
                             let new_hits = if damage > 0 { hits_landed + 1 } else { hits_landed };
-                            next_sequence_branches.push((next_state, next_probability, shared_roll, new_hits));
+                            next_sequence_branches.push((next_state, next_probability, shared_roll, new_hits, false));
                         }
                     }
                 }
@@ -1277,9 +1312,11 @@ fn resolve_multihit_move_for_target(
 
         // Apply King's Rock and Stench flinch once per move per target using the combined
         // chance P(flinch) = 1 - 0.9^hits_landed, avoiding per-hit tree blowup.
-        for (mut branch_state, branch_probability, _, hits_landed) in sequence_branches {
+        for (mut branch_state, branch_probability, _, hits_landed, _stopped) in sequence_branches {
             // Emit HitCount once per multi-hit resolution, after all individual hits resolve.
-            if is_genuinely_multihit {
+            // A branch where every hit missed (hits_landed == 0) already emitted `Missed`
+            // when the first hit's accuracy check failed — don't also claim "Hit 0 time(s)".
+            if is_genuinely_multihit && hits_landed > 0 {
                 simulator_helpers::emit(&mut branch_state, EventKind::HitCount {
                     target: target_slot,
                     hits: hits_landed.min(255) as u8,
@@ -3650,6 +3687,208 @@ fn possible_damage_outcomes_for_move(
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
+    // The following `target: "self"` status moves (Follow Me, Rage Powder, Aqua Ring, Ingrain,
+    // Magnet Rise, Laser Focus, No Retreat, Grudge, Snatch, Bide) each have exactly one effect
+    // in the Showdown source: a top-level `volatileStatus`. The dex parser turns that into a
+    // 100%-chance secondary effect targeting the move's resolved target
+    // (`state/dex_data.rs::parse_secondaries`); for these moves that "target" is the user, and
+    // relying on that generic secondary path to reliably attach a self-volatile proved fragile
+    // (Rage Powder's redirection silently never activated — see TODO.md). Each is now given an
+    // explicit handler that pushes its volatile directly, following the Focus Energy /
+    // Defense Curl pattern above. (Shed Tail also parses to a top-level `volatileStatus:
+    // 'substitute'` but is NOT in this group — it already has bespoke handling in
+    // `apply_secondary_effects` for its HP-cost/fail-condition ordering, and Magic Coat is
+    // handled separately below by extending the Magic Bounce reflection block.)
+
+    // Follow Me: draws all single-target moves from opposing Pokémon to the user for the rest
+    // of the turn (redirection logic lives in `check_and_apply_redirection`, which reads this
+    // volatile). No fail condition beyond the standard doubles/triples-only restriction, which
+    // is enforced by `get_possible_commands_for_active_slot` rather than here.
+    if move_name == PokemonMove::FollowMe {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::FollowMe, 1));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::FollowMe,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Rage Powder: as Follow Me, but Grass-types, Overcoat, Stalwart, Propeller Tail, and Safety
+    // Goggles holders are immune to being redirected by it (checked on the attacker's side in
+    // `check_and_apply_redirection`, not here).
+    if move_name == PokemonMove::RagePowder {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::RagePowder, 1));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::RagePowder,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Aqua Ring: heals 1/16 max HP at the end of every turn until the user switches out.
+    // Persists indefinitely (TurnStatus duration 0), matching the Focus Energy / Defense Curl
+    // "permanent until removed" convention. The end-of-turn heal already keys off this volatile.
+    if move_name == PokemonMove::AquaRing {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::AquaRing, 0));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::AquaRing,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Ingrain: heals 1/16 max HP at the end of every turn, roots the user (cannot be forced out
+    // or voluntarily switch) until it faints, and grounds it, until it switches out. Persists
+    // indefinitely. The end-of-turn heal and forced-switch immunity already key off this volatile.
+    if move_name == PokemonMove::Ingrain {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, 0));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::Ingrain,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Magnet Rise: grants Ground-type immunity for 5 turns. Fails if the user already has
+    // Magnet Rise, is Ingrained, is under Smack Down/Ground'd-by-gravity, or Gravity is active.
+    if move_name == PokemonMove::MagnetRise {
+        let blocked = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::MagnetRise)
+                || simulator_helpers::has_status_volatile(m, &VolatileStatus::Ingrain)
+                || simulator_helpers::has_status_volatile(m, &VolatileStatus::SmackDown))
+            .unwrap_or(true)
+            || simulator_helpers::is_gravity_active(&next_state);
+        if blocked {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, 5));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::MagnetRise,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Laser Focus: the user's moves are guaranteed critical hits for the rest of this turn and
+    // all of the next (duration 2; the crit-ratio override already keys off this volatile).
+    if move_name == PokemonMove::LaserFocus {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.retain(|v| !matches!(v,
+                crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::LaserFocus, _)
+                    | crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LaserFocus, _)));
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::LaserFocus, 2));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::LaserFocus,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // No Retreat: +1 to every stat except accuracy/evasion, and traps the user on the field
+    // (cannot switch or flee) for as long as it remains active. Fails if already used (the trap
+    // cannot be reapplied — Bulbapedia: "if the user is already unable to switch out ... this
+    // move will still raise its stats"; simplified here to a straightforward reuse-block, since
+    // a No-Retreat user is always self-trapped by the time it could use the move again).
+    if move_name == PokemonMove::NoRetreat {
+        let already_used = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::NoRetreat))
+            .unwrap_or(true);
+        if already_used {
+            return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+        }
+        let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
+        let delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            let d = simulator_helpers::apply_stat_boost_external(mon, &[1, 1, 1, 1, 1, 0, 0], items_suppressed);
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::NoRetreat, 0));
+            // Trapped(0) is the generic voluntary-switch-prevention volatile checked by
+            // `simulator_helpers::is_trapped` (already used for Mean Look / Block / Spider Web).
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Trapped(0), 0));
+            d
+        } else { [0i8; 7] };
+        for (boost_idx, &stages) in delta.iter().enumerate() {
+            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::NoRetreat,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Magic Coat: for the rest of this turn, reflectable status moves used against the user are
+    // bounced back at their source — reuses the same reflection branch as the Magic Bounce
+    // ability (see the `target_has_magic_coat` check alongside `target_has_mb` below).
+    if move_name == PokemonMove::MagicCoat {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MagicCoat, 1));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::MagicCoat,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
+    // Grudge, Snatch, Bide: pushing the volatile (so it is at least observable/queryable) is
+    // implemented here, but each move's *full* mechanic requires intercepting a different part
+    // of the turn pipeline that does not yet have a hook (Grudge: drain the attacker's PP to 0
+    // when it faints the user; Snatch: steal the next status move any Pokémon on the field
+    // attempts to use; Bide: store damage taken over 2 turns then retaliate for double).
+    // Tracked as follow-up work; these are all `isNonstandard: "Past"` moves in the current
+    // generation's data (lower priority than the Follow Me / Rage Powder fix above).
+    if move_name == PokemonMove::Grudge {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Grudge, 1));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::Grudge,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+    if move_name == PokemonMove::Snatch {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Snatch, 1));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::Snatch,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+    if move_name == PokemonMove::Bide {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Bide, 3));
+        }
+        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            target: action.user_slot,
+            volatile: VolatileStatus::Bide,
+        });
+        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
+    }
+
     // Minimize: +2 evasiveness and apply the Minimize volatile (certain moves hit it for double
     // and never miss — handled in the damage calculation).
     if move_name == PokemonMove::Minimize {
@@ -4580,6 +4819,13 @@ fn possible_damage_outcomes_for_move(
     // For spread moves this creates independent miss branches per target.
     let mut per_target_outcomes: Vec<(FieldSlot, Vec<(u16, bool, bool, f64)>)> = Vec::new();
 
+    // Effective priority (base dex priority + Prankster / Gale Wings / Grassy Glide etc.
+    // boosts) depends only on the attacker/move, not the target, so it's computed once and
+    // shared by the Psychic Terrain and Armor Tail/Queenly Majesty/Dazzling blocks below —
+    // both block based on the move's actually-resolved priority, not its raw dex value.
+    let effective_priority = simulator_helpers::effective_move_priority(&next_state, &attacker, move_data);
+    let attacker_breaks_mold = simulator_helpers::attacker_breaks_mold(&next_state, &attacker);
+
     for target_slot in &target_slots {
         let mut outcomes_for_target: Vec<(u16, bool, bool, f64)> = Vec::new();
 
@@ -4590,7 +4836,7 @@ fn possible_damage_outcomes_for_move(
 
         let (invulnerability_multiplier, should_continue) = check_invulnerability_status(&attacker, &target, &move_name);
 
-        if move_data.priority > 0
+        if effective_priority > 0
             && simulator_helpers::pokemon_is_on_terrain(&next_state, &target, &crate::state::dex_data::Terrain::PsychicTerrain)
         {
             // Visible in-game ("X surrounds itself with psychic terrain!" / move fails).
@@ -4601,23 +4847,41 @@ fn possible_damage_outcomes_for_move(
         }
 
         // Queenly Majesty / Armor Tail / Dazzling: block any move with increased effective
-        // priority (after Prankster / Gale Wings boosts) from an opposing mon.
+        // priority from an opposing side — the ability protects its holder's whole side
+        // (allies included), not just whichever mon happens to be the direct target. This
+        // includes adjacent-foes spread moves (e.g. a Prankster Growl still gets blocked);
+        // Bulbapedia's "doesn't block moves that target all Pokemon" note is a narrower
+        // field-wide exemption (and even that has exceptions — Perish Song, Flower Shield,
+        // Rototiller are still blocked), not a general spread-move exemption.
         // Bypassed by Mold Breaker / Turboblaze / Teravolt (all three abilities are ignorable).
-        // Exception: spread/field-targeting moves are not blocked (doubles edge case).
-        let effective_priority = simulator_helpers::effective_move_priority(&next_state, &attacker, move_data);
-        let target_has_priority_block_ability =
-            !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
-            && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
-            && matches!(target.ability, Ability::QueenlyMajesty | Ability::ArmorTail | Ability::Dazzling);
-        if effective_priority > 0
+        let priority_blocker = if effective_priority > 0
             && action.user_slot.player != target_slot.player
-            && target_has_priority_block_ability
+            && !attacker_breaks_mold
         {
+            let side_mons: &[PokemonState] = match target_slot.player {
+                Player::P1 => &next_state.p1_active_mons,
+                Player::P2 => &next_state.p2_active_mons,
+            };
+            side_mons.iter().enumerate().find_map(|(idx, mon)| {
+                if !mon.fainted
+                    && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, mon)
+                    && matches!(mon.ability, Ability::QueenlyMajesty | Ability::ArmorTail | Ability::Dazzling)
+                {
+                    Some((FieldSlot { player: target_slot.player, slot_index: idx as u8 }, mon.ability.clone()))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        if let Some((blocker_slot, blocker_ability)) = priority_blocker {
             // In-game the blocking ability is announced ("X cannot use Y!"); nest the
-            // resulting failure under the reveal.
+            // resulting failure under the reveal. The reveal is on the ability holder's
+            // own slot, which may differ from the move's direct target (ally protection).
             simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                slot: *target_slot,
-                ability: target.ability.clone(),
+                slot: blocker_slot,
+                ability: blocker_ability,
             }, |next_state| {
                 simulator_helpers::emit(next_state, EventKind::MoveFailed { slot: *target_slot });
             });
@@ -4774,20 +5038,23 @@ fn possible_damage_outcomes_for_move(
             continue;
         }
 
-        // Magic Bounce: reflect opponent-targeted status moves back at the attacker.
-        // Fires before accuracy / invulnerability checks. Mold Breaker bypasses it.
-        // Only moves with the Reflectable flag are bounced (sourced from move data).
+        // Magic Bounce / Magic Coat: reflect opponent-targeted status moves back at the
+        // attacker. Fires before accuracy / invulnerability checks. Mold Breaker bypasses the
+        // Magic Bounce *ability* but not the Magic Coat *move* (Magic Coat is not an ignorable
+        // ability). Only moves with the Reflectable flag are bounced (sourced from move data).
         if matches!(move_data.category, MoveCategory::Status)
             && target_slot.player != action.user_slot.player
             && simulator_helpers::move_is_reflectable(&move_data)
-            && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
         {
-            let target_has_mb = simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot)
-                .map_or(false, |t| {
-                    !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t)
-                    && t.ability == Ability::MagicBounce
-                });
-            if target_has_mb {
+            let target_has_mb = !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
+                && simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot)
+                    .map_or(false, |t| {
+                        !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t)
+                        && t.ability == Ability::MagicBounce
+                    });
+            let target_has_magic_coat = simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot)
+                .map_or(false, |t| simulator_helpers::has_status_volatile(t, &VolatileStatus::MagicCoat));
+            if target_has_mb || target_has_magic_coat {
                 // Bounce: apply the move's effects to the ATTACKER (user_slot) as if the
                 // target (defender) used them. Swap attacker ↔ target slots so that
                 // side-condition hazards land on the original attacker's side.

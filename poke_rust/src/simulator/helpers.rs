@@ -5380,6 +5380,16 @@ pub fn accuracy_hit_probability(
         return acc as f64 / 100.0;
     }
 
+    // No Guard (on either side) guarantees the hit for all other moves too — it operates at
+    // the accuracy layer, not per-move, so ordinary sub-100%-accuracy moves (Focus Blast,
+    // Hydro Pump, ...) never miss. It does not bypass type immunity (handled separately in
+    // the damage pipeline) and is not suppressible by Mold Breaker.
+    let no_guard = (!pokemon_ability_is_suppressed(state, attacker) && attacker.ability == Ability::NoGuard)
+        || (!pokemon_ability_is_suppressed(state, target) && target.ability == Ability::NoGuard);
+    if no_guard {
+        return 1.0;
+    }
+
     match move_data.accuracy {
         AccuracyType::True => 1.0,
         AccuracyType::Percent(base_accuracy) => {
@@ -5598,11 +5608,14 @@ pub fn compare_action_order(
         }
         // Mega Evolutions and Terastallizations within their tier resolve in speed
         // order (a true speed tie still branches equally via Ordering::Equal).
+        // Per Bulbapedia, Trick Room only reverses move-execution order within a priority
+        // bracket — it does not affect Mega Evolution / Terastallization order, which is
+        // always fast-first regardless of Trick Room.
         (Action::MegaAction(m1), Action::MegaAction(m2)) => {
-            compare_slot_speed_order(state, m1.user_slot, m2.user_slot)
+            compare_slot_speed_order_impl(state, m1.user_slot, m2.user_slot, false)
         }
         (Action::TeraAction(t1), Action::TeraAction(t2)) => {
-            compare_slot_speed_order(state, t1.user_slot, t2.user_slot)
+            compare_slot_speed_order_impl(state, t1.user_slot, t2.user_slot, false)
         }
         _ => Ordering::Equal,
     }
@@ -5615,12 +5628,26 @@ fn compare_slot_speed_order(
     slot1: FieldSlot,
     slot2: FieldSlot,
 ) -> std::cmp::Ordering {
+    compare_slot_speed_order_impl(state, slot1, slot2, true)
+}
+
+/// Speed-order two field slots; the faster slot's action comes first, and a genuine
+/// speed tie returns Equal (callers branch equally on Equal). `respect_trick_room`
+/// selects whether an active Trick Room reverses the ordering — true for move
+/// execution, false for Mega Evolution / Terastallization order, which Trick Room
+/// does not affect.
+fn compare_slot_speed_order_impl(
+    state: &BattleState,
+    slot1: FieldSlot,
+    slot2: FieldSlot,
+    respect_trick_room: bool,
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (get_pokemon_at_slot(state, slot1), get_pokemon_at_slot(state, slot2)) {
         (Some(p1), Some(p2)) => {
             let speed1 = effective_speed_for_slot(state, slot1, p1);
             let speed2 = effective_speed_for_slot(state, slot2, p2);
-            let trick_room = trick_room_is_active(state);
+            let trick_room = respect_trick_room && trick_room_is_active(state);
 
             if (speed2 - speed1).abs() < 0.01 {
                 Ordering::Equal
