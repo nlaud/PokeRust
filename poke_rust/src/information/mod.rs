@@ -1,3 +1,4 @@
+pub mod describe;
 pub mod inference;
 pub mod information;
 pub mod materialize;

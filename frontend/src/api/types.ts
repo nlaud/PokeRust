@@ -42,7 +42,10 @@ export interface MoveView {
 
 export interface PokemonView {
   monId: number
-  /** Showdown display name, e.g. "Abomasnow-Mega" — also the sprite-slug source. */
+  /** Showdown display name, e.g. "Abomasnow-Mega" — also the sprite-slug source.
+   * Always the physically-displayed appearance (the Illusion disguise when one is
+   * active) regardless of information mode — a real player always sees this, it's
+   * never secret team-sheet info. */
   species: string
   level: number
   gender: string
@@ -51,24 +54,37 @@ export interface PokemonView {
   fainted: boolean
   status: Status | null
   volatiles: Volatile[]
-  /** HP, Atk, Def, SpA, SpD, Spe */
+  /** HP, Atk, Def, SpA, SpD, Spe. Under a masked (non-Perfect-Information) view this
+   * is the LOWER bound of the stat range; equal to `statsMax` for ground truth. */
   stats: [number, number, number, number, number, number]
+  /** Upper bound of the stat range — equal to `stats` unless masked and the range
+   * hasn't collapsed to a point yet. */
+  statsMax: [number, number, number, number, number, number]
   /** Atk, Def, SpA, SpD, Spe, Acc, Eva stages */
   boosts: [number, number, number, number, number, number, number]
   nature: string
-  /** HP, Atk, Def, SpA, SpD, Spe EVs. */
+  /** HP, Atk, Def, SpA, SpD, Spe EVs — lower bound under a masked view, see `stats`. */
   evs: [number, number, number, number, number, number]
+  /** Upper bound of the EV range, see `statsMax`. */
+  evsMax: [number, number, number, number, number, number]
   item: string | null
   ability: string
   moves: (MoveView | null)[]
   isTera: boolean
   teraType: string
   isMega: boolean
+  /** `true` when this mon's species is still an unresolved multi-candidate Illusion
+   * disguise in the observer's belief (always `false` for ground truth). */
+  isIllusionSuspected: boolean
 }
 
 export interface SideView {
   active: PokemonView[]
   back: PokemonView[]
+  /** Species shown at team preview but not brought into this battle (a bring-N-of-M
+   * format gap) — rendered grayed-out. Always empty for P1 and under Perfect
+   * Information. */
+  possibleBack?: PokemonView[]
   canTera: boolean
   canMega: boolean
   sideConditions: NamedTurns[]
@@ -90,6 +106,13 @@ export interface PreviewView {
 
 export type Phase = 'teamPreview' | 'normal' | 'selfSwitch' | 'replacement' | 'gameOver'
 
+/** The engine's CNF predicate store rendered as plain-English OR-clauses — literally
+ * "a list of ORs". Absent under Perfect Information (no belief tracked) or during
+ * team preview (no predicates yet); the Predicates tab only appears when present. */
+export interface BeliefView {
+  clauses: string[]
+}
+
 export interface BattleView {
   phase: Phase
   turnNumber: number
@@ -101,6 +124,7 @@ export interface BattleView {
   field?: FieldView
   selfSwitch?: FieldSlot
   winner?: PlayerId
+  belief?: BeliefView
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -210,6 +234,11 @@ export interface TurnLogEntry {
 
 // ── Requests / responses ────────────────────────────────────────────────────
 
+/** `'perfect'` (default) | `'openSheet'` | `'openSheetNatures'`. Selects the
+ * fog-of-war starting baseline for P1's view of P2 — see `InformationMode` in the
+ * Rust engine. */
+export type InformationMode = 'perfect' | 'openSheet' | 'openSheetNatures'
+
 export interface CreateBattleRequest {
   p1Team: string
   p2Team: string
@@ -218,6 +247,7 @@ export interface CreateBattleRequest {
   statPoints?: boolean
   considerCrit?: boolean
   damageRolls?: number
+  informationMode?: InformationMode
 }
 
 export interface CreateBattleResponse {

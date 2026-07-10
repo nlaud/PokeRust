@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import ConfirmDialog from '../components/common/ConfirmDialog'
 import { fetchItemCatalog, type CatalogItem } from '../lib/items'
 import { cachedImageUrl, itemSpriteUrl } from '../lib/sprites'
-import { loadFormats, newId, saveFormats, type StoredFormat } from '../lib/storage'
+import { favoritesFirst, loadFormats, newId, saveFormats, type StoredFormat } from '../lib/storage'
 
 export default function FormatsPage() {
   const [formats, setFormats] = useState<StoredFormat[]>(loadFormats)
@@ -25,11 +25,16 @@ export default function FormatsPage() {
     setCreating(false)
   }
 
+  const toggleFavorite = (format: StoredFormat) =>
+    update(formats.map((f) => (f.id === format.id ? { ...f, favorite: !f.favorite } : f)))
+
+  const sorted = favoritesFirst(formats)
+
   return (
     <div className="mx-auto max-w-6xl p-6">
       <h1 className="mb-6 text-xl font-semibold">Formats</h1>
       <div className="grid grid-cols-3 gap-6">
-        {formats.map((format) =>
+        {sorted.map((format) =>
           editingId === format.id ? (
             <FormatEditor key={format.id} initial={format} onSave={save} onCancel={() => setEditingId(null)} />
           ) : (
@@ -37,6 +42,7 @@ export default function FormatsPage() {
               key={format.id}
               format={format}
               onEdit={() => setEditingId(format.id)}
+              onFavorite={() => toggleFavorite(format)}
               onDelete={() => setPendingDelete(format)}
             />
           ),
@@ -50,6 +56,7 @@ export default function FormatsPage() {
               totalPokemon: 6,
               broughtPokemon: 3,
               bannedItems: [],
+              favorite: false,
             }}
             onSave={save}
             onCancel={() => setCreating(false)}
@@ -83,10 +90,12 @@ export default function FormatsPage() {
 function FormatCard({
   format,
   onEdit,
+  onFavorite,
   onDelete,
 }: {
   format: StoredFormat
   onEdit: () => void
+  onFavorite: () => void
   onDelete: () => void
 }) {
   return (
@@ -94,6 +103,16 @@ function FormatCard({
       <div className="mb-2 flex items-center justify-between">
         <h2 className="truncate text-sm font-semibold">{format.name}</h2>
         <div className="flex gap-1">
+          <button
+            onClick={onFavorite}
+            className={`lift rounded-card p-1.5 ${format.favorite ? 'text-warning' : 'text-ink-muted'}`}
+            aria-label="Favorite"
+            title="Favorite"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill={format.favorite ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+              <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z" />
+            </svg>
+          </button>
           <button onClick={onEdit} className="lift rounded-card p-1.5 text-ink-muted hover:text-ink" aria-label="Edit" title="Edit">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />

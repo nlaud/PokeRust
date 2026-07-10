@@ -1,7 +1,14 @@
 import { useEffect, useState } from 'react'
 import Select from '../../components/common/Select'
-import { loadBattleSetup, loadFormats, loadTeams, saveBattleSetup } from '../../lib/storage'
+import type { InformationMode } from '../../api/types'
+import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetup } from '../../lib/storage'
 import { useBattle } from '../../store/battleStore'
+
+const INFO_MODE_OPTIONS: { value: InformationMode; label: string }[] = [
+  { value: 'perfect', label: 'Perfect Information' },
+  { value: 'openSheet', label: 'Open Team Sheet' },
+  { value: 'openSheetNatures', label: 'Open Team Sheet + Natures' },
+]
 
 export default function SetupPanel() {
   const [teams] = useState(loadTeams)
@@ -20,10 +27,13 @@ export default function SetupPanel() {
   const [formatId, setFormatId] = useState(defaultFormat?.id ?? '')
   const [team1Id, setTeam1Id] = useState(savedTeam1?.id ?? teams[0]?.id ?? '')
   const [team2Id, setTeam2Id] = useState(savedTeam2?.id ?? teams[1]?.id ?? teams[0]?.id ?? '')
+  const [informationMode, setInformationMode] = useState<InformationMode>(
+    saved?.informationMode ?? 'perfect',
+  )
 
   useEffect(() => {
-    saveBattleSetup({ formatId, team1Id, team2Id })
-  }, [formatId, team1Id, team2Id])
+    saveBattleSetup({ formatId, team1Id, team2Id, informationMode })
+  }, [formatId, team1Id, team2Id, informationMode])
 
   const format = formats.find((f) => f.id === formatId)
   const team1 = teams.find((t) => t.id === team1Id)
@@ -42,11 +52,12 @@ export default function SetupPanel() {
       activePerSide: format.activePokemon,
       broughtPerSide: format.broughtPokemon,
       damageRolls: 16,
+      informationMode,
     })
   }
 
-  const formatOptions = formats.map((f) => ({ value: f.id, label: f.name }))
-  const teamOptions = teams.map((t) => ({ value: t.id, label: t.name }))
+  const formatOptions = favoritesFirst(formats).map((f) => ({ value: f.id, label: f.name }))
+  const teamOptions = favoritesFirst(teams).map((t) => ({ value: t.id, label: t.name }))
 
   return (
     <div className="mx-auto max-w-lg p-6">
@@ -74,10 +85,9 @@ export default function SetupPanel() {
         <label className="mb-6 block text-sm">
           <span className="mb-1 block font-medium">Information mode</span>
           <Select
-            value="perfect"
-            options={[{ value: 'perfect', label: 'Perfect Information' }]}
-            onChange={() => {}}
-            disabled
+            value={informationMode}
+            options={INFO_MODE_OPTIONS}
+            onChange={(v) => setInformationMode(v as InformationMode)}
           />
         </label>
 

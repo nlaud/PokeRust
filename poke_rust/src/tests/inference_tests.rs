@@ -9147,3 +9147,189 @@ fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
     );
 }
 
+// ── Information modes: describe.rs rendering, open-sheet reveal, team-preview →
+// battle conversion (bring-N-of-M known/possible-back split) ─────────────────────
+mod information_mode_tests {
+    use super::*;
+    use crate::information::describe::{
+        describe_clause, describe_move_slot, describe_statement, describe_unknown,
+        describe_unknown_item,
+    };
+    use crate::information::unknowns::{InformationMode, UnknownTeamPreviewState};
+    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
+
+    // ── describe.rs ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_describe_unknown_known_possibly_not() {
+        assert_eq!(describe_unknown(&Unknown::Known(Ability::RoughSkin)), "Rough Skin");
+        assert_eq!(
+            describe_unknown(&Unknown::Possibly(vec![Ability::RoughSkin, Ability::SandVeil])),
+            "Rough Skin or Sand Veil"
+        );
+        assert_eq!(describe_unknown(&Unknown::<Ability>::Not(vec![])), "Unknown");
+    }
+
+    #[test]
+    fn test_describe_unknown_item_shorter_list_uses_whitelist() {
+        let pool: HashSet<Item> =
+            [Item::Leftovers, Item::BlackSludge, Item::ChoiceBand, Item::ChoiceSpecs]
+                .into_iter()
+                .collect();
+        // Excluding 1 of 4 leaves 3 possible — the exclusion phrasing (1 item) is
+        // shorter than the possible-list phrasing (3 items).
+        let excl = Unknown::Not(vec![Item::ChoiceBand]);
+        assert_eq!(describe_unknown_item(&excl, Some(&pool)), "not Choice Band");
+    }
+
+    #[test]
+    fn test_describe_unknown_item_possibly_lists_candidates() {
+        let u = Unknown::Possibly(vec![Item::Leftovers, Item::BlackSludge]);
+        assert_eq!(describe_unknown_item(&u, None), "Leftovers or Black Sludge");
+    }
+
+    #[test]
+    fn test_describe_unknown_item_no_whitelist_renders_exclusions() {
+        // Without a whitelist (~1,000 items technically possible), a short exclusion
+        // list is virtually always the shorter description.
+        let u = Unknown::Not(vec![Item::ChoiceBand, Item::ChoiceSpecs]);
+        assert_eq!(describe_unknown_item(&u, None), "not Choice Band, not Choice Specs");
+    }
+
+    #[test]
+    fn test_describe_statement_has_item_resolves_mon_label() {
+        let state =
+            battle_1v1(unknown_mon_species(Species::Snorlax), unknown_mon_species(Species::Garchomp));
+        // mon_idx 0 = p1_active[0] (Snorlax), per the actives-first flat ordering.
+        let stmt = Statement::HasItem { mon_idx: 0, item: Item::Leftovers };
+        assert_eq!(describe_statement(&stmt, &state), "Snorlax's item is Leftovers");
+    }
+
+    #[test]
+    fn test_describe_clause_joins_with_or() {
+        let state =
+            battle_1v1(unknown_mon_species(Species::Snorlax), unknown_mon_species(Species::Garchomp));
+        let clause = vec![
+            Statement::HasItem { mon_idx: 0, item: Item::Leftovers },
+            Statement::HasItem { mon_idx: 0, item: Item::BlackSludge },
+        ];
+        assert_eq!(
+            describe_clause(&clause, &state),
+            "Snorlax's item is Leftovers OR Snorlax's item is Black Sludge"
+        );
+    }
+
+    #[test]
+    fn test_describe_move_slot_unknown_shows_placeholder() {
+        assert_eq!(describe_move_slot(Some(PokemonMove::Tackle)), "Tackle");
+        assert_eq!(describe_move_slot(None), "???");
+    }
+
+    // ── from_opponent_open_sheet ──────────────────────────────────────────────
+
+    fn concrete_mon(
+        species: Species,
+        ability: Ability,
+        item: Item,
+        nature: Nature,
+        moves: [Option<PokemonMove>; 4],
+    ) -> PokemonState {
+        build_pokemon_state(
+            species, &HashMap::new(), &HashMap::new(), Some(50), Some(moves),
+            None, Some(ability), Some(nature), Some(item), None, None, None, false,
+        )
+    }
+
+    #[test]
+    fn test_open_sheet_reveals_moves_item_ability_but_not_nature_or_evs() {
+        let mon = concrete_mon(
+            Species::Garchomp, Ability::RoughSkin, Item::ChoiceScarf, Nature::Jolly,
+            [Some(PokemonMove::Earthquake), Some(PokemonMove::Outrage), None, None],
+        );
+        let unk = UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, false);
+
+        assert_eq!(unk.item, Unknown::Known(Item::ChoiceScarf));
+        assert_eq!(unk.possible_abilities, Unknown::Known(Ability::RoughSkin));
+        assert_eq!(
+            unk.known_moves,
+            [Some(PokemonMove::Earthquake), Some(PokemonMove::Outrage), None, None]
+        );
+        // Nature/EVs are NEVER on a sheet — must stay fully unknown / worst-case bounded.
+        assert_eq!(unk.possible_natures, Unknown::Not(vec![]));
+        assert_eq!(unk.minEvs, [0; 6]);
+        assert_eq!(unk.maxEvs, [252; 6]);
+    }
+
+    #[test]
+    fn test_open_sheet_natures_tightens_stat_bounds_using_the_real_nature() {
+        let mon = concrete_mon(
+            Species::Garchomp, Ability::RoughSkin, Item::ChoiceScarf, Nature::Jolly,
+            [Some(PokemonMove::Earthquake), None, None, None],
+        );
+        let pre_reveal = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+        let unk = UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, true);
+
+        assert_eq!(unk.possible_natures, Unknown::Known(Nature::Jolly));
+        // Jolly NERFS SpA (fixed 0.9 mod now that nature is known, not the independent
+        // 1.1 "best case" a fully-unknown nature assumes) — revealing it must strictly
+        // lower the SpA ceiling.
+        assert!(
+            unk.maxStats[3] < pre_reveal.maxStats[3],
+            "revealing a SpA-nerfing nature must lower the SpA ceiling: {} !< {}",
+            unk.maxStats[3], pre_reveal.maxStats[3]
+        );
+        // Jolly BOOSTS Speed (fixed 1.1 mod, not the independent 0.9 "worst case") —
+        // revealing it must strictly raise the Speed floor.
+        assert!(
+            unk.minStats[5] > pre_reveal.minStats[5],
+            "revealing a Speed-boosting nature must raise the Speed floor: {} !> {}",
+            unk.minStats[5], pre_reveal.minStats[5]
+        );
+    }
+
+    // ── into_battle_state: known-back vs possible-back split ──────────────────
+
+    #[test]
+    fn test_into_battle_state_splits_brought_from_not_brought() {
+        // 6 species shown at preview; only 4 are brought (indices 0,1 active; 2,3 back).
+        let p2_mons: Vec<UnknownPokemonState> = [
+            Species::Garchomp, Species::Snorlax, Species::Corviknight,
+            Species::Charizard, Species::Ferrothorn, Species::Toxapex,
+        ]
+        .into_iter()
+        .map(unknown_mon_species)
+        .collect();
+        let preview = UnknownTeamPreviewState {
+            active_per_side: 1,
+            brought_per_side: 4,
+            p1_mons: vec![unknown_mon_species(Species::Snorlax)],
+            p2_mons,
+        };
+
+        let battle = preview.into_battle_state(&[0], &[], &[0], &[1, 2]);
+
+        assert_eq!(battle.p2_active_mons.len(), 1);
+        assert!(
+            matches!(&battle.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Garchomp)
+        );
+        assert_eq!(battle.p2_known_back_mons.len(), 2);
+        // Not-brought mons (Charizard, Ferrothorn, Toxapex — indices 3,4,5) land in
+        // possible_back, never known_back or active.
+        assert_eq!(battle.p2_possible_back_mons.len(), 3);
+        let possible_species: HashSet<Species> = battle
+            .p2_possible_back_mons
+            .iter()
+            .filter_map(|m| match &m.possible_species {
+                Unknown::Known(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            possible_species,
+            [Species::Charizard, Species::Ferrothorn, Species::Toxapex].into_iter().collect()
+        );
+        // The viewer's own side never has a "possible back" gap.
+        assert!(battle.p1_possible_back_mons.is_empty());
+    }
+}
+

@@ -13,6 +13,8 @@ use axum::Json;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use poke_rust::information::inference::InferenceConfig;
+use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::simulator;
 use poke_rust::state::battle::Player;
 
@@ -82,6 +84,37 @@ pub async fn create_battle(
         }
     }
 
+    let information_mode = match req.information_mode.as_str() {
+        "perfect" => InformationMode::PerfectInformation,
+        "openSheet" => InformationMode::OpenTeamSheet,
+        "openSheetNatures" => InformationMode::OpenTeamSheetNatures,
+        other => return unprocessable(format!("unknown informationMode: {other}")),
+    };
+
+    // Perfect Information keeps `belief`/`inference_config` at `None` — a true
+    // zero-overhead no-op that leaves ground-truth behavior byte-identical to
+    // before this feature existed.
+    let (belief, inference_config) = if information_mode == InformationMode::PerfectInformation {
+        (None, None)
+    } else {
+        let config = InferenceConfig {
+            use_stat_points: req.stat_points,
+            learnset_dex: app.dexes.learnset_dex.clone(),
+            ..InferenceConfig::default()
+        };
+        let belief = UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P1,
+            &preview.p1_mons,
+            &preview.p2_mons,
+            &app.dexes.pokemon_dex,
+            req.active_per_side,
+            req.brought_per_side,
+            50,
+            information_mode,
+        );
+        (Some(belief), Some(config))
+    };
+
     let session = BattleSession {
         state: poke_rust::state::battle::MatchState::TeamPreviewState(preview),
         config: SessionConfig {
@@ -89,8 +122,11 @@ pub async fn create_battle(
             brought_per_side: req.brought_per_side,
             consider_crit: req.consider_crit,
             damage_rolls: req.damage_rolls,
+            information_mode,
         },
         log: Vec::new(),
+        belief,
+        inference_config,
     };
 
     let battle_id = Uuid::new_v4().to_string();

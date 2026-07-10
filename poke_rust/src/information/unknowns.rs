@@ -24,6 +24,20 @@ pub enum PokemonHP {
     Percent(u8), //Opponents use percent
 }
 
+/// Selects the starting fog-of-war baseline for an opponent's Pokémon at team preview.
+/// `PerfectInformation` means no belief is tracked at all (the server keeps `belief =
+/// None` and ships ground truth) — this variant exists for completeness/testing only;
+/// `from_opponent_open_sheet` is never actually invoked with it in production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InformationMode {
+    PerfectInformation,
+    /// Species/ability/item/moves/Tera type revealed up front (like a real VGC open
+    /// team sheet); nature/EVs/IVs/exact stats still hidden.
+    OpenTeamSheet,
+    /// `OpenTeamSheet` plus the Pokémon's nature.
+    OpenTeamSheetNatures,
+}
+
 #[derive(Debug, Clone)]
 pub struct UnknownPokemonState {
     pub possible_mon_id: Unknown<u8>, //1:1 with species if there is only 1 of each pokemon
@@ -378,6 +392,98 @@ pub struct UnknownTeamPreviewState {
     pub p2_mons: Vec<UnknownPokemonState>,
 }
 
+impl UnknownTeamPreviewState {
+    /// Convert the team-preview fog state into the battle-phase `UnknownBattleState`,
+    /// once both players' team-preview lead/bring selections are known. Mirrors the
+    /// concrete `battle_state_from_preview_branching` (`simulator/mod.rs`), which
+    /// already receives exactly these four index arrays via `TeamPreviewCommand`.
+    ///
+    /// Fog mons are matched to their roster bucket by **original list position**
+    /// (not `mon_id` — an opponent's `possible_mon_id` is still unresolved at preview
+    /// time), using the same indices the concrete transition used, so belief and
+    /// ground truth stay in lockstep.
+    ///
+    /// `active_indices` and `back_indices` together only cover `brought_per_side`
+    /// mons. In a bring-N-of-M format, any `p2_mons` entry whose index appears in
+    /// neither list was shown at team preview but never brought into this battle —
+    /// those go to `p2_possible_back_mons` at the bare species-only baseline (no
+    /// moves/item/ability/nature reveal, regardless of information mode: a mon that's
+    /// not in this battle can never affect it, so there is nothing more to know).
+    /// The viewer's own side (`p1`) has no such gap — it's always fully known,
+    /// brought or not — so `p1_possible_back_mons` is always empty.
+    pub fn into_battle_state(
+        &self,
+        p1_active_indices: &[usize],
+        p1_back_indices: &[usize],
+        p2_active_indices: &[usize],
+        p2_back_indices: &[usize],
+    ) -> UnknownBattleState {
+        let pick = |mons: &[UnknownPokemonState], indices: &[usize]| -> Vec<UnknownPokemonState> {
+            indices.iter().filter_map(|&i| mons.get(i).cloned()).collect()
+        };
+
+        let p1_active_mons = pick(&self.p1_mons, p1_active_indices);
+        let p1_known_back_mons = pick(&self.p1_mons, p1_back_indices);
+        let p2_active_mons = pick(&self.p2_mons, p2_active_indices);
+        let p2_known_back_mons = pick(&self.p2_mons, p2_back_indices);
+        let p2_possible_back_mons: Vec<UnknownPokemonState> = self
+            .p2_mons
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !p2_active_indices.contains(i) && !p2_back_indices.contains(i))
+            .map(|(_, mon)| mon.clone())
+            .collect();
+
+        let total_roster = self.p1_mons.len().max(self.p2_mons.len()) as u8;
+
+        UnknownBattleState {
+            active_per_side: self.active_per_side,
+            back_mons_per_side: total_roster.saturating_sub(self.active_per_side),
+
+            p1_active_mons,
+            p2_active_mons,
+            p1_known_back_mons,
+            p2_known_back_mons,
+            p1_possible_back_mons: Vec::new(),
+            p2_possible_back_mons,
+
+            turn_number: 0,
+            turn_started: false,
+            turn_ended: false,
+
+            p1_has_tera: true,
+            p2_has_tera: true,
+            p1_has_mega: true,
+            p2_has_mega: true,
+
+            weather: None,
+            weather_turns: None,
+            weather_setter_mon_idx: None,
+            pseudo_weathers: Vec::new(),
+            pseudo_weather_turns: Vec::new(),
+            terrain: None,
+            terrain_turns: None,
+            terrain_setter_mon_idx: None,
+            p1_side_conditions: Vec::new(),
+            p1_side_condition_turns: Vec::new(),
+            p1_side_condition_setters: Vec::new(),
+            p2_side_conditions: Vec::new(),
+            p2_side_condition_turns: Vec::new(),
+            p2_side_condition_setters: Vec::new(),
+            p1_slot_conditions: vec![Vec::new(); self.active_per_side as usize],
+            p2_slot_conditions: vec![Vec::new(); self.active_per_side as usize],
+
+            self_switch_pending: None,
+            items_consumed_this_turn: Vec::new(),
+            last_move_on_field: None,
+            sub_damage_dealt: 0,
+            round_used_this_turn: false,
+
+            predicates: Vec::new(),
+        }
+    }
+}
+
 /// Fog-of-war analogue of `battle::MatchState`.  Tracks the game phase from a single
 /// player's perspective so observation code can pattern-match symmetrically with the
 /// concrete state machine.
@@ -618,6 +724,77 @@ impl UnknownPokemonState {
     }
 }
 
+impl UnknownPokemonState {
+    /// Build an opponent's fog-of-war view from an **open team sheet** reveal.
+    ///
+    /// A sheet is submitted before battle and reveals species/ability/item/moves/Tera
+    /// type regardless of anything that happens afterward — those fields are copied
+    /// straight from the real `mon` and set to `Known`. Nature/EVs/IVs/stats are never
+    /// on a sheet, so they stay at the same sound worst/best-case bounds
+    /// `from_opponent_species` already computes — unless `reveal_nature` is set (Open
+    /// Team Sheet + Natures), in which case the nature is also copied and the stat
+    /// bounds are tightened using that nature's real per-stat modifier instead of the
+    /// independent 0.9/1.1 worst-case mix both bounds otherwise assume.
+    pub fn from_opponent_open_sheet(
+        mon: &PokemonState,
+        dex: &HashMap<Species, PokemonData>,
+        level: u8,
+        reveal_nature: bool,
+    ) -> Self {
+        let mut unk = Self::from_opponent_species(mon.species.clone(), dex, level);
+
+        unk.possible_abilities = Unknown::Known(mon.ability.clone());
+        unk.possible_original_abilities = Unknown::Known(
+            mon.original_ability.clone().unwrap_or_else(|| mon.ability.clone()),
+        );
+        unk.item = Unknown::Known(mon.item.clone());
+        unk.known_moves = mon.moves.clone();
+        // A sheet reveals move identity, not remaining PP mid-battle — treat this as
+        // the team-preview baseline, same as `from_known_pokemon` would before any
+        // move has actually been used: current PP = max PP.
+        let max_pp = [
+            mon.max_pp[0] as i8,
+            mon.max_pp[1] as i8,
+            mon.max_pp[2] as i8,
+            mon.max_pp[3] as i8,
+        ];
+        unk.move_pp = max_pp;
+        unk.max_pp = max_pp;
+        unk.possible_tera_type = Unknown::Known(mon.tera_type.clone());
+
+        if reveal_nature {
+            unk.possible_natures = Unknown::Known(mon.nature.clone());
+            let base = dex
+                .get(&mon.species)
+                .map(|d| d.base_stats)
+                .unwrap_or([100u16; 6]);
+            // Nature is now fixed, so both bounds use its REAL per-stat modifier
+            // (not the independent 0.9/1.1 worst-case `from_opponent_species` used
+            // when the nature was still unknown) — only EV/IV remain uncertain.
+            let mods = crate::state::pokemon::nature_stat_modifiers(&mon.nature);
+            unk.minStats = [
+                calc_hp(base[0], 0, 0, level),
+                calc_stat(base[1], 0, 0, level, mods[0]),
+                calc_stat(base[2], 0, 0, level, mods[1]),
+                calc_stat(base[3], 0, 0, level, mods[2]),
+                calc_stat(base[4], 0, 0, level, mods[3]),
+                calc_stat(base[5], 0, 0, level, mods[4]),
+            ];
+            unk.maxStats = [
+                calc_hp(base[0], 31, 252, level),
+                calc_stat(base[1], 31, 252, level, mods[0]),
+                calc_stat(base[2], 31, 252, level, mods[1]),
+                calc_stat(base[3], 31, 252, level, mods[2]),
+                calc_stat(base[4], 31, 252, level, mods[3]),
+                calc_stat(base[5], 31, 252, level, mods[4]),
+            ];
+            // min/max_pre_nature_stat unchanged — nature doesn't affect BSV.
+        }
+
+        unk
+    }
+}
+
 // ── UnknownMatchState constructors ────────────────────────────────────────────
 
 impl UnknownMatchState {
@@ -645,6 +822,46 @@ impl UnknownMatchState {
         let opp_mons: Vec<UnknownPokemonState> = opponent_species
             .iter()
             .map(|s| UnknownPokemonState::from_opponent_species(s.clone(), dex, level))
+            .collect();
+
+        let (p1_mons, p2_mons) = match viewer {
+            Player::P1 => (my_mons, opp_mons),
+            Player::P2 => (opp_mons, my_mons),
+        };
+
+        UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
+            active_per_side,
+            brought_per_side,
+            p1_mons,
+            p2_mons,
+        })
+    }
+
+    /// Like [`team_preview_from_perspective`](Self::team_preview_from_perspective), but
+    /// for a non-perfect [`InformationMode`] where the opponent's team is revealed via
+    /// an open team sheet rather than starting fully unknown. Takes the opponent's
+    /// **actual** parsed team (not just species) since open-sheet reveals need ground
+    /// truth for moves/item/ability/Tera type. A separate function (rather than adding
+    /// a `mode` parameter to `team_preview_from_perspective`) keeps the existing
+    /// species-only path — and its tests — untouched.
+    pub fn team_preview_open_sheet_from_perspective(
+        viewer: Player,
+        my_team: &[PokemonState],
+        opponent_team: &[PokemonState],
+        dex: &HashMap<Species, PokemonData>,
+        active_per_side: u8,
+        brought_per_side: u8,
+        level: u8,
+        mode: InformationMode,
+    ) -> UnknownMatchState {
+        let my_mons: Vec<UnknownPokemonState> = my_team
+            .iter()
+            .map(UnknownPokemonState::from_known_pokemon)
+            .collect();
+        let reveal_nature = mode == InformationMode::OpenTeamSheetNatures;
+        let opp_mons: Vec<UnknownPokemonState> = opponent_team
+            .iter()
+            .map(|mon| UnknownPokemonState::from_opponent_open_sheet(mon, dex, level, reveal_nature))
             .collect();
 
         let (p1_mons, p2_mons) = match viewer {

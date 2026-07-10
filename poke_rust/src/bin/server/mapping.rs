@@ -3,8 +3,13 @@
 
 use crate::dto::*;
 use poke_rust::data::item::Item;
+use poke_rust::information::describe::{
+    describe_clause, describe_move_slot, describe_unknown, describe_unknown_item,
+};
 use poke_rust::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
-use poke_rust::information::unknowns::PokemonHP;
+use poke_rust::information::unknowns::{
+    PokemonHP, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
+};
 use poke_rust::state::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, TeamPreviewState};
 use poke_rust::state::dex_data::{SideCondition, SlotCondition, Status, VolatileStatus};
 use poke_rust::state::pokemon::{PokemonState, VolatileStatusState};
@@ -128,7 +133,17 @@ fn slot_condition_name(condition: &SlotCondition) -> String {
 pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
     PokemonView {
         mon_id: mon.mon_id,
-        species: mon.species.to_string(),
+        // A real player always sees the physically-displayed appearance — the
+        // Illusion disguise when one is active — never the true species underneath,
+        // regardless of information mode (this is a visual fact, not secret
+        // team-sheet info). `mon.types` still reflects the TRUE species since it
+        // drives damage calc; a fully faithful disguised-type display would need a
+        // dex lookup this function doesn't have, so it's left as a known gap.
+        species: mon
+            .illusion_disguise
+            .as_ref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| mon.species.to_string()),
         level: mon.level,
         gender: format!("{:?}", mon.gender),
         types: mon.types.iter().map(|t| format!("{:?}", t)).collect(),
@@ -140,9 +155,11 @@ pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
         status: mon.status.as_ref().map(status_dto),
         volatiles: mon.volatiles.iter().map(volatile_dto).collect(),
         stats: mon.stats,
+        stats_max: mon.stats,
         boosts: mon.boosts,
         nature: format!("{:?}", mon.nature),
         evs: mon.evs,
+        evs_max: mon.evs,
         item: item_name(&mon.item),
         ability: mon.ability.to_string(),
         moves: (0..4)
@@ -157,14 +174,121 @@ pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
         is_tera: mon.is_tera,
         tera_type: format!("{:?}", mon.tera_type),
         is_mega: mon.is_mega,
+        is_illusion_suspected: false,
     }
+}
+
+/// Overlay belief-derived masking onto an otherwise-ground-truth `PokemonView`:
+/// only the fields a real open team sheet keeps secret (nature, EVs/stats-as-
+/// ranges, item, ability, unrevealed moves, and a pre-reveal Tera type) are
+/// replaced. Everything else on `view` — HP, status, volatiles, boosts, the
+/// (already Illusion-aware) species/sprite, gender, fainted, isTera/isMega — is
+/// directly observable in a real battle regardless of information mode, so it's
+/// left as ground truth.
+fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> PokemonView {
+    view.nature = describe_unknown(&unk.possible_natures);
+    view.stats = unk.minStats;
+    view.stats_max = unk.maxStats;
+    view.evs = unk.minEvs;
+    view.evs_max = unk.maxEvs;
+    view.item = match &unk.item {
+        Unknown::Known(Item::None) => None,
+        // `legal_items` (format banlists) isn't threaded to the server yet — see
+        // `InferenceConfig` construction — so this always renders against the
+        // unrestricted (~1,000-item) pool.
+        other => Some(describe_unknown_item(other, None)),
+    };
+    view.ability = describe_unknown(&unk.possible_abilities);
+    view.moves = (0..4)
+        .map(|i| {
+            Some(MoveViewDto {
+                name: describe_move_slot(unk.known_moves[i].clone()),
+                pp: unk.move_pp[i].max(0) as u8,
+                max_pp: unk.max_pp[i].max(0) as u8,
+            })
+        })
+        .collect();
+    // A pre-reveal Tera type is genuinely secret in a real battle too (the Tera
+    // Orb icon only shows it once activated) — mask it until `is_tera` flips true.
+    if !view.is_tera {
+        view.tera_type = describe_unknown(&unk.possible_tera_type);
+    }
+    view.is_illusion_suspected =
+        matches!(&unk.possible_species, Unknown::Possibly(c) if c.len() > 1);
+    view
+}
+
+/// Build a `PokemonView` for a benched Pokémon from the belief alone (no reliable
+/// concrete `PokemonState` pairing exists for bench mons — the inference engine's
+/// own bench bookkeeping doesn't preserve list order against `BattleState`'s). Boosts
+/// and volatiles are exactly `[0;7]`/empty for any benched mon (both reset on
+/// switch-out), so this is not an approximation for those two fields; HP is
+/// approximated from the believed max HP when only a percent is known.
+fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState) -> PokemonView {
+    let max_hp = unk.maxStats[0];
+    let current = match unk.hp {
+        PokemonHP::Number(n) => n,
+        PokemonHP::Percent(p) => ((p as u32 * max_hp as u32) / 100) as u16,
+    };
+    let mut view = PokemonView {
+        mon_id: 0,
+        species: describe_unknown(&unk.possible_species),
+        level: unk.level,
+        gender: describe_unknown(&unk.possible_genders),
+        types: match &unk.possible_types {
+            Unknown::Known(types) => types.iter().map(|t| format!("{:?}", t)).collect(),
+            _ => Vec::new(),
+        },
+        hp: HpDto { current, max: max_hp },
+        fainted: unk.fainted,
+        status: unk.status.as_ref().map(status_dto),
+        volatiles: unk.volatiles.iter().map(volatile_dto).collect(),
+        stats: unk.minStats,
+        stats_max: unk.maxStats,
+        boosts: [0; 7],
+        nature: describe_unknown(&unk.possible_natures),
+        evs: unk.minEvs,
+        evs_max: unk.maxEvs,
+        item: None,
+        ability: describe_unknown(&unk.possible_abilities),
+        moves: Vec::new(),
+        is_tera: unk.is_tera,
+        tera_type: describe_unknown(&unk.possible_tera_type),
+        is_mega: unk.is_mega,
+        is_illusion_suspected: false,
+    };
+    view.item = match &unk.item {
+        Unknown::Known(Item::None) => None,
+        other => Some(describe_unknown_item(other, None)),
+    };
+    view.moves = (0..4)
+        .map(|i| {
+            Some(MoveViewDto {
+                name: describe_move_slot(unk.known_moves[i].clone()),
+                pp: unk.move_pp[i].max(0) as u8,
+                max_pp: unk.max_pp[i].max(0) as u8,
+            })
+        })
+        .collect();
+    view
 }
 
 fn named_turns(name: String, turns: Option<u8>) -> NamedTurnsDto {
     NamedTurnsDto { name, turns }
 }
 
-fn side_view(state: &BattleState, player: Player) -> SideView {
+/// The belief's battle-phase fog state for `player`, when one is being tracked and
+/// has already transitioned past team preview. `None` under Perfect Information, or
+/// (defensively) if the belief hasn't reached the `Battle` variant yet — masking is
+/// display-only and must never panic, so this just falls back to ground truth.
+fn belief_battle_state(belief: Option<&UnknownMatchState>) -> Option<&UnknownBattleState> {
+    match belief {
+        Some(UnknownMatchState::Battle(b)) => Some(b),
+        _ => None,
+    }
+}
+
+fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchState>) -> SideView {
     let (active, back, can_tera, can_mega, conditions, condition_turns, slot_conditions) =
         match player {
             Player::P1 => (
@@ -187,9 +311,44 @@ fn side_view(state: &BattleState, player: Player) -> SideView {
             ),
         };
 
+    // Only P2 (the opponent) is ever masked — P1 is the viewer's own team, always
+    // fully known. `active` is zipped by index with the belief's active mons (both
+    // stay in lockstep, actives-first, throughout the battle); known/possible back
+    // mons are rendered straight from the belief alone (see
+    // `bench_pokemon_view_from_belief`'s doc comment for why no concrete pairing is
+    // attempted there).
+    let fog = if player == Player::P2 { belief_battle_state(belief) } else { None };
+
+    let (active_views, back_views, possible_back_views) = match fog {
+        Some(fog) => {
+            let active_views: Vec<PokemonView> = active
+                .iter()
+                .enumerate()
+                .map(|(i, mon)| {
+                    let base = pokemon_view(mon);
+                    match fog.p2_active_mons.get(i) {
+                        Some(unk) => mask_pokemon_view(base, unk),
+                        None => base,
+                    }
+                })
+                .collect();
+            let back_views: Vec<PokemonView> =
+                fog.p2_known_back_mons.iter().map(bench_pokemon_view_from_belief).collect();
+            let possible_back_views: Vec<PokemonView> =
+                fog.p2_possible_back_mons.iter().map(bench_pokemon_view_from_belief).collect();
+            (active_views, back_views, possible_back_views)
+        }
+        None => (
+            active.iter().map(pokemon_view).collect(),
+            back.iter().map(pokemon_view).collect(),
+            Vec::new(),
+        ),
+    };
+
     SideView {
-        active: active.iter().map(pokemon_view).collect(),
-        back: back.iter().map(pokemon_view).collect(),
+        active: active_views,
+        back: back_views,
+        possible_back: possible_back_views,
         can_tera,
         can_mega,
         side_conditions: conditions
@@ -241,16 +400,41 @@ pub fn phase_of(state: &MatchState) -> PhaseDto {
     }
 }
 
-fn preview_view(preview: &TeamPreviewState) -> PreviewView {
+fn preview_view(preview: &TeamPreviewState, belief: Option<&UnknownMatchState>) -> PreviewView {
+    // Mirrors `side_view`: only P2 is ever masked, zipped by index with the
+    // belief's team-preview mon list (both built from the same species list in the
+    // same order — see `team_preview_open_sheet_from_perspective`).
+    let fog_p2_mons: Option<&[UnknownPokemonState]> = match belief {
+        Some(UnknownMatchState::TeamPreview(fog)) => Some(&fog.p2_mons),
+        _ => None,
+    };
+    let p2_mons: Vec<PokemonView> = preview
+        .p2_mons
+        .iter()
+        .enumerate()
+        .map(|(i, mon)| {
+            let base = pokemon_view(mon);
+            match fog_p2_mons.and_then(|mons| mons.get(i)) {
+                Some(unk) => mask_pokemon_view(base, unk),
+                None => base,
+            }
+        })
+        .collect();
+
     PreviewView {
         active_per_side: preview.active_per_side,
         brought_per_side: preview.brought_per_side,
         p1_mons: preview.p1_mons.iter().map(pokemon_view).collect(),
-        p2_mons: preview.p2_mons.iter().map(pokemon_view).collect(),
+        p2_mons,
     }
 }
 
-pub fn battle_view(state: &MatchState, active_per_side: u8, brought_per_side: u8) -> BattleView {
+pub fn battle_view(
+    state: &MatchState,
+    active_per_side: u8,
+    brought_per_side: u8,
+    belief: Option<&UnknownMatchState>,
+) -> BattleView {
     let phase = phase_of(state);
     let mut view = BattleView {
         phase,
@@ -263,28 +447,32 @@ pub fn battle_view(state: &MatchState, active_per_side: u8, brought_per_side: u8
         field: None,
         self_switch: None,
         winner: None,
+        belief: None,
     };
 
     match state {
         MatchState::TeamPreviewState(preview) => {
-            view.preview = Some(preview_view(preview));
+            view.preview = Some(preview_view(preview, belief));
         }
         MatchState::BattleState(battle) => {
             view.turn_number = battle.turn_number;
-            view.p1 = Some(side_view(battle, Player::P1));
-            view.p2 = Some(side_view(battle, Player::P2));
+            view.p1 = Some(side_view(battle, Player::P1, belief));
+            view.p2 = Some(side_view(battle, Player::P2, belief));
             view.field = Some(field_view(battle));
             view.self_switch = battle
                 .self_switch_pending
                 .map(|(slot, _)| field_slot_dto(slot));
+            view.belief = belief_battle_state(belief).map(|fog| BeliefView {
+                clauses: fog.predicates.iter().map(|clause| describe_clause(clause, fog)).collect(),
+            });
         }
         MatchState::GameOverState { winner, final_state, .. } => {
             view.winner = Some(player_dto(*winner));
             // Show the field as it stood when the battle ended (fainted mon,
             // final HP) behind the winner overlay.
             view.turn_number = final_state.turn_number;
-            view.p1 = Some(side_view(final_state, Player::P1));
-            view.p2 = Some(side_view(final_state, Player::P2));
+            view.p1 = Some(side_view(final_state, Player::P1, belief));
+            view.p2 = Some(side_view(final_state, Player::P2, belief));
             view.field = Some(field_view(final_state));
         }
     }

@@ -30,6 +30,16 @@ struct Args {
     #[arg(long, default_value = "../pokemon_info/showdownMoves.txt")]
     move_dex: String,
 
+    /// Path to the showdown ability data (used by the inference engine for
+    /// ability absence/priority reasoning under non-Perfect information modes)
+    #[arg(long, default_value = "../pokemon_info/showdownAbilities.txt")]
+    ability_dex: String,
+
+    /// Path to the showdown learnset data (used by the inference engine for
+    /// Illusion narrowing under non-Perfect information modes)
+    #[arg(long, default_value = "../pokemon_info/showdownLearnsets.txt")]
+    learnset_dex: String,
+
     /// Port to bind on 127.0.0.1
     #[arg(long, default_value_t = 3001)]
     port: u16,
@@ -49,11 +59,15 @@ async fn main() {
     let dexes = Arc::new(Dexes {
         pokemon_dex: poke_rust::state::dex_data::parse_pokemon_dex(&args.poke_dex),
         move_dex: poke_rust::state::dex_data::parse_move_dex(&args.move_dex),
+        ability_dex: poke_rust::state::dex_data::parse_ability_dex(&args.ability_dex),
+        learnset_dex: poke_rust::state::dex_data::parse_learnset_dex(&args.learnset_dex),
     });
     println!(
-        "Loaded {} Pokemon, {} moves",
+        "Loaded {} Pokemon, {} moves, {} abilities, {} learnsets",
         dexes.pokemon_dex.len(),
-        dexes.move_dex.len()
+        dexes.move_dex.len(),
+        dexes.ability_dex.len(),
+        dexes.learnset_dex.len()
     );
 
     std::fs::create_dir_all(&args.sprite_cache_dir)

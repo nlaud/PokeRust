@@ -84,19 +84,29 @@ pub struct PokemonView {
     pub fainted: bool,
     pub status: Option<StatusDto>,
     pub volatiles: Vec<VolatileDto>,
-    /// HP, Atk, Def, SpA, SpD, Spe.
+    /// HP, Atk, Def, SpA, SpD, Spe. Under a masked (non-Perfect-Information) view
+    /// this is the LOWER bound of the stat range; equal to `stats_max` for ground
+    /// truth (ordinary P1 view, or any view under Perfect Information).
     pub stats: [u16; 6],
+    /// Upper bound of the stat range — equal to `stats` unless masked and the range
+    /// hasn't collapsed to a point yet.
+    pub stats_max: [u16; 6],
     /// Atk, Def, SpA, SpD, Spe, Acc, Eva stages.
     pub boosts: [i8; 7],
     pub nature: String,
-    /// HP, Atk, Def, SpA, SpD, Spe EVs.
+    /// HP, Atk, Def, SpA, SpD, Spe EVs — lower bound under a masked view, see `stats`.
     pub evs: [u8; 6],
+    /// Upper bound of the EV range, see `stats_max`.
+    pub evs_max: [u8; 6],
     pub item: Option<String>,
     pub ability: String,
     pub moves: Vec<Option<MoveViewDto>>,
     pub is_tera: bool,
     pub tera_type: String,
     pub is_mega: bool,
+    /// `true` when this mon's species is still an unresolved multi-candidate
+    /// Illusion disguise in the observer's belief (always `false` for ground truth).
+    pub is_illusion_suspected: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -104,6 +114,12 @@ pub struct PokemonView {
 pub struct SideView {
     pub active: Vec<PokemonView>,
     pub back: Vec<PokemonView>,
+    /// Species shown at team preview but not brought into this battle (a bring-N-
+    /// of-M format gap) — "we have no info on them" beyond species, rendered
+    /// grayed-out. Always empty for P1 (the viewer's own side never has this gap)
+    /// and for any side under Perfect Information (no belief tracked).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub possible_back: Vec<PokemonView>,
     pub can_tera: bool,
     pub can_mega: bool,
     pub side_conditions: Vec<NamedTurnsDto>,
@@ -137,6 +153,16 @@ pub enum PhaseDto {
     GameOver,
 }
 
+/// The engine's CNF predicate store (`UnknownBattleState.predicates`), rendered as
+/// plain-English OR-clauses — literally "a list of ORs". `None`/absent under Perfect
+/// Information (no belief tracked) or during team preview (no predicates yet); the
+/// frontend's Predicates tab only appears when this is present.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BeliefView {
+    pub clauses: Vec<String>,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BattleView {
@@ -156,6 +182,8 @@ pub struct BattleView {
     pub self_switch: Option<FieldSlotDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub winner: Option<PlayerDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub belief: Option<BeliefView>,
 }
 
 // ── Legal commands ───────────────────────────────────────────────────────────
@@ -445,6 +473,10 @@ pub struct CreateBattleRequest {
     pub consider_crit: bool,
     #[serde(default = "default_damage_rolls")]
     pub damage_rolls: u8,
+    /// `"perfect"` (default) | `"openSheet"` | `"openSheetNatures"`. Selects the
+    /// fog-of-war starting baseline for P1's view of P2 — see `InformationMode`.
+    #[serde(default = "default_info_mode")]
+    pub information_mode: String,
 }
 
 fn default_true() -> bool {
@@ -453,6 +485,10 @@ fn default_true() -> bool {
 
 fn default_damage_rolls() -> u8 {
     16
+}
+
+fn default_info_mode() -> String {
+    "perfect".to_string()
 }
 
 #[derive(Serialize)]

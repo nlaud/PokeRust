@@ -2,7 +2,7 @@ import { useState } from 'react'
 import ConfirmDialog from '../components/common/ConfirmDialog'
 import Sprite from '../components/common/Sprite'
 import { parseSheetSpecies } from '../lib/teamsheet'
-import { loadTeams, newId, saveTeams, type StoredTeam } from '../lib/storage'
+import { favoritesFirst, loadTeams, newId, saveTeams, type StoredTeam } from '../lib/storage'
 
 interface EditorState {
   id: string | null // null = creating a new team
@@ -49,7 +49,7 @@ export default function TeamsPage() {
   const toggleFavorite = (team: StoredTeam) =>
     update(teams.map((t) => (t.id === team.id ? { ...t, favorite: !t.favorite } : t)))
 
-  const sorted = [...teams].sort((a, b) => Number(b.favorite) - Number(a.favorite))
+  const sorted = favoritesFirst(teams)
 
   return (
     <div className="mx-auto max-w-6xl p-6">

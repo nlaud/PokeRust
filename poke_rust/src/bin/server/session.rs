@@ -3,16 +3,19 @@
 //! validates submitted commands against freshly-enumerated legal options, and
 //! samples one branch of `simulate_turn`'s weighted outcome set.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use poke_rust::data::ability::Ability;
 use poke_rust::data::pokemon_move::PokemonMove;
 use poke_rust::data::species::Species;
+use poke_rust::information::inference::{apply_information, InferenceConfig};
+use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::simulator;
 use poke_rust::state::battle::{
     BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand,
     TeamPreviewCommand,
 };
-use poke_rust::state::dex_data::{MoveData, PokemonData};
+use poke_rust::state::dex_data::{AbilityData, MoveData, PokemonData};
 use poke_rust::user::replacement_commands_are_valid;
 
 use crate::dto::*;
@@ -21,6 +24,12 @@ use crate::mapping;
 pub struct Dexes {
     pub pokemon_dex: HashMap<Species, PokemonData>,
     pub move_dex: HashMap<PokemonMove, MoveData>,
+    /// Used by the inference engine for ability absence/priority reasoning under
+    /// non-Perfect information modes; unused (and fine to be empty) otherwise.
+    pub ability_dex: HashMap<Ability, AbilityData>,
+    /// Used by the inference engine for Illusion narrowing under non-Perfect
+    /// information modes; unused (and fine to be empty) otherwise.
+    pub learnset_dex: HashMap<Species, HashSet<PokemonMove>>,
 }
 
 #[derive(Clone, Copy)]
@@ -29,12 +38,26 @@ pub struct SessionConfig {
     pub brought_per_side: u8,
     pub consider_crit: bool,
     pub damage_rolls: u8,
+    /// Recorded for API introspection (e.g. a future "what mode is this battle in"
+    /// endpoint); `belief.is_some()` alone already fully determines masking behavior
+    /// downstream, so nothing currently reads this back.
+    #[allow(dead_code)]
+    pub information_mode: InformationMode,
 }
 
 pub struct BattleSession {
     pub state: MatchState,
     pub config: SessionConfig,
     pub log: Vec<TurnLogEntry>,
+    /// The observer's (P1's) evolving fog-of-war belief about the opponent's team,
+    /// under `config.information_mode`. `None` for `InformationMode::PerfectInformation`
+    /// — a true zero-overhead no-op that keeps ground-truth behavior byte-identical;
+    /// `Some` for the other modes, advanced each turn in `resolve_turn` via
+    /// `into_battle_state` (team preview → battle) or `apply_information` (every
+    /// turn after).
+    pub belief: Option<UnknownMatchState>,
+    /// Built once at session creation; `Some` exactly when `belief` is `Some`.
+    pub inference_config: Option<InferenceConfig>,
 }
 
 impl BattleSession {
@@ -43,6 +66,7 @@ impl BattleSession {
             &self.state,
             self.config.active_per_side,
             self.config.brought_per_side,
+            self.belief.as_ref(),
         )
     }
 }
@@ -257,6 +281,7 @@ pub fn resolve_turn(
         MatchState::BattleState(state) => format!("Turn {}", state.turn_number),
         MatchState::GameOverState { .. } => "Game Over".to_string(),
     };
+    let was_team_preview = matches!(session.state, MatchState::TeamPreviewState(_));
 
     let (next_state, events, probability) = simulator::sample_turn(
         &session.state,
@@ -269,11 +294,48 @@ pub fn resolve_turn(
         Some(Player::P1),
     );
 
-    let event_nodes: Vec<EventNode> = events
-        .unwrap_or_default()
-        .iter()
-        .map(mapping::event_node)
-        .collect();
+    let events = events.unwrap_or_default();
+    let event_nodes: Vec<EventNode> = events.iter().map(mapping::event_node).collect();
+
+    // Advance the fog-of-war belief in lockstep with the ground-truth transition
+    // above, when a non-Perfect-Information mode is tracking one.
+    if let Some(belief) = session.belief.take() {
+        let next_belief = if was_team_preview {
+            // Team-preview -> battle: convert using the SAME active/back indices
+            // `sample_turn` just used for the concrete transition, so belief and
+            // ground truth stay in lockstep. `reconstruct_player_command` already
+            // guarantees both commands are `PlayerCommand::TeamPreview` whenever
+            // the incoming state was `TeamPreviewState`.
+            match (&belief, p1_cmd, p2_cmd) {
+                (
+                    UnknownMatchState::TeamPreview(preview),
+                    PlayerCommand::TeamPreview(p1_tp),
+                    PlayerCommand::TeamPreview(p2_tp),
+                ) => UnknownMatchState::Battle(preview.into_battle_state(
+                    &p1_tp.active_indices,
+                    &p1_tp.back_indices,
+                    &p2_tp.active_indices,
+                    &p2_tp.back_indices,
+                )),
+                _ => belief,
+            }
+        } else {
+            let config = session
+                .inference_config
+                .as_ref()
+                .expect("belief is only Some alongside a built inference_config");
+            apply_information(
+                belief,
+                &events,
+                false,
+                &dexes.pokemon_dex,
+                &dexes.move_dex,
+                &dexes.ability_dex,
+                config,
+            )
+        };
+        session.belief = Some(next_belief);
+    }
 
     session.state = next_state;
     session.log.push(TurnLogEntry {

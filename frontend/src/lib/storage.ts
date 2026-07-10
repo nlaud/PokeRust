@@ -18,6 +18,7 @@ export interface StoredFormat {
   broughtPokemon: number
   /** PokeAPI item names (slugs) that are banned in this format. */
   bannedItems: string[]
+  favorite: boolean
 }
 
 const TEAMS_KEY = 'pokerust.teams.v1'
@@ -37,7 +38,9 @@ function writeJson(key: string, value: unknown) {
 }
 
 export function loadTeams(): StoredTeam[] {
-  return readJson<{ teams: StoredTeam[] }>(TEAMS_KEY)?.teams ?? []
+  const teams = readJson<{ teams: StoredTeam[] }>(TEAMS_KEY)?.teams ?? []
+  // Backfill `favorite` for rows stored before the field existed.
+  return teams.map((t) => ({ ...t, favorite: t.favorite ?? false }))
 }
 
 export function saveTeams(teams: StoredTeam[]) {
@@ -52,6 +55,7 @@ const DEFAULT_FORMATS: StoredFormat[] = [
     totalPokemon: 6,
     broughtPokemon: 4,
     bannedItems: [],
+    favorite: false,
   },
   {
     id: 'champions-s2-singles',
@@ -60,6 +64,7 @@ const DEFAULT_FORMATS: StoredFormat[] = [
     totalPokemon: 6,
     broughtPokemon: 3,
     bannedItems: [],
+    favorite: false,
   },
 ]
 
@@ -69,7 +74,8 @@ export function loadFormats(): StoredFormat[] {
     saveFormats(DEFAULT_FORMATS)
     return DEFAULT_FORMATS
   }
-  return stored.formats
+  // Backfill `favorite` for rows stored before the field existed.
+  return stored.formats.map((f) => ({ ...f, favorite: f.favorite ?? false }))
 }
 
 export function saveFormats(formats: StoredFormat[]) {
@@ -80,11 +86,17 @@ export function newId(): string {
   return crypto.randomUUID()
 }
 
+/** Favorited items sort first; a stable sort preserves relative order within each group. */
+export function favoritesFirst<T extends { favorite: boolean }>(items: T[]): T[] {
+  return [...items].sort((a, b) => Number(b.favorite) - Number(a.favorite))
+}
+
 /** Last-used new-battle configuration, restored between games. */
 export interface BattleSetup {
   formatId: string
   team1Id: string
   team2Id: string
+  informationMode?: 'perfect' | 'openSheet' | 'openSheetNatures'
 }
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'
