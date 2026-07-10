@@ -159,6 +159,11 @@ pub fn materialize_pokemon(
         mega_species,
         mega_ability,
         last_move_failed: unk.last_move_failed,
+        // The inference engine doesn't track whether a hidden opponent's sleep was Rest-induced
+        // (UnknownPokemonState has no such field); default to false, the safe/conservative
+        // choice — worst case a materialized hypothesis treats a Rest-sleep as a normal random
+        // sleep, which is still a sound (if not maximally tight) approximation.
+        rest_sleep: false,
         original_ability: None,
         last_used_move: unk.last_used_move.clone(),
         consecutive_move_count: unk.consecutive_move_count,

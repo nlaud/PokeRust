@@ -3014,7 +3014,9 @@ fn decrement_unknown_turns_raw(t: &mut Unknown<u8>) {
 
 // ── Ability absence / priority inference ──────────────────────────────────────
 
-/// Weather-setting abilities whose activation is always visible (`WeatherChanged`).
+/// Weather-setting abilities whose activation is always visible (`WeatherChanged`) —
+/// *unless* the weather they'd set is already active, in which case `set_weather` no-ops
+/// and no `WeatherChanged` fires (see `weather_setting_ability_target` below).
 const WEATHER_SETTING_ABILITIES: &[Ability] = &[
     Ability::Drizzle,
     Ability::Drought,
@@ -3022,6 +3024,23 @@ const WEATHER_SETTING_ABILITIES: &[Ability] = &[
     Ability::SnowWarning,
     Ability::OrichalcumPulse, // Sets Sun (apply_entry_ability_field_effects, helpers.rs)
 ];
+
+/// The weather a given weather-setting ability would install, or `None` if `ab` isn't one
+/// of `WEATHER_SETTING_ABILITIES`. Mirrors `apply_entry_ability_field_effects` in
+/// `simulator/helpers.rs`. Used to guard the absence-inference pass below: since a weather
+/// ability re-activating under its own already-active weather now (correctly) skips
+/// `set_weather` and emits no `WeatherChanged`, that specific ability's absence can no
+/// longer be inferred from "no WeatherChanged" alone in that case — but every *other*
+/// weather-setting ability still can (they'd have changed the weather and didn't).
+fn weather_setting_ability_target(ab: &Ability) -> Option<Weather> {
+    match ab {
+        Ability::Drizzle => Some(Weather::Rain),
+        Ability::Drought | Ability::OrichalcumPulse => Some(Weather::Sun),
+        Ability::SandStream => Some(Weather::Sandstorm),
+        Ability::SnowWarning => Some(Weather::Snow),
+        _ => None,
+    }
+}
 
 /// Terrain-setting abilities whose activation is always visible (`TerrainChanged`).
 const TERRAIN_SETTING_ABILITIES: &[Ability] = &[
@@ -3149,16 +3168,24 @@ fn pass1_ability_absence_inference(
         }
 
         // ── Weather-setting abilities ────────────────────────────────────────
-        // Guard: if strong/primordial weather is already active, `set_weather` silently
-        // no-ops (helpers.rs:5478-5492), so absence of a WeatherChanged reaction carries
-        // no information. It also avoids a contradiction-panic: the absence pass runs
-        // before the nested AbilityRevealed reaction is processed, so without this guard
-        // we'd exclude the ability then immediately try to reveal it as Known.
+        // Guard: `set_weather` silently no-ops (no WeatherChanged) whenever the weather it
+        // would set is already active — either because strong/primordial weather blocks any
+        // change (helpers.rs:5478-5492), or because the ability's own target weather already
+        // matches the current one (a normal-weather reactivation, e.g. Sand Stream switching
+        // in under an already-active Sandstorm — `apply_entry_ability_field_effects` skips
+        // `set_weather` in that case so the timer isn't reset). Either way, absence of
+        // WeatherChanged carries no information for that specific ability's presence. This
+        // must be checked PER-ABILITY, not blanket: under active Rain, Drizzle legitimately
+        // produces no WeatherChanged and can't be excluded, but Drought/SandStream/SnowWarning
+        // still would have changed the weather, so their absence remains sound evidence. This
+        // also avoids a contradiction-panic: the absence pass runs before the nested
+        // AbilityRevealed reaction is processed, so excluding an ability that then gets
+        // revealed as Known would be an unsound contradiction.
         let current_is_strong_weather = matches!(
             state.weather,
             Some(Weather::HeavyRain | Weather::ExtremeSunlight | Weather::StrongWinds)
         );
-        if !weather_changed && !current_is_strong_weather {
+        if !weather_changed {
             // If ONLY this slot's mons could have a weather setter (no other entering
             // mon has one), absence of WeatherChanged proves this mon doesn't have it.
             // For single-entry (Switch) this is always unambiguous.
@@ -3167,6 +3194,13 @@ fn pass1_ability_absence_inference(
 
             if sole_possible_setter {
                 for ab in WEATHER_SETTING_ABILITIES {
+                    let ability_would_no_op = current_is_strong_weather
+                        || weather_setting_ability_target(ab).is_some_and(|target| {
+                            state.weather.as_ref() == Some(&target)
+                        });
+                    if ability_would_no_op {
+                        continue;
+                    }
                     if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                         unknown_exclude(&mut mon.possible_abilities, ab, "ability-absence-weather");
                     }

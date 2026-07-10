@@ -1302,9 +1302,21 @@ fn resolve_multihit_move_for_target(
             }
 
             // Sample mode: without this, per-hit branches multiply (rolls × crit
-            // per hit → 5-hit moves at 16 rolls explode).
+            // per hit → 5-hit moves at 16 rolls explode). Renormalized to the full collapsed
+            // set's total weight (not `sample_one_weighted`'s raw survivor weight) — a
+            // multi-hit move's overall result gets additively combined with sibling
+            // paralysis/sleep/confusion/attract fail branches further up in
+            // `possible_damage_outcomes_for_move`, which never go through a per-hit collapse
+            // of their own; leaving the survivor at its tiny individual fraction would badly
+            // overweight those fail branches relative to "the move actually executed" (S30 —
+            // see `sample_one_branch_renormalized`'s doc comment for the general pattern).
             sequence_branches = if config.sample {
-                simulator_helpers::sample_one_weighted(next_sequence_branches, |b| b.1)
+                let total_weight: f64 = next_sequence_branches.iter().map(|b| b.1).sum();
+                let mut survivor = simulator_helpers::sample_one_weighted(next_sequence_branches, |b| b.1);
+                if let Some(b) = survivor.first_mut() {
+                    b.1 = total_weight;
+                }
+                survivor
             } else {
                 next_sequence_branches
             };
@@ -1748,14 +1760,18 @@ fn possible_damage_outcomes_for_move(
             }
             Status::Sleep(n) => {
                 // Early Bird halves the sleep duration (round down), effectively waking at n>=1
-                // instead of n>=2. Rest is also affected: 2 turns → 1 turn.
+                // instead of n>=2 — this happens to be the correct wake_threshold for BOTH
+                // natural sleep and Rest-induced sleep under Champions' numbers (see the
+                // status_fail_prob branch below for where Rest actually differs).
                 let early_bird = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
                     && attacker.ability == Ability::EarlyBird;
+                let rest_sleep = attacker.rest_sleep;
                 let wake_threshold: u8 = if early_bird { 1 } else { 2 };
                 if *n >= wake_threshold {
                     let sleep_n_copy = *n; // copy counter before borrow is released by the mutation
                     if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                         mon.status = None;
+                        mon.rest_sleep = false;
                     }
                     attacker.status = None;
                     simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: action.user_slot, status: Status::Sleep(sleep_n_copy) });
@@ -1763,12 +1779,42 @@ fn possible_damage_outcomes_for_move(
                     // If the move is usable while asleep (Snore), allow it to execute regardless of wake roll
                     if move_data.sleep_usable {
                     } else {
-                        // First action after sleep always fails; second action has a 1/3 wake chance.
-                        status_fail_prob = if *n == 0 { 1.0 } else { 2.0 / 3.0 };
-                        if *n > 0 {
+                        // Champions sleep duration is 2-3 turns (1/3 chance of 2, i.e. 1 blocked
+                        // turn; 2/3 chance of 3, i.e. 2 blocked turns) — NOT mainline's 2-4/1-3.
+                        // Normal sleep: first action after falling asleep always fails (n==0);
+                        // the second action has a 1/3 wake chance (n==1, guaranteed wake at n==2
+                        // via wake_threshold above). Early Bird halves the blocked-turn count,
+                        // rounding down (Bulbapedia/Serebii): it only ever reaches this branch at
+                        // n==0 (wake_threshold==1 already unconditionally wakes it at n==1), and
+                        // there it has a 1/3 chance of *zero* blocked turns (fully negating a
+                        // short roll) — so it's blocked here with probability 2/3, not the
+                        // unconditional 1.0 a non-Early-Bird mon gets at n==0.
+                        // Rest is a DETERMINISTIC 2-blocked-turn sleep (1 with Early Bird), not
+                        // the randomized natural duration — no chance of an early wake at any
+                        // reachable n here; wake_threshold above alone determines when it ends.
+                        status_fail_prob = if rest_sleep {
+                            1.0
+                        } else if early_bird {
+                            2.0 / 3.0
+                        } else if *n == 0 {
+                            1.0
+                        } else {
+                            2.0 / 3.0
+                        };
+                        // This mutation represents the complementary "woke up and moved
+                        // normally" branch's baseline state — only meaningful when there's an
+                        // actual chance of that (status_fail_prob < 1.0). Deterministic blocks
+                        // (Rest, or non-Early-Bird n==0) have zero chance of waking here, so
+                        // skip it — otherwise a spurious zero-weight StatusCured branch would be
+                        // queued for no reason. Note this can now fire at n==0 too (Early Bird's
+                        // 1/3 chance of zero blocked turns), not just n>0 as before — the old
+                        // code never needed an n==0 case here since n==0 was always a flat 1.0
+                        // (deterministic) for every mon prior to the Early Bird fix above.
+                        if status_fail_prob < 1.0 {
                             let sleep_status_copy = Status::Sleep(*n);
                             if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
                                 mon.status = None;
+                                mon.rest_sleep = false;
                             }
                             attacker.status = None;
                             simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: action.user_slot, status: sleep_status_copy });
@@ -5340,8 +5386,29 @@ fn possible_damage_outcomes_for_move(
 
         // Sample mode: without this, spread moves cross-multiply per target
         // (rolls × crit × secondaries per target).
+        //
+        // Renormalize ONLY when this move-attempt has a pending paralysis/sleep/attract fail
+        // branch or a confusion self-hit branch — those get additively combined with
+        // `all_outcomes` further down (`final_outcomes.push(...)`) without themselves going
+        // through a collapse, so a plain (non-renormalized) sample here would silently discard
+        // most of this branch's true probability mass, badly overweighting the fail/confusion
+        // branches relative to "the move actually executed" (S30). When there is no such
+        // sibling to combine with, this collapsed result IS effectively the final reported
+        // trajectory probability (or feeds a purely multiplicative chain further up), so it
+        // must keep its own true (small) weight, not get inflated to the local group's total —
+        // renormalizing unconditionally broke `sample_turn_is_member_of_enumeration`, which
+        // expects the reported probability to reflect the exact sampled roll/crit combination's
+        // true rarity, not "certainty within this collapse."
+        let has_sibling_fail_branch = par_fail_prob > 0.0
+            || status_fail_prob > 0.0
+            || attract_fail_prob > 0.0
+            || confusion_self_hit_outcomes.is_some();
         all_outcomes = if config.sample {
-            simulator_helpers::sample_one_branch(new_all_outcomes)
+            if has_sibling_fail_branch {
+                simulator_helpers::sample_one_branch_renormalized(new_all_outcomes)
+            } else {
+                simulator_helpers::sample_one_branch(new_all_outcomes)
+            }
         } else {
             new_all_outcomes
         };

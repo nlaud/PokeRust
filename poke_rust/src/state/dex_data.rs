@@ -279,6 +279,22 @@ pub enum SideCondition {
     WideGuard,
 }
 
+impl SideCondition {
+    /// True for the entry-hazard conditions (Spikes, Toxic Spikes, Stealth Rock, Sticky Web) —
+    /// conditions that punish whoever they're applied to, as opposed to screens/guards which
+    /// protect their own side. Callers use this to route hazards onto the setter's *opponent's*
+    /// side unconditionally, regardless of how a move's target slot happened to resolve.
+    pub fn is_hazard(&self) -> bool {
+        matches!(
+            self,
+            SideCondition::Spikes(_)
+                | SideCondition::ToxicSpikes(_)
+                | SideCondition::StealthRock
+                | SideCondition::StickyWeb(_)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SlotCondition {
     /// Pending Future Sight or Doom Desire. Fires at end of turn when `turns_remaining`

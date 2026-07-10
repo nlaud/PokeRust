@@ -283,6 +283,34 @@ pub(crate) fn sample_one_branch<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)> {
     sample_one_weighted(branches, |(_, p)| *p)
 }
 
+/// Like `sample_one_branch`, but RENORMALIZES the survivor's weight to the full sum of the
+/// input set's weights, instead of leaving it at whatever fraction it individually carried.
+///
+/// Use this — not the plain `sample_one_branch`/`sample_one_weighted` — for an intermediate
+/// chokepoint whose collapsed result will later be combined ADDITIVELY with sibling branches
+/// that did NOT go through a similar collapse (e.g. a move's damage-roll/crit/secondary
+/// branches, later summed alongside separately-computed paralysis/sleep/confusion/attract
+/// fail branches into one outcome list). Without renormalization, collapsing N sub-branches
+/// down to 1 silently discards (N-1)/N of that branch's true probability mass — so when it's
+/// later added to an un-collapsed sibling, the sibling is wildly overrepresented relative to
+/// its true likelihood (S30: this caused sleep's Cant branch to appear ~98% of sampled turns
+/// instead of the correct 2/3, because the "woke up and hit" branch's ~32 damage-roll×crit
+/// sub-branches collapsed to 1 survivor still carrying only ~1/32 of its rightful weight).
+///
+/// Do NOT use this for a genuinely terminal collapse whose caller wants the raw sampled-
+/// trajectory probability (e.g. `sample_turn`'s own top-level collapse, or a per-action
+/// collapse whose input already sums to ~1 and is fed into a purely multiplicative chain of
+/// further per-action sampling) — renormalizing there would incorrectly inflate the reported
+/// joint probability.
+pub(crate) fn sample_one_branch_renormalized<T>(branches: Vec<(T, f64)>) -> Vec<(T, f64)> {
+    let total_weight: f64 = branches.iter().map(|(_, p)| *p).sum();
+    let mut survivor = sample_one_branch(branches);
+    if let Some((_, p)) = survivor.first_mut() {
+        *p = total_weight;
+    }
+    survivor
+}
+
 pub fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
     let mut results: Vec<Vec<T>> = Vec::new();
 
@@ -6584,23 +6612,38 @@ fn apply_entry_ability_field_effects(
         Ability::GrassySurge => set_terrain(state, Terrain::GrassyTerrain, 5),
         Ability::MistySurge => set_terrain(state, Terrain::MistyTerrain, 5),
         Ability::PsychicSurge => set_terrain(state, Terrain::PsychicTerrain, 5),
+        // Drought/Drizzle/SandStream/SnowWarning: skip set_weather entirely when the weather
+        // they'd set is already active — the ability still gets REVEALED (the caller wraps this
+        // whole function in `with_reactions(AbilityRevealed, ...)` unconditionally, which still
+        // fires even when this closure emits nothing), but re-activating an already-active
+        // weather must not reset its turn counter or re-emit WeatherChanged. A move-based
+        // re-application (Sunny Day/Rain Dance/Sandstorm/Snowscape) legitimately still refreshes
+        // the duration on reuse — that path is `apply_weather_effects`, untouched here.
         Ability::Drought | Ability::OrichalcumPulse => {
-            let d = dur_for(&Weather::Sun);
-            set_weather(state, Weather::Sun, d);
+            if !matches!(state.weather, Some(Weather::Sun)) {
+                let d = dur_for(&Weather::Sun);
+                set_weather(state, Weather::Sun, d);
+            }
         }
         Ability::DesolateLand => set_weather(state, Weather::ExtremeSunlight, 0),
         Ability::Drizzle => {
-            let d = dur_for(&Weather::Rain);
-            set_weather(state, Weather::Rain, d);
+            if !matches!(state.weather, Some(Weather::Rain)) {
+                let d = dur_for(&Weather::Rain);
+                set_weather(state, Weather::Rain, d);
+            }
         }
         Ability::PrimordialSea => set_weather(state, Weather::HeavyRain, 0),
         Ability::SandStream => {
-            let d = dur_for(&Weather::Sandstorm);
-            set_weather(state, Weather::Sandstorm, d);
+            if !matches!(state.weather, Some(Weather::Sandstorm)) {
+                let d = dur_for(&Weather::Sandstorm);
+                set_weather(state, Weather::Sandstorm, d);
+            }
         }
         Ability::SnowWarning => {
-            let d = dur_for(&Weather::Snow);
-            set_weather(state, Weather::Snow, d);
+            if !matches!(state.weather, Some(Weather::Snow)) {
+                let d = dur_for(&Weather::Snow);
+                set_weather(state, Weather::Snow, d);
+            }
         }
         Ability::DeltaStream => set_weather(state, Weather::StrongWinds, 0),
         _ => {}
@@ -7239,29 +7282,52 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
 
     if !yawn_slots.is_empty() {
         let state_snapshot = state.clone();
-        // Collect (slot) where Yawn actually applied sleep, to emit StatusInflicted after loop.
-        let mut yawn_inflicted: Vec<FieldSlot> = Vec::new();
         for (player, idx) in yawn_slots {
-            let mons = match player {
-                Player::P1 => &mut state.p1_active_mons,
-                Player::P2 => &mut state.p2_active_mons,
-            };
-            if let Some(mon) = mons.get_mut(idx) {
-                let applied = apply_status_to_pokemon(
-                    &state_snapshot,
-                    sun_blocks_freeze,
-                    false,
-                    mon,
-                    &crate::state::dex_data::Status::Sleep(0),
-                );
-                if applied {
-                    yawn_inflicted.push(FieldSlot { player, slot_index: idx as u8 });
+            // Remove the Yawn volatile now (rather than leaving it for the later generic
+            // decrement_volatile_statuses pass in decrement_effect_timers) so that pass can't
+            // also see it and emit a duplicate, flat VolatileEnd — the nested emission below
+            // is the only VolatileEnd{Yawn} for this expiry.
+            {
+                let mons = match player {
+                    Player::P1 => &mut state.p1_active_mons,
+                    Player::P2 => &mut state.p2_active_mons,
+                };
+                if let Some(mon) = mons.get_mut(idx) {
+                    mon.volatiles.retain(|v| {
+                        !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1))
+                    });
                 }
             }
-        }
-        // Emit StatusInflicted after the mutable loop borrows are released.
-        for slot in yawn_inflicted {
-            emit(state, EventKind::StatusInflicted { target: slot, status: Status::Sleep(0) });
+            // Falling asleep is a REACTION to Yawn ending, not a flat sibling event (mirrors
+            // the confusion-damage-nesting fix): emit VolatileEnd{Yawn} as the parent, with
+            // StatusInflicted{Sleep} nested underneath if sleep actually landed. If sleep is
+            // blocked (Insomnia, Electric Terrain, already statused, etc.) VolatileEnd{Yawn}
+            // still fires with empty reactions — the volatile ends either way.
+            let slot = FieldSlot { player, slot_index: idx as u8 };
+            with_reactions(
+                state,
+                EventKind::VolatileEnd { target: slot, volatile: VolatileStatus::Yawn },
+                |state| {
+                    let mons = match player {
+                        Player::P1 => &mut state.p1_active_mons,
+                        Player::P2 => &mut state.p2_active_mons,
+                    };
+                    let applied = if let Some(mon) = mons.get_mut(idx) {
+                        apply_status_to_pokemon(
+                            &state_snapshot,
+                            sun_blocks_freeze,
+                            false,
+                            mon,
+                            &crate::state::dex_data::Status::Sleep(0),
+                        )
+                    } else {
+                        false
+                    };
+                    if applied {
+                        emit(state, EventKind::StatusInflicted { target: slot, status: Status::Sleep(0) });
+                    }
+                },
+            );
         }
     }
 
@@ -7835,6 +7901,9 @@ fn apply_status_to_pokemon(
                 return false;
             }
             mon.status = Some(Status::Sleep(0));
+            // Every path that induces sleep except Rest goes through here — clear the flag so
+            // a natural sleep never inherits a stale `true` left over from a previous Rest.
+            mon.rest_sleep = false;
         }
         Status::Frozen(_) => {
             if pokemon_has_type(mon, &PokemonType::Ice) {
@@ -10251,7 +10320,19 @@ fn apply_effect_to_target(
                     base
                 }
             };
-            add_side_condition(state, side_condition_player, to_add, duration);
+            // Entry hazards (Spikes/Toxic Spikes/Stealth Rock/Sticky Web) always punish the
+            // setter's OPPONENT, regardless of how `side_condition_player` (derived from the
+            // move's resolved target slot) happens to line up — screens/guards stay on
+            // `side_condition_player` since those legitimately protect the target's own side.
+            // Deriving this from `attacker_slot.player` rather than trusting the passed-in
+            // target makes hazard placement correct by construction, not just correct for the
+            // target-resolution paths that happen to already agree with it.
+            let destination = if to_add.is_hazard() {
+                attacker_slot.player.opponent()
+            } else {
+                side_condition_player
+            };
+            add_side_condition(state, destination, to_add, duration);
         }
     }
 
@@ -10441,13 +10522,25 @@ fn apply_healing_move(
 
     match move_name {
         PokemonMove::Rest => {
-            if pokemon_is_on_terrain(terrain_snapshot, attacker_mon, &Terrain::ElectricTerrain) {
+            // Already asleep: Rest fails outright (Showdown onTry: `source.status === 'slp'`
+            // fails; note it does NOT check other statuses — Rest legitimately cures and
+            // overwrites Burn/Paralysis/Poison/etc. with Sleep, that's its whole point).
+            if matches!(attacker_mon.status, Some(Status::Sleep(_))) {
+                return false;
+            }
+            if pokemon_is_on_terrain(terrain_snapshot, attacker_mon, &Terrain::ElectricTerrain)
+                || pokemon_is_on_terrain(terrain_snapshot, attacker_mon, &Terrain::MistyTerrain)
+            {
+                return false;
+            }
+            // Comatose / Purifying Salt block all non-volatile statuses outright. Replicated
+            // here (rather than delegating to apply_status_to_pokemon) because that function's
+            // generic "already has a different status" gate would incorrectly block Rest curing
+            // an existing Burn/Paralysis/Poison into Sleep.
+            if matches!(attacker_mon.ability, Ability::Comatose | Ability::PurifyingSalt) {
                 return false;
             }
             // Insomnia / Vital Spirit cannot fall asleep, so Rest fails outright (no heal).
-            // NOTE: this Rest path sets Sleep directly rather than going through
-            // apply_status_to_pokemon, so Sweet Veil and the full-HP/already-asleep fail
-            // conditions are also bypassed here — worth a follow-up.
             if !pokemon_ability_is_suppressed(terrain_snapshot, attacker_mon)
                 && matches!(
                     attacker_mon.ability,
@@ -10456,8 +10549,25 @@ fn apply_healing_move(
             {
                 return false;
             }
+            // Sweet Veil: blocks sleep (including Rest) for the user's ENTIRE side, not just a
+            // holder using Rest on itself.
+            if side_has_veil(terrain_snapshot, attacker_slot.player, Ability::SweetVeil) {
+                return false;
+            }
+            // Uproar: no Pokémon can fall asleep (including self-induced) while any Pokémon on
+            // the field is making an uproar.
+            let uproar_active = terrain_snapshot.p1_active_mons.iter()
+                .chain(terrain_snapshot.p2_active_mons.iter())
+                .any(|m| !m.fainted && has_status_volatile(m, &VolatileStatus::Uproar));
+            if uproar_active {
+                return false;
+            }
             attacker_mon.volatiles.clear();
             attacker_mon.status = Some(Status::Sleep(0));
+            // Rest's sleep is a deterministic 2 blocked turns (1 with Early Bird), not the
+            // normal random 1/3-vs-2/3 duration — see the Status::Sleep(n) wake-up arm in
+            // mod.rs, which branches on this flag.
+            attacker_mon.rest_sleep = true;
             rest_slept = true;
             let max_hp = attacker_mon.stats[0].max(1);
             let heal = max_hp.saturating_sub(attacker_mon.hp);
@@ -12031,9 +12141,15 @@ pub fn apply_contact_hit_reactions(
                 .into_iter()
                 .map(|(mut bs, prob)| {
                     with_reactions(&mut bs, EventKind::AbilityRevealed { slot: holder_slot, ability: Ability::ToxicDebris }, |bs| {
+                        // The setter is the holder (Toxic Debris triggers on being hit), so the
+                        // hazard lands on the setter's opponent — i.e. the attacker's side. This
+                        // happens to equal `attacker_slot.player` directly here, but routing it
+                        // through `holder_slot.player.opponent()` keeps this call site expressed
+                        // via the same "opponent of the setter" rule as the general hazard path
+                        // in `apply_effect_to_target`, rather than relying on the coincidence.
                         add_side_condition(
                             bs,
-                            attacker_slot.player,
+                            holder_slot.player.opponent(),
                             SideCondition::ToxicSpikes(1),
                             0,
                         );

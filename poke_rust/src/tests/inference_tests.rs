@@ -6710,6 +6710,63 @@ fn test_c4_weather_setter_not_excluded_under_primordial_weather() {
     );
 }
 
+/// C5: a Sand Stream mon switching in under an already-active NORMAL Sandstorm (not just
+/// strong/primordial weather, per C4) must neither be excluded nor trigger a contradiction
+/// panic. Since the simulator fix, `apply_entry_ability_field_effects` skips `set_weather`
+/// entirely when the ability's target weather already matches (so the turn counter isn't
+/// reset) — meaning no `WeatherChanged` fires even though the weather is perfectly ordinary,
+/// not strong/primordial. The absence-inference guard must therefore be per-ability (does
+/// THIS ability's target weather match current weather), not just a blanket
+/// strong-weather check — otherwise it would wrongly exclude SandStream here, moments before
+/// the unconditional `AbilityRevealed{SandStream}` reaction tries to set it Known.
+#[test]
+fn test_c5_weather_setter_not_excluded_under_same_normal_weather() {
+    // State: ordinary Sandstorm already active (NOT strong/primordial weather).
+    let mut state = battle_with_p2(vec![unknown_mon()]);
+    state.weather = Some(Weather::Sandstorm);
+
+    // P2 switches in with SandStream revealed (AbilityRevealed reaction) but NO WeatherChanged
+    // — set_weather no-ops because Sandstorm is already active.
+    let events = vec![
+        event_with(
+            EventKind::Switch(SwitchState {
+                slot: p2(0),
+                species: Species::Tyranitar,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+            }),
+            vec![
+                event_with(
+                    EventKind::AbilityRevealed { slot: p2(0), ability: Ability::SandStream },
+                    vec![], // No WeatherChanged reaction (already-active weather suppressed it).
+                ),
+            ],
+        ),
+    ];
+
+    // Must not panic (a blanket strong-weather-only guard would exclude SandStream here, then
+    // AbilityRevealed would try to set Known(SandStream) → contradiction panic).
+    let result = apply(state, events);
+
+    let p2_mon = &result.p2_active_mons[0];
+    assert!(
+        !unknown_is_excluded(&p2_mon.possible_abilities, &Ability::SandStream),
+        "SandStream must NOT be excluded when switching in under an already-active Sandstorm; \
+         possible_abilities = {:?}", p2_mon.possible_abilities
+    );
+
+    // Contrast: a DIFFERENT weather-setting ability (Drizzle, sets Rain, not Sandstorm) is
+    // still soundly excludable here — its absence of WeatherChanged remains real evidence,
+    // since Drizzle WOULD have changed Sandstorm to Rain and didn't.
+    assert!(
+        unknown_is_excluded(&p2_mon.possible_abilities, &Ability::Drizzle),
+        "Drizzle should still be excluded — it would have changed the weather and didn't; \
+         possible_abilities = {:?}", p2_mon.possible_abilities
+    );
+}
+
 // ── T1: End-to-end simulator → inference round-trip harness ──────────────────
 //
 // These tests wire the full pipeline: a real `BattleState` → `simulate_turn` with

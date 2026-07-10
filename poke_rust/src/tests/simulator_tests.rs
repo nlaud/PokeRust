@@ -4160,6 +4160,11 @@ mod tests {
 
     mod weather {
         use super::*;
+        use crate::information::information::{EventKind, InformationEvent};
+
+        fn any_event_deep(events: &[InformationEvent], pred: impl Fn(&EventKind) -> bool + Copy) -> bool {
+            events.iter().any(|e| pred(&e.kind) || any_event_deep(&e.reactions, pred))
+        }
 
         #[test]
         fn weather_abilities_and_moves() {
@@ -4227,6 +4232,89 @@ mod tests {
             let (state_after_turn, probability) = extract_battle_state(outcomes);
             assert!((probability - 1.0).abs() < 1e-9);
             assert_eq!(state_after_turn.weather, Some(Weather::Rain));
+        }
+
+        /// A weather-setting ability reactivating under weather it would ALSO set must not
+        /// reset the turn counter, but must still reveal the ability (AbilityRevealed fires
+        /// unconditionally; only the redundant set_weather call is skipped). Uses
+        /// `process_pokemon_send_out` directly (the actual switch-in handler) so this exercises
+        /// the real `with_reactions(AbilityRevealed, ...)` wrapper switch-in uses.
+        #[test]
+        fn sand_stream_reactivation_does_not_reset_weather_duration() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let tyranitar = build_pokemon_state(
+                Species::Tyranitar, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::SandStream), Some(Nature::Hardy),
+                None, None, Some([0; 6]), None, false,
+            );
+            let magikarp = build_pokemon_state(
+                Species::Magikarp, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0; 6]), None, false,
+            );
+
+            let mut state = battle_state_from_lists(vec![tyranitar], vec![], vec![magikarp], vec![]);
+            // Sandstorm already active and mid-countdown (NOT a fresh 5) — reactivation must
+            // leave this untouched.
+            state.weather = Some(Weather::Sandstorm);
+            state.weather_turns = Some(2);
+            state.event_observer = Some(Player::P1);
+
+            let slot = crate::state::battle::FieldSlot { player: Player::P1, slot_index: 0 };
+            simulator_helpers::process_pokemon_send_out(&mut state, slot, &move_dex);
+
+            assert_eq!(state.weather, Some(Weather::Sandstorm));
+            assert_eq!(state.weather_turns, Some(2), "reactivating an already-active weather must not reset its turn counter");
+            assert!(
+                state.pending_events.iter().any(|e| matches!(
+                    &e.kind, EventKind::AbilityRevealed { ability: Ability::SandStream, .. }
+                )),
+                "the ability must still be revealed even though the weather didn't change"
+            );
+            assert!(
+                !any_event_deep(&state.pending_events, |k| matches!(k, EventKind::WeatherChanged { .. })),
+                "no WeatherChanged should fire when the weather doesn't actually change"
+            );
+        }
+
+        /// Contrast case: reactivating under a DIFFERENT weather must still set/overwrite it
+        /// normally (the fix only skips same-weather reactivation, not weather changes).
+        #[test]
+        fn sand_stream_reactivation_under_different_weather_still_sets_it() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let tyranitar = build_pokemon_state(
+                Species::Tyranitar, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::SandStream), Some(Nature::Hardy),
+                None, None, Some([0; 6]), None, false,
+            );
+            let magikarp = build_pokemon_state(
+                Species::Magikarp, &pokemon_dex, &move_dex, Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None, Some(Ability::None), Some(Nature::Hardy),
+                None, None, Some([0; 6]), None, false,
+            );
+
+            let mut state = battle_state_from_lists(vec![tyranitar], vec![], vec![magikarp], vec![]);
+            state.weather = Some(Weather::Rain);
+            state.weather_turns = Some(3);
+            state.event_observer = Some(Player::P1);
+
+            let slot = crate::state::battle::FieldSlot { player: Player::P1, slot_index: 0 };
+            simulator_helpers::process_pokemon_send_out(&mut state, slot, &move_dex);
+
+            assert_eq!(state.weather, Some(Weather::Sandstorm));
+            assert_eq!(state.weather_turns, Some(5));
+            assert!(
+                any_event_deep(&state.pending_events, |k| matches!(k, EventKind::WeatherChanged { weather: Some(Weather::Sandstorm) })),
+                "a genuine weather change must still emit WeatherChanged"
+            );
         }
 
         #[test]
@@ -21800,6 +21888,7 @@ mod volatile_status_debuffs {
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
     };
+    use crate::information::information::EventKind;
 
     fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
         let pdex = pokemon_dex();
@@ -22212,6 +22301,61 @@ mod volatile_status_debuffs {
             "Yawn should apply Sleep when its volatile expires");
         assert!(!has_vol(&state.p2_active_mons[0], &VolatileStatus::Yawn),
             "Yawn volatile should be removed after sleep is applied");
+    }
+
+    #[test]
+    fn yawn_sleep_nests_under_volatile_end() {
+        // Falling asleep is a REACTION to Yawn ending, not a flat top-level sibling.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+        );
+        state.event_observer = Some(Player::P1);
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1),
+        );
+        simulator_helpers::decrement_effect_timers(&mut state);
+
+        let yawn_end = state.pending_events.iter().find(|e| {
+            matches!(&e.kind, EventKind::VolatileEnd { volatile: VolatileStatus::Yawn, .. })
+        }).expect("VolatileEnd{Yawn} must be emitted");
+        assert!(
+            yawn_end.reactions.iter().any(|r| matches!(
+                &r.kind, EventKind::StatusInflicted { status: Status::Sleep(_), .. }
+            )),
+            "StatusInflicted{{Sleep}} must nest under VolatileEnd{{Yawn}}; reactions = {:#?}",
+            yawn_end.reactions
+        );
+        assert!(
+            !state.pending_events.iter().any(|e| matches!(
+                &e.kind, EventKind::StatusInflicted { status: Status::Sleep(_), .. }
+            )),
+            "StatusInflicted{{Sleep}} must not also appear as a flat top-level sibling"
+        );
+    }
+
+    #[test]
+    fn yawn_blocked_volatile_end_has_no_reactions() {
+        // Sleep fails to land (Insomnia): VolatileEnd{Yawn} still fires — the volatile ends
+        // either way — but with no nested StatusInflicted.
+        let mut state = battle_state_from_lists(
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::None)],
+            vec![],
+            vec![mon(Species::Snorlax, PokemonMove::Splash, Ability::Insomnia)],
+            vec![],
+        );
+        state.event_observer = Some(Player::P1);
+        state.p2_active_mons[0].volatiles.push(
+            VolatileStatusState::TurnStatus(VolatileStatus::Yawn, 1),
+        );
+        simulator_helpers::decrement_effect_timers(&mut state);
+
+        let yawn_end = state.pending_events.iter().find(|e| {
+            matches!(&e.kind, EventKind::VolatileEnd { volatile: VolatileStatus::Yawn, .. })
+        }).expect("VolatileEnd{Yawn} must still be emitted even when sleep is blocked");
+        assert!(yawn_end.reactions.is_empty(), "no reactions expected when sleep failed to land");
     }
 
     #[test]
@@ -28498,7 +28642,7 @@ mod new_ability_tests {
     use crate::state::dex_data::{Status, Weather};
     use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
     use crate::tests::simuilator_test_helpers::{
-        battle_state_from_lists, damage_distribution, move_dex, pokemon_dex,
+        battle_state_from_lists, damage_distribution, extract_battle_state, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
     use crate::simulator;
@@ -28657,6 +28801,165 @@ mod new_ability_tests {
         // 1/3 chance to wake and execute move at Sleep(1)
         assert!((damage_prob - 1.0 / 3.0).abs() < 0.05,
             "No Early Bird: expected ~1/3 wake at Sleep(1), got {damage_prob:.3}");
+    }
+
+    #[test]
+    fn early_bird_partial_wake_at_sleep_turn_0() {
+        // Champions sleep: normal duration is 1/3 chance of 1 blocked turn, 2/3 chance of 2.
+        // Early Bird halves the blocked-turn count, rounding down: 1/3 chance of ZERO blocked
+        // turns (fully negates a short roll — wakes and moves on the very first attempt), 2/3
+        // chance of exactly one blocked turn. This is the very first attempt (Sleep(0)), so
+        // damage_prob should be ~1/3, not the unconditional 0 a non-Early-Bird mon would give.
+        let mut p1 = mon(Species::Noctowl, PokemonMove::Tackle, Ability::EarlyBird);
+        p1.stats[5] = 200;
+        p1.status = Some(Status::Sleep(0));
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_state(state);
+
+        let damage_prob: f64 = outcomes.iter().map(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                if bs.p2_active_mons[0].hp < 1000 { *p } else { 0.0 }
+            } else { 0.0 }
+        }).sum();
+        assert!((damage_prob - 1.0 / 3.0).abs() < 0.05,
+            "Early Bird at Sleep(0): expected ~1/3 chance of zero blocked turns, got {damage_prob:.3}");
+
+        // The 1/3 wake branch must show status cleared and boosts/state otherwise normal —
+        // not still marked asleep despite the move having executed.
+        let woke_and_moved = outcomes.iter().any(|(s, p)| {
+            if let MatchState::BattleState(bs) = s {
+                *p > 0.0 && bs.p1_active_mons[0].status.is_none() && bs.p2_active_mons[0].hp < 1000
+            } else { false }
+        });
+        assert!(woke_and_moved, "the woken branch must show status cleared, not still Some(Sleep(_))");
+    }
+
+    #[test]
+    fn rest_sleep_blocks_deterministically_for_exactly_two_turns() {
+        // Rest's sleep is fixed at 2 blocked turns (Bulbapedia; "no change to Rest" per the
+        // Champions mechanics research), unlike natural sleep's randomized 1-in-3 / 2-in-3 split.
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Rest), Some(PokemonMove::Tackle), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
+        );
+        p1.stats[5] = 200;
+        p1.hp = 1;
+        let mut p2 = build_pokemon_state(
+            Species::Magikarp, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
+        );
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let turn1 = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state_after_t1, p1_prob) = extract_battle_state(turn1);
+        assert!((p1_prob - 1.0).abs() < 1e-9, "Rest itself is deterministic");
+        assert!(matches!(state_after_t1.p1_active_mons[0].status, Some(Status::Sleep(0))));
+        assert!(state_after_t1.p1_active_mons[0].rest_sleep, "rest_sleep flag must be set");
+
+        // Turn 2: must be deterministically still blocked (no wake chance at all).
+        let turn2 = run_single_turn(
+            &MatchState::BattleState(state_after_t1),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state_after_t2, p2_prob) = extract_battle_state(turn2);
+        assert!((p2_prob - 1.0).abs() < 1e-9,
+            "Rest sleep turn 2 must be deterministically blocked, not probabilistic");
+        assert!(matches!(state_after_t2.p1_active_mons[0].status, Some(Status::Sleep(1))));
+
+        // Turn 3: still deterministically blocked (2nd blocked attempt).
+        let turn3 = run_single_turn(
+            &MatchState::BattleState(state_after_t2),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state_after_t3, p3_prob) = extract_battle_state(turn3);
+        assert!((p3_prob - 1.0).abs() < 1e-9,
+            "Rest sleep turn 3 must be deterministically blocked, not probabilistic");
+        assert!(matches!(state_after_t3.p1_active_mons[0].status, Some(Status::Sleep(2))));
+
+        // Turn 4: guaranteed wake (2 blocked attempts — turns 2 and 3 — then free).
+        let turn4 = run_single_turn(
+            &MatchState::BattleState(state_after_t3),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state_after_t4, p4_prob) = extract_battle_state(turn4);
+        assert!((p4_prob - 1.0).abs() < 1e-9);
+        assert!(state_after_t4.p1_active_mons[0].status.is_none(), "must wake on turn 4");
+        assert!(!state_after_t4.p1_active_mons[0].rest_sleep, "rest_sleep must be cleared on waking");
+    }
+
+    #[test]
+    fn rest_sleep_with_early_bird_blocks_for_exactly_one_turn() {
+        // Bulbapedia: Early Bird also halves Rest's fixed duration, 2 turns -> 1 turn.
+        let pdex = pokemon_dex();
+        let mdex = move_dex();
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Rest), Some(PokemonMove::Tackle), None, None]),
+            None, Some(Ability::EarlyBird), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
+        );
+        p1.stats[5] = 200;
+        p1.hp = 1;
+        let mut p2 = build_pokemon_state(
+            Species::Magikarp, &pdex, &mdex, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
+        );
+        p2.stats[0] = 1000; p2.hp = 1000;
+
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let turn1 = run_single_turn(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state_after_t1, _) = extract_battle_state(turn1);
+        assert!(matches!(state_after_t1.p1_active_mons[0].status, Some(Status::Sleep(0))));
+
+        // Turn 2: still deterministically blocked (Early Bird still has exactly 1 blocked
+        // attempt for a Rest-induced sleep, not zero — Rest's fixed duration always blocks at
+        // least once, unlike the natural-sleep n==0 case where Early Bird can wake instantly).
+        let turn2 = run_single_turn(
+            &MatchState::BattleState(state_after_t1),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state_after_t2, p2_prob) = extract_battle_state(turn2);
+        assert!((p2_prob - 1.0).abs() < 1e-9,
+            "Early Bird + Rest turn 2 must be deterministically blocked, not probabilistic");
+        assert!(matches!(state_after_t2.p1_active_mons[0].status, Some(Status::Sleep(1))));
+
+        // Turn 3: guaranteed wake (Early Bird halves Rest's 2-turn block to 1).
+        let turn3 = run_single_turn(
+            &MatchState::BattleState(state_after_t2),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            &move_dex(), &pokemon_dex(),
+        );
+        let (state_after_t3, p3_prob) = extract_battle_state(turn3);
+        assert!((p3_prob - 1.0).abs() < 1e-9);
+        assert!(state_after_t3.p1_active_mons[0].status.is_none(),
+            "Early Bird + Rest must wake deterministically after only 1 blocked turn");
     }
 
     // ── Sturdy ──────────────────────────────────────────────────────────────
@@ -33945,6 +34248,119 @@ mod sample_mode {
         assert!(
             bs.p2_active_mons[0].hp < 1000,
             "Icicle Spear (100% accuracy) must have dealt damage in the sampled trajectory"
+        );
+    }
+
+    /// Regression for the "Cant{Sleep} isn't showing up on the frontend" report: the server
+    /// exclusively uses `sample_turn` (not `simulate_turn`), and prior to this test there was
+    /// no coverage of a status-prevented-move failure through that specific path — only damage
+    /// scenarios. A mon with guaranteed sleep-block (Sleep(0), first attempt, probability 1.0
+    /// per the corrected Champions sleep table) must surface Cant{Sleep} in the sampled
+    /// trajectory's event list every time, with probability 1.0.
+    #[test]
+    fn sample_turn_surfaces_guaranteed_sleep_cant() {
+        use crate::state::dex_data::Status;
+        use crate::information::information::{CantReason, EventKind};
+
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p1.status = Some(Status::Sleep(0));
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        for _ in 0..10 {
+            let (_sampled, events, probability) = crate::simulator::sample_turn(
+                &state, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), true, 16, Some(Player::P1),
+            );
+            assert!((probability - 1.0).abs() < 1e-9,
+                "guaranteed sleep-block trajectory must have probability 1.0, got {probability}");
+            let events = events.expect("observer set — events must be Some");
+            let has_sleep_cant = events.iter().any(|e| matches!(
+                &e.kind, EventKind::Cant { reason: CantReason::Sleep, .. }
+            ));
+            assert!(has_sleep_cant,
+                "Cant{{Sleep}} must appear in the sampled event list; events = {events:#?}");
+        }
+    }
+
+    /// Same as above but for the probabilistic case (Sleep(1), ~2/3 chance of still being
+    /// blocked) sampled many times — Cant{Sleep} must appear in roughly that proportion of
+    /// samples, not zero and not always.
+    #[test]
+    fn sample_turn_surfaces_probabilistic_sleep_cant() {
+        use crate::state::dex_data::Status;
+        use crate::information::information::{CantReason, EventKind};
+
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p1.status = Some(Status::Sleep(1));
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let mut cant_count = 0;
+        let samples = 300;
+        for _ in 0..samples {
+            let (_sampled, events, _probability) = crate::simulator::sample_turn(
+                &state, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), true, 16, Some(Player::P1),
+            );
+            let events = events.expect("observer set — events must be Some");
+            if events.iter().any(|e| matches!(
+                &e.kind, EventKind::Cant { reason: CantReason::Sleep, .. }
+            )) {
+                cant_count += 1;
+            }
+        }
+        let observed_rate = cant_count as f64 / samples as f64;
+        assert!(
+            (observed_rate - 2.0 / 3.0).abs() < 0.1,
+            "Cant{{Sleep}} should appear in ~2/3 of samples at Sleep(1), observed {observed_rate:.3} ({cant_count}/{samples})"
+        );
+    }
+
+    /// Same S30 coverage gap, but for paralysis rather than sleep: `par_fail_prob` (0.125) is
+    /// one of the sibling-fail branches `has_sibling_fail_branch` guards against, so it must
+    /// also survive the renormalized collapse and surface as Cant{Paralysis} in the sampled
+    /// event list at roughly its true rate — not be drowned out by the "moved normally" branch.
+    #[test]
+    fn sample_turn_surfaces_probabilistic_paralysis_cant() {
+        use crate::state::dex_data::Status;
+        use crate::information::information::{CantReason, EventKind};
+
+        let mut p1 = mon(Species::Snorlax, PokemonMove::Tackle);
+        p1.status = Some(Status::Paralysis);
+        p1.stats[5] = 200;
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash);
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let mut cant_count = 0;
+        let samples = 300;
+        for _ in 0..samples {
+            let (_sampled, events, _probability) = crate::simulator::sample_turn(
+                &state, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), true, 16, Some(Player::P1),
+            );
+            let events = events.expect("observer set — events must be Some");
+            if events.iter().any(|e| matches!(
+                &e.kind, EventKind::Cant { reason: CantReason::Paralysis, .. }
+            )) {
+                cant_count += 1;
+            }
+        }
+        let observed_rate = cant_count as f64 / samples as f64;
+        assert!(
+            (observed_rate - 0.125).abs() < 0.08,
+            "Cant{{Paralysis}} should appear in ~1/8 of samples, observed {observed_rate:.3} ({cant_count}/{samples})"
         );
     }
 }

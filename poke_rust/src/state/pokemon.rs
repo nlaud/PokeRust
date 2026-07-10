@@ -180,6 +180,12 @@ pub struct PokemonState {
 
     pub last_move_failed: bool, //For stomping tantrum
 
+    /// True while the current `Status::Sleep` was induced by Rest, which (per Bulbapedia) is a
+    /// deterministic, non-randomized 2-blocked-turn sleep (1 with Early Bird) rather than the
+    /// normal 1/3-vs-2/3-weighted random duration. Cleared on waking so a later natural sleep
+    /// never inherits a stale value.
+    pub rest_sleep: bool,
+
     pub original_ability: Option<Ability>,
     pub last_used_move: Option<PokemonMove>,
     /// Consecutive uses of the same move (for the Metronome item boost).
@@ -706,6 +712,7 @@ pub fn build_pokemon_state(
         mega_species,
         mega_ability,
         last_move_failed: false,
+        rest_sleep: false,
         original_ability: None,
         last_used_move: None,
         consecutive_move_count: 0,

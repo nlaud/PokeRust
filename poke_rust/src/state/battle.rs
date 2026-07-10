@@ -44,6 +44,17 @@ pub enum Player {
     P2,
 }
 
+impl Player {
+    /// The other player. Used to route effects (e.g. entry hazards) onto the side opposite a
+    /// given setter/attacker regardless of how a move's resolved target slot lines up.
+    pub fn opponent(self) -> Player {
+        match self {
+            Player::P1 => Player::P2,
+            Player::P2 => Player::P1,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldSlot {
     pub player: Player,
