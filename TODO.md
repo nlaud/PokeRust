@@ -3,16 +3,6 @@
 ### New features
 - Frontend features
   - We need a favicon lul
-  - Favorited teams should show up first in the teams dropdown
-  - Other information modes such as open team sheets, open team sheets - natures (plan in depth how to implement the representation of this information, that's the hardest part)
-  - Actually implement custom theme
-  - EV Display should be in SP not EV
-  - Instead of doing nothing when you click a team, the default behavior should be to begin editing the team. Remove the edit button for this as well. Same thing for formats, allow for format editing as well.
-  - "Custom theme" should actually be custom, with color pickers for background and acecnt color, with text picked automatically to be visible
-  - Music within settings w/ youtube api (VanilluxePavillion?)
-    - There should be two playlists, one for battle music (https://www.youtube.com/watch?v=3KyqUee895Y&list=PL6uHbR5DF8jBKITHMx8hwgR0WDz6q7rgt) and one for ambient music (https://www.youtube.com/watch?v=TYdZmrpz7K0&list=PL6uHbR5DF8jBFrkhA7-8YQ2K5GlxdeMmP). There should be an in-site player within the settings menu (full width of that tab) which includes a skip, pause, and next buttons displayed on top of the video, as well as a thing so you can choose the place in the current songe, but without any other buttons. Above this player should be a volume slider that when clicked on the volume icon to the left mutes (changing the icon) but otherwise controls the volume of the current song. This should be at the bottom of the settings page, forced to the bottom of the screen.
-    - This should play the ambient one by default but when a battle is in progress it should seamlessly fade the audio to the battle one, then fade back once its over. These playlists should both be constantly shuffled
-    - Implement this with the official API for youtube, no shenanigans
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)
 - Create a meta sampler from pikalytics, and then get the algorithm to understand that
   - [ ] Tracker page: needs a parser for lines of input -> action / reaction tree

@@ -22,6 +22,13 @@ function hpBarColor(fraction: number): string {
   return 'bg-success'
 }
 
+/** The server sends the raw scaled 0–252 EV (`scale_evs_for_stat_points` in
+ * poke_rust/src/state/pokemon.rs: `ev = max(0, 8*points - 4)`) — teamsheets are
+ * authored in 0–32 stat points, so invert that to show the sheet author's own units. */
+function evToStatPoints(ev: number): number {
+  return ev === 0 ? 0 : Math.round((ev + 4) / 8)
+}
+
 /** A range value: shows a single number when the bound has collapsed to a point
  * (ground truth, or a masked value that's since been narrowed to certainty), or
  * "min–max" while genuinely uncertain. */
@@ -240,9 +247,9 @@ function MonRow({
                   <span key={STAT_NAMES[i]}>
                     {STAT_NAMES[i]}{' '}
                     <span className="font-medium text-ink">
-                      <RangeValue min={value} max={mon.evsMax[i]} />
+                      <RangeValue min={evToStatPoints(value)} max={evToStatPoints(mon.evsMax[i])} />
                     </span>{' '}
-                    EV
+                    SP
                   </span>
                 ) : null,
               )}

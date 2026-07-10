@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import MusicPlayer from './MusicPlayer'
 import { useSettings, type Theme } from '../../store/settingsStore'
 
 const sunIcon = (
@@ -28,18 +29,27 @@ const themes: { value: Theme; label: string; icon: ReactNode }[] = [
 ]
 
 export default function SettingsSidebar() {
-  const { sidebarOpen, setSidebarOpen, theme, setTheme } = useSettings()
+  const { sidebarOpen, setSidebarOpen, theme, setTheme, customBackground, customAccent, setCustomColors } =
+    useSettings()
 
-  if (!sidebarOpen) return null
-
+  // The sidebar (and everything inside it, including <MusicPlayer/>) stays mounted
+  // at all times — it's only ever hidden via CSS (transform + pointer-events), never
+  // unmounted. Unmounting would tear down the music players and restart playback
+  // every time the drawer closed, which defeats "I want the audio to always work."
   return (
-    <div className="fixed inset-0 z-50">
+    <div className={`fixed inset-0 z-50 ${sidebarOpen ? '' : 'pointer-events-none'}`}>
       <div
-        className="absolute inset-0 bg-black/40"
+        className={`absolute inset-0 bg-black/40 transition-opacity duration-200 ${
+          sidebarOpen ? 'opacity-100' : 'opacity-0'
+        }`}
         onClick={() => setSidebarOpen(false)}
         aria-hidden
       />
-      <aside className="absolute right-0 top-0 h-full w-80 bg-card p-6 shadow-xl">
+      <aside
+        className={`absolute right-0 top-0 flex h-full w-80 flex-col bg-card p-6 shadow-xl transition-transform duration-200 ${
+          sidebarOpen ? 'translate-x-0' : 'translate-x-full'
+        }`}
+      >
         <div className="mb-6 flex items-center justify-between">
           <h2 className="text-lg font-semibold">Settings</h2>
           <button
@@ -72,7 +82,34 @@ export default function SettingsSidebar() {
               </button>
             ))}
           </div>
+
+          {theme === 'custom' && (
+            <div className="mt-3 flex gap-4">
+              <label className="flex flex-1 items-center justify-between gap-2 text-sm">
+                <span className="text-ink-muted">Background</span>
+                <input
+                  type="color"
+                  value={customBackground}
+                  onChange={(e) => setCustomColors(e.target.value, customAccent)}
+                  className="h-8 w-12 cursor-pointer rounded-card border border-subtle bg-transparent p-0.5"
+                  aria-label="Background color"
+                />
+              </label>
+              <label className="flex flex-1 items-center justify-between gap-2 text-sm">
+                <span className="text-ink-muted">Accent</span>
+                <input
+                  type="color"
+                  value={customAccent}
+                  onChange={(e) => setCustomColors(customBackground, e.target.value)}
+                  className="h-8 w-12 cursor-pointer rounded-card border border-subtle bg-transparent p-0.5"
+                  aria-label="Accent color"
+                />
+              </label>
+            </div>
+          )}
         </section>
+
+        <MusicPlayer />
       </aside>
     </div>
   )
