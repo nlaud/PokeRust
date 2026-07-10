@@ -66,6 +66,7 @@ pub fn battle_state_from_lists(
         resolved_move_targets: vec![],
         pending_events: vec![],
         event_observer: None,
+        double_ko: None,
     };
 
     // P2's mon_id is offset by P1's party count so ids are globally unique across both teams,

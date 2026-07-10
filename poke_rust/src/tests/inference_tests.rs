@@ -6096,6 +6096,31 @@ fn test_lb_multiscale_hp_gate_and_timer_sentinel() {
     );
 }
 
+// ── EOT item reveals: Leftovers ──────────────────────────────────────────────
+
+/// Leftovers' EOT heal now nests its `Healed` event as a REACTION of `ItemRevealed`
+/// (ItemRevealed is the parent here, unlike Frisk below where it's the child) — confirm
+/// the item still collapses to Known regardless of which side of the tree it sits on,
+/// and that the nested Healed doesn't interfere with the collapse.
+#[test]
+fn test_leftovers_eot_heal_reveals_item() {
+    let mut foe = unknown_mon();
+    foe.item = Unknown::Not(vec![]); // unknown item
+    let state = battle_1v1(unknown_mon(), foe);
+
+    let events = vec![event_with(
+        EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers },
+        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(50) })],
+    )];
+
+    let result = apply(state, events);
+    assert_eq!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::Leftovers),
+        "the nested Leftovers ItemRevealed must still collapse the foe's item to Known"
+    );
+}
+
 // ── Information Abilities: Frisk ──────────────────────────────────────────────
 
 /// Frisk: AbilityRevealed{Frisk} wrapping ItemRevealed collapses the foe's item to Known.

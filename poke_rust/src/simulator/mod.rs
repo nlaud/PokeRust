@@ -4,7 +4,7 @@ use colored::Colorize;
 use crate::state::battle::{
     MatchState, BattleState, TeamPreviewState, PlayerCommand, BattleCommand,
     AttackCommand, SwitchCommand, TeamPreviewCommand, Player, FieldSlot,
-    Action, MoveAction, SwitchAction, MegaAction, TeraAction,
+    Action, MoveAction, SwitchAction, MegaAction, TeraAction, DoubleKo,
 };
 use crate::state::pokemon::{
     PokemonState, parse_team_sheet_str
@@ -6174,7 +6174,17 @@ fn game_over_state_if_battle_finished(state: &BattleState) -> Option<MatchState>
     let winner = match (p1_has_remaining, p2_has_remaining) {
         (false, true) => Player::P2,
         (true, false) => Player::P1,
-        _ => return None,
+        // Both last Pokémon fainted the same end-of-turn (currently only reachable via
+        // Perish Song). `double_ko` records the "last to faint loses" tiebreak the
+        // Perish Song handler already resolved; a `SpeedTie` is split into two `Winner`
+        // branches by the caller before this is ever reached here. `None` means a
+        // non-Perish-Song simultaneous double-KO (e.g. mutual EOT residual damage) —
+        // not yet resolved, so fall through to a live BattleState like before.
+        (false, false) => match state.double_ko {
+            Some(DoubleKo::Winner(p)) => p,
+            _ => return None,
+        },
+        (true, true) => return None,
     };
     Some(MatchState::GameOverState {
         winner,
@@ -7285,6 +7295,19 @@ fn step_action_queue(
                     reactions,
                 });
             }
+            if bs.double_ko == Some(DoubleKo::SpeedTie) {
+                // Perish Song double-KO with the two decisive mons at equal effective
+                // Speed — branch the winner 50/50 rather than picking a side, matching
+                // how every other speed tie in the engine is resolved.
+                for winner in [Player::P1, Player::P2] {
+                    let mut tied_bs = bs.clone();
+                    tied_bs.double_ko = Some(DoubleKo::Winner(winner));
+                    if let Some(game_over) = game_over_state_if_battle_finished(&tied_bs) {
+                        result.push((game_over, prob * 0.5));
+                    }
+                }
+                continue;
+            }
             if let Some(game_over) = game_over_state_if_battle_finished(&bs) {
                 result.push((game_over, prob));
             } else {
@@ -7963,6 +7986,7 @@ fn battle_state_from_preview_branching(
         resolved_move_targets: vec![],
         pending_events: vec![],
         event_observer: observer,
+        double_ko: None,
     };
 
     let mut slots: Vec<FieldSlot> = Vec::new();

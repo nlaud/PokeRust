@@ -32806,7 +32806,8 @@ mod event_round_trip {
 
     /// Verify the two fundamental nesting contracts in one turn:
     /// - A damaging move's `DamageDealt` is a reaction of `MoveUsed`.
-    /// - Leftovers healing at end-of-turn is a reaction of `EndOfTurn`.
+    /// - Leftovers healing at end-of-turn nests two levels deep: `EndOfTurn` wraps the
+    ///   `ItemRevealed{Leftovers}` (the cause), which itself wraps the `Healed` (the effect).
     #[test]
     fn move_used_wraps_damage_and_eot_wraps_leftovers() {
         let pd = pokemon_dex();
@@ -32858,12 +32859,19 @@ mod event_round_trip {
 
         let eot_ev = events.iter().find(|e| matches!(e.kind, EventKind::EndOfTurn))
             .expect("EndOfTurn event not found");
+        let item_revealed_ev = eot_ev.reactions.iter().find(|e| matches!(&e.kind,
+            EventKind::ItemRevealed { slot, item: Item::Leftovers } if *slot == p2s0()
+        )).unwrap_or_else(|| panic!(
+            "ItemRevealed{{Leftovers}} for P2 slot 0 missing from EndOfTurn reactions;\n\
+             reactions = {:#?}", eot_ev.reactions
+        ));
         assert!(
-            any_kind(&eot_ev.reactions, |k| matches!(k,
+            any_kind(&item_revealed_ev.reactions, |k| matches!(k,
                 EventKind::Healed { target, .. } if *target == p2s0()
             )),
-            "Healed for P2 slot 0 missing from EndOfTurn reactions;\n\
-             reactions = {:#?}", eot_ev.reactions
+            "Healed for P2 slot 0 missing from its ItemRevealed{{Leftovers}} reactions \
+             (the heal is caused by the item activating, so it must nest underneath it);\n\
+             reactions = {:#?}", item_revealed_ev.reactions
         );
     }
 
@@ -34995,6 +35003,190 @@ mod berry_heal_event_nesting {
     }
 }
 
+// Leftovers activating is the CAUSE of its end-of-turn heal, so the reveal must nest
+// the Healed event underneath it (mirrors berry_heal_event_nesting above).
+mod leftovers_item_reveal_nesting {
+    use crate::data::ability::Ability;
+    use crate::data::item::Item;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::pokemon::build_pokemon_state;
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn count_matching(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> usize {
+        events
+            .iter()
+            .map(|e| usize::from(pred(&e.kind)) + count_matching(&e.reactions, pred))
+            .sum()
+    }
+
+    fn find_first<'a>(
+        events: &'a [InformationEvent],
+        pred: &impl Fn(&EventKind) -> bool,
+    ) -> Option<&'a InformationEvent> {
+        for e in events {
+            if pred(&e.kind) {
+                return Some(e);
+            }
+            if let Some(found) = find_first(&e.reactions, pred) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn leftovers_heal_nests_under_its_item_revealed() {
+        let mut p1 = build_pokemon_state(
+            Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, Some(Item::Leftovers), None, None, None, false,
+        );
+        let max_hp = p1.stats[0];
+        p1.hp = max_hp / 2; // leave room to heal
+
+        let p2 = build_pokemon_state(
+            Species::Shuckle, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let outcomes = crate::simulator::simulate_turn(
+            &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p1_active_mons[0].item, Item::Leftovers, "Leftovers is never consumed");
+        let events = events.expect("observer requested");
+
+        let is_leftovers_revealed = |k: &EventKind| {
+            matches!(k, EventKind::ItemRevealed { item: Item::Leftovers, .. })
+        };
+        assert_eq!(
+            count_matching(&events, &is_leftovers_revealed), 1,
+            "exactly one ItemRevealed for the Leftovers activation"
+        );
+        let revealed = find_first(&events, &is_leftovers_revealed).unwrap();
+        assert!(
+            revealed.reactions.iter().any(|r| matches!(r.kind, EventKind::Healed { .. })),
+            "the Leftovers heal must nest as a reaction of its ItemRevealed"
+        );
+        assert_eq!(
+            count_matching(&events, &|k| matches!(k, EventKind::Healed { .. })), 1,
+            "no flat duplicate Healed sibling"
+        );
+    }
+}
+
+// A Perish Song end-of-turn that KOs both players' last Pokémon at once must resolve
+// to GameOverState (never a stuck live BattleState — that's what caused the empty-log
+// flood), with the winner decided by "last to faint loses" in Speed order.
+mod perish_song_double_ko {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
+    use crate::state::dex_data::{PseudoWeather, VolatileStatus};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState, VolatileStatusState};
+    use crate::tests::simuilator_test_helpers::{
+        battle_state_from_lists, move_dex, pokemon_dex, simple_attack,
+    };
+
+    fn mon_with_speed(species: Species, speed: u16) -> PokemonState {
+        let mut m = build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        m.stats[5] = speed;
+        m.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::PerishSong, 1));
+        m
+    }
+
+    fn perish_state(p1_speed: u16, p2_speed: u16) -> MatchState {
+        let p1 = mon_with_speed(Species::Snorlax, p1_speed);
+        let p2 = mon_with_speed(Species::Shuckle, p2_speed);
+        MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]))
+    }
+
+    #[test]
+    fn faster_mon_wins_when_perish_counters_expire_together() {
+        // P2 is faster (100 > 50), so it faints FIRST; P1 (slower) faints LAST and loses.
+        let state = perish_state(50, 100);
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, None,
+        );
+        assert_eq!(
+            outcomes.len(), 1,
+            "no stuck live BattleState — must resolve to exactly one GameOverState"
+        );
+        let (s, _events, prob) = outcomes.into_iter().next().unwrap();
+        let MatchState::GameOverState { winner, .. } = s else {
+            panic!("expected GameOverState, got {s:?}");
+        };
+        assert_eq!(winner, Player::P2, "the faster mon faints first, so it wins");
+        assert!((prob - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trick_room_flips_the_double_ko_winner() {
+        let mut state = perish_state(50, 100);
+        if let MatchState::BattleState(bs) = &mut state {
+            bs.pseudo_weathers.push(PseudoWeather::TrickRoom);
+            bs.pseudo_weather_turns.push(5);
+        }
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, None,
+        );
+        assert_eq!(outcomes.len(), 1);
+        let (s, _events, _prob) = outcomes.into_iter().next().unwrap();
+        let MatchState::GameOverState { winner, .. } = s else {
+            panic!("expected GameOverState, got {s:?}");
+        };
+        // Under Trick Room the slower mon (P1) now faints first, so P2 (faster, now
+        // faints last) loses instead.
+        assert_eq!(winner, Player::P1, "Trick Room reverses the perish faint order");
+    }
+
+    #[test]
+    fn exact_speed_tie_branches_winner_fifty_fifty() {
+        let state = perish_state(100, 100);
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), false, 1, None,
+        );
+        assert_eq!(
+            outcomes.len(), 2,
+            "an exact speed tie must branch into two GameOverState outcomes"
+        );
+        let mut winners: Vec<Player> = Vec::new();
+        for (s, _events, prob) in outcomes {
+            let MatchState::GameOverState { winner, .. } = s else {
+                panic!("expected GameOverState, got {s:?}");
+            };
+            assert!((prob - 0.5).abs() < 1e-9, "each branch should carry probability 0.5, got {prob}");
+            winners.push(winner);
+        }
+        assert!(winners.contains(&Player::P1) && winners.contains(&Player::P2),
+            "branches must cover both possible winners, got {winners:?}");
+    }
+}
+
 // A replacement send-out's Switch event must describe the actual entrant —
 // observed live: the event named the mon in the *other* active slot (species
 // and HP), and its Intimidate seemingly re-fired.
@@ -35830,5 +36022,171 @@ Modest Nature
         assert_eq!(mon.species, Species::Yanmega);
         assert!(!mon.has_mega_form);
         assert_eq!(mon.mega_species, None);
+    }
+}
+
+// Hospitality's switch-in heal must be reported via a `Healed` event nested
+// under its `AbilityRevealed`, and the ability must not reveal itself at all
+// when it has no valid target (a full-HP ally, or no ally in singles) — see
+// TODO.md: "Hospitality does not show healing" / "should not reveal if your
+// partner is full hp".
+mod hospitality_event_visibility {
+    use crate::data::ability::Ability;
+    use crate::data::pokemon_move::PokemonMove;
+    use crate::data::species::Species;
+    use crate::information::information::{EventKind, InformationEvent};
+    use crate::state::battle::{
+        BattleCommand, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand,
+    };
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
+    use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
+
+    fn mon(species: Species, ability: Ability) -> PokemonState {
+        build_pokemon_state(
+            species, pokemon_dex(), move_dex(), Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(ability), None, None, None, None, None, false,
+        )
+    }
+
+    fn p1s0() -> FieldSlot { FieldSlot { player: Player::P1, slot_index: 0 } }
+    fn p1s1() -> FieldSlot { FieldSlot { player: Player::P1, slot_index: 1 } }
+
+    fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+        events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+    }
+
+    fn find_switch<'a>(events: &'a [InformationEvent], slot: FieldSlot) -> &'a InformationEvent {
+        events.iter()
+            .find(|e| matches!(&e.kind, EventKind::Switch(s) if s.slot == slot))
+            .unwrap_or_else(|| panic!("Switch event for {slot:?} must be present; events = {events:#?}"))
+    }
+
+    /// Doubles: P1 slot 0 = ally below max HP, P1 slot 1 = filler, P1 bench = the
+    /// Hospitality holder. Switching the holder into slot 1 must heal slot 0 by 1/4
+    /// its max HP and report it as a `Healed` nested under `AbilityRevealed`, nested
+    /// under the entrant's `Switch` event.
+    #[test]
+    fn hospitality_emits_healed_event_for_ally() {
+        let mut ally = mon(Species::Blissey, Ability::NaturalCure);
+        let ally_max_hp = ally.stats[0];
+        ally.hp = ally_max_hp / 2; // well below max, heal won't be capped
+        let starting_hp = ally.hp;
+        let expected_heal = (ally_max_hp / 4).max(1);
+
+        let filler = mon(Species::Snorlax, Ability::None);
+        let hospitality_mon = mon(Species::Chansey, Ability::Hospitality);
+
+        let state = MatchState::BattleState(battle_state_from_lists(
+            vec![ally, filler],
+            vec![hospitality_mon],
+            vec![mon(Species::Shuckle, Ability::None), mon(Species::Shuckle, Ability::None)],
+            vec![],
+        ));
+
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(vec![
+                BattleCommand::Pass,
+                BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+            ]),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass, BattleCommand::Pass]),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p1_active_mons[0].hp, starting_hp + expected_heal,
+            "Hospitality must still heal 1/4 of the ally's max HP");
+
+        let events = events.expect("observer requested");
+        let sw = find_switch(&events, p1s1());
+        assert!(
+            tree_contains(&sw.reactions, &|k| matches!(k,
+                EventKind::AbilityRevealed { slot, ability: Ability::Hospitality } if *slot == p1s1())),
+            "Hospitality must reveal itself when it has a real heal target;\n\
+             switch reactions = {:#?}", sw.reactions
+        );
+        assert!(
+            tree_contains(&sw.reactions, &|k| matches!(k,
+                EventKind::Healed { target, .. } if *target == p1s0())),
+            "the ally's heal must be reported via a nested Healed event;\n\
+             switch reactions = {:#?}", sw.reactions
+        );
+    }
+
+    /// Same doubles setup, but the ally is already at full HP: Hospitality has no
+    /// target, so it must not heal, must not reveal itself, and must not emit Healed.
+    #[test]
+    fn hospitality_no_reveal_when_ally_full_hp() {
+        let ally = mon(Species::Blissey, Ability::NaturalCure); // full HP by construction
+        let full_hp = ally.hp;
+        let filler = mon(Species::Snorlax, Ability::None);
+        let hospitality_mon = mon(Species::Chansey, Ability::Hospitality);
+
+        let state = MatchState::BattleState(battle_state_from_lists(
+            vec![ally, filler],
+            vec![hospitality_mon],
+            vec![mon(Species::Shuckle, Ability::None), mon(Species::Shuckle, Ability::None)],
+            vec![],
+        ));
+
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(vec![
+                BattleCommand::Pass,
+                BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+            ]),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass, BattleCommand::Pass]),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else { panic!("battle continues") };
+        assert_eq!(bs.p1_active_mons[0].hp, full_hp, "a full-HP ally must not be healed");
+
+        let events = events.expect("observer requested");
+        let sw = find_switch(&events, p1s1());
+        assert!(
+            !tree_contains(&sw.reactions, &|k| matches!(k,
+                EventKind::AbilityRevealed { ability: Ability::Hospitality, .. })),
+            "Hospitality must not reveal itself next to a full-HP ally;\n\
+             switch reactions = {:#?}", sw.reactions
+        );
+        assert!(
+            !tree_contains(&sw.reactions, &|k| matches!(k, EventKind::Healed { .. })),
+            "no Healed event may be emitted when there is nothing to heal;\n\
+             switch reactions = {:#?}", sw.reactions
+        );
+    }
+
+    /// Singles: Hospitality has no ally at all, so it must never reveal itself.
+    #[test]
+    fn hospitality_no_reveal_in_singles() {
+        let p1_lead = mon(Species::Snorlax, Ability::None);
+        let hospitality_mon = mon(Species::Chansey, Ability::Hospitality);
+        let state = MatchState::BattleState(battle_state_from_lists(
+            vec![p1_lead],
+            vec![hospitality_mon],
+            vec![mon(Species::Shuckle, Ability::None)],
+            vec![],
+        ));
+
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass]),
+            move_dex(), pokemon_dex(), false, 1, Some(Player::P1),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let (_, events, _) = outcomes.into_iter().next().unwrap();
+        let events = events.expect("observer requested");
+        let sw = find_switch(&events, p1s0());
+        assert!(
+            !tree_contains(&sw.reactions, &|k| matches!(k,
+                EventKind::AbilityRevealed { ability: Ability::Hospitality, .. })),
+            "Hospitality must not reveal itself in singles (no ally to heal);\n\
+             switch reactions = {:#?}", sw.reactions
+        );
     }
 }

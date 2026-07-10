@@ -1,4 +1,4 @@
-use crate::state::battle::{Action, BattleState, FieldSlot, Player};
+use crate::state::battle::{Action, BattleState, DoubleKo, FieldSlot, Player};
 use crate::information::information::{CantReason, EventKind, InformationEvent};
 use crate::information::unknowns::PokemonHP;
 use crate::data::ability::Ability;
@@ -6168,7 +6168,14 @@ pub fn process_pokemon_send_out(
     }
 
     if !ability_suppressed {
-        if ability_has_visible_send_out_effect(&ability) {
+        // Hospitality's reveal is state-dependent: in singles, or next to an ally already
+        // at max HP, it has no observable effect at all, so don't leak the ability by
+        // popping `AbilityRevealed` for nothing. Every other ability's visibility is a
+        // static fact about the ability itself.
+        let visible = ability_has_visible_send_out_effect(&ability)
+            && !(matches!(ability, Ability::Hospitality)
+                && hospitality_heal_targets(state, slot).is_empty());
+        if visible {
             let ability_event = ability.clone();
             with_reactions(state, crate::information::information::EventKind::AbilityRevealed { slot, ability: ability_event }, |bs| {
                 apply_entry_ability_field_effects(bs, slot, &ability);
@@ -6305,6 +6312,25 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
     }
 }
 
+/// Allies of `slot` that Hospitality would actually heal: active, not fainted, currently
+/// below max HP, and not Heal Blocked. Returns `(ally_slot, heal_amount)`. Always empty in
+/// singles. The reveal gate in the send-out dispatcher and the heal loop in
+/// `apply_send_out_only_ability_effects` both consult this so they can never disagree about
+/// whether Hospitality actually did anything observable.
+fn hospitality_heal_targets(state: &BattleState, slot: FieldSlot) -> Vec<(FieldSlot, u16)> {
+    collect_active_slots(state, slot.player, Some(slot.slot_index))
+        .into_iter()
+        .filter_map(|ally_slot| {
+            let mon = get_pokemon_at_slot(state, ally_slot)?;
+            let max_hp = mon.stats[0].max(1);
+            if mon.fainted || mon.hp >= max_hp || heal_is_blocked(mon) {
+                return None;
+            }
+            Some((ally_slot, (mon.stats[0] / 4).max(1)))
+        })
+        .collect()
+}
+
 /// Apply entry abilities whose effects only make sense on switch-in (healing, stat resets,
 /// screen removal, Imposter/Trace, Frisk, Anticipation). These are deliberately NOT shared
 /// with `apply_entry_ability_field_effects` or `apply_entry_ability_target_effects`, so they
@@ -6332,19 +6358,22 @@ fn apply_send_out_only_ability_effects(
             }
         }
 
-        // Heal each ally by ¼ of that ally's max HP.
+        // Heal each ally by ¼ of that ally's max HP. `hospitality_heal_targets` already
+        // filters to allies actually below max HP, so every heal here is real and worth
+        // reporting; the batch is emitted as `Healed` nested under the dispatcher's
+        // `AbilityRevealed` wrapper.
         Ability::Hospitality => {
-            for ally_slot in collect_active_slots(state, own_player, Some(slot.slot_index)) {
-                let heal = get_pokemon_at_slot(state, ally_slot)
-                    .map(|m| (m.stats[0] / 4).max(1))
-                    .unwrap_or(0);
+            let mut batch: Vec<(FieldSlot, u16, u16)> = Vec::new();
+            for (ally_slot, heal) in hospitality_heal_targets(state, slot) {
                 let ally_env = berry_env(state, ally_slot);
-                if heal > 0 {
-                    if let Some(mon) = get_pokemon_at_slot_mut(state, ally_slot) {
-                        gain_hp(mon, heal, ally_env);
-                    }
+                if let Some(mon) = get_pokemon_at_slot_mut(state, ally_slot) {
+                    gain_hp(mon, heal, ally_env);
+                }
+                if let Some(mon) = get_pokemon_at_slot(state, ally_slot) {
+                    batch.push((ally_slot, mon.hp, mon.stats[0].max(1)));
                 }
             }
+            emit_healed_batch(state, &batch);
         }
 
         // Remove Light Screen, Reflect, and Aurora Veil from BOTH sides.
@@ -7332,7 +7361,7 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
     }
 
     // ── PerishSong: faint when counter reaches 1 (about to be removed) ───────────────────
-    let perish_slots: Vec<(Player, usize)> = state
+    let perish_slots: Vec<FieldSlot> = state
         .p1_active_mons
         .iter()
         .enumerate()
@@ -7345,7 +7374,7 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
                     )
                 })
             {
-                Some((Player::P1, i))
+                Some(FieldSlot { player: Player::P1, slot_index: i as u8 })
             } else {
                 None
             }
@@ -7364,7 +7393,7 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
                             )
                         })
                     {
-                        Some((Player::P2, i))
+                        Some(FieldSlot { player: Player::P2, slot_index: i as u8 })
                     } else {
                         None
                     }
@@ -7372,23 +7401,68 @@ fn apply_volatile_eot_effects(state: &mut BattleState) {
         )
         .collect();
 
-    let perish_before = snapshot_active_hp(state);
-    for (player, idx) in perish_slots {
-        let mons = match player {
-            Player::P1 => &mut state.p1_active_mons,
-            Player::P2 => &mut state.p2_active_mons,
-        };
-        if let Some(mon) = mons.get_mut(idx) {
-            if !abilities_suppressed && mon.ability == Ability::MagicGuard {
-                continue;
+    if !perish_slots.is_empty() {
+        // Bulbapedia (Gen III+): Perish Song KOs resolve "in the same order they would
+        // move in" — Speed order, reversed under Trick Room. This also determines the
+        // double-KO tiebreak below: the side whose mon faints LAST loses.
+        let trick_room = trick_room_is_active(state);
+        let mut perish_with_speed: Vec<(FieldSlot, f32)> = perish_slots
+            .iter()
+            .filter_map(|&slot| {
+                get_pokemon_at_slot(state, slot)
+                    .map(|m| (slot, effective_speed_for_slot(state, slot, m)))
+            })
+            .collect();
+        perish_with_speed.sort_by(|a, b| {
+            if trick_room {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
             }
-            mon.hp = 0;
-            mon.fainted = true;
-            clear_pokemon_on_faint(mon);
+        });
+        let sorted_slots: Vec<FieldSlot> = perish_with_speed.iter().map(|&(slot, _)| slot).collect();
+
+        let perish_before: Vec<(FieldSlot, u16, u16)> = sorted_slots
+            .iter()
+            .filter_map(|&slot| get_pokemon_at_slot(state, slot).map(|m| (slot, m.hp, m.stats[0].max(1))))
+            .collect();
+        for &slot in &sorted_slots {
+            let mons = match slot.player {
+                Player::P1 => &mut state.p1_active_mons,
+                Player::P2 => &mut state.p2_active_mons,
+            };
+            if let Some(mon) = mons.get_mut(slot.slot_index as usize) {
+                if !abilities_suppressed && mon.ability == Ability::MagicGuard {
+                    continue;
+                }
+                mon.hp = 0;
+                mon.fainted = true;
+                clear_pokemon_on_faint(mon);
+            }
+        }
+        // Emit the Perish Song KOs in speed order (DamageDealt→0 + Faint + on-faint hooks).
+        emit_eot_hp_deltas(state, &perish_before);
+
+        // Double-KO tiebreak: if both teams are now empty, the side whose mon faints LAST
+        // loses. Magic Guard holders above never actually fainted, so filter down to slots
+        // that did before reading off the decisive (last) one.
+        if !team_has_remaining_pokemon(state, Player::P1) && !team_has_remaining_pokemon(state, Player::P2) {
+            let fainted_order: Vec<(FieldSlot, f32)> = perish_with_speed
+                .into_iter()
+                .filter(|&(slot, _)| get_pokemon_at_slot(state, slot).is_some_and(|m| m.fainted))
+                .collect();
+            if let Some(&(last_slot, last_speed)) = fainted_order.last() {
+                let winner = last_slot.player.opponent();
+                // A tie only matters when the second-to-last faint belongs to the OTHER
+                // team at the same effective speed — an ally tie doesn't change who loses.
+                let tied = fainted_order.len() >= 2 && {
+                    let (second_slot, second_speed) = fainted_order[fainted_order.len() - 2];
+                    second_slot.player != last_slot.player && (second_speed - last_speed).abs() < 0.01
+                };
+                state.double_ko = Some(if tied { DoubleKo::SpeedTie } else { DoubleKo::Winner(winner) });
+            }
         }
     }
-    // Emit the Perish Song KO (DamageDealt→0 + Faint + on-faint hooks).
-    emit_eot_hp_deltas(state, &perish_before);
 }
 
 /// Decrement all TurnStatus volatile counters for `mons`. Volatiles whose counter
@@ -8199,7 +8273,14 @@ fn apply_pre_status_residuals(state: &mut BattleState) {
             }
         }
     }
-    emit_healed_batch(state, &healed);
+    // Leftovers activating is what causes the heal, so nest Healed as a reaction
+    // under ItemRevealed (cause->effect) instead of emitting flat siblings — this
+    // is also what lets the inference engine collapse the holder's item to Known.
+    for &(slot, hp, max_hp) in &healed {
+        with_reactions(state, EventKind::ItemRevealed { slot, item: Item::Leftovers }, |state| {
+            emit_healed_batch(state, &[(slot, hp, max_hp)]);
+        });
+    }
     healed.clear();
 
     // Aqua Ring: restore 1/16 max HP (rounded down) at end of turn. Heal Block suppresses

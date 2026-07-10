@@ -1,14 +1,6 @@
 # TODO
 ### Fixes
-- Toxic spikes from toxic debris are set on wrong side (presumable also applies to other spikes and poison spike setting points? P1's Glimmora's Toxic Debris!
-
-Toxic Spikes (1) was set on P1's side!)
-- Re-activating sand stream resets the weather duration to 5 again (it should stay the same and continue decrementing at end of turn). Make sure the inference engine also supports this.
-- Yawn putting to sleep should be a reaction to the yawn ending
-- Sleep should display as a reaction to the move, instead of silently not doing anything, same for other failure reactions
-- Hospitatlity does not show healing or something?
 ### New features
-- Hospitality should not reveal if your partner is full hp
 - Frontend features
   - We need a favicon lul
   - Favorited teams should show up first in the teams dropdown

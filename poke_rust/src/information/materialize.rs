@@ -268,5 +268,6 @@ pub fn materialize_battle(
         resolved_move_targets: vec![],
         pending_events: vec![],
         event_observer: None,
+        double_ko: None,
     }
 }

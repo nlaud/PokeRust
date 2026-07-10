@@ -55,6 +55,18 @@ impl Player {
     }
 }
 
+/// Tiebreak outcome for an end-of-turn that KOs BOTH players' last Pokémon at once
+/// (currently only Perish Song can do this). Bulbapedia: the player whose last Pokémon
+/// faints LAST loses (this is why a recoil/self-KO user loses to their own target).
+/// `SpeedTie` marks the case where the two decisive mons had equal effective Speed —
+/// the caller branches this into two `Winner` outcomes at 0.5 probability each rather
+/// than picking a side, matching how every other speed tie in the engine is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DoubleKo {
+    Winner(Player),
+    SpeedTie,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldSlot {
     pub player: Player,
@@ -202,6 +214,14 @@ pub struct BattleState {
     /// `None` = no collection (zero-overhead path).
     /// Excluded from `PartialEq`/`Hash`.
     pub event_observer: Option<Player>,
+
+    /// Set by the Perish Song end-of-turn handler when it KOs both players' last
+    /// Pokémon in the same sub-phase, recording how the "last to faint loses" tiebreak
+    /// resolved. `None` on every other `BattleState` (including once a `SpeedTie` has
+    /// been split into two `Winner` branches — see `simulator::mod`'s end-of-turn
+    /// resolution). Read once by `game_over_state_if_battle_finished` and otherwise
+    /// unused. Excluded from `PartialEq`/`Hash` (transient, not part of battle identity).
+    pub double_ko: Option<DoubleKo>,
 }
 
 /// Format a single Pokémon's state as a multi-line string for display.
@@ -725,7 +745,7 @@ impl PartialEq for BattleState {
             && self.items_consumed_this_turn == other.items_consumed_this_turn
             && (self.event_observer.is_none() || self.pending_events == other.pending_events)
         // last_move_on_field, sub_damage_dealt, round_used_this_turn,
-        // move_was_prevented, event_observer intentionally excluded
+        // move_was_prevented, event_observer, double_ko intentionally excluded
     }
 }
 
@@ -765,6 +785,6 @@ impl std::hash::Hash for BattleState {
             self.pending_events.hash(state);
         }
         // last_move_on_field, sub_damage_dealt, round_used_this_turn,
-        // move_was_prevented, event_observer intentionally excluded
+        // move_was_prevented, event_observer, double_ko intentionally excluded
     }
 }
