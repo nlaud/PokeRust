@@ -1,4 +1,5 @@
 import type { PokemonView } from '../../api/types'
+import { hpDisplayText, hpFraction } from '../../lib/hp'
 
 const STATUS_COLORS: Record<string, string> = {
   BRN: 'bg-orange-500',
@@ -18,7 +19,7 @@ function hpBarColor(fraction: number): string {
 }
 
 export default function PokemonHUD({ mon }: { mon: PokemonView }) {
-  const fraction = mon.hp.max > 0 ? mon.hp.current / mon.hp.max : 0
+  const fraction = hpFraction(mon.hp, mon.statsMax[0])
 
   return (
     <div className={`glass w-full rounded-card p-2.5 shadow-sm ${mon.fainted ? 'opacity-50' : ''}`}>
@@ -37,9 +38,7 @@ export default function PokemonHUD({ mon }: { mon: PokemonView }) {
         />
       </div>
       <div className="mt-0.5 flex items-center justify-between">
-        <span className="text-xs text-ink-muted">
-          {mon.hp.current}/{mon.hp.max}
-        </span>
+        <span className="text-xs text-ink-muted">{hpDisplayText(mon.hp, mon.statsMax[0])}</span>
         {mon.status && (
           <span
             className={`rounded px-1 text-[9px] font-bold text-white ${STATUS_COLORS[mon.status.code] ?? 'bg-slate-500'}`}

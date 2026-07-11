@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { PokemonView } from '../../api/types'
 import Sprite from '../../components/common/Sprite'
+import { hpDisplayText, hpFraction } from '../../lib/hp'
 import { typeStyle } from '../../lib/typeColors'
 import { useBattle } from '../../store/battleStore'
 
@@ -104,7 +105,7 @@ function MonRow({
    * beyond species — just a grayed-out roster icon. */
   grayed?: boolean
 }) {
-  const fraction = mon.hp.max > 0 ? mon.hp.current / mon.hp.max : 0
+  const fraction = hpFraction(mon.hp, mon.statsMax[0])
 
   const header = (
     <>
@@ -157,9 +158,7 @@ function MonRow({
               />
             </div>
             <div className="mt-0.5 flex items-center justify-between">
-              <span className="text-[10px] text-ink-muted">
-                {mon.hp.current}/{mon.hp.max}
-              </span>
+              <span className="text-[10px] text-ink-muted">{hpDisplayText(mon.hp, mon.statsMax[0])}</span>
               {mon.status && (
                 <span
                   className={`rounded px-1 text-[9px] font-bold text-white ${

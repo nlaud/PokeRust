@@ -812,11 +812,20 @@ fn apply_information_battle(
         ));
     });
 
+    // S32: snapshot of `state` as of turn start, BEFORE the event walk mutates field
+    // conditions (weather/terrain/Trick Room/side conditions/boosts/status). Both
+    // `pass4_speed_from_order` calls below seed their running speed-relevant trackers
+    // from this snapshot — never from `state` at call time — so the *second* call
+    // (after the walk, once `state` reflects end-of-turn field conditions) doesn't
+    // misattribute a mid-turn or end-of-turn field change to pairings that raced
+    // before it existed. See `pass4_speed_from_order`'s doc comment.
+    let seed_state = state.clone();
+
     // ── Pass 4 (first): speed ordering → Spe bounds ─────────────────────────
     // Run BEFORE the event walk so that speed bounds (minStats[5]/maxStats[5])
     // are already tightened when Pass 3 calls the damage oracle for Gyro Ball
     // and Electro Ball, which compute BP from effective speeds.
-    pass4_speed_from_order(state, events, move_dex, ability_dex);
+    pass4_speed_from_order(state, &seed_state, events, move_dex, ability_dex);
     // Propagate the emitted SpeedComparison predicates to fixpoint immediately.
     // Predicate set is static here (no clause pruning), so collect once and reuse.
     {
@@ -841,6 +850,26 @@ fn apply_information_battle(
         process_battle_event(state, event, &mut ctx);
     }
 
+    // Reset the breadcrumb to the whole-turn view now that the per-event walk has
+    // finished. `process_battle_event` narrowed it to each node's `EventKind` as it
+    // went (see above) and never resets it — left alone, any contradiction raised by
+    // Pass 5, Pass 6 (BCP), or the Pass 4 re-derivation below would misleadingly
+    // report `event=<whatever the turn's last event was>` (frequently `EndOfTurn` or
+    // a `VolatileEnd`), even though none of those passes are examining that specific
+    // event. This was the source of confusing `event=VolatileEnd`/`event=EndOfTurn`
+    // labels on speed-comparison contradictions that Pass 4 actually raised from
+    // unrelated `MoveUsed` pairings (S32).
+    CURRENT_EVENT_CONTEXT.with(|c| {
+        *c.borrow_mut() = Some(format!(
+            "post-walk turn=[{}]",
+            events
+                .iter()
+                .map(|e| format!("{:?}", e.kind))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    });
+
     // ── Pass 5 (first): back-solve EV/IV/nature from tightened stat bounds ───
     run_pass5_all_mons(state, config, dex);
 
@@ -850,7 +879,7 @@ fn apply_information_battle(
     // ── Pass 4 re-derivation: if BCP forced a priority ability to Known, re-run
     // speed ordering with the tighter bracket so speed bounds are updated.
     // One re-run is sufficient; duplicate clauses are now guarded against.
-    pass4_speed_from_order(state, events, move_dex, ability_dex);
+    pass4_speed_from_order(state, &seed_state, events, move_dex, ability_dex);
     {
         let sc = bcp::collect_speed_comparisons(state);
         while bcp::propagate_collected(state, &sc) {}
@@ -6985,13 +7014,20 @@ fn snapshot_item_ability_type(
 /// boosts that are deterministically known from state (Grassy Glide +1 on
 /// Grassy Terrain).  Does NOT fold in ability-based boosts (Prankster/Gale Wings/
 /// Triage); those are folded in by callers that have access to move data and user state.
+/// S32: takes the terrain EXPLICITLY (the per-move-scan snapshot from
+/// `pass4_speed_from_order`, reflecting terrain as of just before this move — see
+/// its doc comment) rather than reading `state.terrain` live, for the same
+/// mid-turn/end-of-turn staleness reason as `compute_speed_multipliers` (S4):
+/// Grassy Terrain can be set or expire mid-turn or by end of turn, and reading it
+/// live at Pass 4's (second, post-walk) call time can disagree with what actually
+/// determined the observed priority bracket.
 fn effective_move_priority(
     move_used: &PokemonMove,
     base_priority: i8,
-    state: &UnknownBattleState,
+    terrain: &Option<Terrain>,
 ) -> i8 {
     if *move_used == PokemonMove::GrassyGlide
-        && state.terrain == Some(Terrain::GrassyTerrain)
+        && *terrain == Some(Terrain::GrassyTerrain)
     {
         base_priority + 1
     } else {
@@ -7081,9 +7117,9 @@ fn priority_lift_escapes(
 
 /// Per-mover snapshot used by `pass4_speed_from_order`: everything needed to emit a
 /// pairing's clause, including the speed-relevant fields (Spe boost stage, paralysis,
-/// Tailwind) captured AS OF the point in the turn just before this mover's own
-/// `MoveUsed`, not read live from `state` at Pass 4's call time (see S4 comment on
-/// `compute_speed_multipliers`).
+/// Tailwind, Trick Room, weather, terrain) captured AS OF the point in the turn just
+/// before this mover's own `MoveUsed`, not read live from `state` at Pass 4's call
+/// time (see S4 comment on `compute_speed_multipliers`, and S32 below).
 struct Mover {
     eff_prio: i8,
     mon_idx: usize,
@@ -7091,11 +7127,25 @@ struct Mover {
     spe_boost: i8,
     paralyzed: bool,
     tailwind: bool,
+    /// S32: Trick Room state as of just before this mover acted. Trick Room can be
+    /// set or removed mid-turn (e.g. a Trick Room use, or a Room Service/Room-ending
+    /// move); a single global read at Pass 4's call time — especially the *second*
+    /// call, which runs after the event walk has mutated `state` to end-of-turn field
+    /// conditions — would misattribute a later Trick Room flip to earlier pairings.
+    trick_room: bool,
+    /// S32: weather as of just before this mover acted, for the weather-ability escape
+    /// disjuncts (Swift Swim/Chlorophyll/Sand Rush/Slush Rush) — same rationale as
+    /// `trick_room`.
+    weather: Option<Weather>,
+    /// S32: terrain as of just before this mover acted, for the Surge Surfer escape.
+    terrain: Option<Terrain>,
 }
 
 /// Deep-scan `reactions` for events that change a mon's Spe boost stage, paralysis
-/// status, or a side's Tailwind — the fields `compute_speed_multipliers` bakes into
-/// a `SpeedComparison`'s numeric factors — and update the running snapshot maps.
+/// status, a side's Tailwind, Trick Room, weather, or terrain — the fields
+/// `compute_speed_multipliers` and the weather/TR escape logic in
+/// `pass4_speed_from_order` bake into a `SpeedComparison`'s numeric factors and
+/// escape disjuncts — and update the running snapshot state (S32).
 ///
 /// Deliberately narrow: `BoostsSwapped`/`BoostsCopied` are not tracked (which
 /// specific stats they move isn't recoverable from the event alone without the
@@ -7103,12 +7153,16 @@ struct Mover {
 /// speed-relevant pairing is rare enough that leaving the snapshot stale here is an
 /// acceptable, documented residual gap rather than blocking the fix for the common
 /// cases (Thunder Wave, Icy Wind/Charm, Intimidate-adjacent, Tailwind, Haze).
+#[allow(clippy::too_many_arguments)]
 fn update_speed_snapshot_from_reactions(
     state: &UnknownBattleState,
     reactions: &[InformationEvent],
     spe_boost: &mut HashMap<usize, i8>,
     paralyzed: &mut HashMap<usize, bool>,
     tailwind: &mut HashMap<Player, bool>,
+    trick_room: &mut bool,
+    weather: &mut Option<Weather>,
+    terrain: &mut Option<Terrain>,
 ) {
     for r in reactions {
         match &r.kind {
@@ -7145,9 +7199,23 @@ fn update_speed_snapshot_from_reactions(
             EventKind::SideConditionEnd { side, condition: SideCondition::TailWind } => {
                 tailwind.insert(*side, false);
             }
+            EventKind::PseudoWeatherStart { effect: PseudoWeather::TrickRoom } => {
+                *trick_room = true;
+            }
+            EventKind::PseudoWeatherEnd { effect: PseudoWeather::TrickRoom } => {
+                *trick_room = false;
+            }
+            EventKind::WeatherChanged { weather: w } => {
+                *weather = w.clone();
+            }
+            EventKind::TerrainChanged { terrain: t } => {
+                *terrain = t.clone();
+            }
             _ => {}
         }
-        update_speed_snapshot_from_reactions(state, &r.reactions, spe_boost, paralyzed, tailwind);
+        update_speed_snapshot_from_reactions(
+            state, &r.reactions, spe_boost, paralyzed, tailwind, trick_room, weather, terrain,
+        );
     }
 }
 
@@ -7159,20 +7227,44 @@ fn update_speed_snapshot_from_reactions(
 ///   Quick Draw, ability priority, Stall, item speed modifiers, weather abilities, etc.).
 /// - Accounts for Trick Room (reverses the inferred fast/slow assignment) and Tailwind
 ///   (folds the ×2 multiplier into the comparison deterministically).
+///
+/// S32: `seed_state` is a clone of `UnknownBattleState` taken *before* this turn's
+/// event walk (`apply_information_battle`, before `process_battle_event` runs).
+/// `pass4_speed_from_order` is invoked twice — once before the walk (to tighten Spe
+/// bounds ahead of Pass 3's damage oracle) and once after (to pick up any
+/// priority-lifting ability BCP forced to Known mid-walk). The *initial* seed for
+/// every running speed-relevant tracker (Tailwind, Trick Room, weather, terrain,
+/// per-mon Spe boost/paralysis) must always be `seed_state` — i.e. what was true at
+/// turn start — never `state` at call time, because on the second call `state` has
+/// already been mutated to end-of-turn field conditions by the walk. Reading `state`
+/// there previously attributed a Tailwind/Trick Room/weather change from later in
+/// the turn (or from end-of-turn expiry) to pairings that raced before it existed —
+/// the root cause of spurious `SpeedComparison raises min above max` contradictions
+/// tagged with a misleading `event=EndOfTurn`/`event=VolatileEnd` breadcrumb (that
+/// breadcrumb is just whatever event the prior event-walk pass last visited; Pass 4
+/// itself never reads `VolatileEnd`/`EndOfTurn` — see `CURRENT_EVENT_CONTEXT`).
+/// `state` itself is still used for everything NOT speed-relevant-field state (mon
+/// lookups by idx, writing the emitted predicates) since those are structural /
+/// output, not turn-start-vs-live field values.
 fn pass4_speed_from_order(
     state: &mut UnknownBattleState,
+    seed_state: &UnknownBattleState,
     top_events: &[InformationEvent],
     move_dex: &HashMap<PokemonMove, MoveData>,
     _ability_dex: &HashMap<Ability, AbilityData>,
 ) {
-    // Running snapshot of Spe boost / paralysis / Tailwind, seeded from `state`'s
-    // values at call time and updated as we scan forward through `top_events` —
-    // see `Mover` and `update_speed_snapshot_from_reactions` (S4).
+    // Running snapshot of Spe boost / paralysis / Tailwind / Trick Room / weather /
+    // terrain, seeded from `seed_state` (turn start) and updated as we scan forward
+    // through `top_events` — see `Mover` and `update_speed_snapshot_from_reactions`
+    // (S4, S32).
     let mut spe_boost: HashMap<usize, i8> = HashMap::new();
     let mut paralyzed: HashMap<usize, bool> = HashMap::new();
     let mut tailwind: HashMap<Player, bool> = HashMap::new();
-    tailwind.insert(Player::P1, state.p1_side_conditions.contains(&SideCondition::TailWind));
-    tailwind.insert(Player::P2, state.p2_side_conditions.contains(&SideCondition::TailWind));
+    tailwind.insert(Player::P1, seed_state.p1_side_conditions.contains(&SideCondition::TailWind));
+    tailwind.insert(Player::P2, seed_state.p2_side_conditions.contains(&SideCondition::TailWind));
+    let mut trick_room = seed_state.pseudo_weathers.contains(&PseudoWeather::TrickRoom);
+    let mut weather = seed_state.weather.clone();
+    let mut terrain = seed_state.terrain.clone();
 
     // Collect one Mover per top-level MoveUsed event, each carrying a snapshot taken
     // AS OF the point in the scan just before its own MoveUsed — i.e. reflecting
@@ -7186,17 +7278,17 @@ fn pass4_speed_from_order(
         } = &event.kind
         {
             let base_prio = move_dex.get(move_used).map(|md| md.priority).unwrap_or(0);
-            let mut eff_prio = effective_move_priority(move_used, base_prio, state);
+            let mut eff_prio = effective_move_priority(move_used, base_prio, &terrain);
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
                 // Fold in Known priority-lifting abilities to get the tightest bracket.
                 if let (Some(mon), Some(md)) = (get_mon_by_idx(state, idx), move_dex.get(move_used)) {
                     eff_prio = fold_known_ability_priority(md, eff_prio, mon);
                 }
                 let s_boost = *spe_boost.entry(idx).or_insert_with(|| {
-                    get_mon_by_idx(state, idx).map_or(0, |m| m.boosts[4])
+                    get_mon_by_idx(seed_state, idx).map_or(0, |m| m.boosts[4])
                 });
                 let s_para = *paralyzed.entry(idx).or_insert_with(|| {
-                    get_mon_by_idx(state, idx)
+                    get_mon_by_idx(seed_state, idx)
                         .map_or(false, |m| matches!(m.status, Some(Status::Paralysis)))
                 });
                 let s_tw = *tailwind.entry(user.player).or_insert(false);
@@ -7207,13 +7299,17 @@ fn pass4_speed_from_order(
                     spe_boost: s_boost,
                     paralyzed: s_para,
                     tailwind: s_tw,
+                    trick_room,
+                    weather: weather.clone(),
+                    terrain: terrain.clone(),
                 });
             }
         }
-        update_speed_snapshot_from_reactions(state, &event.reactions, &mut spe_boost, &mut paralyzed, &mut tailwind);
+        update_speed_snapshot_from_reactions(
+            state, &event.reactions, &mut spe_boost, &mut paralyzed, &mut tailwind,
+            &mut trick_room, &mut weather, &mut terrain,
+        );
     }
-
-    let trick_room_active = state.pseudo_weathers.contains(&PseudoWeather::TrickRoom);
 
     for window in move_order.windows(2) {
         let mover0 = &window[0];
@@ -7243,7 +7339,11 @@ fn pass4_speed_from_order(
         }
 
         // Under Trick Room the slower mon goes first; swap the fast/slow assignment
-        // (and their snapshotted speed-relevant fields along with it).
+        // (and their snapshotted speed-relevant fields along with it). Uses mover0's
+        // own snapshot of Trick Room (S32) — the field state as of just before the
+        // FIRST of this pair acted, i.e. as of the moment this pairing's ordering was
+        // actually determined — rather than a single global read at Pass 4's call time.
+        let trick_room_active = mover0.trick_room;
         let (fast_idx, slow_idx, fast_move, fast_snap, slow_snap) = if trick_room_active {
             // mover1 went second → is the faster mon in normal ordering.
             (idx1, idx0, mover1.move_used.clone(), mover1, mover0)
@@ -7332,10 +7432,13 @@ fn pass4_speed_from_order(
         }
 
         // (6) Weather-conditional speed-doubling abilities on the fast mon.
-        //     Only add escapes when the triggering weather is currently active.
+        //     Only add escapes when the triggering weather was active AS OF this
+        //     pairing (mover0's S32 snapshot) — not whatever `state.weather` reads at
+        //     Pass 4's call time, which on the second (post-walk) call reflects
+        //     end-of-turn weather, not what was active when this pair raced.
         if let Some(fast_m) = fast_mon {
-            let weather = &state.weather;
-            let is_rain = matches!(weather, Some(Weather::Rain) | Some(Weather::HeavyRain));
+            let pairing_weather = &mover0.weather;
+            let is_rain = matches!(pairing_weather, Some(Weather::Rain) | Some(Weather::HeavyRain));
             if is_rain && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SwiftSwim) {
                 clause.push(Statement::HasAbility {
                     mon_idx: fast_idx,
@@ -7343,29 +7446,29 @@ fn pass4_speed_from_order(
                 });
             }
             let is_sun =
-                matches!(weather, Some(Weather::Sun) | Some(Weather::ExtremeSunlight));
+                matches!(pairing_weather, Some(Weather::Sun) | Some(Weather::ExtremeSunlight));
             if is_sun && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Chlorophyll) {
                 clause.push(Statement::HasAbility {
                     mon_idx: fast_idx,
                     ability: Ability::Chlorophyll,
                 });
             }
-            let is_sand = matches!(weather, Some(Weather::Sandstorm));
+            let is_sand = matches!(pairing_weather, Some(Weather::Sandstorm));
             if is_sand && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SandRush) {
                 clause.push(Statement::HasAbility {
                     mon_idx: fast_idx,
                     ability: Ability::SandRush,
                 });
             }
-            let is_snow = matches!(weather, Some(Weather::Snow));
+            let is_snow = matches!(pairing_weather, Some(Weather::Snow));
             if is_snow && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SlushRush) {
                 clause.push(Statement::HasAbility {
                     mon_idx: fast_idx,
                     ability: Ability::SlushRush,
                 });
             }
-            // Surge Surfer: ×2 on Electric Terrain.
-            if state.terrain == Some(Terrain::ElectricTerrain)
+            // Surge Surfer: ×2 on Electric Terrain (mover0's S32 terrain snapshot).
+            if mover0.terrain == Some(Terrain::ElectricTerrain)
                 && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SurgeSurfer)
             {
                 clause.push(Statement::HasAbility {
@@ -7496,15 +7599,12 @@ pub fn pass5_back_solve(
     {
         let s_min = mon.minStats[0];
         let s_max = mon.maxStats[0];
-        let iv_range = if config.force_max_ivs {
-            31..=31
-        } else {
-            mon.minIvs[0]..=mon.maxIvs[0]
-        };
+        let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.minIvs[0] };
+        let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.maxIvs[0] };
         let mut min_ev: Option<u8> = None;
         let mut max_ev: Option<u8> = None;
         let mut any = false;
-        for iv in iv_range {
+        for iv in iv_lo..=iv_hi {
             for &ev in ev_candidates {
                 let hp = calc_hp(base[0], iv, ev, level);
                 if hp >= s_min && hp <= s_max {
@@ -7515,7 +7615,36 @@ pub fn pass5_back_solve(
             }
         }
         if !any {
-            inference_contradiction!("pass5-hp", "no IV/EV can produce observed HP bounds");
+            // S33: `minStats[0]`/`maxStats[0]` are ONLY ever written by
+            // `recompute_stats_for_iv_mode` (full reset against a species) and
+            // `recompute_stat_bounds_for_species_change` (re-derived from the mon's
+            // CURRENT minEvs[0]/minIvs[0], hence always reachable by construction —
+            // see its doc comment). No damage/percent observation narrows this window
+            // (`update_mon_hp` only ever touches the display field `mon.hp`, never
+            // `minStats`), and `Statement::EVIVStatGE/LE` can never target HP (there is
+            // no `PokemonStat::Hp` variant — see `stat_to_stats_idx`). So an unreachable
+            // window here can ONLY mean `minStats[0]/maxStats[0]` were computed against
+            // a species/context a later resolution (elsewhere in the same fixpoint)
+            // superseded WITHOUT going through one of those two reset paths — the same
+            // desync class S30 found and fixed for the one call site then known
+            // (`HasSpecies` forced mid-BCP after `widen_item_for_illusion`; see
+            // `bcp::force_literal`'s `HasSpecies` arm and `IllusionEnded`'s handler,
+            // which both perform this exact reset). Rather than crash the whole belief
+            // update on any *other*, not-yet-audited call site with the same shape,
+            // self-heal the same way: widen back to the current species' theoretical
+            // worst/best case and the EV bound back to the full lattice. This is sound
+            // — it only WIDENS, so it can never exclude a value that was actually true
+            // — at the cost of losing whatever (evidently stale) precision the old
+            // window claimed to have.
+            let lo = calc_hp(base[0], iv_lo, 0, level);
+            let hi = calc_hp(base[0], iv_hi, 252, level);
+            mon.minStats[0] = lo;
+            mon.maxStats[0] = hi;
+            mon.min_pre_nature_stat[0] = lo;
+            mon.max_pre_nature_stat[0] = hi;
+            mon.minEvs[0] = 0;
+            mon.maxEvs[0] = 252;
+            return pass5_back_solve(mon, config, dex);
         }
         if let Some(lo) = min_ev {
             if lo > mon.minEvs[0] {

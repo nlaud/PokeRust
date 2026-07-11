@@ -20,15 +20,10 @@ pub enum PlayerDto {
     P2,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct HpDto {
-    pub current: u16,
-    pub max: u16,
-}
-
-/// HP as observed in the event stream: exact for the observer's own side,
-/// percent for the opponent's.
+/// HP as observed by a real player: exact for their own side, percent for the
+/// opponent's. Used both for the event stream and for `PokemonView.hp` — a real
+/// player's screen never shows the opponent's exact HP, so `PokemonView` must use
+/// this same observed/masked representation rather than a ground-truth pair.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservedHpDto {
@@ -80,7 +75,7 @@ pub struct PokemonView {
     pub level: u8,
     pub gender: String,
     pub types: Vec<String>,
-    pub hp: HpDto,
+    pub hp: ObservedHpDto,
     pub fainted: bool,
     pub status: Option<StatusDto>,
     pub volatiles: Vec<VolatileDto>,

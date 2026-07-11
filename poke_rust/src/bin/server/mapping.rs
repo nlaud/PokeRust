@@ -147,10 +147,7 @@ pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
         level: mon.level,
         gender: format!("{:?}", mon.gender),
         types: mon.types.iter().map(|t| format!("{:?}", t)).collect(),
-        hp: HpDto {
-            current: mon.hp,
-            max: mon.stats[0],
-        },
+        hp: ObservedHpDto { exact: Some(mon.hp), percent: None },
         fainted: mon.fainted,
         status: mon.status.as_ref().map(status_dto),
         volatiles: mon.volatiles.iter().map(volatile_dto).collect(),
@@ -192,19 +189,10 @@ fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> Pokemo
     view.evs = unk.minEvs;
     view.evs_max = unk.maxEvs;
     // A real player only ever sees the opponent's HP as a rounded percent, never the
-    // exact value — mirror `bench_pokemon_view_from_belief`'s conversion (percent
-    // scaled against the believed max HP) rather than leaving `view.hp` on the true
-    // `mon.hp`/`mon.stats[0]` set by `pokemon_view`. `unk.hp` is `Percent` for every
-    // opponent mon in practice (see `PokemonHP`'s doc); `Number` is handled defensively
-    // for parity with the bench helper.
-    let masked_max_hp = unk.maxStats[0];
-    view.hp = HpDto {
-        current: match &unk.hp {
-            PokemonHP::Number(n) => *n,
-            PokemonHP::Percent(p) => ((*p as u32 * masked_max_hp as u32) / 100) as u16,
-        },
-        max: masked_max_hp,
-    };
+    // exact value — replace the true `mon.hp` set by `pokemon_view` with the belief's
+    // own observed representation (never compute a fake-precise number back out of a
+    // percent; that reintroduces the exact precision a real player never has).
+    view.hp = observed_hp_dto(&unk.hp);
     // Typing is public dex knowledge for a normal opponent (`possible_types` is
     // already `Known` from `from_opponent_species`, so this is a no-op there), but for
     // a suspected Illusion disguise `possible_types` widens to `Possibly` alongside
@@ -246,8 +234,8 @@ fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> Pokemo
 /// concrete `PokemonState` pairing exists for bench mons — the inference engine's
 /// own bench bookkeeping doesn't preserve list order against `BattleState`'s). Boosts
 /// and volatiles are exactly `[0;7]`/empty for any benched mon (both reset on
-/// switch-out), so this is not an approximation for those two fields; HP is
-/// approximated from the believed max HP when only a percent is known.
+/// switch-out), so this is not an approximation for those two fields; HP is the
+/// belief's own observed representation (percent, same as an active opponent mon).
 ///
 /// `mon_id` prefers the belief's own `possible_mon_id` (narrowed to `Known` once the
 /// party-order slot is pinned down); when it's still ambiguous, falls back to
@@ -255,11 +243,6 @@ fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> Pokemo
 /// bench render for this call (see `side_view`). Without this, every unresolved bench
 /// mon rendered `mon_id: 0` and collided on the frontend's `mon_id`-keyed rows.
 fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState, fallback_id: u8) -> PokemonView {
-    let max_hp = unk.maxStats[0];
-    let current = match unk.hp {
-        PokemonHP::Number(n) => n,
-        PokemonHP::Percent(p) => ((p as u32 * max_hp as u32) / 100) as u16,
-    };
     let mon_id = match unk.possible_mon_id {
         Unknown::Known(id) => id,
         _ => fallback_id,
@@ -273,7 +256,7 @@ fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState, fallback_id: u8) ->
             Unknown::Known(types) => types.iter().map(|t| format!("{:?}", t)).collect(),
             _ => Vec::new(),
         },
-        hp: HpDto { current, max: max_hp },
+        hp: observed_hp_dto(&unk.hp),
         fainted: unk.fainted,
         status: unk.status.as_ref().map(status_dto),
         volatiles: unk.volatiles.iter().map(volatile_dto).collect(),

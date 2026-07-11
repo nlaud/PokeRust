@@ -8,11 +8,8 @@ export interface FieldSlot {
   slotIndex: number
 }
 
-export interface Hp {
-  current: number
-  max: number
-}
-
+/** HP as observed by a real player: exact for their own side, percent for the
+ * opponent's. Used both for the event stream and for `PokemonView.hp`. */
 export interface ObservedHp {
   exact?: number
   percent?: number
@@ -50,7 +47,7 @@ export interface PokemonView {
   level: number
   gender: string
   types: string[]
-  hp: Hp
+  hp: ObservedHp
   fainted: boolean
   status: Status | null
   volatiles: Volatile[]

@@ -1,81 +1,24 @@
 # TODO
 ### Fixes
-  - **[FIXED]** "Zoroark should show up as possibly in the back when led" / "switching
-    it out fully reveals it": root cause was `UnknownTeamPreviewState::into_battle_state`
-    (`unknowns.rs:421`) building the *leading* mon's belief entry directly from the
-    team-preview roster at the TRUE physical active index — ground truth the belief has
-    no business knowing, since the observer only ever sees what's DISPLAYED, which can
-    be a disguise. Fixed by changing `into_battle_state` to park P2's entire roster
-    (active pick included) in `possible_back` with `p2_active_mons` starting empty, and
-    changing `session.rs::resolve_turn` to run `apply_information` over the team-preview
-    transition's own event log immediately afterward (previously skipped entirely for
-    this transition) — that log's `SimultaneousSwitch` already carries each lead's
-    perspective-gated DISPLAYED species (`compute_illusion_disguise`,
-    `simulator/mod.rs::battle_state_from_preview_branching`), so Pass 1's existing
-    switch-in handling (`pass1_switch`, shared verbatim with every mid-battle switch)
-    matches it against the roster and runs the SAME Illusion widening
-    (`maybe_widen_for_illusion`/`widen_item_for_illusion`) a mid-battle disguised
-    switch-in already gets — no new Illusion-specific logic needed, just routing team
-    preview through the existing mechanism. Verified both empirically (all S29/Illusion
-    regression tests + full suite pass, 1263/1263) and via two new tests:
-    `test_disguised_lead_widens_to_possibly_zoroark_and_stays_in_possible_back` (the
-    exact TODO repro — a disguised lead widens to `Possibly([shown, Zoroark])` and
-    Zoroark's own roster entry survives in `possible_back`) and
-    `test_into_battle_state_then_apply_information_places_lead_active` (proves the new
-    two-step flow is byte-identical to the old one-step behavior for a normal,
-    non-disguised lead).
-- Getting errors like: "[inference contradiction] context=0 event=VolatileEnd { target: P1_1, volatile: RagePowder } — SpeedComparison raises min(148) above max(99)"
-  - Obviously volatiles ending should not determine speed order since it isn't related to speed order at all
-  - Speed order should not be considered at end of turn in general
-- Also sometimes errors like "[inference contradiction] context=2 event=EndOfTurn — SpeedComparison raises min(198) above max(112)" happen when I use trick room?, but strangely only sometimes, like when opponents use protect?
-  - I think this warrants a deep dive into the simulator, figuring out in all cases what the ordering for events is and which should be used for speed comparison in the inference
-  - Something causing this: Team Preview
-  P2 sent out Aerodactyl (100%)
-  
-  P1 sent out Lycanroc (150 HP)
-  
-  P2 sent out Charizard (100%)
-  
-  P1 sent out Tyranitar (203 HP)
-  
-  P2's Aerodactyl's Unnerve!
-  
-  P1's Tyranitar's Sand Stream!
-  
-  The weather became Sandstorm!
-  
-  Turn 1
-  P2's Aerodactyl used Protect!
-  
-  P2's Aerodactyl protected itself!
-  
-  P2's Charizard used Protect!
-  
-  P2's Charizard protected itself!
-  
-  P1's Tyranitar used Protect!
-  
-  P1's Tyranitar protected itself!
-  
-  P1's Lycanroc used Rock Slide!
-  
-  P2's Aerodactyl blocked the attack!
-  
-  P2's Charizard blocked the attack!
-  
-  End of turn
-  
-P2's Charizard took damage (now 94%), when I seleect Rock slide for tyranitar and lycanroc, then tailwind and heat wave"[inference contradiction] context="pass5-hp" event=EndOfTurn — no IV/EV can produce observed HP bounds", maybe it is a good idea to just supress everything end of turn, except maybe perish events, since those do happen in speed order (check this with the simulator)
-- Weather speed stuff is not dynamically updated. You need to make everything relating to speed tiers, damage claculation, and all that update dynamically as you progress through the turn.
-  - There is currently a bug where if you use tailwind and heat wave, the speed tiers updating does not work properly because it sees that teh charizard is faster than the aerodactyl after the tailwind, but obviously it should not be (the charizard is slower before the tailwind, so the tailwind goes first). These speed cases should be calculated sequentially. Figure out the fastest move, then do all the derivations relating to that move being first (all pokemon that have not moved yet must be slower). Then resolve the effects of that move and update everything (trick room, sand rush, tailwind, etc.). Might be best to intertwine this with the state inference logic, but if it is sinificantly easier to leave as is then we should do that.
-- The damage-inference engine often finds no information at all when it runs. This isn't a soundness bug — the HP-vs-DEF-EV scenario and the `pass5-hp` "no IV/EV can produce observed HP bounds" panic were both investigated and fixed (S30, see the regression tests in `inference_tests.rs`) — but Pass 3/5's back-solve is still weak/imprecise in the common case. Worth revisiting for more inferential power without sacrificing soundness.
-- Double check that simulator probabilities are being handled correctly, and that there are no rounding errors?
+- We need to rework how zoroark works with the inference engine from the ground up (when information mode is not perfect information). 
+  - When a team has zoroark, all pokemon should be treated as if they could be zoroark. While they should be displayed as the original pokemon on the FE, their actual stats/moves/item should be treated as if they could be zoroark (It it should be displayed as if the possible moves are A Or B, where A is the original move and B is the zoroark move, at least in a teamsheet mode when you know the moves of each of your opponents mons), the same should be true for items, abiltiies, natures, and stat spreads should encompass both the original and zoroark stats (this should update once zoroark is found and the pokemon is either revealed to be zoroark or not). 
+  - Prior to zoroark being revealed it should be listed as possibly in the back (as well as all pokemon being possibly in the back, unless there are two of that pokemon in the front, since this means both the original and zoroark are in the front). The types of pokemon should be displayed as their original types on the frontend, and the inference engine should handle both cases of zoroark and the original at all times, keeping the learnset based deduction and stuff.
+    - This can somewhat easily be handled by having a predicate that states that all pokemon are either zoroark with zoroark's moves, abilities, etc. or the original pokemon with its moves, abilities, etc.
+  - It is okay to assume that a pokemon that was in the front is in the back one it switched out, unless it is already on the field (there were originally two on the field). This is because either zoroark or the original pokemon could have been in the front, and either way there must have been the original in the back at some point (zoroark transformed into the back mon).
+  - Remeber that we optimize for SOUNDNESS FIRST, so losing information is okay for the sake of soundness above all else
+  - Tracking zoroark throughout the course of a battle is important and extremely difficult. I want this logic to be bulletproof, and I want the frontend to always display the information that player one would have, although when choosing moves for player 2 it should display information that player 2 would have. 
+  - Also there is a bug with zoroark. While the moves should be unknown (A or B state) in the sidebar when you don't know if a pokemon is zoroark, when choosing moves it should still show the correct moves so selection goes properly.
+- The damage-inference engine often finds no information at all when it runs. This isn't a soundness bug — the HP-vs-DEF-EV scenario and the `pass5-hp` "no IV/EV can produce observed HP bounds" panic were both investigated and fixed (S30/S33, see the regression tests in `inference_tests.rs`) — but Pass 3/5's back-solve is still weak/imprecise in the common case. Worth revisiting for more inferential power without sacrificing soundness.
+  - **[2026-07-11 investigation, not yet fixed]** Empirically confirmed and localized: against an HP-heavy defender (e.g. Snorlax with 252 HP EV / 0 Def EV), Direction A's damage oracle returns the **full theoretical Def BSV range** (zero narrowing) after a single hit — expected, since percent-damage ≈ raw_dmg/maxHP and raw_dmg ∝ 1/Def, so for a single observation there's a genuine hyperbola of (maxHP, Def) pairs that all reproduce the same observed percent; no single-hit fix can do better than that. But a **second** hit against the same mon (same true HP/Def, only the damage roll can differ) produced the **identical** zero-narrowing result — that's the real, fixable gap. Root cause: each hit's oracle result is unioned independently into its own achievable-BSV interval, and only that resulting **marginal** interval gets intersected across hits — the underlying (maxHP, Def) **pair sets** from each hit are never jointly intersected, which is the only way multiple observations of the same fixed (HP, Def) pair can actually narrow each other down. Fixing this is an architectural change to Pass 3 Direction A (joint multi-observation pair-set intersection instead of per-hit independent marginal unioning) in one of the most soundness-audited parts of the codebase (S17–S30) — deliberately deferred to its own focused session with room for the same audit rigor, rather than rushed here. Repro: `roundtrip_b1_p1_attacks_p2_hp_ev_vs_def_ev_soundness` / `roundtrip_b2_two_hits_hp_ev_vs_def_ev_soundness` in `inference_tests.rs` (add an `eprintln!` of `p2_fog.min_pre_nature_stat[2]/max_pre_nature_stat[2]/minEvs/maxEvs` to see the flat result).
+  - It seems like the Pass 5 fix does not fully work: "[inference contradiction] context="pass5" event=post-walk turn=[MegaEvolution { slot: P1_0, into: TyranitarMega }, MoveUsed { user: P1_1, move_used: RockSlide, targets: [P2_0, P2_1] }, Cant { slot: P2_1, reason: Flinch }, MoveUsed { user: P2_0, move_used: Tailwind, targets: [P2_0, P2_1] }, MoveUsed { user: P1_0, move_used: IcePunch, targets: [P2_1] }, EndOfTurn] — every candidate nature is infeasible for stat 1 (minStat=233, maxStat=229) — inference over-narrowed"
+  - It seems like it isn't accounting for the mega evolution, or some other factor: I also get the same error here: [inference contradiction] context="pass5" event=post-walk turn=[MoveUsed { user: P2_0, move_used: AquaJet, targets: [P1_0] }, MoveUsed { user: P1_1, move_used: RockSlide, targets: [P2_0] }, MoveUsed { user: P1_0, move_used: KnockOff, targets: [P2_0] }] — every candidate nature is infeasible for stat 2 (minStat=70, maxStat=79) — inference over-narrowed
+- Instead of denoting the two tabs your team and opponent, they should be denoted as player 1 and player 2. When choosing player 2's moves the entire battlefield should be flipped, and in an imperfect information mode it should show the information from the perspective of palyer 2. This means that you need to now track 2 separate information states (1 per player).
 ### New features
 - Add inference to the README, link all the READMEs to the main project README.
 - Frontend features
   - Cheeky crossfade between screens? (Also when starting a new battlke)
   - Need to display the number of back mons in parentheses next to the possibly in the back text.
-  - Default tab for battle view should be "opponent"
+  - Default tab for battle view should be the opposing team, switching to be the opposing team whenever the players' view that we are watching changes.
   - Light screen and reflect should both be the color of current reflect
   - We need a favicon lul
 - Implement Closed Team Sheets information mode

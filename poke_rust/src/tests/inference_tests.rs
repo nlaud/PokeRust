@@ -2594,6 +2594,184 @@ fn test_pass4_trick_room_swaps_comparison() {
     assert!(!has_wrong_cmp, "Trick Room must not emit the non-reversed SpeedComparison");
 }
 
+/// S32 regression (TODO.md "SpeedComparison raises min above max" / RagePowder
+/// VolatileEnd; also the Tailwind+Heat Wave doubles bug): `pass4_speed_from_order`
+/// runs twice per `apply_information_battle` call — once before the event walk
+/// (correct: `state` is still pre-turn) and once after (previously buggy: it re-read
+/// Tailwind/Trick Room/weather live from `state`, which the walk had by then mutated
+/// to end-of-turn field conditions).
+///
+/// P1 casts Tailwind on its own side and moves FIRST (priority 0); P2 moves SECOND
+/// (priority 0). At the moment this pairing's ordering was actually determined —
+/// just before P1's own move — Tailwind was NOT yet up, so it must not factor into
+/// the numeric multiplier baked into the resulting `SpeedComparison`. The buggy
+/// second-pass seed would have credited P1 with its own same-turn Tailwind
+/// retroactively (fast_mult=2 instead of 1), which is unsound: it can force a fast
+/// mon's minimum Spe far above what's actually observed, exactly the "raises
+/// min(N) above max(M)" contradiction from the bug report (there mislabeled with a
+/// stale `event=VolatileEnd`/`event=EndOfTurn` breadcrumb — Pass 4 never reads
+/// those event kinds at all; see the `CURRENT_EVENT_CONTEXT` reset in
+/// `apply_information_battle`).
+#[test]
+fn test_s32_own_turn_tailwind_not_retroactive_to_pre_cast_pairing() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let p2_mon = no_speed_escape_mon(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Tailwind, poke_status_move(PokemonMove::Tailwind));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let tailwind_event = event_with(
+        EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Tailwind, targets: vec![] },
+        vec![event(EventKind::SideConditionStart { side: Player::P1, condition: SideCondition::TailWind })],
+    );
+
+    let result = apply_ex(
+        state,
+        vec![
+            tailwind_event,
+            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::DragonClaw, targets: vec![p1(0)] }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // Correct: fast=P1(idx0), slow=P2(idx1), multiplier (4,4) — the neutral (no
+    // boost/paralysis/Tailwind) baseline from `compute_speed_multipliers`'s
+    // unreduced stage fractions (stage_frac(0) = (2,2) on both sides, squared by the
+    // cross-multiply). Tailwind wasn't up yet when this pairing raced, so it must
+    // not appear in either factor.
+    let has_correct = result.predicates.iter().any(|clause| {
+        clause.iter().any(|stmt| matches!(stmt,
+            Statement::SpeedComparison { fast_idx: 0, slow_idx: 1, fast_mult: 4, slow_mult: 4 }))
+    });
+    assert!(
+        has_correct,
+        "expected an un-tailwinded SpeedComparison(fast=0,slow=1,mult=4,4); predicates = {:?}",
+        result.predicates
+    );
+
+    // Bug: fast_mult=8 (double the neutral 4) would mean P1's own same-turn Tailwind
+    // cast was wrongly applied retroactively to the pairing that put it first.
+    let has_buggy = result.predicates.iter().any(|clause| {
+        clause.iter().any(|stmt| matches!(stmt,
+            Statement::SpeedComparison { fast_idx: 0, slow_idx: 1, fast_mult: 8, .. }))
+    });
+    assert!(
+        !has_buggy,
+        "P1's own same-turn Tailwind cast must not retroactively speed up the pairing \
+         that put it first; predicates = {:?}",
+        result.predicates
+    );
+}
+
+/// S32 regression, Trick Room half of the same bug: P1 sets Trick Room on its own
+/// move (priority-0 stub) and moves FIRST; P2 moves SECOND. Trick Room was NOT up
+/// when this pairing raced (it's the reaction of P1's own move), so the pairing
+/// must be read as a NORMAL (non-reversed) ordering: fast=P1(idx0), slow=P2(idx1).
+///
+/// Previously, `pass4_speed_from_order`'s *second* call (after the event walk has
+/// mutated `state.pseudo_weathers` to include the now-active Trick Room) read Trick
+/// Room as a single live global instead of per-pairing, and would have wrongly
+/// swapped this pairing to fast=P2/slow=P1 — misreading the very setup turn.
+#[test]
+fn test_s32_own_turn_trick_room_not_retroactive_to_pre_cast_pairing() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let p2_mon = no_speed_escape_mon(Species::Garchomp);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::TrickRoom, poke_status_move(PokemonMove::TrickRoom));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let trick_room_event = event_with(
+        EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::TrickRoom, targets: vec![] },
+        vec![event(EventKind::PseudoWeatherStart { effect: PseudoWeather::TrickRoom })],
+    );
+
+    let result = apply_ex(
+        state,
+        vec![
+            trick_room_event,
+            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::DragonClaw, targets: vec![p1(0)] }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    let has_correct = result.predicates.iter().any(|clause| {
+        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 0, slow_idx: 1, .. }))
+    });
+    assert!(
+        has_correct,
+        "expected the un-reversed SpeedComparison(fast=0,slow=1) since Trick Room \
+         wasn't up when this pairing raced; predicates = {:?}",
+        result.predicates
+    );
+
+    let has_wrongly_swapped = result.predicates.iter().any(|clause| {
+        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 1, slow_idx: 0, .. }))
+    });
+    assert!(
+        !has_wrongly_swapped,
+        "P1's own same-turn Trick Room cast must not retroactively reverse the pairing \
+         that put it first; predicates = {:?}",
+        result.predicates
+    );
+}
+
+/// S33 regression: `pass5_back_solve`'s HP contradiction ("no IV/EV can produce
+/// observed HP bounds") must self-heal rather than panic when `minStats[0]`/
+/// `maxStats[0]` is left unreachable by the mon's current species/EV/IV window —
+/// the same class of stale-bound desync S30 fixed for its one known trigger
+/// (`HasSpecies` forced mid-BCP after `widen_item_for_illusion`). A code audit found
+/// no OTHER call site can legitimately narrow `minStats[0]`/`maxStats[0]` from an
+/// observation (percent/damage updates only ever touch the display field `mon.hp`;
+/// `Statement::EVIVStatGE/LE` can never target HP — there is no `PokemonStat::Hp`
+/// variant), so as a defense-in-depth measure this directly corrupts the HP window
+/// to simulate an as-yet-unaudited trigger of the same shape, and asserts recovery:
+/// no panic, and the window widens back to the species' theoretical worst/best case
+/// (the real achievable HP for the true species/level must lie within it).
+#[test]
+fn test_s33_pass5_hp_self_heals_instead_of_panicking() {
+    let pd = crate::tests::simuilator_test_helpers::pokemon_dex();
+    let mut mon = UnknownPokemonState::from_opponent_species(Species::Charizard, pd, 50);
+    mon.possible_species = Unknown::Known(Species::Charizard);
+    // Simulate a stale HP window left over from some other context — unreachable by
+    // any Charizard IV/EV combination at level 50.
+    mon.minStats[0] = 9000;
+    mon.maxStats[0] = 9001;
+    // Also simulate a stale, too-narrow EV bound from a prior (now-invalidated) pass5
+    // call, to confirm the self-heal resets it rather than leaving it stuck.
+    mon.minEvs[0] = 200;
+    mon.maxEvs[0] = 210;
+
+    let config = InferenceConfig::default();
+    pass5_back_solve(&mut mon, &config, pd); // must not panic
+
+    assert!(
+        mon.minStats[0] <= mon.maxStats[0],
+        "healed HP window must be non-empty: [{}, {}]",
+        mon.minStats[0], mon.maxStats[0]
+    );
+    assert_eq!(mon.minEvs[0], 0, "healed window must widen EVs back to the full range");
+    assert_eq!(mon.maxEvs[0], 252, "healed window must widen EVs back to the full range");
+
+    // Soundness: the real Charizard's achievable HP range (base HP, level 50) must lie
+    // within the healed window at both IV extremes.
+    let base_hp = pd.get(&Species::Charizard).unwrap().base_stats[0];
+    let iv_lo = if config.force_max_ivs { 31 } else { mon.minIvs[0] };
+    let iv_hi = if config.force_max_ivs { 31 } else { mon.maxIvs[0] };
+    let real_lo = crate::state::pokemon::calc_hp(base_hp, iv_lo, 0, 50);
+    let real_hi = crate::state::pokemon::calc_hp(base_hp, iv_hi, 252, 50);
+    assert!(
+        mon.minStats[0] <= real_lo && real_hi <= mon.maxStats[0],
+        "healed window [{}, {}] must contain the true achievable HP range [{}, {}]",
+        mon.minStats[0], mon.maxStats[0], real_lo, real_hi
+    );
+}
+
 /// When P2 uses a Status move and might have Prankster (+1 priority to status moves),
 /// Pass 4 must include HasAbility{Prankster} as an escape disjunct so the predicate
 /// stays sound even if Prankster explains the ordering.
