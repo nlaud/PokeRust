@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import ReactPlayer from 'react-player'
+import ReactPlayer from 'react-player/youtube'
 import { useBattle } from '../../store/battleStore'
 import { usePlayer, type TrackId, type YTPlayer } from '../../store/playerStore'
 
@@ -61,7 +61,7 @@ function TrackPlayer({
         volume={0} // level is driven imperatively (setVolume/crossfadeTo), not this prop
         width="100%"
         height="100%"
-        config={{ youtube: { playerVars: { listType: 'playlist', list: playlistId } } }}
+        config={{ playerVars: { listType: 'playlist', list: playlistId } }}
         onReady={(player) => {
           const yt = player.getInternalPlayer() as YTPlayer | undefined
           // Official YouTube IFrame Player API queueing functions — "constantly

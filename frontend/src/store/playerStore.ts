@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type ReactPlayer from 'react-player'
+import type ReactPlayer from 'react-player/youtube'
 
 const PLAYER_KEY = 'pokerust.player.v1'
 
