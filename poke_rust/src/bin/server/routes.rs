@@ -49,6 +49,21 @@ fn not_found() -> Response {
     error(StatusCode::NOT_FOUND, "battle not found")
 }
 
+fn internal_error(message: impl Into<String>) -> Response {
+    error(StatusCode::INTERNAL_SERVER_ERROR, message)
+}
+
+/// Recovers from a poisoned mutex instead of propagating the poison forever. A panic
+/// inside turn resolution is now caught before it can reach here (see
+/// `session::resolve_turn`'s `catch_unwind`), but this is defense-in-depth against any
+/// other panic while a session lock is held — one bad request must not turn every
+/// future request into a 500 for the rest of the process's life. The data behind a
+/// poisoned lock is still exactly as consistent as it was the instant before the panic
+/// (nothing here mutates a session and then panics mid-mutation), so recovering it is safe.
+fn lock_sessions(app: &AppState) -> std::sync::MutexGuard<'_, HashMap<String, BattleSession>> {
+    app.sessions.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub async fn create_battle(
     State(app): State<AppState>,
     Json(req): Json<CreateBattleRequest>,
@@ -99,6 +114,7 @@ pub async fn create_battle(
     } else {
         let config = InferenceConfig {
             use_stat_points: req.stat_points,
+            force_max_ivs: req.force_max_ivs,
             learnset_dex: app.dexes.learnset_dex.clone(),
             ..InferenceConfig::default()
         };
@@ -131,10 +147,7 @@ pub async fn create_battle(
 
     let battle_id = Uuid::new_v4().to_string();
     let view = session.view();
-    app.sessions
-        .lock()
-        .unwrap()
-        .insert(battle_id.clone(), session);
+    lock_sessions(&app).insert(battle_id.clone(), session);
 
     Json(CreateBattleResponse {
         battle_id,
@@ -144,7 +157,7 @@ pub async fn create_battle(
 }
 
 pub async fn get_battle(State(app): State<AppState>, Path(id): Path<String>) -> Response {
-    let sessions = app.sessions.lock().unwrap();
+    let sessions = lock_sessions(&app);
     let Some(session) = sessions.get(&id) else {
         return not_found();
     };
@@ -165,7 +178,7 @@ pub async fn get_commands(
     Path(id): Path<String>,
     Query(query): Query<CommandsQuery>,
 ) -> Response {
-    let sessions = app.sessions.lock().unwrap();
+    let sessions = lock_sessions(&app);
     let Some(session) = sessions.get(&id) else {
         return not_found();
     };
@@ -181,7 +194,7 @@ pub async fn submit_turn(
     Path(id): Path<String>,
     Json(req): Json<TurnRequest>,
 ) -> Response {
-    let mut sessions = app.sessions.lock().unwrap();
+    let mut sessions = lock_sessions(&app);
     let Some(session) = sessions.get_mut(&id) else {
         return not_found();
     };
@@ -197,7 +210,15 @@ pub async fn submit_turn(
         Err(message) => return unprocessable(message),
     };
 
-    let (events, probability) = session::resolve_turn(session, &app.dexes, &p1_cmd, &p2_cmd);
+    // A contradiction in the fog-of-war inference engine is caught inside
+    // `resolve_turn` and surfaced here as an ordinary error response — the session
+    // (both ground-truth state and belief) is left untouched on failure, so the
+    // battle is still there to retry or continue against on the next request. See
+    // `resolve_turn`'s doc comment for the full atomicity argument.
+    let (events, probability) = match session::resolve_turn(session, &app.dexes, &p1_cmd, &p2_cmd) {
+        Ok(result) => result,
+        Err(message) => return internal_error(message),
+    };
 
     Json(TurnResponse {
         state: session.view(),
@@ -208,7 +229,7 @@ pub async fn submit_turn(
 }
 
 pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) -> Response {
-    let removed = app.sessions.lock().unwrap().remove(&id).is_some();
+    let removed = lock_sessions(&app).remove(&id).is_some();
     if removed {
         StatusCode::NO_CONTENT.into_response()
     } else {

@@ -1,22 +1,26 @@
 # TODO
 ### Fixes
-- Mons are displayed as possible in the back only when not actually in the back, you shuoldn't be able to see what mons are actually in the back until they are revealed then switched out, while currently back mons immediatley show up!
-- Switching between your oppoents tab and your tab adds random pokemon from your opponents team to your teams display? This has some weird behavior also like your opponents back mons having their dropdowns connected...
-- Assumptions for damage are incorrectly assuming things about the HP and DEF stats, specifically sometimes it assumes you have defense EVs or whatever when you really just have HP evs, THIS IS A SOUNDNESS VIOLATION. THis system in general feels really buggy; most of the time it gets no infered information and when it does it finds things wrong. Consider larger changes for this system.
-  - I'm also getting "thread 'tokio-rt-worker' (97912) panicked at src\information\inference.rs:7229:13:
-  [inference contradiction] context="pass5-hp" — no IV/EV can produce observed HP bounds", presumably because of similar issues, possibly because the inference engine does not consider multiscale??
-- Zoroark does NOT display properly (it displays the copied pokemons item, when it should display that the species could be the copied species or zoroark (all possible clones should ahve this, things that have already been damaged should have it removed, same thing for the item of all pokemon should be the item of the zoroark, with predicates tying them together, if the species is zoroark the nit has the zoroark item, otherwise the copied pokemons item.)). You should not be using any information from the actual team sheet for displaying the opponents data, just the possible state. 
-- I randomly get "thread 'tokio-rt-worker' (102752) panicked at src\information\inference.rs:280:17:
-[inference contradiction] context="ability-absence-weather" — exclude("ability-absence-weather") conflicts with Known value
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
-thread 'tokio-rt-worker' (98944) panicked at src\bin\server\routes.rs:184:44:
-called `Result::unwrap()` on an `Err` value: PoisonError { .. }"
-  - I think this has something to do with the fact that we changed how weather works, as in if a weather is currently present resetting the weather does not reset the duration to 5.
-- Errors like this one should not immediately destroy the gateway. Instead it should display a red error on the frontend (like errors already show up), and the gateway should continue running using the most recent information as the source of truth.
+- Another bug with: [inference contradiction] context=0 — SpeedComparison raises min(248) above max(195)
+  - This one might be caused by tailwind? It has something to do with a fast pokemon (like aerodactyl) using tailwind?
+  - Another bug with the same error where this does not take into account extra stats from mega evolution?
+  - The inference stat calculation engine really needs work, there are many edge cases unaccounted for!
+- Tailwind and weathers ending does not produce an event?
+- Erros with the inference enging should also add the Event currently being resolved as text
+- Even in imperfect information modes, exact HP values are shown... NOTHING should render based on the true state of the battle, it should all be from the inferred state.
+  - This is also shown in the sidebar.
+  - The renderer should literally not even have access to the actual state of the battle when the information mode is imperfect, except for choosing moves.
+  - Additionally, zoroark's items, types, moves, and stats are shown when those should NOT be known. It should display the true range of possible stats for that pokemon, as well as the fact that the typing is unknown and the pokemon name should show milotic, zoroark. Finally, zoroark should show up as possibly in the back, which it currently doesnt when led!
+    - Once zoroark is switched out, it is fully revealed but this 
+  - When pokemon are switched in later on in the battle, information from the teamsheet about that pokemon is not used when it otherwise should be (information should be known, even if there are multiple of the same mon in the teamsheet, you can get SOME information, even if you don't know which it is).
+- Figure out what causes predicates to show up?
+- The damage-inference engine often finds no information at all when it runs. This isn't a soundness bug — the HP-vs-DEF-EV scenario and the `pass5-hp` "no IV/EV can produce observed HP bounds" panic were both investigated and fixed (S30, see the regression tests in `inference_tests.rs`) — but Pass 3/5's back-solve is still weak/imprecise in the common case. Worth revisiting for more inferential power without sacrificing soundness.
 ### New features
+- Add inference to the README, link all the READMEs to the main project README.
 - Frontend features
+  - Cheeky crossfade between screens? (Also when starting a new battlke)
+  - Need to display the number of back mons in parentheses next to the possibly in the back text.
   - We need a favicon lul
+- Implement Closed Team Sheets information mode
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)
 - Create a meta sampler from pikalytics, and then get the algorithm to understand that
   - [ ] Tracker page: needs a parser for lines of input -> action / reaction tree

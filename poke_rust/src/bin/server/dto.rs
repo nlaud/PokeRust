@@ -471,6 +471,10 @@ pub struct CreateBattleRequest {
     pub stat_points: bool,
     #[serde(default = "default_true")]
     pub consider_crit: bool,
+    /// Pin all opponent IVs to 31 for the fog-of-war inference engine (Pokémon
+    /// Champions competitive default). See `InferenceConfig::force_max_ivs`.
+    #[serde(default = "default_true")]
+    pub force_max_ivs: bool,
     #[serde(default = "default_damage_rolls")]
     pub damage_rolls: u8,
     /// `"perfect"` (default) | `"openSheet"` | `"openSheetNatures"`. Selects the

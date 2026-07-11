@@ -316,6 +316,13 @@ pub enum Statement {
         mon_idx: usize,
         ability: Ability,
     },
+    /// Used to tie an Illusion candidate's item to which physical identity it turns
+    /// out to be: `(¬HasSpecies{Zoroark} ∨ HasItem{z1} ∨ …)` and
+    /// `(HasSpecies{Zoroark} ∨ HasItem{c1} ∨ …)` — see `bcp::widen_item_for_illusion`.
+    HasSpecies {
+        mon_idx: usize,
+        species: Species,
+    },
     /// The active weather lasts exactly `turns` more end-of-turns. Emitted as a clause
     /// pair tying the setter's extension rock to the duration; the `turns` payload is
     /// decremented in sync with the field timer each end-of-turn.
@@ -416,7 +423,12 @@ impl UnknownTeamPreviewState {
         p1_active_indices: &[usize],
         p1_back_indices: &[usize],
         p2_active_indices: &[usize],
-        p2_back_indices: &[usize],
+        // No longer distinguishes "brought but not leading" from "never brought": both
+        // land in `p2_possible_back_mons` below, since neither has been battle-revealed
+        // yet. Kept in the signature so callers (session.rs) don't need to change and
+        // so a future bring-fewer-than-full-roster format still has a slot to plumb
+        // "never brought at all" through if that ever needs different treatment.
+        _p2_back_indices: &[usize],
     ) -> UnknownBattleState {
         let pick = |mons: &[UnknownPokemonState], indices: &[usize]| -> Vec<UnknownPokemonState> {
             indices.iter().filter_map(|&i| mons.get(i).cloned()).collect()
@@ -425,12 +437,22 @@ impl UnknownTeamPreviewState {
         let p1_active_mons = pick(&self.p1_mons, p1_active_indices);
         let p1_known_back_mons = pick(&self.p1_mons, p1_back_indices);
         let p2_active_mons = pick(&self.p2_mons, p2_active_indices);
-        let p2_known_back_mons = pick(&self.p2_mons, p2_back_indices);
+        // The opponent's non-leading roster starts entirely in `possible_back` — even
+        // though team preview already reveals species (so `possible_species` is
+        // `Known` on each of these entries), NONE of them have actually been sent to
+        // the field yet. `known_back` must only ever hold mons that have been battle-
+        // confirmed by being active and then withdrawn — exactly what `bench_outgoing_mon`
+        // does mid-battle, and what `pass1_switch`'s known-then-possible fallback
+        // (inference.rs ~2107-2128) already expects to pull a first-time switch-in
+        // from. Dumping `back_indices` straight into `known_back` here bypassed that
+        // and made every opponent bench mon "immediately show up" as already-revealed
+        // at turn 0 (TODO.md fix: back mons must wait for reveal-then-switch-out).
+        let p2_known_back_mons: Vec<UnknownPokemonState> = Vec::new();
         let p2_possible_back_mons: Vec<UnknownPokemonState> = self
             .p2_mons
             .iter()
             .enumerate()
-            .filter(|(i, _)| !p2_active_indices.contains(i) && !p2_back_indices.contains(i))
+            .filter(|(i, _)| !p2_active_indices.contains(i))
             .map(|(_, mon)| mon.clone())
             .collect();
 

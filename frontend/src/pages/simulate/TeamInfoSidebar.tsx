@@ -314,8 +314,10 @@ export default function TeamInfoSidebar() {
   const activeTab: Tab = tab === 'predicates' && !hasBelief ? 'p1' : tab
 
   const side = activeTab === 'p1' ? view?.p1 : activeTab === 'p2' ? view?.p2 : undefined
-  // During team preview there are no sides yet, but the preview payload
-  // already carries full PokemonViews for both teams — show those.
+  // During team preview there are no sides yet, but the preview payload already
+  // carries PokemonViews for both teams — the server masks p2Mons the same way it
+  // masks a battle-phase SideView (see `preview_view` in mapping.rs), so this is
+  // safe to show as-is even for the opponent tab.
   const previewMons =
     !side && view?.preview && activeTab !== 'predicates'
       ? (activeTab === 'p1' ? view.preview.p1Mons : view.preview.p2Mons)
@@ -324,8 +326,14 @@ export default function TeamInfoSidebar() {
   const back = side?.back ?? previewMons
   const possibleBack = side?.possibleBack ?? []
 
-  const row = (mon: PokemonView, isActive: boolean, grayed = false) => {
-    const key = `${activeTab}-${mon.monId}`
+  // Keyed by section + list index, not just `mon.monId`: bench mons whose identity
+  // hasn't narrowed yet can share a fallback id (or, historically, all shared the
+  // same placeholder id — see mapping.rs's `bench_pokemon_view_from_belief`), and a
+  // duplicate React key merges those rows' expansion state and corrupts
+  // reconciliation across tab switches. The section+index pair is always unique
+  // within one render regardless of what the belief currently knows about monId.
+  const row = (mon: PokemonView, isActive: boolean, section: string, idx: number, grayed = false) => {
+    const key = `${activeTab}-${section}-${idx}-${mon.monId}`
     return (
       <MonRow
         key={key}
@@ -389,14 +397,14 @@ export default function TeamInfoSidebar() {
             {!side && previewMons.length === 0 && (
               <p className="p-2 text-xs text-ink-muted">No team data yet.</p>
             )}
-            {active.map((mon) => row(mon, true))}
-            {back.map((mon) => row(mon, false))}
+            {active.map((mon, i) => row(mon, true, 'active', i))}
+            {back.map((mon, i) => row(mon, false, 'back', i))}
             {possibleBack.length > 0 && (
               <>
                 <p className="px-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
                   Possibly in the back
                 </p>
-                {possibleBack.map((mon) => row(mon, false, true))}
+                {possibleBack.map((mon, i) => row(mon, false, 'possible', i, true))}
               </>
             )}
           </>

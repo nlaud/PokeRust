@@ -270,12 +270,34 @@ pub fn reconstruct_player_command(
 /// weighted trajectory instead of enumerating the full outcome tree (which
 /// exhausts memory on doubles spread turns at 16 damage rolls) — then advance
 /// the session and log the event tree.
+/// Turns a caught panic payload into a human-readable message for the API error body.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "internal error (inference engine panicked)".to_string()
+    }
+}
+
+/// Advance one turn, or fail without mutating `session` at all.
+///
+/// The fog-of-war inference engine (`apply_information`) can still panic on an
+/// unresolved contradiction (see `information/AUDIT.md`) — a single malformed
+/// belief update must not take the whole gateway down with it. Everything below is
+/// computed into locals first; `session.state`/`session.belief`/`session.log` are
+/// only written at the very end, once we know the belief update actually
+/// succeeded. On failure the session is left exactly as it was before this call —
+/// "most recent good information stays the source of truth" — and the caller
+/// reports the error instead of silently desyncing belief from ground truth by one
+/// turn (which would corrupt every future switch-in / masking decision).
 pub fn resolve_turn(
     session: &mut BattleSession,
     dexes: &Dexes,
     p1_cmd: &PlayerCommand,
     p2_cmd: &PlayerCommand,
-) -> (Vec<EventNode>, f64) {
+) -> Result<(Vec<EventNode>, f64), String> {
     let label = match &session.state {
         MatchState::TeamPreviewState(_) => "Team Preview".to_string(),
         MatchState::BattleState(state) => format!("Turn {}", state.turn_number),
@@ -298,9 +320,12 @@ pub fn resolve_turn(
     let event_nodes: Vec<EventNode> = events.iter().map(mapping::event_node).collect();
 
     // Advance the fog-of-war belief in lockstep with the ground-truth transition
-    // above, when a non-Perfect-Information mode is tracking one.
-    if let Some(belief) = session.belief.take() {
-        let next_belief = if was_team_preview {
+    // above, when a non-Perfect-Information mode is tracking one. Cloned rather than
+    // `.take()`n so `session.belief` is untouched if this whole function bails out
+    // early below.
+    let next_belief: Option<UnknownMatchState> = match session.belief.clone() {
+        None => None,
+        Some(belief) => Some(if was_team_preview {
             // Team-preview -> battle: convert using the SAME active/back indices
             // `sample_turn` just used for the concrete transition, so belief and
             // ground truth stay in lockstep. `reconstruct_player_command` already
@@ -324,24 +349,30 @@ pub fn resolve_turn(
                 .inference_config
                 .as_ref()
                 .expect("belief is only Some alongside a built inference_config");
-            apply_information(
-                belief,
-                &events,
-                false,
-                &dexes.pokemon_dex,
-                &dexes.move_dex,
-                &dexes.ability_dex,
-                config,
-            )
-        };
-        session.belief = Some(next_belief);
-    }
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                apply_information(
+                    belief,
+                    &events,
+                    false,
+                    &dexes.pokemon_dex,
+                    &dexes.move_dex,
+                    &dexes.ability_dex,
+                    config,
+                )
+            }));
+            match caught {
+                Ok(next) => next,
+                Err(payload) => return Err(panic_message(payload)),
+            }
+        }),
+    };
 
     session.state = next_state;
+    session.belief = next_belief;
     session.log.push(TurnLogEntry {
         label,
         events: event_nodes.clone(),
     });
 
-    (event_nodes, probability)
+    Ok((event_nodes, probability))
 }

@@ -100,6 +100,9 @@ pub fn describe_statement(stmt: &Statement, battle: &UnknownBattleState) -> Stri
         Statement::HasAbility { mon_idx, ability } => {
             format!("{}'s ability is {}", mon_label(battle, *mon_idx), display_name(ability))
         }
+        Statement::HasSpecies { mon_idx, species } => {
+            format!("{}'s species is {}", mon_label(battle, *mon_idx), display_name(species))
+        }
         Statement::WeatherTurns { turns } => {
             format!("The weather lasts {} more turn(s)", turns)
         }

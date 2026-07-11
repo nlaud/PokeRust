@@ -224,14 +224,24 @@ fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> Pokemo
 /// and volatiles are exactly `[0;7]`/empty for any benched mon (both reset on
 /// switch-out), so this is not an approximation for those two fields; HP is
 /// approximated from the believed max HP when only a percent is known.
-fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState) -> PokemonView {
+///
+/// `mon_id` prefers the belief's own `possible_mon_id` (narrowed to `Known` once the
+/// party-order slot is pinned down); when it's still ambiguous, falls back to
+/// `fallback_id` — a caller-supplied id that must be unique across the whole side's
+/// bench render for this call (see `side_view`). Without this, every unresolved bench
+/// mon rendered `mon_id: 0` and collided on the frontend's `mon_id`-keyed rows.
+fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState, fallback_id: u8) -> PokemonView {
     let max_hp = unk.maxStats[0];
     let current = match unk.hp {
         PokemonHP::Number(n) => n,
         PokemonHP::Percent(p) => ((p as u32 * max_hp as u32) / 100) as u16,
     };
+    let mon_id = match unk.possible_mon_id {
+        Unknown::Known(id) => id,
+        _ => fallback_id,
+    };
     let mut view = PokemonView {
-        mon_id: 0,
+        mon_id,
         species: describe_unknown(&unk.possible_species),
         level: unk.level,
         gender: describe_unknown(&unk.possible_genders),
@@ -332,10 +342,23 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
                     }
                 })
                 .collect();
-            let back_views: Vec<PokemonView> =
-                fog.p2_known_back_mons.iter().map(bench_pokemon_view_from_belief).collect();
-            let possible_back_views: Vec<PokemonView> =
-                fog.p2_possible_back_mons.iter().map(bench_pokemon_view_from_belief).collect();
+            // Fallback ids for mons whose `possible_mon_id` hasn't narrowed to `Known`
+            // yet: real party-order ids only ever range 0..=5, so offsetting each
+            // section's fallback base well above that (and apart from each other)
+            // guarantees no two bench rows ever collide on `mon_id` — see
+            // `bench_pokemon_view_from_belief`'s doc comment.
+            let back_views: Vec<PokemonView> = fog
+                .p2_known_back_mons
+                .iter()
+                .enumerate()
+                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 100 + i as u8))
+                .collect();
+            let possible_back_views: Vec<PokemonView> = fog
+                .p2_possible_back_mons
+                .iter()
+                .enumerate()
+                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 150 + i as u8))
+                .collect();
             (active_views, back_views, possible_back_views)
         }
         None => (

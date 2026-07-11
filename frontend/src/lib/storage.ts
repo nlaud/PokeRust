@@ -18,6 +18,9 @@ export interface StoredFormat {
   broughtPokemon: number
   /** PokeAPI item names (slugs) that are banned in this format. */
   bannedItems: string[]
+  /** Pin all opponent IVs to 31 for the fog-of-war inference engine (Champions
+   * competitive default). Mirrors `InferenceConfig::force_max_ivs` in the Rust engine. */
+  forceMaxIvs: boolean
   favorite: boolean
 }
 
@@ -55,6 +58,7 @@ const DEFAULT_FORMATS: StoredFormat[] = [
     totalPokemon: 6,
     broughtPokemon: 4,
     bannedItems: [],
+    forceMaxIvs: true,
     favorite: false,
   },
   {
@@ -64,6 +68,7 @@ const DEFAULT_FORMATS: StoredFormat[] = [
     totalPokemon: 6,
     broughtPokemon: 3,
     bannedItems: [],
+    forceMaxIvs: true,
     favorite: false,
   },
 ]
@@ -74,8 +79,12 @@ export function loadFormats(): StoredFormat[] {
     saveFormats(DEFAULT_FORMATS)
     return DEFAULT_FORMATS
   }
-  // Backfill `favorite` for rows stored before the field existed.
-  return stored.formats.map((f) => ({ ...f, favorite: f.favorite ?? false }))
+  // Backfill fields for rows stored before they existed.
+  return stored.formats.map((f) => ({
+    ...f,
+    favorite: f.favorite ?? false,
+    forceMaxIvs: f.forceMaxIvs ?? true,
+  }))
 }
 
 export function saveFormats(formats: StoredFormat[]) {

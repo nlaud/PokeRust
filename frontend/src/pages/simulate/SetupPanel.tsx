@@ -51,6 +51,7 @@ export default function SetupPanel() {
       p2Team: team2.sheet,
       activePerSide: format.activePokemon,
       broughtPerSide: format.broughtPokemon,
+      forceMaxIvs: format.forceMaxIvs,
       damageRolls: 16,
       informationMode,
     })

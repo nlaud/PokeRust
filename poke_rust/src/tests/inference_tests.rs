@@ -1673,7 +1673,126 @@ fn test_switch_widens_species_for_possible_illusion() {
     }
 }
 
+/// TODO.md fix: the item must be tied to the species via a conditional predicate —
+/// "if species is Zoroark it has Zoroark's item, otherwise the copied Pokémon's
+/// item" — not left showing the copied mon's assumed item unconditionally.
+///
+/// Sets the benched Zoroark's own item to a concrete `Known` value so the
+/// `HasSpecies`/`HasItem` clause pair is guaranteed to be emitted (bounded
+/// candidate sets only — see `unknown_bounded_candidates`), then drives the
+/// disguise through to a real `IllusionEnded` reveal and checks BCP resolves the
+/// item to Zoroark's own value, not the copied mon's.
+#[test]
+fn test_illusion_item_tied_to_species_via_predicate() {
+    let garchomp_back =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut zoroark_back =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    zoroark_back.item = Unknown::Known(Item::Leftovers);
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+
+    // "Garchomp" switches in — might really be the disguised Zoroark.
+    let after_switch = apply(
+        state,
+        vec![event(EventKind::Switch(SwitchState {
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }))],
+    );
+
+    // A HasSpecies clause referencing this slot's mon_idx must now exist — the tie
+    // was actually emitted, not silently skipped.
+    let mon_idx = mon_idx_for_active_slot(&after_switch, &p2(0)).unwrap();
+    let has_species_clause = after_switch.predicates.iter().any(|clause| {
+        clause.iter().any(|lit| {
+            matches!(lit, Statement::HasSpecies { mon_idx: idx, .. } if *idx == mon_idx)
+                || matches!(lit, Statement::Not(inner)
+                    if matches!(&**inner, Statement::HasSpecies { mon_idx: idx, .. } if *idx == mon_idx))
+        })
+    });
+    assert!(
+        has_species_clause,
+        "expected a HasSpecies clause tying item to the disguise hypothesis; \
+         predicates = {:?}",
+        after_switch.predicates
+    );
+    // Soundness in the meantime: Leftovers must not be excluded (it's the real
+    // Zoroark's item, one of the two live hypotheses).
+    assert!(
+        !unknown_is_excluded(&after_switch.p2_active_mons[0].item, &Item::Leftovers),
+        "Leftovers (Zoroark's real item) must remain a live candidate before \
+         resolution; item = {:?}",
+        after_switch.p2_active_mons[0].item
+    );
+
+    // The disguise breaks (e.g. it took a damaging hit) and reveals the true species.
+    let after_reveal = apply(
+        after_switch,
+        vec![event(EventKind::IllusionEnded { slot: p2(0), actual_species: Species::Zoroark })],
+    );
+
+    assert_eq!(
+        after_reveal.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "species must resolve to Known(Zoroark) after IllusionEnded"
+    );
+    assert_eq!(
+        after_reveal.p2_active_mons[0].item,
+        Unknown::Known(Item::Leftovers),
+        "BCP must resolve item to Zoroark's own tracked item once species confirms \
+         Zoroark — got {:?}",
+        after_reveal.p2_active_mons[0].item
+    );
+}
+
 // ── Regression: S29 — Illusion disguise must not consume a scouted teammate ─────
+
+/// Regression: `combined_back` must scan `possible_back`, not just `known_back`.
+/// A Zoroark sitting in `possible_back` (species known from team preview, but never
+/// yet individually revealed-and-switched-out — the normal state for most of a
+/// team's bench for the first several turns, after the TODO.md fix making
+/// `into_battle_state` populate `possible_back` from turn 1) must still trigger
+/// Illusion widening for a DIFFERENT mon switching in. Before that fix landed,
+/// `pass1_switch`'s bench scan only checked `known_back`, so a same-turn-one
+/// Zoroark switch-in for anything else would have silently failed to widen.
+#[test]
+fn test_illusion_widens_from_possible_back_zoroark() {
+    let garchomp_back =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let zoroark_back =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    let mut state = battle_with_p2(vec![]);
+    // Zoroark sits in possible_back (never individually revealed), not known_back.
+    state.p2_known_back_mons = vec![garchomp_back];
+    state.p2_possible_back_mons = vec![zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+
+    let result = apply(
+        state,
+        vec![event(EventKind::Switch(SwitchState {
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }))],
+    );
+
+    assert!(
+        matches!(&result.p2_active_mons[0].possible_species,
+            Unknown::Possibly(v) if v.contains(&Species::Garchomp) && v.contains(&Species::Zoroark)),
+        "species must still widen to Possibly([Garchomp, Zoroark]) when the Zoroark \
+         candidate is sitting in possible_back rather than known_back; got {:?}",
+        result.p2_active_mons[0].possible_species
+    );
+}
 
 /// With a Zoroark on the opponent's known bench, a "Garchomp" switch-in might be the
 /// Zoroark in disguise. The real (previously scouted) Garchomp's benched entry must
@@ -6810,7 +6929,7 @@ mod roundtrip_soundness {
     use crate::data::species::Species;
     use crate::information::inference::{apply_information, unknown_is_excluded, InferenceConfig};
     use crate::information::information::InformationEvent;
-    use crate::information::unknowns::{Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState};
+    use crate::information::unknowns::{Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState};
     use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::state::dex_data::PokemonType;
     use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
@@ -7005,6 +7124,224 @@ mod roundtrip_soundness {
             !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::Immunity),
             "soundness: true ability Immunity must not be excluded; \
              possible_abilities = {:?}", p2_fog.possible_abilities
+        );
+    }
+
+    /// TODO.md soundness regression: same shape as
+    /// `roundtrip_b_p1_attacks_p2_def_stat_soundness`, but P2's true EVs are maxed on
+    /// HP (252) and zero on Def — the exact shape of the reported "assumes Def EVs
+    /// when the truth is HP EVs" concern. Pass 3 Direction A back-solves the
+    /// defender's Def BSV by unioning the feasible-BSV interval over every achievable
+    /// (HP, Def) pair (`achievable_defender_hp_values` × `find_feasible_bsv_range_a`);
+    /// since the true HP is always among the enumerated candidates, the pair
+    /// containing the true (HP, Def) always contributes its own interval to that
+    /// union, so the resulting marginal Def bound provably still contains the truth
+    /// regardless of which HP hypothesis is real — investigated and confirmed sound
+    /// by inspection AND empirically here. If a future change to Pass 3/Pass 5/
+    /// `ev_total_cap` breaks that coupling, this fails with either `minEvs[2] > 0`
+    /// (wrongly excluding the true Def EV) or `maxEvs[0] < 252` (wrongly excluding
+    /// the true HP EV).
+    #[test]
+    fn roundtrip_b1_p1_attacks_p2_hp_ev_vs_def_ev_soundness() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+
+        // True build: 252 HP EVs, 0 Def EVs (all other EVs 0 too) — maximally
+        // HP-heavy, the exact shape the TODO complaint describes.
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([252u8, 0, 0, 0, 0, 0]), Some([31u8; 6]), false,
+        );
+        let true_hp_ev: u8 = p2.evs[0];
+        let true_def_ev: u8 = p2.evs[2];
+        assert_eq!(true_hp_ev, 252);
+        assert_eq!(true_def_ev, 0);
+
+        let battle = battle_state_from_lists(
+            vec![p1.clone()], vec![], vec![p2.clone()], vec![],
+        );
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Earthquake
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
+
+        let fog = fog_1v1(&p1, Species::Snorlax);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        let p2_fog = &result.p2_active_mons[0];
+        assert!(
+            p2_fog.minEvs[0] <= true_hp_ev && true_hp_ev <= p2_fog.maxEvs[0],
+            "soundness: true HP EV ({true_hp_ev}) must lie within inferred range \
+             [{}, {}]", p2_fog.minEvs[0], p2_fog.maxEvs[0]
+        );
+        assert!(
+            p2_fog.minEvs[2] <= true_def_ev && true_def_ev <= p2_fog.maxEvs[2],
+            "soundness: true Def EV ({true_def_ev}) must lie within inferred range \
+             [{}, {}] — HP EV bound was [{}, {}]",
+            p2_fog.minEvs[2], p2_fog.maxEvs[2], p2_fog.minEvs[0], p2_fog.maxEvs[0]
+        );
+    }
+
+    /// TODO.md soundness regression, two-hit variant: two consecutive Direction-A
+    /// observations against the same HP-heavy defender (252 HP EV / 0 Def EV), belief
+    /// threaded turn-to-turn exactly as `session::resolve_turn` does it — checks that
+    /// accumulating a second percent-HP delta on top of the first never tightens past
+    /// the true (HP, Def) pair once both observations are intersected. See
+    /// `roundtrip_b1_p1_attacks_p2_hp_ev_vs_def_ev_soundness` for why each individual
+    /// observation's bound is sound; intersecting two sound bounds (each already
+    /// containing the truth) can only ever stay sound.
+    #[test]
+    fn roundtrip_b2_two_hits_hp_ev_vs_def_ev_soundness() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), None, None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
+            Some([252u8, 0, 0, 0, 0, 0]), Some([31u8; 6]), false,
+        );
+        let true_hp_ev: u8 = p2.evs[0];
+        let true_def_ev: u8 = p2.evs[2];
+
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // Turn 1.
+        let mut branches =
+            run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
+        branches.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let (turn1_state, turn1_events, _) = branches
+            .into_iter()
+            .find(|(st, _, _)| matches!(st, MatchState::BattleState(_)))
+            .expect("no BattleState branch found after turn 1 — P2 may have fainted");
+        let turn1_events = turn1_events.expect("observer set → events must be Some");
+
+        let fog = fog_1v1(&p1, Species::Snorlax);
+        let dex = pokemon_dex();
+        let belief_after_1 = apply_information(
+            UnknownMatchState::Battle(fog),
+            &turn1_events,
+            false,
+            dex,
+            md,
+            &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+
+        // Turn 2: same attack again, from the post-turn-1 ground truth.
+        let mut branches2 =
+            run_single_turn_with_events(&turn1_state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
+        branches2.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let Some((_turn2_state, turn2_events, _)) = branches2
+            .into_iter()
+            .find(|(st, _, _)| matches!(st, MatchState::BattleState(_)))
+        else {
+            // P2 fainted on turn 2 — nothing further to check; turn 1's bound alone
+            // was already verified sound by the single-hit probe.
+            return;
+        };
+        let turn2_events = turn2_events.expect("observer set → events must be Some");
+
+        let belief_after_2 = apply_information(
+            belief_after_1, &turn2_events, false, dex, md, &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+        let UnknownMatchState::Battle(result) = belief_after_2 else {
+            panic!("expected Battle state after second apply_information");
+        };
+
+        let p2_fog = &result.p2_active_mons[0];
+        assert!(
+            p2_fog.minEvs[0] <= true_hp_ev && true_hp_ev <= p2_fog.maxEvs[0],
+            "soundness (2 hits): true HP EV ({true_hp_ev}) must lie within inferred \
+             range [{}, {}]", p2_fog.minEvs[0], p2_fog.maxEvs[0]
+        );
+        assert!(
+            p2_fog.minEvs[2] <= true_def_ev && true_def_ev <= p2_fog.maxEvs[2],
+            "soundness (2 hits): true Def EV ({true_def_ev}) must lie within inferred \
+             range [{}, {}] — HP EV bound was [{}, {}]",
+            p2_fog.minEvs[2], p2_fog.maxEvs[2], p2_fog.minEvs[0], p2_fog.maxEvs[0]
+        );
+    }
+
+    // ── Regression: BCP-forced species change must not leave a stale HP window ──
+    //
+    // `widen_item_for_illusion` emits `HasSpecies` CNF clauses; BCP's `force_literal`
+    // can resolve one to `Known(species)` mid-fixpoint (e.g. once the item-tie clause's
+    // other disjuncts are eliminated). Unlike `IllusionEnded` and Mega/forme changes,
+    // that path did NOT recompute the mon's stat window — so a slot displayed as (say)
+    // Snorlax (HP base 160) whose species BCP forces to Zoroark (HP base 60) was left
+    // with an HP window no Zoroark IV/EV can reach. `pass5_back_solve`'s "pass5-hp —
+    // no IV/EV can produce observed HP bounds" assertion then panicked, taking down
+    // the tokio worker (and, pre-Fix-4, the whole gateway).
+    //
+    // This drives the actual BCP path: a `Possibly([Snorlax, Zoroark])` species (as
+    // `widen_item_for_illusion` would leave it, stat window untouched) plus a unit
+    // `HasSpecies{Zoroark}` predicate clause — exactly what remains once BCP has
+    // eliminated every other disjunct in a real item-tie clause. Asserts BCP resolves
+    // it without panicking and lands a Zoroark-consistent, sound HP window.
+    #[test]
+    fn test_s30_forced_species_stale_hp_window_no_pass5_panic() {
+        use crate::information::inference::mon_idx_for_active_slot;
+        use crate::state::pokemon::calc_hp;
+        let pd = pokemon_dex();
+
+        // Displayed as Snorlax (big-HP window, per widen_item_for_illusion which
+        // widens `possible_species` only — it never touches stat bounds).
+        let mut desynced = UnknownPokemonState::from_opponent_species(Species::Snorlax, pd, 50);
+        desynced.possible_species =
+            Unknown::Possibly(vec![Species::Snorlax, Species::Zoroark]);
+        let mut state = super::battle_with_p2(vec![desynced]);
+
+        let mon_idx = mon_idx_for_active_slot(&state, &super::p2(0)).unwrap();
+        // Unit clause: BCP forces this on its very first pass.
+        state.predicates.push(vec![Statement::HasSpecies { mon_idx, species: Species::Zoroark }]);
+
+        // Reaching the asserts at all proves no panic.
+        let result = apply_information(
+            UnknownMatchState::Battle(state),
+            &[],
+            false,
+            pd,
+            &HashMap::new(),
+            &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+        let UnknownMatchState::Battle(b) = result else { panic!("expected battle state") };
+        let m = &b.p2_active_mons[0];
+
+        assert_eq!(m.possible_species, Unknown::Known(Species::Zoroark));
+        assert!(
+            m.minStats[0] <= m.maxStats[0],
+            "HP window must be non-empty after reconciliation: [{}, {}]",
+            m.minStats[0], m.maxStats[0]
+        );
+        // The window must be Zoroark-consistent: a real Zoroark (base HP 60, 31 IV,
+        // any EV) must lie within it. force_max_ivs default → 31 IV; 0 EV gives the
+        // theoretical minimum.
+        let real_zoroark_hp = calc_hp(60, 31, 0, 50);
+        assert!(
+            m.minStats[0] <= real_zoroark_hp && real_zoroark_hp <= m.maxStats[0],
+            "reconciled HP window [{}, {}] must contain a real Zoroark HP ({})",
+            m.minStats[0], m.maxStats[0], real_zoroark_hp
         );
     }
 
@@ -9287,11 +9624,18 @@ mod information_mode_tests {
         );
     }
 
-    // ── into_battle_state: known-back vs possible-back split ──────────────────
+    // ── into_battle_state: opponent bench starts entirely unrevealed ──────────
 
     #[test]
-    fn test_into_battle_state_splits_brought_from_not_brought() {
-        // 6 species shown at preview; only 4 are brought (indices 0,1 active; 2,3 back).
+    fn test_into_battle_state_p2_bench_starts_possible_not_known() {
+        // 6 species shown at preview; P2 leads with index 0, the rest (1..5) are
+        // reserve — but NONE of the reserve has actually been sent to the field yet.
+        // `known_back` must only ever hold battle-confirmed (revealed-then-withdrawn)
+        // mons (see `bench_outgoing_mon` / `pass1_switch`'s known-then-possible
+        // fallback), so every non-active P2 mon — brought-but-not-leading and
+        // never-brought alike — must start in `possible_back`, not `known_back`.
+        // Regression for the TODO.md fix: opponent back mons were "immediately
+        // showing up" as already-revealed at turn 0.
         let p2_mons: Vec<UnknownPokemonState> = [
             Species::Garchomp, Species::Snorlax, Species::Corviknight,
             Species::Charizard, Species::Ferrothorn, Species::Toxapex,
@@ -9312,10 +9656,12 @@ mod information_mode_tests {
         assert!(
             matches!(&battle.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Garchomp)
         );
-        assert_eq!(battle.p2_known_back_mons.len(), 2);
-        // Not-brought mons (Charizard, Ferrothorn, Toxapex — indices 3,4,5) land in
-        // possible_back, never known_back or active.
-        assert_eq!(battle.p2_possible_back_mons.len(), 3);
+        // Nothing is battle-confirmed yet — known_back starts empty regardless of
+        // which indices were passed as "back" vs left off entirely.
+        assert!(battle.p2_known_back_mons.is_empty());
+        // All 5 non-active P2 mons (Snorlax, Corviknight, Charizard, Ferrothorn,
+        // Toxapex) land in possible_back, whether or not they were in `back_indices`.
+        assert_eq!(battle.p2_possible_back_mons.len(), 5);
         let possible_species: HashSet<Species> = battle
             .p2_possible_back_mons
             .iter()
@@ -9326,10 +9672,17 @@ mod information_mode_tests {
             .collect();
         assert_eq!(
             possible_species,
-            [Species::Charizard, Species::Ferrothorn, Species::Toxapex].into_iter().collect()
+            [
+                Species::Snorlax, Species::Corviknight, Species::Charizard,
+                Species::Ferrothorn, Species::Toxapex,
+            ]
+            .into_iter()
+            .collect()
         );
-        // The viewer's own side never has a "possible back" gap.
-        assert!(battle.p1_possible_back_mons.is_empty());
+        // The viewer's own side is unaffected — P1 back mons still populate
+        // known_back directly (never masked for display) and never gain a
+        // "possible back" gap.
+        assert_eq!(battle.p1_possible_back_mons.len(), 0);
     }
 }
 

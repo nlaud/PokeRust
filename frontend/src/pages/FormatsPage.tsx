@@ -56,6 +56,7 @@ export default function FormatsPage() {
               totalPokemon: 6,
               broughtPokemon: 3,
               bannedItems: [],
+              forceMaxIvs: true,
               favorite: false,
             }}
             onSave={save}
@@ -138,6 +139,8 @@ function FormatCard({
         {format.bannedItems.length === 0
           ? 'All items allowed'
           : `${format.bannedItems.length} item(s) banned`}
+        {' · '}
+        {format.forceMaxIvs ? 'Max IVs assumed' : 'IVs unknown'}
       </p>
     </div>
   )
@@ -219,6 +222,16 @@ function FormatEditor({
           </label>
         ))}
       </div>
+
+      <label className="mb-3 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={draft.forceMaxIvs}
+          onChange={(e) => setDraft({ ...draft, forceMaxIvs: e.target.checked })}
+          className="h-4 w-4 rounded border-subtle"
+        />
+        <span>Assume max IVs (31)</span>
+      </label>
 
       <div className="mb-2">
         <input

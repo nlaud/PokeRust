@@ -6821,6 +6821,12 @@ fn handle_gas_primal_weather_suppression(state: &mut BattleState) {
     ) {
         state.weather = None;
         state.weather_turns = None;
+        // Must emit like every other weather-clearing path (set_weather,
+        // decrement_effect_timers) — otherwise the fog-of-war observer's belief never
+        // learns the weather cleared and goes stale, which can desync the inference
+        // engine's own `state.weather` from ground truth (see
+        // information/AUDIT.md for the resulting "ability-absence-weather" contradiction).
+        emit(state, EventKind::WeatherChanged { weather: None });
     }
     // Break any active Illusion disguises — Neutralizing Gas now suppresses Illusion.
     let all_slots: Vec<FieldSlot> = collect_active_slots(state, Player::P1, None)
@@ -7036,6 +7042,9 @@ fn handle_primal_weather_departure(state: &mut BattleState, departed_ability: &A
     if state.weather.as_ref() == Some(&weather) {
         state.weather = None;
         state.weather_turns = None;
+        // See the matching comment in `handle_gas_primal_weather_suppression` — every
+        // weather-clearing path must emit so the observer's belief doesn't go stale.
+        emit(state, EventKind::WeatherChanged { weather: None });
     }
 }
 

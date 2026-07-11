@@ -346,6 +346,68 @@ fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
     matches!(u, Unknown::Known(v) if v == val)
 }
 
+/// Widen to whichever of `a`/`b` admits more: `x` is possible in the result iff it
+/// was possible under `a` OR under `b`. Used when the same slot might really be one
+/// of two distinct physical identities (Illusion) and each identity's own bound needs
+/// folding into one marginal — never narrows past what either side alone allowed, so
+/// this can only ever widen, not exclude.
+fn unknown_union<T: PartialEq + Clone>(a: &Unknown<T>, b: &Unknown<T>) -> Unknown<T> {
+    match (a, b) {
+        (Unknown::Known(x), Unknown::Known(y)) => {
+            if x == y { Unknown::Known(x.clone()) } else { Unknown::Possibly(vec![x.clone(), y.clone()]) }
+        }
+        (Unknown::Known(x), Unknown::Possibly(ys)) | (Unknown::Possibly(ys), Unknown::Known(x)) => {
+            let mut out = ys.clone();
+            if !out.contains(x) {
+                out.push(x.clone());
+            }
+            Unknown::Possibly(out)
+        }
+        (Unknown::Possibly(xs), Unknown::Possibly(ys)) => {
+            let mut out = xs.clone();
+            for y in ys {
+                if !out.contains(y) {
+                    out.push(y.clone());
+                }
+            }
+            Unknown::Possibly(out)
+        }
+        (Unknown::Known(x), Unknown::Not(excluded)) | (Unknown::Not(excluded), Unknown::Known(x)) => {
+            // "Everything except `excluded`" unioned with a single extra value: drop
+            // that value from the exclusion list if it was there, otherwise unchanged
+            // (it was already included).
+            let mut out = excluded.clone();
+            out.retain(|e| e != x);
+            Unknown::Not(out)
+        }
+        (Unknown::Possibly(xs), Unknown::Not(excluded)) | (Unknown::Not(excluded), Unknown::Possibly(xs)) => {
+            let mut out = excluded.clone();
+            out.retain(|e| !xs.contains(e));
+            Unknown::Not(out)
+        }
+        (Unknown::Not(ex_a), Unknown::Not(ex_b)) => {
+            // "Almost everything" unioned with "almost everything": an item is only
+            // excluded from the union if BOTH sides excluded it — i.e. the intersection
+            // of the two exclusion lists.
+            let out: Vec<T> = ex_a.iter().filter(|e| ex_b.contains(e)).cloned().collect();
+            Unknown::Not(out)
+        }
+    }
+}
+
+/// Candidate values currently admitted by `u`, if that set is small enough to be
+/// worth encoding as an explicit CNF disjunction (`Possibly`/`Known`). `None` for
+/// `Not(excluded)` — an "almost everything" bound would blow up into a near-tautological
+/// clause covering hundreds of items, so callers should skip clause emission for that
+/// side rather than materialize it.
+fn unknown_bounded_candidates<T: Clone>(u: &Unknown<T>) -> Option<Vec<T>> {
+    match u {
+        Unknown::Known(v) => Some(vec![v.clone()]),
+        Unknown::Possibly(vs) => Some(vs.clone()),
+        Unknown::Not(_) => None,
+    }
+}
+
 // ── Item-clause helpers ────────────────────────────────────────────────────────
 
 /// Return the `mon_idx` values for every Pokémon on the same side as `source_idx`,
@@ -746,7 +808,7 @@ fn apply_information_battle(
     run_pass5_all_mons(state, config, dex);
 
     // ── Pass 6: BCP to fixpoint ────────────────────────────────────────────────
-    bcp::run_bcp(state, config.allow_repeat_items);
+    bcp::run_bcp(state, config.allow_repeat_items, dex, config);
 
     // ── Pass 4 re-derivation: if BCP forced a priority ability to Known, re-run
     // speed ordering with the tighter bracket so speed bounds are updated.
@@ -756,14 +818,14 @@ fn apply_information_battle(
         let sc = bcp::collect_speed_comparisons(state);
         while bcp::propagate_collected(state, &sc) {}
     }
-    bcp::run_bcp(state, config.allow_repeat_items);
+    bcp::run_bcp(state, config.allow_repeat_items, dex, config);
 
     // ── Pass 5 (second): re-run after BCP so that stat bounds tightened by
     // force_literal (e.g. from a SpeedComparison clause resolving to Known) are
     // reflected in EV/IV/nature narrowing.  BCP is re-run once more to propagate
     // any newly excluded natures.  Bounds are monotone → guaranteed to terminate.
     run_pass5_all_mons(state, config, dex);
-    bcp::run_bcp(state, config.allow_repeat_items);
+    bcp::run_bcp(state, config.allow_repeat_items, dex, config);
 }
 
 /// Context threaded through the recursive event walk.
@@ -1775,6 +1837,82 @@ fn pass1_apply_event(
                         mon.possible_abilities = new_abilities;
                         mon.possible_weight_hg = Unknown::Known(data.weight);
                     }
+                    // Everything Pass 3/5 had narrowed (minStats/maxStats,
+                    // min_pre_nature_stat/max_pre_nature_stat, minIvs/maxIvs, and
+                    // minEvs/maxEvs) was back-solved against the DISGUISE species' base
+                    // stat table, which describes a completely different Pokemon than the
+                    // one now revealed — those bounds carry no information about the true
+                    // mon and must not survive the reveal. Leaving them in place produced
+                    // a real contradiction: a small-base-HP mon (e.g. Zoroark, base 60)
+                    // revealed from behind a large-base-HP disguise (e.g. Snorlax, base
+                    // 160) left `minStats[0]/maxStats[0]` pinned to Snorlax's achievable-HP
+                    // window, which no Zoroark IV/EV combination can reach — pass5-hp's
+                    // "no IV/EV can produce observed HP bounds" contradiction. Reset to the
+                    // true species' theoretical worst/best case (same computation a
+                    // brand-new sighting gets via `recompute_stats_for_iv_mode`, called
+                    // from `pass1_switch`) and widen EVs back to the full lattice range;
+                    // nature stays untouched since it's not species-dependent and any
+                    // narrowing already learned about the physical mon's nature remains
+                    // valid post-reveal.
+                    recompute_stats_for_iv_mode(mon, actual_species, ctx.dex, ctx.config);
+                    mon.minEvs = [0; 6];
+                    mon.maxEvs = [252; 6];
+                }
+                // Persisted CNF clauses referencing this slot accumulated while it
+                // displayed the disguise. Two kinds:
+                //  - Species-VALUE clauses (EVIVStatGE/LE, SpeedComparison,
+                //    NatureBoostsStat/NerfsStat, KnowsThreateningMove) were derived
+                //    from the DISGUISE species' base stats/movepool — stale for the
+                //    same reason `Transformed` purges them (see below). Left in place,
+                //    BCP's `force_literal` could re-tighten `min_pre_nature_stat`/
+                //    `max_pre_nature_stat` (or minStats/maxStats) right back to a
+                //    disguise-derived value on the next fixpoint pass, undoing the
+                //    reset above and reintroducing the "no IV/EV can produce observed
+                //    HP bounds" contradiction.
+                //  - Species-IDENTITY tie clauses (HasSpecies/HasItem, from
+                //    `widen_item_for_illusion`) are NOT stale — they're conditionals
+                //    ("if species=Zoroark then item=X") that stay true regardless of
+                //    which hypothesis wins, and now that `possible_species` is Known
+                //    above, BCP's very next fixpoint pass correctly collapses them
+                //    (the false disjunct drops out, forcing the item). Purging these
+                //    too would silently discard the only mechanism that resolves the
+                //    item — the reveal's whole point.
+                // `statement_stale_after_species_reveal` distinguishes the two.
+                if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+                    state
+                        .predicates
+                        .retain(|clause| !clause.iter().any(|lit| statement_stale_after_species_reveal(lit, idx)));
+                }
+                // S29 companion: `pass1_switch` never consumed the benched Illusion-forme
+                // entry (to avoid merging two distinct mons while the disguise was still
+                // ambiguous) — and per `combined_back`, that entry could be sitting in
+                // EITHER known_back or possible_back. Now that it's confirmed to be THIS
+                // mon, that benched entry is a stale duplicate of the same physical
+                // Pokémon — left in place, it would make
+                // `teammate_indices`/`enforce_unique_item` see two teammates both
+                // holding whatever item BCP just resolved (a false item-clause
+                // contradiction; discovered via `widen_item_for_illusion`'s regression
+                // test). Discard it, same as the S29 switch-out-while-ambiguous case.
+                let known_back = match slot.player {
+                    Player::P1 => &mut state.p1_known_back_mons,
+                    Player::P2 => &mut state.p2_known_back_mons,
+                };
+                if let Some(pos) = known_back
+                    .iter()
+                    .position(|m| unknown_is_known_as(&m.possible_species, actual_species))
+                {
+                    known_back.remove(pos);
+                } else {
+                    let possible_back = match slot.player {
+                        Player::P1 => &mut state.p1_possible_back_mons,
+                        Player::P2 => &mut state.p2_possible_back_mons,
+                    };
+                    if let Some(pos) = possible_back
+                        .iter()
+                        .position(|m| unknown_is_known_as(&m.possible_species, actual_species))
+                    {
+                        possible_back.remove(pos);
+                    }
                 }
             }
         }
@@ -1906,6 +2044,7 @@ fn statement_references_mon(stmt: &Statement, idx: usize) -> bool {
         Statement::Not(inner) => statement_references_mon(inner, idx),
         Statement::HasItem { mon_idx, .. }
         | Statement::HasAbility { mon_idx, .. }
+        | Statement::HasSpecies { mon_idx, .. }
         | Statement::NatureBoostsStat { mon_idx, .. }
         | Statement::NatureNerfsStat { mon_idx, .. }
         | Statement::EVIVStatGE { mon_idx, .. }
@@ -1918,6 +2057,34 @@ fn statement_references_mon(stmt: &Statement, idx: usize) -> bool {
         | Statement::TerrainTurns { .. }
         | Statement::SideConditionTurns { .. } => false,
     }
+}
+
+/// `true` if `lit` references `idx` (see `statement_references_mon`) AND is a
+/// species-VALUE statement — one whose numeric/relational content (a stat bound, a
+/// speed comparison, a nature-stat direction, a movepool-dependent threat check) was
+/// derived from a specific species' base-stat table or movepool. Used by
+/// `IllusionEnded`'s predicate purge (S30) to distinguish clauses invalidated by a
+/// species reveal from `HasSpecies`/`HasItem`/`HasAbility` identity-tie clauses, which
+/// stay valid (and in fact become *resolvable*) once the true species is Known —
+/// purging those too would discard the very mechanism that ties the disguise's item to
+/// its true identity.
+fn statement_stale_after_species_reveal(lit: &Statement, idx: usize) -> bool {
+    if !statement_references_mon(lit, idx) {
+        return false;
+    }
+    let inner = match lit {
+        Statement::Not(inner) => inner.as_ref(),
+        other => other,
+    };
+    matches!(
+        inner,
+        Statement::EVIVStatGE { .. }
+            | Statement::EVIVStatLE { .. }
+            | Statement::SpeedComparison { .. }
+            | Statement::NatureBoostsStat { .. }
+            | Statement::NatureNerfsStat { .. }
+            | Statement::KnowsThreateningMove { .. }
+    )
 }
 
 /// S18: an active `mon_idx` is a *slot* index — stable as a number (see S1), but
@@ -2075,24 +2242,42 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot) {
     }
 }
 
+/// Every benched entry for `player`'s side — `known_back` AND `possible_back`
+/// combined. A bench scan for "is there a Zoroark somewhere on this team" must
+/// cover both: species is `Known` on `possible_back` entries too (team preview
+/// reveals species for the whole roster — see `from_opponent_species`/
+/// `into_battle_state`; only item/ability/nature/EVs stay genuinely unresolved
+/// there). Scanning `known_back` alone would miss any bench mon that hasn't yet
+/// been individually revealed-and-switched-out, which after the fix making
+/// `into_battle_state` populate `possible_back` from turn 1 (TODO.md: back mons
+/// must not "immediately show up") is now most of the roster for the whole early
+/// game.
+fn combined_back<'a>(state: &'a UnknownBattleState, player: &Player) -> Vec<&'a UnknownPokemonState> {
+    match player {
+        Player::P1 => {
+            state.p1_known_back_mons.iter().chain(state.p1_possible_back_mons.iter()).collect()
+        }
+        Player::P2 => {
+            state.p2_known_back_mons.iter().chain(state.p2_possible_back_mons.iter()).collect()
+        }
+    }
+}
+
 fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleContext) {
     let player = &sw.slot.player;
     let slot_i = sw.slot.slot_index as usize;
     let species = &sw.species;
 
-    // S29: if an Illusion disguise is possible on this side (a Zoroark forme sits on
-    // this side's known bench) and the incoming "species" is not itself a Zoroark
-    // forme, the shown species may be a disguise. Consuming the matching benched
-    // teammate's entry would move the REAL teammate's accumulated observations into
-    // the active slot and then mutate them with events that physically happen to the
-    // Zoroark — merging two distinct mons. Build a fresh species-only entry instead
-    // and let `maybe_widen_for_illusion` widen it to `Possibly([species, Zoroark…])`.
+    // S29: if an Illusion disguise is possible on this side (a Zoroark forme sits
+    // anywhere on this side's bench) and the incoming "species" is not itself a
+    // Zoroark forme, the shown species may be a disguise. Consuming the matching
+    // benched teammate's entry would move the REAL teammate's accumulated
+    // observations into the active slot and then mutate them with events that
+    // physically happen to the Zoroark — merging two distinct mons. Build a fresh
+    // species-only entry instead and let `maybe_widen_for_illusion` widen it to
+    // `Possibly([species, Zoroark…])`.
     let illusion_possible = {
-        let back = match player {
-            Player::P1 => &state.p1_known_back_mons,
-            Player::P2 => &state.p2_known_back_mons,
-        };
-        let back_species: Vec<Species> = back
+        let back_species: Vec<Species> = combined_back(state, player)
             .iter()
             .filter_map(|m| match &m.possible_species {
                 Unknown::Known(s) => Some(s.clone()),
@@ -2139,7 +2324,7 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         // left the mon with the from_opponent_species defaults instead of proper bounds).
         let mut new_mon =
             UnknownPokemonState::from_opponent_species(species.clone(), ctx.dex, ctx.config.level);
-        recompute_stats_for_iv_mode(&mut new_mon, species, ctx);
+        recompute_stats_for_iv_mode(&mut new_mon, species, ctx.dex, ctx.config);
         if let Some(legal) = &ctx.config.legal_items {
             let mut candidates: Vec<Item> = legal.iter().cloned().collect();
             candidates.push(Item::None);
@@ -2150,18 +2335,24 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
 
     apply_switch_state_to_mon(&mut mon, sw, ctx.config);
 
-    // Illusion widening (only for unknown / opponent mons).
-    let opponent_known_back_species: Vec<Species> = {
-        let back = match player {
-            Player::P1 => &state.p1_known_back_mons,
-            Player::P2 => &state.p2_known_back_mons,
-        };
-        back.iter()
-            .filter_map(|m| {
-                if let Unknown::Known(s) = &m.possible_species { Some(s.clone()) } else { None }
-            })
-            .collect()
-    };
+    // Illusion widening (only for unknown / opponent mons). Scans the FULL bench
+    // (known + possible) — see `combined_back`'s doc comment.
+    let opponent_known_back_species: Vec<Species> = combined_back(state, player)
+        .iter()
+        .filter_map(|m| {
+            if let Unknown::Known(s) = &m.possible_species { Some(s.clone()) } else { None }
+        })
+        .collect();
+    // Same benched Illusion-forme entries, but keeping their own item bound too —
+    // needed by `widen_item_for_illusion` below to tie this slot's item to whichever
+    // physical identity it turns out to be.
+    let illusion_bench_entries: Vec<(Species, Unknown<Item>)> = combined_back(state, player)
+        .iter()
+        .filter_map(|m| match &m.possible_species {
+            Unknown::Known(s) if bcp::is_illusion_forme(s) => Some((s.clone(), m.item.clone())),
+            _ => None,
+        })
+        .collect();
 
     let actives = match sw.slot.player {
         Player::P1 => &mut state.p1_active_mons,
@@ -2174,6 +2365,14 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     }
 
     bcp::maybe_widen_for_illusion(state, &sw.slot, &opponent_known_back_species);
+    // Only tie the item if species widening actually happened above (re-check rather
+    // than duplicate `maybe_widen_for_illusion`'s own eligibility logic).
+    let species_was_widened = mon_idx_for_active_slot(state, &sw.slot)
+        .and_then(|i| get_mon_by_idx(state, i))
+        .is_some_and(|m| matches!(&m.possible_species, Unknown::Possibly(_)));
+    if species_was_widened {
+        bcp::widen_item_for_illusion(state, &sw.slot, &illusion_bench_entries);
+    }
 }
 
 /// Recompute `minStats`/`maxStats` and pin IVs according to `config.force_max_ivs`.
@@ -2182,12 +2381,17 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
 ///   max stats use EV=252 and nature×1.1.
 /// When `force_max_ivs = false`: IV range is [0,31], min uses IV=0 + EV=0 + nature×0.9,
 ///   max uses IV=31 + EV=252 + nature×1.1.
+///
+/// Takes `dex`/`config` directly (rather than a full `BattleContext`) so it can also be
+/// called from `bcp::force_literal`, which resolves a `HasSpecies` literal outside the
+/// event-walk's `BattleContext` scope (see S30).
 fn recompute_stats_for_iv_mode(
     mon: &mut UnknownPokemonState,
     species: &Species,
-    ctx: &BattleContext,
+    dex: &HashMap<Species, PokemonData>,
+    config: &InferenceConfig,
 ) {
-    let force_max = ctx.config.force_max_ivs;
+    let force_max = config.force_max_ivs;
     if force_max {
         mon.minIvs = [31; 6];
         mon.maxIvs = [31; 6];
@@ -2195,9 +2399,9 @@ fn recompute_stats_for_iv_mode(
         mon.minIvs = [0; 6];
         mon.maxIvs = [31; 6];
     }
-    if let Some(data) = ctx.dex.get(species) {
+    if let Some(data) = dex.get(species) {
         let b = data.base_stats;
-        let lv = ctx.config.level;
+        let lv = config.level;
         let min_iv: u8 = if force_max { 31 } else { 0 };
         mon.minStats = [
             calc_hp(b[0], min_iv, 0, lv),
@@ -3192,7 +3396,25 @@ fn pass1_ability_absence_inference(
             let sole_possible_setter = entered_slots.len() == 1
                 || only_slot_with_weather_setter(state, entered_slots, slot);
 
-            if sole_possible_setter {
+            // Defensive: if this mon's ability is already a direct observation
+            // (`Known`, e.g. from an earlier `AbilityRevealed`), absence-inference must
+            // never contradict it — a direct reveal always outranks an inferred
+            // absence. The `ability_would_no_op` guard below tries to track every way
+            // `set_weather` can legitimately no-op, but it reads the belief's own
+            // `state.weather`, which can go stale if some ground-truth weather-clearing
+            // path ever forgets to emit `WeatherChanged` (see AUDIT.md — this happened
+            // for primal-weather departure/Neutralizing-Gas suppression). Rather than
+            // rely on that list being exhaustive, short-circuit whenever the mon is
+            // already Known: excluding anything from a `Known` value can only ever be a
+            // no-op (different ability) or an unsound contradiction (same ability) —
+            // and if the ability were genuinely absent, it could never have become
+            // `Known` in the first place.
+            let already_known = matches!(
+                get_mon_by_idx(state, idx).map(|m| &m.possible_abilities),
+                Some(Unknown::Known(_))
+            );
+
+            if sole_possible_setter && !already_known {
                 for ab in WEATHER_SETTING_ABILITIES {
                     let ability_would_no_op = current_is_strong_weather
                         || weather_setting_ability_target(ab).is_some_and(|target| {

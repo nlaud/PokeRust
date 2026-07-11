@@ -246,6 +246,9 @@ export interface CreateBattleRequest {
   broughtPerSide: number
   statPoints?: boolean
   considerCrit?: boolean
+  /** Pin all opponent IVs to 31 for the fog-of-war inference engine (Champions
+   * competitive default). Mirrors `InferenceConfig::force_max_ivs` in the Rust engine. */
+  forceMaxIvs?: boolean
   damageRolls?: number
   informationMode?: InformationMode
 }
