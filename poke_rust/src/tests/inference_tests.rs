@@ -9729,13 +9729,18 @@ mod information_mode_tests {
     #[test]
     fn test_into_battle_state_p2_bench_starts_possible_not_known() {
         // 6 species shown at preview; P2 leads with index 0, the rest (1..5) are
-        // reserve — but NONE of the reserve has actually been sent to the field yet.
-        // `known_back` must only ever hold battle-confirmed (revealed-then-withdrawn)
-        // mons (see `bench_outgoing_mon` / `pass1_switch`'s known-then-possible
-        // fallback), so every non-active P2 mon — brought-but-not-leading and
-        // never-brought alike — must start in `possible_back`, not `known_back`.
-        // Regression for the TODO.md fix: opponent back mons were "immediately
-        // showing up" as already-revealed at turn 0.
+        // reserve — but NONE of the reserve has actually been sent to the field yet,
+        // and (post-D3 fix) neither has the "lead" itself, from the belief's point of
+        // view: `into_battle_state` alone no longer places ANY P2 mon active — see its
+        // doc comment. The belief only learns who's really active once the caller
+        // (`session.rs::resolve_turn`) runs `apply_information` over the transition's
+        // own event log afterward (covered by `test_into_battle_state_then_apply_information_places_lead_active`
+        // below). `known_back` must only ever hold battle-confirmed
+        // (revealed-then-withdrawn) mons (see `bench_outgoing_mon` / `pass1_switch`'s
+        // known-then-possible fallback), so every P2 mon — active, brought-but-not-
+        // leading, and never-brought alike — starts in `possible_back`, not
+        // `known_back`. Regression for the TODO.md fix: opponent back mons were
+        // "immediately showing up" as already-revealed at turn 0.
         let p2_mons: Vec<UnknownPokemonState> = [
             Species::Garchomp, Species::Snorlax, Species::Corviknight,
             Species::Charizard, Species::Ferrothorn, Species::Toxapex,
@@ -9752,16 +9757,17 @@ mod information_mode_tests {
 
         let battle = preview.into_battle_state(&[0], &[], &[0], &[1, 2]);
 
-        assert_eq!(battle.p2_active_mons.len(), 1);
         assert!(
-            matches!(&battle.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Garchomp)
+            battle.p2_active_mons.is_empty(),
+            "into_battle_state alone must not place any P2 mon active; got {:?}",
+            battle.p2_active_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
         );
         // Nothing is battle-confirmed yet — known_back starts empty regardless of
         // which indices were passed as "back" vs left off entirely.
         assert!(battle.p2_known_back_mons.is_empty());
-        // All 5 non-active P2 mons (Snorlax, Corviknight, Charizard, Ferrothorn,
-        // Toxapex) land in possible_back, whether or not they were in `back_indices`.
-        assert_eq!(battle.p2_possible_back_mons.len(), 5);
+        // All 6 P2 mons (including the eventual lead, Garchomp) land in
+        // possible_back — the belief has no ground-truth concept of "active" yet.
+        assert_eq!(battle.p2_possible_back_mons.len(), 6);
         let possible_species: HashSet<Species> = battle
             .p2_possible_back_mons
             .iter()
@@ -9773,16 +9779,125 @@ mod information_mode_tests {
         assert_eq!(
             possible_species,
             [
-                Species::Snorlax, Species::Corviknight, Species::Charizard,
-                Species::Ferrothorn, Species::Toxapex,
+                Species::Garchomp, Species::Snorlax, Species::Corviknight,
+                Species::Charizard, Species::Ferrothorn, Species::Toxapex,
             ]
             .into_iter()
             .collect()
         );
-        // The viewer's own side is unaffected — P1 back mons still populate
-        // known_back directly (never masked for display) and never gain a
-        // "possible back" gap.
+        // The viewer's own side is unaffected — P1 leads/back mons still populate
+        // directly (never masked for display) and never gain a "possible back" gap.
+        assert_eq!(battle.p1_active_mons.len(), 1);
         assert_eq!(battle.p1_possible_back_mons.len(), 0);
+    }
+
+    /// Companion to the test above: the intended two-step flow (`into_battle_state`
+    /// seeds, then `apply_information` walks the transition's own `SimultaneousSwitch`
+    /// event) must reproduce the OLD single-step behavior exactly for a normal,
+    /// non-disguised lead — same species, same open-sheet fields, and the lead is
+    /// removed from `possible_back` (not left duplicated there).
+    #[test]
+    fn test_into_battle_state_then_apply_information_places_lead_active() {
+        let p2_mons: Vec<UnknownPokemonState> = [
+            Species::Garchomp, Species::Snorlax, Species::Corviknight,
+        ]
+        .into_iter()
+        .map(unknown_mon_species)
+        .collect();
+        let preview = UnknownTeamPreviewState {
+            active_per_side: 1,
+            brought_per_side: 3,
+            p1_mons: vec![unknown_mon_species(Species::Snorlax)],
+            p2_mons,
+        };
+        let seeded = preview.into_battle_state(&[0], &[], &[0], &[1, 2]);
+
+        let switch_events = vec![event(EventKind::SimultaneousSwitch {
+            switches: vec![
+                SwitchState {
+                    slot: p1(0), species: Species::Snorlax, level: 50,
+                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                },
+                SwitchState {
+                    slot: p2(0), species: Species::Garchomp, level: 50,
+                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                },
+            ],
+        })];
+        let result = apply_ex(seeded, switch_events, HashMap::new(), HashMap::new());
+
+        assert_eq!(result.p2_active_mons.len(), 1);
+        assert!(
+            matches!(&result.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Garchomp),
+            "the lead must resolve to Known(Garchomp), got {:?}",
+            result.p2_active_mons[0].possible_species
+        );
+        // Garchomp must be PULLED from possible_back, not left duplicated there.
+        assert_eq!(result.p2_possible_back_mons.len(), 2);
+        assert!(
+            !result.p2_possible_back_mons.iter().any(|m|
+                matches!(&m.possible_species, Unknown::Known(Species::Garchomp))),
+            "the now-active Garchomp must not remain in possible_back"
+        );
+    }
+
+    /// The actual TODO.md regression: a leading Pokémon whose DISPLAYED species could
+    /// be a Zoroark disguise (a Zoroark forme sits elsewhere in the team-preview
+    /// roster, not selected as this lead) must resolve to an ambiguous
+    /// `Possibly([shown, Zoroark])` species on `apply_information` — not the old
+    /// behavior of confidently placing whichever roster member `into_battle_state`
+    /// was told is "active." The benched Zoroark roster entry must also survive
+    /// untouched in `possible_back` (mirroring `pass1_switch`'s S29 treatment) — this
+    /// is the "Zoroark should show up as possibly in the back when led" bug.
+    #[test]
+    fn test_disguised_lead_widens_to_possibly_zoroark_and_stays_in_possible_back() {
+        let p2_mons: Vec<UnknownPokemonState> = [
+            Species::Milotic, Species::Zoroark, Species::Corviknight,
+        ]
+        .into_iter()
+        .map(unknown_mon_species)
+        .collect();
+        let preview = UnknownTeamPreviewState {
+            active_per_side: 1,
+            brought_per_side: 3,
+            p1_mons: vec![unknown_mon_species(Species::Snorlax)],
+            p2_mons,
+        };
+        // P2's TRUE physical lead is index 1 (Zoroark), but the event stream carries
+        // the DISPLAYED species (Milotic) — exactly what
+        // `battle_state_from_preview_branching`'s perspective-gated `species` field
+        // would produce for the observer.
+        let seeded = preview.into_battle_state(&[0], &[], &[1], &[0, 2]);
+
+        let switch_events = vec![event(EventKind::SimultaneousSwitch {
+            switches: vec![
+                SwitchState {
+                    slot: p1(0), species: Species::Snorlax, level: 50,
+                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                },
+                SwitchState {
+                    slot: p2(0), species: Species::Milotic, level: 50,
+                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                },
+            ],
+        })];
+        let result = apply_ex(seeded, switch_events, HashMap::new(), HashMap::new());
+
+        assert!(
+            matches!(&result.p2_active_mons[0].possible_species,
+                Unknown::Possibly(v) if v.contains(&Species::Milotic) && v.contains(&Species::Zoroark)),
+            "a leading disguise-eligible mon must widen to Possibly([Milotic, Zoroark]), got {:?}",
+            result.p2_active_mons[0].possible_species
+        );
+        // Zoroark's own roster entry must still be present ("possibly in the back"),
+        // not consumed by the active-slot widening — S29's existing invariant, now
+        // also verified for the team-preview lead path.
+        assert!(
+            result.p2_possible_back_mons.iter().any(|m|
+                matches!(&m.possible_species, Unknown::Known(Species::Zoroark))),
+            "Zoroark's own roster entry must remain in possible_back; possible_back = {:?}",
+            result.p2_possible_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+        );
     }
 }
 

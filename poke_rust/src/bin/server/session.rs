@@ -325,33 +325,45 @@ pub fn resolve_turn(
     // early below.
     let next_belief: Option<UnknownMatchState> = match session.belief.clone() {
         None => None,
-        Some(belief) => Some(if was_team_preview {
-            // Team-preview -> battle: convert using the SAME active/back indices
-            // `sample_turn` just used for the concrete transition, so belief and
-            // ground truth stay in lockstep. `reconstruct_player_command` already
-            // guarantees both commands are `PlayerCommand::TeamPreview` whenever
-            // the incoming state was `TeamPreviewState`.
-            match (&belief, p1_cmd, p2_cmd) {
-                (
-                    UnknownMatchState::TeamPreview(preview),
-                    PlayerCommand::TeamPreview(p1_tp),
-                    PlayerCommand::TeamPreview(p2_tp),
-                ) => UnknownMatchState::Battle(preview.into_battle_state(
-                    &p1_tp.active_indices,
-                    &p1_tp.back_indices,
-                    &p2_tp.active_indices,
-                    &p2_tp.back_indices,
-                )),
-                _ => belief,
-            }
-        } else {
+        Some(belief) => {
+            // Team-preview -> battle needs two steps, not one: `into_battle_state`
+            // structurally seeds the belief (P1 fully known as usual; P2's entire
+            // roster parked in `possible_back`, nothing placed active yet — see its
+            // doc comment), and THEN `apply_information` walks this transition's own
+            // event log (the `SimultaneousSwitch` for both sides' leads, plus entry
+            // abilities/hazards/weather) through the exact same Pass 1 switch-in
+            // handling every mid-battle switch already gets — including Illusion
+            // widening. Skipping the second step (the old behavior) left P2's belief
+            // built from the true physical active index instead of what's actually
+            // displayed, which is wrong the moment a lead is a disguised Zoroark.
+            // Both steps use `belief` as the seed only when `was_team_preview`;
+            // `reconstruct_player_command` already guarantees both commands are
+            // `PlayerCommand::TeamPreview` whenever the incoming state was
+            // `TeamPreviewState`.
+            let seeded = if was_team_preview {
+                match (&belief, p1_cmd, p2_cmd) {
+                    (
+                        UnknownMatchState::TeamPreview(preview),
+                        PlayerCommand::TeamPreview(p1_tp),
+                        PlayerCommand::TeamPreview(p2_tp),
+                    ) => UnknownMatchState::Battle(preview.into_battle_state(
+                        &p1_tp.active_indices,
+                        &p1_tp.back_indices,
+                        &p2_tp.active_indices,
+                        &p2_tp.back_indices,
+                    )),
+                    _ => belief,
+                }
+            } else {
+                belief
+            };
             let config = session
                 .inference_config
                 .as_ref()
                 .expect("belief is only Some alongside a built inference_config");
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 apply_information(
-                    belief,
+                    seeded,
                     &events,
                     false,
                     &dexes.pokemon_dex,
@@ -361,10 +373,10 @@ pub fn resolve_turn(
                 )
             }));
             match caught {
-                Ok(next) => next,
+                Ok(next) => Some(next),
                 Err(payload) => return Err(panic_message(payload)),
             }
-        }),
+        }
     };
 
     session.state = next_state;

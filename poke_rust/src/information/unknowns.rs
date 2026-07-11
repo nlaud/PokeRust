@@ -422,12 +422,14 @@ impl UnknownTeamPreviewState {
         &self,
         p1_active_indices: &[usize],
         p1_back_indices: &[usize],
-        p2_active_indices: &[usize],
-        // No longer distinguishes "brought but not leading" from "never brought": both
-        // land in `p2_possible_back_mons` below, since neither has been battle-revealed
-        // yet. Kept in the signature so callers (session.rs) don't need to change and
-        // so a future bring-fewer-than-full-roster format still has a slot to plumb
-        // "never brought at all" through if that ever needs different treatment.
+        // No longer used to place P2's roster: the belief must not be built from
+        // P2's true active/back split (see the doc comment on `p2_possible_back_mons`
+        // below) — the whole roster goes to `possible_back` regardless, and the caller
+        // resolves activity via the event log instead. Kept in the signature so
+        // callers (session.rs) don't need to change and so a future bring-fewer-
+        // than-full-roster format still has a slot to plumb "never brought at all"
+        // through if that ever needs different treatment.
+        _p2_active_indices: &[usize],
         _p2_back_indices: &[usize],
     ) -> UnknownBattleState {
         let pick = |mons: &[UnknownPokemonState], indices: &[usize]| -> Vec<UnknownPokemonState> {
@@ -436,25 +438,42 @@ impl UnknownTeamPreviewState {
 
         let p1_active_mons = pick(&self.p1_mons, p1_active_indices);
         let p1_known_back_mons = pick(&self.p1_mons, p1_back_indices);
-        let p2_active_mons = pick(&self.p2_mons, p2_active_indices);
-        // The opponent's non-leading roster starts entirely in `possible_back` — even
-        // though team preview already reveals species (so `possible_species` is
-        // `Known` on each of these entries), NONE of them have actually been sent to
-        // the field yet. `known_back` must only ever hold mons that have been battle-
-        // confirmed by being active and then withdrawn — exactly what `bench_outgoing_mon`
-        // does mid-battle, and what `pass1_switch`'s known-then-possible fallback
-        // (inference.rs ~2107-2128) already expects to pull a first-time switch-in
-        // from. Dumping `back_indices` straight into `known_back` here bypassed that
-        // and made every opponent bench mon "immediately show up" as already-revealed
-        // at turn 0 (TODO.md fix: back mons must wait for reveal-then-switch-out).
+        // The opponent's ENTIRE roster — including whatever P2 selected as active —
+        // starts in `possible_back`, and `p2_active_mons` starts empty. This is
+        // deliberate, not an oversight: unlike P1 (the observer's own side, always
+        // fully known), the observer never learns WHICH physical roster slot P2
+        // truly leads with — only what's DISPLAYED once it's sent out, which can be
+        // an Illusion disguise. Directly copying `self.p2_mons[p2_active_indices[i]]`
+        // (the old behavior) used the true physical index — ground truth the belief
+        // has no business knowing — so a leading, disguised Zoroark was built as
+        // `Known(Zoroark)` with its full real stats/moves/item from turn 0, and the
+        // "possibly in the back" entry for that same physical mon never got created.
+        //
+        // Instead, the caller (`session.rs::resolve_turn`) is now expected to run
+        // `apply_information` over the team-preview transition's own event log
+        // immediately after this call, before storing the result as the belief. That
+        // log's `SimultaneousSwitch` already carries each lead's DISPLAYED species,
+        // perspective-gated by `compute_illusion_disguise`
+        // (`simulator/mod.rs::battle_state_from_preview_branching`) as the real game
+        // would show it — so Pass 1's existing switch-in handling (`pass1_switch`,
+        // shared verbatim with every mid-battle switch) matches it against this same
+        // `possible_back` roster by species and pulls the correct entry into the
+        // active slot, running the SAME Illusion-widening
+        // (`maybe_widen_for_illusion`/`widen_item_for_illusion`) a mid-battle
+        // disguised switch-in already gets. For a normal (non-disguised) lead this
+        // produces byte-identical results to the old direct-copy — the match is
+        // exact and the pulled entry carries the same open-sheet data — but for a
+        // genuinely disguised lead it correctly leaves the belief ambiguous.
+        //
+        // `known_back` must only ever hold mons that have been battle-confirmed by
+        // being active and then withdrawn — exactly what `bench_outgoing_mon` does
+        // mid-battle, and what `pass1_switch`'s known-then-possible fallback already
+        // expects to pull a first-time switch-in from. Dumping any indices straight
+        // into `known_back` here bypasses that and makes an opponent bench mon
+        // "immediately show up" as already-revealed at turn 0.
+        let p2_active_mons: Vec<UnknownPokemonState> = Vec::new();
         let p2_known_back_mons: Vec<UnknownPokemonState> = Vec::new();
-        let p2_possible_back_mons: Vec<UnknownPokemonState> = self
-            .p2_mons
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !p2_active_indices.contains(i))
-            .map(|(_, mon)| mon.clone())
-            .collect();
+        let p2_possible_back_mons: Vec<UnknownPokemonState> = self.p2_mons.clone();
 
         let total_roster = self.p1_mons.len().max(self.p2_mons.len()) as u8;
 
