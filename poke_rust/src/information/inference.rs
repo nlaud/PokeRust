@@ -110,16 +110,38 @@ pub const EV_LATTICE: [u8; 33] = [
 
 // ── Contradiction macro ────────────────────────────────────────────────────────
 
+thread_local! {
+    /// A human-readable breadcrumb of "what the engine was doing" when an
+    /// `inference_contradiction!` panic fires. Set to a whole-turn event summary at
+    /// the top of `apply_information_battle` (covers the tail BCP/Pass-4 passes, which
+    /// run *after* the full event walk and so aren't tied to any single event), then
+    /// refined to the specific node's `EventKind` by `process_battle_event` as the
+    /// depth-first Pass 1–3 walk descends.
+    ///
+    /// Deliberately a `thread_local!` rather than a parameter threaded through every
+    /// `inference_contradiction!` call site (~30 of them, several deep in `bcp.rs` with
+    /// no natural place to plumb new state) — `cargo test` runs tests on separate OS
+    /// threads, so this stays test-isolated without any synchronization. Referencing it
+    /// by plain name from inside the macro body below resolves at the macro's
+    /// *definition* site (this module) regardless of which module invokes the macro,
+    /// so `bcp.rs`'s call sites pick it up with no extra plumbing.
+    static CURRENT_EVENT_CONTEXT: std::cell::RefCell<Option<String>> =
+        std::cell::RefCell::new(None);
+}
+
 /// Panic with a descriptive contradiction message.  Called whenever the observed
 /// events are jointly impossible under the current state.
 macro_rules! inference_contradiction {
-    ($ctx:expr, $($msg:tt)*) => {
+    ($ctx:expr, $($msg:tt)*) => {{
+        let __event_ctx = $crate::information::inference::CURRENT_EVENT_CONTEXT
+            .with(|c| c.borrow().clone());
         panic!(
-            "[inference contradiction] context={:?} — {}",
+            "[inference contradiction] context={:?} event={} — {}",
             $ctx,
+            __event_ctx.as_deref().unwrap_or("<none>"),
             format!($($msg)*)
         )
-    };
+    }};
 }
 
 mod bcp;
@@ -775,6 +797,21 @@ fn apply_information_battle(
     ability_dex: &HashMap<Ability, AbilityData>,
     config: &InferenceConfig,
 ) {
+    // Whole-turn breadcrumb for `inference_contradiction!` (see `CURRENT_EVENT_CONTEXT`
+    // doc comment) — covers Pass 4 and the tail BCP passes below, which aren't tied to
+    // any single event. `process_battle_event` narrows this to a specific node's
+    // `EventKind` once the per-event walk starts.
+    CURRENT_EVENT_CONTEXT.with(|c| {
+        *c.borrow_mut() = Some(format!(
+            "turn=[{}]",
+            events
+                .iter()
+                .map(|e| format!("{:?}", e.kind))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    });
+
     // ── Pass 4 (first): speed ordering → Spe bounds ─────────────────────────
     // Run BEFORE the event walk so that speed bounds (minStats[5]/maxStats[5])
     // are already tightened when Pass 3 calls the damage oracle for Gyro Ball
@@ -912,6 +949,12 @@ fn process_battle_event(
     event: &InformationEvent,
     ctx: &mut BattleContext,
 ) {
+    // Narrow the `inference_contradiction!` breadcrumb to this specific node while it's
+    // being resolved (see `CURRENT_EVENT_CONTEXT` doc comment above the macro).
+    CURRENT_EVENT_CONTEXT.with(|c| {
+        *c.borrow_mut() = Some(format!("{:?}", event.kind));
+    });
+
     let prev_move_ctx = ctx.move_context.clone();
     let prev_switch_slot = ctx.switch_slot.clone();
 
@@ -1435,6 +1478,21 @@ fn pass1_apply_event(
                         recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
                     }
                 }
+                // A mega's base-stat table differs from the pre-mega species', so any
+                // predicate whose numeric content was derived against the OLD base
+                // stats (SpeedComparison, EVIVStatGE/LE, nature-direction, threatening-
+                // move clauses) is stale the instant `recompute_stat_bounds_for_species_change`
+                // above remaps `minStats`/`maxStats` to the new table — a persisted
+                // pre-mega SpeedComparison capping `maxStats[5]` below the freshly
+                // widened `minStats[5]` is exactly the "SpeedComparison raises min above
+                // max" contradiction this purge prevents. Same purge as S30's
+                // `IllusionEnded` handler (`statement_stale_after_species_reveal`);
+                // dropping a predicate only widens the fog, so this is sound.
+                state.predicates.retain(|clause| {
+                    !clause
+                        .iter()
+                        .any(|lit| statement_stale_after_species_reveal(lit, idx))
+                });
                 match slot.player {
                     // p1_has_mega / p2_has_mega means "resource still available" —
                     // initialized true, flipped to false when the Mega is used.
@@ -1511,6 +1569,15 @@ fn pass1_apply_event(
                         recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
                     }
                 }
+                // Same stale-predicate purge as MegaEvolution above (and S30's
+                // IllusionEnded handler) — a forme change that swaps base stats
+                // invalidates any SpeedComparison/EVIVStatGE/LE/nature-direction clause
+                // derived against the old table.
+                state.predicates.retain(|clause| {
+                    !clause
+                        .iter()
+                        .any(|lit| statement_stale_after_species_reveal(lit, idx))
+                });
             }
         }
 
@@ -2364,7 +2431,7 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         actives.push(mon);
     }
 
-    bcp::maybe_widen_for_illusion(state, &sw.slot, &opponent_known_back_species);
+    bcp::maybe_widen_for_illusion(state, &sw.slot, &opponent_known_back_species, ctx.dex);
     // Only tie the item if species widening actually happened above (re-check rather
     // than duplicate `maybe_widen_for_illusion`'s own eligibility logic).
     let species_was_widened = mon_idx_for_active_slot(state, &sw.slot)

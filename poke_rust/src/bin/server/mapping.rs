@@ -178,19 +178,43 @@ pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
     }
 }
 
-/// Overlay belief-derived masking onto an otherwise-ground-truth `PokemonView`:
-/// only the fields a real open team sheet keeps secret (nature, EVs/stats-as-
-/// ranges, item, ability, unrevealed moves, and a pre-reveal Tera type) are
-/// replaced. Everything else on `view` — HP, status, volatiles, boosts, the
-/// (already Illusion-aware) species/sprite, gender, fainted, isTera/isMega — is
-/// directly observable in a real battle regardless of information mode, so it's
-/// left as ground truth.
+/// Overlay belief-derived masking onto an otherwise-ground-truth `PokemonView`: the
+/// fields a real open team sheet (or a real player's screen) keeps secret — nature,
+/// EVs/stats-as-ranges, item, ability, unrevealed moves, a pre-reveal Tera type, exact
+/// HP, and typing while a species disguise is unresolved — are replaced. Status,
+/// volatiles, boosts, the (already Illusion-aware) species/sprite, gender, fainted,
+/// isTera/isMega are directly observable in a real battle regardless of information
+/// mode, so those stay ground truth.
 fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> PokemonView {
     view.nature = describe_unknown(&unk.possible_natures);
     view.stats = unk.minStats;
     view.stats_max = unk.maxStats;
     view.evs = unk.minEvs;
     view.evs_max = unk.maxEvs;
+    // A real player only ever sees the opponent's HP as a rounded percent, never the
+    // exact value — mirror `bench_pokemon_view_from_belief`'s conversion (percent
+    // scaled against the believed max HP) rather than leaving `view.hp` on the true
+    // `mon.hp`/`mon.stats[0]` set by `pokemon_view`. `unk.hp` is `Percent` for every
+    // opponent mon in practice (see `PokemonHP`'s doc); `Number` is handled defensively
+    // for parity with the bench helper.
+    let masked_max_hp = unk.maxStats[0];
+    view.hp = HpDto {
+        current: match &unk.hp {
+            PokemonHP::Number(n) => *n,
+            PokemonHP::Percent(p) => ((*p as u32 * masked_max_hp as u32) / 100) as u16,
+        },
+        max: masked_max_hp,
+    };
+    // Typing is public dex knowledge for a normal opponent (`possible_types` is
+    // already `Known` from `from_opponent_species`, so this is a no-op there), but for
+    // a suspected Illusion disguise `possible_types` widens to `Possibly` alongside
+    // `possible_species` (see `maybe_widen_for_illusion`) — mirror
+    // `bench_pokemon_view_from_belief`'s treatment so a disguised Zoroark's row shows
+    // unknown typing instead of the true species' `mon.types` `pokemon_view` set.
+    view.types = match &unk.possible_types {
+        Unknown::Known(types) => types.iter().map(|t| format!("{:?}", t)).collect(),
+        _ => Vec::new(),
+    };
     view.item = match &unk.item {
         Unknown::Known(Item::None) => None,
         // `legal_items` (format banlists) isn't threaded to the server yet — see

@@ -198,10 +198,22 @@ pub(super) fn is_illusion_forme(species: &Species) -> bool {
 
 /// Widen `possible_species` to include Zoroark formes when the opponent's back
 /// contains one and the on-field species is unconfirmed.  Call after a Switch.
+///
+/// `possible_types` is documented as corresponding 1:1 with `possible_species`
+/// (`unknowns.rs`'s `UnknownPokemonState` field comment) but is left `Known` by every
+/// other caller since a normal opponent's typing is openly visible in a real battle
+/// (species → typing is public dex knowledge). A disguised Zoroark is the one case
+/// where that 1:1 correspondence must actually hold: the *shown* species' typing is
+/// what a real player sees, not the true one, so once `possible_species` widens to a
+/// disjunction, `possible_types` widens in lockstep to the matching per-candidate
+/// typing — otherwise the server DTO layer (`mask_pokemon_view`) would keep reporting
+/// the disguise's typing as `Known` and confidently correct even while the species
+/// underneath is genuinely unresolved.
 pub(super) fn maybe_widen_for_illusion(
     state: &mut UnknownBattleState,
     slot: &FieldSlot,
     opponent_known_back_species: &[Species],
+    dex: &HashMap<Species, PokemonData>,
 ) {
     let has_zoroark = opponent_known_back_species
         .iter()
@@ -224,6 +236,17 @@ pub(super) fn maybe_widen_for_illusion(
                 }
             }
             if candidates.len() > 1 {
+                let type_candidates: Vec<Vec<crate::state::dex_data::PokemonType>> = candidates
+                    .iter()
+                    .filter_map(|s| dex.get(s).map(|d| d.types.clone()))
+                    .collect();
+                // Only widen types if every candidate resolved a dex entry — species
+                // with no dex data are already kept as species candidates elsewhere
+                // (absence of data isn't evidence of inability), but silently dropping
+                // a species' typing here would under-count the true type disjunction.
+                if type_candidates.len() == candidates.len() {
+                    mon.possible_types = Unknown::Possibly(type_candidates);
+                }
                 mon.possible_species = Unknown::Possibly(candidates);
             }
         }

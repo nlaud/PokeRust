@@ -7221,22 +7221,76 @@ pub fn remove_side_condition(state: &mut BattleState, player: Player, condition:
     }
 }
 
-fn prune_timed_effects<T: Clone>(effects: &mut Vec<T>, turns: &mut Vec<u8>) {
-    let mut kept_effects = Vec::with_capacity(effects.len());
-    let mut kept_turns = Vec::with_capacity(turns.len());
-
-    for (effect, turn_count) in effects.drain(..).zip(turns.drain(..)) {
-        if turn_count == 0 {
-            kept_effects.push(effect);
-            kept_turns.push(0);
-        } else if turn_count > 1 {
-            kept_effects.push(effect);
-            kept_turns.push(turn_count - 1);
+/// Decrement `state.pseudo_weather_turns`, dropping (and emitting `PseudoWeatherEnd`
+/// for) any pseudo-weather whose timer naturally hits zero this call. A `0` timer is
+/// the permanent-effect sentinel and is left untouched, matching `decrement_effect_timers`'
+/// weather/terrain handling above. Unlike the old generic `prune_timed_effects` this
+/// emits an event on expiry, so the inference engine's fog-of-war belief (which listens
+/// for `PseudoWeatherEnd`/`SideConditionEnd`, e.g. Pass 4's Tailwind snapshot) doesn't
+/// silently go stale relative to the true battle state.
+fn decrement_and_expire_pseudo_weathers(state: &mut BattleState) {
+    let mut expired: Vec<PseudoWeather> = Vec::new();
+    {
+        let mut kept_effects = Vec::with_capacity(state.pseudo_weathers.len());
+        let mut kept_turns = Vec::with_capacity(state.pseudo_weather_turns.len());
+        for (effect, turn_count) in state
+            .pseudo_weathers
+            .drain(..)
+            .zip(state.pseudo_weather_turns.drain(..))
+        {
+            if turn_count == 0 {
+                kept_effects.push(effect);
+                kept_turns.push(0);
+            } else if turn_count > 1 {
+                kept_effects.push(effect);
+                kept_turns.push(turn_count - 1);
+            } else {
+                expired.push(effect);
+            }
         }
+        state.pseudo_weathers = kept_effects;
+        state.pseudo_weather_turns = kept_turns;
     }
+    for effect in expired {
+        emit(state, EventKind::PseudoWeatherEnd { effect });
+    }
+}
 
-    *effects = kept_effects;
-    *turns = kept_turns;
+/// Same as `decrement_and_expire_pseudo_weathers`, but for one side's side conditions
+/// (Tailwind, Reflect, Light Screen, Aurora Veil, Safeguard, Mist, …), emitting
+/// `SideConditionEnd` for any condition whose timer naturally hits zero.
+fn decrement_and_expire_side_conditions(state: &mut BattleState, player: Player) {
+    let mut expired: Vec<SideCondition> = Vec::new();
+    {
+        let (conditions, turns) = match player {
+            Player::P1 => (
+                &mut state.p1_side_conditions,
+                &mut state.p1_side_condition_turns,
+            ),
+            Player::P2 => (
+                &mut state.p2_side_conditions,
+                &mut state.p2_side_condition_turns,
+            ),
+        };
+        let mut kept_effects = Vec::with_capacity(conditions.len());
+        let mut kept_turns = Vec::with_capacity(turns.len());
+        for (effect, turn_count) in conditions.drain(..).zip(turns.drain(..)) {
+            if turn_count == 0 {
+                kept_effects.push(effect);
+                kept_turns.push(0);
+            } else if turn_count > 1 {
+                kept_effects.push(effect);
+                kept_turns.push(turn_count - 1);
+            } else {
+                expired.push(effect);
+            }
+        }
+        *conditions = kept_effects;
+        *turns = kept_turns;
+    }
+    for condition in expired {
+        emit(state, EventKind::SideConditionEnd { side: player, condition });
+    }
 }
 
 /// Fire end-of-turn effects for volatiles that are about to expire this turn (turns == 1)
@@ -7553,7 +7607,7 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
 
     // Detect Magic Room (MagicDeluge) expiry: items go from suppressed to re-enabled.
     let was_items_suppressed = items_are_suppressed(state);
-    prune_timed_effects(&mut state.pseudo_weathers, &mut state.pseudo_weather_turns);
+    decrement_and_expire_pseudo_weathers(state);
     if was_items_suppressed && !items_are_suppressed(state) {
         // Items are now re-enabled — trigger immediate on-enable effects (e.g. status-cure berries).
         // ability_active is unknown here (no per-slot state); use simple env so
@@ -7583,14 +7637,8 @@ pub fn decrement_effect_timers(state: &mut BattleState) {
         }
     }
 
-    prune_timed_effects(
-        &mut state.p1_side_conditions,
-        &mut state.p1_side_condition_turns,
-    );
-    prune_timed_effects(
-        &mut state.p2_side_conditions,
-        &mut state.p2_side_condition_turns,
-    );
+    decrement_and_expire_side_conditions(state, Player::P1);
+    decrement_and_expire_side_conditions(state, Player::P2);
 
     // Before decrementing, fire effects for volatiles that expire this turn.
     apply_volatile_eot_effects(state);

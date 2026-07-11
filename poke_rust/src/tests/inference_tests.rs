@@ -2001,6 +2001,25 @@ fn test_status_conflict_panics() {
     );
 }
 
+/// TODO.md: "Errors with the inference engine should also add the Event currently
+/// being resolved as text." `inference_contradiction!` panics must now name the event
+/// being processed (`event={:?}`) alongside the pre-existing `context=` field — not
+/// just a bare mon index, which was the entire complaint (`context=0` gave no clue
+/// what actually went wrong). The event breadcrumb comes from a thread-local set by
+/// `process_battle_event` per node, so a per-event-walk contradiction (like this one)
+/// must show the specific `StatusInflicted` node, not a generic placeholder.
+#[test]
+#[should_panic(expected = "event=StatusInflicted")]
+fn test_contradiction_panic_names_the_resolving_event() {
+    let mut mon = unknown_mon();
+    mon.status = Some(Status::Burn);
+    let state = battle_with_p2(vec![mon]);
+    apply(
+        state,
+        vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Paralysis })],
+    );
+}
+
 // ── Pass 3: Damage → Stat Bounds ─────────────────────────────────────────────
 
 /// Species dex entry for Garchomp (Ground/Dragon, base stats [108,130,95,80,85,102]).
@@ -3791,6 +3810,87 @@ fn test_mega_evolution_real_species_change_does_not_panic() {
             || matches!(&mon.possible_abilities, Unknown::Possibly(v) if v == &vec![Ability::SandForce]),
         "ability set must be recomputed from the mega species dex entry, got {:?}",
         mon.possible_abilities
+    );
+}
+
+/// Regression (TODO.md "SpeedComparison raises min above max" / Mega Evolution): a
+/// `SpeedComparison` predicate persisted from BEFORE a Mega Evolution — capping the
+/// mega'd mon's max Spe against its PRE-mega base stat — must not survive the mega.
+/// `recompute_stat_bounds_for_species_change` remaps `minStats`/`maxStats` to the new
+/// (here, much faster) base-stat table, and if the stale clause is left in
+/// `state.predicates`, the tail BCP/Pass-4 re-run re-derives the OLD cap against the
+/// freshly-raised `minStats[5]` and contradiction-panics. The `MegaEvolution` handler
+/// must purge species-derived predicates (`statement_stale_after_species_reveal`, same
+/// mechanism as S30's `IllusionEnded` purge) so this never fires.
+#[test]
+fn test_mega_evolution_purges_stale_speed_comparison() {
+    use crate::state::pokemon::PokemonGender;
+
+    // P1: fixed, known Spe = 100 — the "fast" reference mon.
+    let mut p1_mon = unknown_mon_species(Species::Garchomp);
+    p1_mon.minStats[5] = 100;
+    p1_mon.maxStats[5] = 100;
+
+    // P2: about to Mega Evolve into something MUCH faster than its current bounds allow.
+    let p2_mon = unknown_mon_species(Species::Garchomp);
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.p2_has_mega = true;
+    // A stale, already-unit SpeedComparison clause from an earlier turn: "P1 (idx 0) is
+    // at least as fast as P2 (idx 1)" — caps p2's max Spe at 100 once propagated.
+    // mon_idx layout: both actives come first (`[p1_active…, p2_active…]`), so in a 1v1
+    // idx 0 = P1's only active slot, idx 1 = P2's.
+    state.predicates.push(vec![Statement::SpeedComparison {
+        fast_idx: 0,
+        slow_idx: 1,
+        fast_mult: 1,
+        slow_mult: 1,
+    }]);
+
+    let mut dex = HashMap::new();
+    dex.insert(Species::GarchompMega, PokemonData {
+        species: Species::GarchompMega,
+        types: vec![PokemonType::Dragon, PokemonType::Ground],
+        // Base Spe 150 (vs. Garchomp's real 102) — deliberately exaggerated so the
+        // post-mega minStats[5] floor is guaranteed to exceed the stale 100 cap.
+        base_stats: [108, 170, 115, 120, 95, 150],
+        weight: 950,
+        primary_ability: Some(Ability::SandForce),
+        abilities: vec![Ability::SandForce],
+        base_species: Some(Species::Garchomp),
+        forme: None,
+        required_item: None,
+        battle_only: Some(Species::Garchomp),
+        default_gender: PokemonGender::Male,
+    });
+
+    // Does not panic — this is the primary regression assertion.
+    let result = apply_ex(
+        state,
+        vec![event(EventKind::MegaEvolution { slot: p2(0), into: Species::GarchompMega })],
+        dex,
+        HashMap::new(),
+    );
+
+    let mon = &result.p2_active_mons[0];
+    assert!(
+        mon.minStats[5] <= mon.maxStats[5],
+        "post-mega Spe bounds must stay consistent: min={} max={}",
+        mon.minStats[5], mon.maxStats[5]
+    );
+    // The stale pre-mega cap must be gone — max Spe should reflect the new, much
+    // faster base stat, not stay pinned at the old 100 cap.
+    assert!(
+        mon.maxStats[5] > 100,
+        "the stale pre-mega SpeedComparison cap must be purged; maxStats[5] = {}",
+        mon.maxStats[5]
+    );
+    assert!(
+        !result.predicates.iter().any(|clause| clause.iter().any(|lit| matches!(
+            lit,
+            Statement::SpeedComparison { slow_idx: 1, .. } | Statement::SpeedComparison { fast_idx: 1, .. }
+        ))),
+        "no SpeedComparison clause referencing the mega'd mon should survive; predicates = {:?}",
+        result.predicates
     );
 }
 

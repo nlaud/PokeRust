@@ -25865,6 +25865,79 @@ mod side_and_field_condition_moves {
         });
         assert!(any_burned, "Infiltrator should bypass Safeguard and allow burn");
     }
+
+    // ── Natural side-condition / pseudo-weather expiry must emit an end event ──
+    //
+    // Regression: `decrement_effect_timers` used to prune expired side conditions and
+    // pseudo-weathers via a generic helper that took no `&mut BattleState` and so
+    // couldn't call `emit(...)` — Tailwind, screens, Trick Room, Gravity, etc. all
+    // expired silently (no `SideConditionEnd`/`PseudoWeatherEnd`). This mattered beyond
+    // the missing event itself: the inference engine's fog-of-war belief only learns a
+    // side condition ended by observing that event (see `pass4_speed_from_order`'s
+    // Tailwind snapshot, `inference.rs`), so a silently-expired Tailwind left the
+    // belief's copy stale and could bake a phantom ×2 into a later speed comparison —
+    // the "SpeedComparison raises min above max" contradiction from TODO.md.
+
+    #[test]
+    fn tailwind_natural_expiry_emits_side_condition_end() {
+        let mut state = battle_state_from_lists(vec![bulky()], vec![], vec![bulky()], vec![]);
+        state.event_observer = Some(Player::P1);
+        simulator_helpers::add_side_condition(&mut state, Player::P1, SideCondition::TailWind, 1);
+
+        simulator_helpers::decrement_effect_timers(&mut state);
+
+        assert!(
+            !state.p1_side_conditions.iter().any(|c| matches!(c, SideCondition::TailWind)),
+            "Tailwind should be removed once its timer naturally hits zero"
+        );
+        let ended = state.pending_events.iter().any(|e| matches!(
+            &e.kind,
+            crate::information::information::EventKind::SideConditionEnd {
+                side: Player::P1,
+                condition: SideCondition::TailWind,
+            }
+        ));
+        assert!(ended, "natural Tailwind expiry must emit SideConditionEnd; pending_events = {:?}", state.pending_events);
+    }
+
+    #[test]
+    fn side_condition_with_turns_remaining_does_not_emit_end_yet() {
+        let mut state = battle_state_from_lists(vec![bulky()], vec![], vec![bulky()], vec![]);
+        state.event_observer = Some(Player::P1);
+        simulator_helpers::add_side_condition(&mut state, Player::P1, SideCondition::TailWind, 5);
+
+        simulator_helpers::decrement_effect_timers(&mut state);
+
+        assert!(
+            state.p1_side_conditions.iter().any(|c| matches!(c, SideCondition::TailWind)),
+            "Tailwind with turns remaining must survive the decrement"
+        );
+        let ended = state.pending_events.iter().any(|e| matches!(
+            &e.kind,
+            crate::information::information::EventKind::SideConditionEnd { condition: SideCondition::TailWind, .. }
+        ));
+        assert!(!ended, "SideConditionEnd must not fire while turns remain");
+    }
+
+    #[test]
+    fn trick_room_natural_expiry_emits_pseudo_weather_end() {
+        let mut state = battle_state_from_lists(vec![bulky()], vec![], vec![bulky()], vec![]);
+        state.event_observer = Some(Player::P1);
+        state.pseudo_weathers.push(PseudoWeather::TrickRoom);
+        state.pseudo_weather_turns.push(1);
+
+        simulator_helpers::decrement_effect_timers(&mut state);
+
+        assert!(
+            !state.pseudo_weathers.iter().any(|pw| matches!(pw, PseudoWeather::TrickRoom)),
+            "Trick Room should be removed once its timer naturally hits zero"
+        );
+        let ended = state.pending_events.iter().any(|e| matches!(
+            &e.kind,
+            crate::information::information::EventKind::PseudoWeatherEnd { effect: PseudoWeather::TrickRoom }
+        ));
+        assert!(ended, "natural Trick Room expiry must emit PseudoWeatherEnd; pending_events = {:?}", state.pending_events);
+    }
 }
 
 #[cfg(test)]
