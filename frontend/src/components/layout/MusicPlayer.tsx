@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactPlayer from 'react-player/youtube'
 import { useBattle } from '../../store/battleStore'
-import { usePlayer, type TrackId, type YTPlayer } from '../../store/playerStore'
+import { applyAudible, installUnlockListener, usePlayer, type TrackId, type YTPlayer } from '../../store/playerStore'
 
 // Both playlists are constantly shuffled + looped (via `onReady` below, using the
 // official YouTube IFrame Player API's queueing methods) — ambient plays by default,
@@ -16,6 +16,26 @@ function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+/**
+ * `setShuffle` is a documented no-op if called before the playlist has finished
+ * loading, and even once it takes effect it doesn't relocate the video already
+ * cued (the playlist's first entry) — so every reload started on the same track
+ * and "shuffle" never looked like it did anything. Poll for the playlist to
+ * actually be populated, then shuffle, loop, and jump to a random index so
+ * ordering is visibly randomized from the first track onward.
+ */
+function shuffleWhenReady(yt: YTPlayer | undefined, attempt = 0) {
+  const playlist = yt?.getPlaylist?.()
+  if (playlist && playlist.length > 0) {
+    yt?.setShuffle?.(true)
+    yt?.setLoop?.(true)
+    yt?.playVideoAt?.(Math.floor(Math.random() * playlist.length))
+    return
+  }
+  if (attempt >= 20) return // playlist never loaded in time; give up quietly
+  setTimeout(() => shuffleWhenReady(yt, attempt + 1), 250)
 }
 
 /** One playlist's player. Always mounted regardless of `visible` — only CSS hides
@@ -35,9 +55,7 @@ function TrackPlayer({
   const ref = useRef<ReactPlayer>(null)
   const registerRef = usePlayer((s) => s.registerRef)
   const activeTrack = usePlayer((s) => s.activeTrack)
-  const crossfading = usePlayer((s) => s.crossfading)
   const playing = usePlayer((s) => s.playing)
-  const muted = usePlayer((s) => s.muted)
   const setProgress = usePlayer((s) => s._setProgress)
   const setDuration = usePlayer((s) => s._setDuration)
 
@@ -54,26 +72,33 @@ function TrackPlayer({
       <ReactPlayer
         ref={ref}
         url={url}
-        playing={playing && (isActive || crossfading)}
+        // Both tracks always play (not gated on isActive/crossfading): browsers
+        // permit muted autoplay unconditionally, so keeping both embeds genuinely
+        // playing from mount is what makes the battle track's crossfade-in actually
+        // audible later — a `playVideo()` call fired for the first time mid-battle,
+        // after the tab has been open a while, is exactly the kind of "unmuted
+        // autoplay" browsers block. The inactive track stays silent via the
+        // imperative volume=0 below, not by pausing it.
+        playing={playing}
         controls={false}
         loop
-        muted={muted}
+        // Always `true` here — mute/unmute is driven imperatively via the real YT
+        // player instead (see `applyAudible` in playerStore for why: react-player's
+        // own reaction to a `muted` prop change silently fights our volume control).
+        // This still yields muted autoplay (the iframe is built with `mute: 1`),
+        // which is all that's needed to keep both embeds warm from mount.
+        muted
         volume={0} // level is driven imperatively (setVolume/crossfadeTo), not this prop
         width="100%"
         height="100%"
         config={{ playerVars: { listType: 'playlist', list: playlistId } }}
         onReady={(player) => {
           const yt = player.getInternalPlayer() as YTPlayer | undefined
-          // Official YouTube IFrame Player API queueing functions — "constantly
-          // shuffled" per the request, no scraping/undocumented APIs involved.
-          yt?.setShuffle?.(true)
-          yt?.setLoop?.(true)
+          shuffleWhenReady(yt)
           // `crossfadeTo` only actually ramps volume on a TRACK CHANGE — the track
-          // that's active at mount time never goes through that ramp, so its
-          // starting volume has to be set here instead of staying silent at the
-          // `volume={0}` prop until the user first touches the slider.
-          const { activeTrack, volume } = usePlayer.getState()
-          yt?.setVolume?.((track === activeTrack ? volume : 0) * 100)
+          // that's active at mount time never goes through that ramp, so its real
+          // mute/volume state has to be set here instead of staying silent forever.
+          applyAudible(track)
         }}
         onProgress={(state) => isActive && setProgress(track, state.playedSeconds)}
         onDuration={(d) => isActive && setDuration(track, d)}
@@ -117,6 +142,14 @@ export default function MusicPlayer() {
   const seekTo = usePlayer((s) => s.seekTo)
   const skip = usePlayer((s) => s.skip)
   const crossfadeTo = usePlayer((s) => s.crossfadeTo)
+
+  // Arm the one-time "first gesture anywhere unlocks audible playback" listener as
+  // early as possible — this component (inside the always-mounted Settings
+  // sidebar) mounts once at app start, well before the user necessarily opens
+  // Settings themselves.
+  useEffect(() => {
+    installUnlockListener()
+  }, [])
 
   // Local state while the user is actively dragging the scrubber, so incoming
   // onProgress updates don't fight the drag.
