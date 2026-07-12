@@ -848,7 +848,7 @@ fn apply_information_battle(
     // Run BEFORE the event walk so that speed bounds (minStats[5]/maxStats[5])
     // are already tightened when Pass 3 calls the damage oracle for Gyro Ball
     // and Electro Ball, which compute BP from effective speeds.
-    pass4_speed_from_order(state, &seed_state, events, move_dex, ability_dex);
+    pass4_speed_from_order(state, &seed_state, events, dex, move_dex, ability_dex);
     // Propagate the emitted SpeedComparison predicates to fixpoint immediately.
     // Predicate set is static here (no clause pruning), so collect once and reuse.
     {
@@ -902,7 +902,7 @@ fn apply_information_battle(
     // ── Pass 4 re-derivation: if BCP forced a priority ability to Known, re-run
     // speed ordering with the tighter bracket so speed bounds are updated.
     // One re-run is sufficient; duplicate clauses are now guarded against.
-    pass4_speed_from_order(state, &seed_state, events, move_dex, ability_dex);
+    pass4_speed_from_order(state, &seed_state, events, dex, move_dex, ability_dex);
     {
         let sc = bcp::collect_speed_comparisons(state);
         while bcp::propagate_collected(state, &sc) {}
@@ -7313,6 +7313,7 @@ fn pass4_speed_from_order(
     state: &mut UnknownBattleState,
     seed_state: &UnknownBattleState,
     top_events: &[InformationEvent],
+    dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
     _ability_dex: &HashMap<Ability, AbilityData>,
 ) {
@@ -7336,6 +7337,39 @@ fn pass4_speed_from_order(
     // one).
     let mut move_order: Vec<Mover> = Vec::new();
     for event in top_events {
+        // S41: Mega Evolution / permanent Forme Change swap in a new base-stat table
+        // and always resolve before any move that turn (real game rule) — but this is
+        // the FIRST of pass4's two calls, which runs BEFORE the real event walk (see
+        // the doc comment above), so `state` has NOT yet been mutated by the walk's own
+        // `MegaEvolution`/`FormeChange` handler. Scanning `top_events` in order without
+        // applying this ourselves means every `Mover` built for the REST of this same
+        // scan — including the mega'd mon's own `MoveUsed`, later in this very list —
+        // would read its PRE-mega Speed, even though by the time it actually moved that
+        // turn its Speed was already post-mega. Apply the same recompute the real
+        // handler uses, directly to `state`, so later Movers in this scan see the
+        // correct value. Idempotent: the real walk applies the identical overwrite
+        // again later for real, to the same target values.
+        if let EventKind::MegaEvolution { slot, into } | EventKind::FormeChange { slot, into, .. } = &event.kind {
+            if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+                if let (Some(mon), Some(data)) = (get_mon_mut_by_idx(state, idx), dex.get(into)) {
+                    mon.possible_species = Unknown::Known(into.clone());
+                    recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
+                }
+                // Same purge the real walk's MegaEvolution/FormeChange handler performs
+                // (`statement_stale_after_species_reveal`) — applied here too, since this
+                // early recompute now makes a pre-existing SpeedComparison/EVIVStatGE/LE
+                // clause derived against the OLD base-stat table stale immediately, not
+                // just once the real walk gets around to processing this same event.
+                // Without this, the very next line's synchronous `propagate_collected`
+                // can apply a stale pre-mega cap to the freshly-widened bound and panic
+                // before the real walk ever runs.
+                state.predicates.retain(|clause| {
+                    !clause
+                        .iter()
+                        .any(|lit| statement_stale_after_species_reveal(lit, idx))
+                });
+            }
+        }
         if let EventKind::MoveUsed {
             user, move_used, ..
         } = &event.kind

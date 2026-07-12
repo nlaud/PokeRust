@@ -4080,6 +4080,122 @@ fn test_mega_evolution_purges_stale_speed_comparison() {
     );
 }
 
+/// **S41 regression** — a mon that Mega Evolves on the SAME turn it moves must use its
+/// POST-mega Speed for that turn's own move-order comparisons, not its turn-start
+/// (pre-mega) Speed. `pass4_speed_from_order`'s FIRST call runs BEFORE the event walk
+/// (deliberately — see its doc comment, to seed Spe bounds ahead of Pass 3's damage
+/// oracle) and reads `state` as of turn start for EVERY `MoveUsed` in the event list,
+/// including one whose user Mega Evolves earlier in that SAME event list. Real games
+/// resolve Mega Evolution before any move that turn, so by the time the mega'd mon's
+/// own `MoveUsed` node is scanned, its true Speed is already the POST-mega value — but
+/// pass4's first call, having not yet walked the `MegaEvolution` event, still reads the
+/// PRE-mega value from `state`. If a same-priority pairing that turn is only explained
+/// by the POST-mega Speed (a real, sound observation), this stale-vs-live desync can
+/// produce a `SpeedComparison` this pass can't yet satisfy against pre-mega bounds.
+///
+/// Setup: P1's own Tyranitar (idx 1) has pre-mega Spe well BELOW P1's own second mon's
+/// Spe (idx 0), and post-mega Spe well ABOVE it — so the observed order (P2 moves,
+/// then Tyranitar, then the idx-0 mon) is only sound post-mega. Both P1 mons are fully
+/// Known (own team), matching the real report exactly (both ends of the panicking
+/// `SpeedComparison` were the observer's own, already-pinned mons).
+#[test]
+fn test_s41_mega_evolution_uses_post_mega_speed_for_same_turn_move_order() {
+    use crate::state::pokemon::{Nature, PokemonGender};
+
+    // P1 idx 0: fully known, fixed Spe = 150 — between the pre- and post-mega values below.
+    let mut p1_other = unknown_mon_species(Species::Snorlax); // not in dex; pass5 skips it
+    p1_other.minStats[5] = 150;
+    p1_other.maxStats[5] = 150;
+    p1_other.item = Unknown::Known(Item::None);
+    p1_other.possible_abilities = Unknown::Known(Ability::None);
+
+    // P1 idx 1: Tyranitar, fully known/pinned (own mon) — pre-mega base Spe 80 (chosen
+    // low), post-mega base Spe 120 (chosen high), same EV/IV/nature/level either side.
+    let mut tyranitar = unknown_mon_species(Species::Tyranitar);
+    tyranitar.possible_natures = Unknown::Known(Nature::Hardy); // neutral on every stat
+    tyranitar.minIvs = [31; 6];
+    tyranitar.maxIvs = [31; 6];
+    tyranitar.minEvs = [0, 0, 0, 0, 0, 252];
+    tyranitar.maxEvs = [0, 0, 0, 0, 0, 252];
+    tyranitar.item = Unknown::Known(Item::Tyranitarite);
+    tyranitar.possible_abilities = Unknown::Known(Ability::SandStream);
+    tyranitar.possible_original_abilities = Unknown::Known(Ability::SandStream);
+    // Pre-mega Spe (base 80, iv 31, ev 252, lvl 50, neutral): calc_stat gives 132.
+    tyranitar.minStats[5] = 132;
+    tyranitar.maxStats[5] = 132;
+    tyranitar.min_pre_nature_stat = [0; 6];
+    tyranitar.max_pre_nature_stat = [u16::MAX; 6];
+
+    // P2: two placeholder mons (only idx 0 acts; doubles shape matches the real report).
+    let p2a = unknown_mon_species(Species::Garchomp);
+    let p2b = unknown_mon_species(Species::Garchomp);
+
+    let mut state = battle_nvn(vec![p1_other, tyranitar], vec![p2a, p2b]);
+    state.p1_has_mega = true;
+
+    let mut dex = HashMap::new();
+    dex.insert(Species::Tyranitar, PokemonData {
+        species: Species::Tyranitar,
+        types: vec![PokemonType::Rock, PokemonType::Dark],
+        base_stats: [100, 134, 110, 95, 100, 80], // Spe 80 (test value, not the real dex)
+        weight: 2020,
+        primary_ability: Some(Ability::SandStream),
+        abilities: vec![Ability::SandStream, Ability::Unnerve],
+        base_species: None,
+        forme: None,
+        required_item: None,
+        battle_only: None,
+        default_gender: PokemonGender::Male,
+    });
+    dex.insert(Species::TyranitarMega, PokemonData {
+        species: Species::TyranitarMega,
+        types: vec![PokemonType::Rock, PokemonType::Dark],
+        base_stats: [100, 164, 150, 95, 120, 120], // Spe 120 (test value) — the real jump
+        weight: 2550,
+        primary_ability: Some(Ability::SandStream),
+        abilities: vec![Ability::SandStream],
+        base_species: Some(Species::Tyranitar),
+        forme: None,
+        required_item: Some("Tyranitarite".to_string()),
+        battle_only: Some(Species::Tyranitar),
+        default_gender: PokemonGender::Male,
+    });
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Growl, {
+        let mut m = normal_physical_move(PokemonMove::Growl, 0);
+        m.category = MoveCategory::Status;
+        m
+    });
+
+    // Real observed shape: MegaEvolution first, then P2 moves, then the mega'd mon
+    // (only sound post-mega: 120-base Spe > 150? no — post-mega Spe here is 172,
+    // computed below, comfortably above p1_other's 150), then p1_other.
+    let events = vec![
+        event(EventKind::MegaEvolution { slot: p1(1), into: Species::TyranitarMega }),
+        event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Growl, targets: vec![p1(0)] }),
+        event(EventKind::MoveUsed { user: p1(1), move_used: PokemonMove::Growl, targets: vec![p2(1)] }),
+        event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Growl, targets: vec![p2(0)] }),
+    ];
+
+    // Must not panic — this is the primary regression assertion.
+    let result = apply_ex(state, events, dex, move_dex);
+
+    let mon = &result.p1_active_mons[1];
+    assert!(
+        mon.minStats[5] <= mon.maxStats[5],
+        "post-mega Spe bounds must stay consistent: min={} max={}",
+        mon.minStats[5], mon.maxStats[5]
+    );
+    // Post-mega Spe (base 120, iv 31, ev 252, lvl 50, neutral) = 172 — must not be
+    // corrupted down toward the pre-mega 132 by a stale pre-mega SpeedComparison.
+    assert_eq!(
+        (mon.minStats[5], mon.maxStats[5]),
+        (172, 172),
+        "own mon's post-mega Speed must stay exactly known at its real post-mega value"
+    );
+}
+
 /// `FormeChange` into a genuinely different species (e.g. Stance Change,
 /// Mimikyu-Busted) must NOT panic when the base species is already `Known`.
 #[test]
