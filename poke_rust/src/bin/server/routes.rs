@@ -127,6 +127,7 @@ pub async fn create_battle(
             req.brought_per_side,
             50,
             information_mode,
+            req.force_max_ivs,
         );
         (Some(belief), Some(config))
     };

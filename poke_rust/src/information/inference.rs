@@ -778,6 +778,29 @@ fn run_pass5_all_mons(
 ) {
     let total = mons_count_battle(state);
     for idx in 0..total {
+        // S38: skip mons whose EVs are ALREADY fully pinned (`minEvs == maxEvs` on
+        // every stat) — this is exactly the invariant `from_known_pokemon` establishes
+        // for the observer's own (P1) mons, where the true EV is already ground truth
+        // and there's nothing to back-solve. Running pass5 anyway is not just wasted
+        // work: pass5's own EV_LATTICE search for an EXACT stat target can itself land
+        // on a genuine *range* of EVs that floor-round to the same integer stat — and
+        // that range shifts when the mon's base stat changes (Mega Evolution, a
+        // permanent Forme Change) between two `apply_information` calls (e.g. the
+        // team-preview transition, then the turn the mon Mega Evolves). Since pass5's
+        // writes are monotone-tightening only, intersecting two genuinely different
+        // (base-stat-dependent) EV ranges for the SAME real EV can produce an inverted
+        // `minEvs > maxEvs` window even though nothing about the mon's real build ever
+        // changed — corrupting the exact value `from_known_pokemon` already had right,
+        // and eventually crashing pass5's own "every candidate nature is infeasible"
+        // soundness assertion on a LATER stat lookup once `minStats`/`maxStats` get
+        // rebuilt from these EVs. A mon this fully known has no business being
+        // re-derived by a back-solve meant for opponents in the first place.
+        let already_pinned = get_mon_by_idx(state, idx)
+            .map(|m| (0..6).all(|si| m.minEvs[si] == m.maxEvs[si]))
+            .unwrap_or(false);
+        if already_pinned {
+            continue;
+        }
         let has_known_species = get_mon_by_idx(state, idx)
             .map(|m| matches!(m.possible_species, Unknown::Known(_)))
             .unwrap_or(false);
@@ -2363,6 +2386,31 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     let player = &sw.slot.player;
     let slot_i = sw.slot.slot_index as usize;
     let species = &sw.species;
+
+    // S37: the team-preview→battle transition (`into_battle_state`) already places
+    // P1's leads directly into `p1_active_mons` with their full `Known` nature/EV/IV
+    // data from `from_known_pokemon` — P1's own side is never actually "found in the
+    // back and moved to active" the way this function's normal (P2, or a genuine
+    // mid-battle switch) logic assumes. Since `p1_known_back_mons`/`p1_possible_back_mons`
+    // only ever hold P1's BENCHED mons, a lead's SimultaneousSwitch reveal at battle
+    // start never matches anything there, and this function fell through to its
+    // "completely new mon" branch — REBUILDING P1's own, fully-known lead as a
+    // wide-uncertain `from_opponent_species` mon (nature `Not([])`, EVs `[0,252]`)
+    // and overwriting the correct entry `into_battle_state` had already placed.
+    // A genuine mid-battle P1 switch always changes who's active, so the incoming
+    // species can never already match the slot's CURRENT occupant except at this
+    // one-time reveal — detect that case and just apply the transient switch fields
+    // (HP/status/etc.) to the existing, already-correct entry instead of discarding it.
+    if *player == Player::P1 {
+        if let Some(existing) = state.p1_active_mons.get(slot_i) {
+            if unknown_is_known_as(&existing.possible_species, species) {
+                if let Some(mon) = state.p1_active_mons.get_mut(slot_i) {
+                    apply_switch_state_to_mon(mon, sw, ctx.config);
+                }
+                return;
+            }
+        }
+    }
 
     // S29: if an Illusion disguise is possible on this side (a Zoroark forme sits
     // anywhere on this side's bench) and the incoming "species" is not itself a
@@ -5238,15 +5286,10 @@ fn pass3_damage_to_stats(
         //    full-HP-gated reducers (Multiscale/Shadow Shield/Tera Shell) aren't
         //    evaluated against the already-post-move HP Pass 1 leaves on the live mon.
         let mut current_hp: PokemonHP = pre_hp.clone();
-        let mut pending_crit = false;
         let mut hit_idx: usize = 0;
 
         for reaction in &event.reactions {
             let new_hp = match &reaction.kind {
-                EventKind::Crit { target } if target == target_slot => {
-                    pending_crit = true;
-                    continue;
-                }
                 EventKind::Healed { target, new_hp } | EventKind::SetHp { target, new_hp }
                     if target == target_slot =>
                 {
@@ -5257,8 +5300,24 @@ fn pass3_damage_to_stats(
                 EventKind::DamageDealt { target, new_hp } if target == target_slot => new_hp,
                 _ => continue,
             };
-            let is_crit = pending_crit;
-            pending_crit = false;
+            // S39: `Crit{target}` is emitted as a REACTION (child) of its `DamageDealt`
+            // node, not a preceding sibling — see `with_reactions(bs, DamageDealt{...},
+            // run_damage_reactions)` in simulator/mod.rs, which nests Crit/Faint under
+            // the specific hit they belong to (the same shape a player sees: "A critical
+            // hit!" attached to that hit's damage line). A `pending_crit` flag scanning
+            // for a *preceding sibling* `Crit` can never fire — `event.reactions` (this
+            // MoveUsed node's direct children) never contains a bare `Crit`, so `is_crit`
+            // was unconditionally `false` here, silently discarding every real crit. That
+            // fed pass3_direction_a/b's oracle a non-crit-only search space for hits that
+            // were actually crits, producing a stat window that EXCLUDES the true value
+            // (unsound) whenever the observed damage required the crit multiplier to
+            // explain — the root cause of the "every candidate nature is infeasible"
+            // contradictions on crit hits. Look inside this DamageDealt's own nested
+            // reactions instead.
+            let is_crit = reaction
+                .reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::Crit { target } if target == target_slot));
 
             // Per-hit BP override for fixed-BP multi-hit moves (Triple Kick etc.).
             // None for normal multi-hit moves (each hit uses move's base_power).
@@ -5882,7 +5941,6 @@ fn apply_unconditional_tightening(
 fn emit_nature_conditional_bounds(
     state: &mut UnknownBattleState,
     mon_idx: usize,
-    si: usize,
     stat: &crate::state::dex_data::PokemonStat,
     per_class: &[NatureClassBound],
     gear_items: &[Item],
@@ -5916,6 +5974,20 @@ fn emit_nature_conditional_bounds(
             }))
             .collect();
 
+        // S35: always push the full clause (guards + bound literal + gear escapes) to
+        // `state.predicates`, even when there are no gear escapes to include. The
+        // previous code force-applied the bound directly to `min_pre_nature_stat`/
+        // `max_pre_nature_stat` whenever `gear_literals` was empty — but `not_kappa_guards`
+        // is a REAL condition (the nature must actually BE this boost/neutral/nerf class)
+        // that has nothing to do with whether gear escapes exist; dropping it meant a
+        // per-class-conditional bound ("IF nature nerfs this stat, BSV >= lo") got applied
+        // unconditionally. Since `per_class` iterates every remaining nature class, this
+        // let a nerf class's high `lo` and a boost class's low `hi` BOTH get force-applied
+        // for the same mon/stat — producing an inverted `[min_pre_nature_stat > max_pre_nature_stat]`
+        // window and the "every candidate nature is infeasible" pass5 contradiction on
+        // ordinary turns. Pushing the clause instead lets BCP's existing fixpoint correctly
+        // force the bound only once `not_kappa_guards` is independently proven false (i.e.
+        // this class is confirmed), the same safe path the gear-escape branch already used.
         if let Some(lo) = cr.bsv_lo_neutral {
             if lo > current_pre_min {
                 let mut clause = not_kappa_guards.clone();
@@ -5925,16 +5997,7 @@ fn emit_nature_conditional_bounds(
                     value: lo,
                 });
                 clause.extend(gear_literals.clone());
-                if clause.len() > not_kappa_guards.len() + 1 {
-                    state.predicates.push(clause);
-                } else {
-                    // No gear alternatives possible: force the bound directly.
-                    if let Some(mon) = get_mon_mut_by_idx(state, mon_idx) {
-                        if lo > mon.min_pre_nature_stat[si] {
-                            mon.min_pre_nature_stat[si] = lo;
-                        }
-                    }
-                }
+                state.predicates.push(clause);
             }
         }
         if let Some(hi) = cr.bsv_hi_neutral {
@@ -5946,15 +6009,7 @@ fn emit_nature_conditional_bounds(
                     value: hi,
                 });
                 clause.extend(gear_literals.clone());
-                if clause.len() > not_kappa_guards.len() + 1 {
-                    state.predicates.push(clause);
-                } else {
-                    if let Some(mon) = get_mon_mut_by_idx(state, mon_idx) {
-                        if hi < mon.max_pre_nature_stat[si] {
-                            mon.max_pre_nature_stat[si] = hi;
-                        }
-                    }
-                }
+                state.predicates.push(clause);
             }
         }
     }
@@ -6296,7 +6351,7 @@ fn pass3_direction_b(
     // `current_pre_min/max` are read from the pre-tightening clone (attacker_unk) so the
     // "worth emitting" gate is stable throughout the loop.
     emit_nature_conditional_bounds(
-        state, user_idx, si, off_stat,
+        state, user_idx, off_stat,
         &per_class, &booster_items, &booster_abilities,
         attacker_unk.min_pre_nature_stat[si],
         attacker_unk.max_pre_nature_stat[si],
@@ -6967,7 +7022,7 @@ fn pass3_direction_a(
         .cloned()
         .collect();
     emit_nature_conditional_bounds(
-        state, target_idx, si, def_stat,
+        state, target_idx, def_stat,
         &per_class_a, &reducer_items, &reducer_abilities,
         defender_unk.min_pre_nature_stat[si],
         defender_unk.max_pre_nature_stat[si],
@@ -7123,10 +7178,18 @@ fn priority_lift_escapes(
 struct Mover {
     eff_prio: i8,
     mon_idx: usize,
+    /// The side this mover's own mon is on — needed by S36's same-side tailwind fix
+    /// below to look up the RIGHT side's flag from another mover's snapshot.
+    player: Player,
     move_used: PokemonMove,
     spe_boost: i8,
     paralyzed: bool,
-    tailwind: bool,
+    /// S36: BOTH sides' Tailwind state as of just before this mover acted (not just
+    /// this mover's own side) — see the windows(2) loop in `pass4_speed_from_order`
+    /// for why a same-side pairing needs the EARLIER mover's snapshot for BOTH
+    /// participants, not each participant's own separate snapshot time.
+    p1_tailwind: bool,
+    p2_tailwind: bool,
     /// S32: Trick Room state as of just before this mover acted. Trick Room can be
     /// set or removed mid-turn (e.g. a Trick Room use, or a Room Service/Room-ending
     /// move); a single global read at Pass 4's call time — especially the *second*
@@ -7291,14 +7354,18 @@ fn pass4_speed_from_order(
                     get_mon_by_idx(seed_state, idx)
                         .map_or(false, |m| matches!(m.status, Some(Status::Paralysis)))
                 });
-                let s_tw = *tailwind.entry(user.player).or_insert(false);
+                tailwind.entry(user.player).or_insert(false);
+                let p1_tw = *tailwind.get(&Player::P1).unwrap_or(&false);
+                let p2_tw = *tailwind.get(&Player::P2).unwrap_or(&false);
                 move_order.push(Mover {
                     eff_prio,
                     mon_idx: idx,
+                    player: user.player,
                     move_used: move_used.clone(),
                     spe_boost: s_boost,
                     paralyzed: s_para,
-                    tailwind: s_tw,
+                    p1_tailwind: p1_tw,
+                    p2_tailwind: p2_tw,
                     trick_room,
                     weather: weather.clone(),
                     terrain: terrain.clone(),
@@ -7351,13 +7418,38 @@ fn pass4_speed_from_order(
             (idx0, idx1, mv0.clone(), mover0, mover1)
         };
 
+        // S36: Tailwind is looked up from `mover0` — the TEMPORALLY EARLIER mover,
+        // always (Trick Room only relabels which one is "fast", it doesn't change
+        // WHEN the comparison was actually decided) — for BOTH participants' sides,
+        // not each mon's own separate snapshot time. The action-selection algorithm
+        // that produced this observed order picked `mover0` as the winner from a pool
+        // that included `mover1` AS IT STOOD AT THAT MOMENT; `mover1`'s own (necessarily
+        // later-or-equal) snapshot can already reflect a side-wide field change `mover0`
+        // itself just caused. This matters specifically for a same-side pair where the
+        // earlier mover's own move is what changed the field (e.g. Aerodactyl casts
+        // Tailwind and is immediately followed by its own teammate): the teammate's own
+        // snapshot correctly shows Tailwind active (needed for the NEXT pairing, against
+        // the opposing side), but that Tailwind boost must not be backed into THIS pairing
+        // against Aerodactyl, which raced its teammate before Tailwind existed. Using
+        // `mover1.tailwind` there previously required Aerodactyl's own raw Speed to be
+        // at least double its teammate's — impossible once that teammate's real Speed
+        // was high enough, producing exactly this class of "SpeedComparison raises min
+        // above max" contradiction.
+        let fast_tailwind = match fast_snap.player {
+            Player::P1 => mover0.p1_tailwind,
+            Player::P2 => mover0.p2_tailwind,
+        };
+        let slow_tailwind = match slow_snap.player {
+            Player::P1 => mover0.p1_tailwind,
+            Player::P2 => mover0.p2_tailwind,
+        };
         let (fast_mult, slow_mult) = compute_speed_multipliers(
             fast_snap.spe_boost,
             slow_snap.spe_boost,
             fast_snap.paralyzed,
             slow_snap.paralyzed,
-            fast_snap.tailwind,
-            slow_snap.tailwind,
+            fast_tailwind,
+            slow_tailwind,
         );
 
         // ── Build escape disjuncts ────────────────────────────────────────────

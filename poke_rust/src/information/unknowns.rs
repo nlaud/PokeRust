@@ -776,13 +776,48 @@ impl UnknownPokemonState {
     /// Team Sheet + Natures), in which case the nature is also copied and the stat
     /// bounds are tightened using that nature's real per-stat modifier instead of the
     /// independent 0.9/1.1 worst-case mix both bounds otherwise assume.
+    ///
+    /// S34: `force_max_ivs` — `from_opponent_species` always seeds the FULL [0, 31] IV
+    /// lattice; it has no way to know about the format's IV-pinning rule. When the
+    /// format pins opponent IVs to 31 (Pokémon Champions competitive default,
+    /// `InferenceConfig::force_max_ivs`), the min-side stat/BSV bounds this function
+    /// hands back must be recomputed at IV 31, not IV 0 — otherwise the stored window
+    /// spans a "phantom" region (IV-0-achievable but never IV-31-achievable) that
+    /// `pass3_direction_b`'s damage back-solve can narrow into, while `pass5_back_solve`
+    /// (which correctly restricts its own search to IV 31 per this same config flag)
+    /// can never satisfy — producing "every candidate nature is infeasible" contradictions
+    /// on ordinary turns. See the `test_s34_*` regression tests below.
     pub fn from_opponent_open_sheet(
         mon: &PokemonState,
         dex: &HashMap<Species, PokemonData>,
         level: u8,
         reveal_nature: bool,
+        force_max_ivs: bool,
     ) -> Self {
         let mut unk = Self::from_opponent_species(mon.species.clone(), dex, level);
+        let min_iv: u8 = if force_max_ivs { 31 } else { 0 };
+        if force_max_ivs {
+            unk.minIvs = [31; 6];
+            if let Some(data) = dex.get(&mon.species) {
+                let b = data.base_stats;
+                unk.minStats = [
+                    calc_hp(b[0], min_iv, 0, level),
+                    calc_stat(b[1], min_iv, 0, level, 0.9),
+                    calc_stat(b[2], min_iv, 0, level, 0.9),
+                    calc_stat(b[3], min_iv, 0, level, 0.9),
+                    calc_stat(b[4], min_iv, 0, level, 0.9),
+                    calc_stat(b[5], min_iv, 0, level, 0.9),
+                ];
+                unk.min_pre_nature_stat = [
+                    calc_hp(b[0], min_iv, 0, level),
+                    calc_stat(b[1], min_iv, 0, level, 1.0),
+                    calc_stat(b[2], min_iv, 0, level, 1.0),
+                    calc_stat(b[3], min_iv, 0, level, 1.0),
+                    calc_stat(b[4], min_iv, 0, level, 1.0),
+                    calc_stat(b[5], min_iv, 0, level, 1.0),
+                ];
+            }
+        }
 
         unk.possible_abilities = Unknown::Known(mon.ability.clone());
         unk.possible_original_abilities = Unknown::Known(
@@ -814,12 +849,12 @@ impl UnknownPokemonState {
             // when the nature was still unknown) — only EV/IV remain uncertain.
             let mods = crate::state::pokemon::nature_stat_modifiers(&mon.nature);
             unk.minStats = [
-                calc_hp(base[0], 0, 0, level),
-                calc_stat(base[1], 0, 0, level, mods[0]),
-                calc_stat(base[2], 0, 0, level, mods[1]),
-                calc_stat(base[3], 0, 0, level, mods[2]),
-                calc_stat(base[4], 0, 0, level, mods[3]),
-                calc_stat(base[5], 0, 0, level, mods[4]),
+                calc_hp(base[0], min_iv, 0, level),
+                calc_stat(base[1], min_iv, 0, level, mods[0]),
+                calc_stat(base[2], min_iv, 0, level, mods[1]),
+                calc_stat(base[3], min_iv, 0, level, mods[2]),
+                calc_stat(base[4], min_iv, 0, level, mods[3]),
+                calc_stat(base[5], min_iv, 0, level, mods[4]),
             ];
             unk.maxStats = [
                 calc_hp(base[0], 31, 252, level),
@@ -885,6 +920,7 @@ impl UnknownMatchState {
     /// truth for moves/item/ability/Tera type. A separate function (rather than adding
     /// a `mode` parameter to `team_preview_from_perspective`) keeps the existing
     /// species-only path — and its tests — untouched.
+    #[allow(clippy::too_many_arguments)]
     pub fn team_preview_open_sheet_from_perspective(
         viewer: Player,
         my_team: &[PokemonState],
@@ -894,6 +930,7 @@ impl UnknownMatchState {
         brought_per_side: u8,
         level: u8,
         mode: InformationMode,
+        force_max_ivs: bool,
     ) -> UnknownMatchState {
         let my_mons: Vec<UnknownPokemonState> = my_team
             .iter()
@@ -902,7 +939,9 @@ impl UnknownMatchState {
         let reveal_nature = mode == InformationMode::OpenTeamSheetNatures;
         let opp_mons: Vec<UnknownPokemonState> = opponent_team
             .iter()
-            .map(|mon| UnknownPokemonState::from_opponent_open_sheet(mon, dex, level, reveal_nature))
+            .map(|mon| {
+                UnknownPokemonState::from_opponent_open_sheet(mon, dex, level, reveal_nature, force_max_ivs)
+            })
             .collect();
 
         let (p1_mons, p2_mons) = match viewer {

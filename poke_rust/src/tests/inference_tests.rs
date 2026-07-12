@@ -2452,14 +2452,18 @@ fn test_pass3_dir_b_crit_observed_no_contradiction() {
     // Note the STAB quantization: damage is floor(1.5·x) for integer x, so values
     // like 140 are unreachable for ANY attacker (floor(1.5·93)=139, floor(1.5·94)=141).
     // 141 is reachable by mid-range Atk values under a crit.
+    // S39: `Crit` is emitted as a REACTION (child) of its `DamageDealt` node in the
+    // real simulator (`with_reactions(bs, DamageDealt{...}, run_damage_reactions)` in
+    // simulator/mod.rs — Crit is emitted from inside that closure), not a preceding
+    // sibling. Nest it here to match the real event tree shape.
     let result = apply_ex(
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![
-                event(EventKind::Crit { target: p1(0) }),           // crit signalled
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(359) }), // 141 damage
-            ],
+            vec![event_with(
+                EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(359) }, // 141 damage
+                vec![event(EventKind::Crit { target: p1(0) })], // crit signalled
+            )],
         )],
         garchomp_dex(),
         move_dex,
@@ -2939,8 +2943,10 @@ fn test_pass3_multihit_2hits_no_contradiction() {
     );
 }
 
-/// **S23 regression — per-hit crit attribution.** A 2-hit move lands a crit on hit 1
-/// only (the sim emits `Crit` immediately before that hit's own `DamageDealt`).
+/// **S23 regression — per-hit crit attribution.** A 2-hit move lands a crit on hit 2
+/// only. S39: the sim emits `Crit` nested as a REACTION (child) of that hit's own
+/// `DamageDealt`, not a preceding sibling — see `with_reactions(bs, DamageDealt{...},
+/// run_damage_reactions)` in simulator/mod.rs.
 ///
 /// Setup mirrors `test_pass3_multihit_tighter_than_single_hit` (Garchomp, neutral,
 /// 40 BP Normal 2-hit vs Def=100): true Atk BSV = 180 → base term 33, non-crit rolls
@@ -2966,11 +2972,13 @@ fn test_s23_multihit_mixed_crit_keeps_true_atk_feasible() {
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
             vec![
-                // Hit 1: non-crit, 33 damage (500 → 467).
+                // Hit 1: non-crit, 33 damage (500 → 467), no nested Crit.
                 event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(467) }),
-                // Hit 2: crit, 45 damage (467 → 422) — Crit emitted just before it.
-                event(EventKind::Crit { target: p1(0) }),
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(422) }),
+                // Hit 2: crit, 45 damage (467 → 422) — Crit nested under this hit's own DamageDealt.
+                event_with(
+                    EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(422) },
+                    vec![event(EventKind::Crit { target: p1(0) })],
+                ),
                 event(EventKind::HitCount { target: p1(0), hits: 2 }),
             ],
         )],
@@ -7267,6 +7275,197 @@ mod roundtrip_soundness {
         }
     }
 
+    /// Like [`fog_1v1`] but seeds P2's belief via [`UnknownPokemonState::from_opponent_open_sheet`]
+    /// with `force_max_ivs=true` — the exact server code path (`create_battle`'s
+    /// `informationMode="openSheet"` branch, via `team_preview_open_sheet_from_perspective`)
+    /// that produced the S34/S35 contradictions. `reveal_nature=false` matches plain
+    /// "Open Team Sheet" (not "+ Natures").
+    fn fog_1v1_open_sheet_force_max_ivs(p1: &PokemonState, p2: &PokemonState) -> UnknownBattleState {
+        let dex = pokemon_dex();
+        super::battle_nvn(
+            vec![UnknownPokemonState::from_known_pokemon(p1)],
+            vec![UnknownPokemonState::from_opponent_open_sheet(p2, dex, 50, false, true)],
+        )
+    }
+
+    /// S34/S35 regression: a real, high-frequency (~1/3 to 1/2 of turns, depending on
+    /// the damage roll) crash found in production-realistic "Open Team Sheet" gameplay.
+    ///
+    /// S34: `from_opponent_open_sheet`/`from_opponent_species` always seeded the min
+    /// side of `min_pre_nature_stat`/`minStats` at IV 0, with no way to know the format
+    /// pins opponent IVs to 31 (`force_max_ivs`) — leaving a "phantom" IV-0-consistent
+    /// region that Direction B's damage back-solve could narrow into, but `pass5_back_solve`
+    /// (which correctly restricts its own search to IV 31 per `config.force_max_ivs`)
+    /// could never satisfy.
+    ///
+    /// S35: independently, `emit_nature_conditional_bounds` force-applied a per-nature-class
+    /// conditional bound directly onto `min_pre_nature_stat`/`max_pre_nature_stat` whenever
+    /// no gear escape existed — completely dropping the `not_kappa_guards` condition (i.e.
+    /// "this nature class is actually confirmed"). Since every nature class's own clause hit
+    /// this shortcut independently, a nerf class's high lower-bound and a boost class's low
+    /// upper-bound could BOTH get force-applied for the same mon/stat, inverting
+    /// `min_pre_nature_stat` above `max_pre_nature_stat`.
+    ///
+    /// Either bug alone crashes `pass5_back_solve`'s "every candidate nature is infeasible"
+    /// soundness assertion. Exhaustively checks all 16 damage rolls (deterministic — the
+    /// original bug was only stochastically hit depending on which roll landed, so a single
+    /// fixed roll would not reliably catch a regression here).
+    #[test]
+    fn test_s34_s35_open_sheet_force_max_ivs_no_pass5_contradiction() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Garchomp, pd, md, Some(50),
+            Some([Some(PokemonMove::Earthquake), None, None, None]),
+            None, Some(Ability::RoughSkin), Some(Nature::Adamant), Some(Item::ChoiceBand),
+            None, Some([4, 252, 0, 0, 0, 252]), None, true,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::BodySlam), None, None, None]),
+            None, Some(Ability::ThickFat), Some(Nature::Impish), Some(Item::None),
+            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+        );
+
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let fog = fog_1v1_open_sheet_force_max_ivs(&p1, &p2);
+
+        let branches = crate::tests::simuilator_test_helpers::run_single_turn_with_events_opts(
+            &state, &p1_cmd, &p2_cmd, md, pd, Player::P1, true, 16,
+        );
+        assert!(!branches.is_empty());
+
+        let mut checked = 0;
+        for (st, events_opt, _prob) in branches {
+            if !matches!(st, MatchState::BattleState(_)) {
+                continue; // A one-shot faint on this roll — nothing further to check.
+            }
+            let Some(events) = events_opt else { continue };
+            checked += 1;
+            // Must not panic — this is the actual regression under test.
+            apply_information(
+                UnknownMatchState::Battle(fog.clone()),
+                &events,
+                false,
+                pd,
+                md,
+                &HashMap::new(),
+                &InferenceConfig::default(),
+            );
+        }
+        assert!(
+            checked > 1,
+            "expected multiple distinct damage-roll branches to be exercised, got {checked}"
+        );
+    }
+
+    /// S37 regression: the team-preview→battle transition (`into_battle_state`) places
+    /// P1's leads directly into `p1_active_mons` with their full `Known` nature/EV/IV
+    /// data from `from_known_pokemon` — but that same transition's own event log
+    /// (`session.rs::resolve_turn`'s documented two-step flow) includes a
+    /// `SimultaneousSwitch` for BOTH sides' leads, P1's own sent-out reveal alongside
+    /// P2's. Before this fix, `pass1_switch` processed P1's own `SimultaneousSwitch`
+    /// entry exactly like a genuine mid-battle switch: look up the incoming species in
+    /// `p1_known_back_mons`/`p1_possible_back_mons` (which only ever hold P1's BENCHED
+    /// mons — a lead is already active, never in either list), fail to find it, and
+    /// fall through to building a brand-new `from_opponent_species`-style mon —
+    /// DISCARDING the correct, fully-known entry `into_battle_state` had already placed
+    /// and replacing it with a wide-uncertain one (`possible_natures = Not([])`,
+    /// `minEvs`/`maxEvs` widened to `[0, 252]`). This corrupted P1's OWN belief on
+    /// every real battle that goes through the actual server flow — the earlier
+    /// `test_s34_s35_*` test above didn't catch it because it built the fog state
+    /// directly, bypassing `into_battle_state` entirely. Once a mon later Mega Evolves
+    /// (`recompute_stat_bounds_for_species_change` re-derives `minStats`/`maxStats`
+    /// from the now-wrongly-wide nature/EV window), this produced a visibly WIDE stat
+    /// range for a mon that should be a single exact value, feeding wrong data into
+    /// Direction A/B and eventually an "every candidate nature is infeasible" pass5
+    /// contradiction or a `SpeedComparison` inversion.
+    #[test]
+    fn test_s37_p1_own_lead_stays_known_through_team_preview_transition() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1a = build_pokemon_state(
+            Species::Tyranitar, pd, md, Some(50),
+            Some([Some(PokemonMove::RockSlide), None, None, None]),
+            None, Some(Ability::SandStream), Some(Nature::Adamant), Some(Item::Tyranitarite),
+            None, Some([26, 252, 0, 0, 0, 0]), None, true,
+        );
+        let p2a = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::BodySlam), None, None, None]),
+            None, Some(Ability::ThickFat), Some(Nature::Impish), Some(Item::None),
+            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+        );
+
+        let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P1, &[p1a.clone()], &[p2a.clone()], pd, 1, 1, 50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet, true,
+        );
+        let UnknownMatchState::TeamPreview(preview) = preview else {
+            panic!("expected TeamPreview")
+        };
+        let fog = preview.into_battle_state(&[0], &[], &[0], &[]);
+
+        // The exact event shape the real server emits for this transition: both
+        // leads sent out simultaneously.
+        let events = vec![InformationEvent {
+            kind: crate::information::information::EventKind::SimultaneousSwitch {
+                switches: vec![
+                    crate::information::information::SwitchState {
+                        slot: super::p1(0),
+                        species: Species::Tyranitar,
+                        level: 50,
+                        hp: crate::information::unknowns::PokemonHP::Number(p1a.hp),
+                        status: None,
+                        tera_type: None,
+                    },
+                    crate::information::information::SwitchState {
+                        slot: super::p2(0),
+                        species: Species::Snorlax,
+                        level: 50,
+                        hp: crate::information::unknowns::PokemonHP::Percent(100),
+                        status: None,
+                        tera_type: None,
+                    },
+                ],
+            },
+            reactions: vec![],
+        }];
+
+        let result = apply_information(
+            UnknownMatchState::Battle(fog), &events, true, pd, md, &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+        let UnknownMatchState::Battle(b) = result else {
+            panic!("expected Battle state")
+        };
+        let p1_mon = &b.p1_active_mons[0];
+
+        assert_eq!(
+            p1_mon.possible_natures, Unknown::Known(Nature::Adamant),
+            "P1's own lead must keep its Known nature through the team-preview \
+             transition; got {:?}", p1_mon.possible_natures
+        );
+        assert_eq!(
+            p1_mon.minEvs, p1a.evs,
+            "P1's own lead must keep its exact EVs, not widen to [0,252]; got {:?}",
+            p1_mon.minEvs
+        );
+        assert_eq!(p1_mon.maxEvs, p1a.evs);
+        assert_eq!(
+            p1_mon.minStats[1], p1_mon.maxStats[1],
+            "P1's own lead's Atk must stay collapsed to a single exact value \
+             ([{}, {}]), not a range",
+            p1_mon.minStats[1], p1_mon.maxStats[1]
+        );
+    }
+
     // ── Scenario A: Voluntary switch — C1 tera-leak regression ───────────────
 
     /// P2 voluntarily switches from Snorlax → Garchomp.  Garchomp has tera_type=Fire
@@ -9861,7 +10060,7 @@ mod information_mode_tests {
             Species::Garchomp, Ability::RoughSkin, Item::ChoiceScarf, Nature::Jolly,
             [Some(PokemonMove::Earthquake), Some(PokemonMove::Outrage), None, None],
         );
-        let unk = UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, false);
+        let unk = UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, false, false);
 
         assert_eq!(unk.item, Unknown::Known(Item::ChoiceScarf));
         assert_eq!(unk.possible_abilities, Unknown::Known(Ability::RoughSkin));
@@ -9882,7 +10081,7 @@ mod information_mode_tests {
             [Some(PokemonMove::Earthquake), None, None, None],
         );
         let pre_reveal = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
-        let unk = UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, true);
+        let unk = UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, true, false);
 
         assert_eq!(unk.possible_natures, Unknown::Known(Nature::Jolly));
         // Jolly NERFS SpA (fixed 0.9 mod now that nature is known, not the independent
