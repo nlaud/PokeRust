@@ -64,6 +64,12 @@ pub struct InformationEvent {
 /// The identity and visible state of a Pokémon as it enters the field.
 /// Used for voluntary switches and — when nested under a causing event — forced switches
 /// (Roar, Whirlwind, Dragon Tail, Red Card, etc.).
+///
+/// `species`/`hp` are always the *true* values here: the raw resolution pass
+/// (`event_observer` present) no longer masks at emission time. `disguise_species` and
+/// `max_hp` carry what a non-owning observer would see instead; [`mask_events_for`]
+/// consumes them to build each player's masked stream and they go unused afterward
+/// (`disguise_species` becomes irrelevant, `hp` is already collapsed to `Number`/`Percent`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SwitchState {
     pub slot: FieldSlot,
@@ -73,6 +79,13 @@ pub struct SwitchState {
     pub status: Option<Status>,
     /// `None` if not yet Terastallized or if the Tera type is not yet known.
     pub tera_type: Option<PokemonType>,
+    /// The Illusion-disguised species a non-owning observer would see instead of
+    /// `species`, if any (`None` = no active disguise, i.e. `species` is shown to
+    /// everyone). Populated pre-mask; ignored after [`mask_events_for`] runs.
+    pub disguise_species: Option<Species>,
+    /// True max HP, needed by [`mask_events_for`] to compute a non-owning observer's
+    /// `Percent` display from `hp`'s raw `Number`. Ignored after masking.
+    pub max_hp: u16,
 }
 
 /// Reason a Pokémon could not act this turn.
@@ -193,24 +206,35 @@ pub enum EventKind {
     /// HP was lost. Covers move damage, recoil, Life Orb, crash, confusion self-hit,
     /// entry hazards, weather chip, status chip, binding/Salt Cure/Leech Seed residual,
     /// and Future Sight. Whether it is self-inflicted is determined by `target`.
+    ///
+    /// `new_hp` is the *raw* value pre-mask (always `PokemonHP::Number`, the true HP);
+    /// `max_hp` accompanies it so [`mask_events_for`] can derive `Percent` for a
+    /// non-owning observer. Both fields are only meaningful before masking runs.
     DamageDealt {
         target: FieldSlot,
         new_hp: PokemonHP,
+        max_hp: u16,
     },
 
     /// HP was restored. Covers healing moves, drain, Leftovers, berries, Aqua Ring,
     /// Ingrain, Wish, Regenerator, and any other recovery. Drain healing sits as a
     /// reaction of the enclosing `MoveUsed` with `target == user`.
+    ///
+    /// See [`DamageDealt`] for the `new_hp`/`max_hp` raw-vs-masked contract.
     Healed {
         target: FieldSlot,
         new_hp: PokemonHP,
+        max_hp: u16,
     },
 
     /// HP was set to an exact value by a move (Pain Split). Use [`DamageDealt`] /
     /// [`Healed`] for ordinary deltas; this is only for direct-set effects.
+    ///
+    /// See [`DamageDealt`] for the `new_hp`/`max_hp` raw-vs-masked contract.
     SetHp {
         target: FieldSlot,
         new_hp: PokemonHP,
+        max_hp: u16,
     },
 
     // ── Hit qualifiers (reactions of MoveUsed) ───────────────────────────────
@@ -397,4 +421,100 @@ pub enum EventKind {
         into_slot: FieldSlot,
         into_species: Species,
     },
+}
+
+// ── Masking: raw resolution → per-observer view ────────────────────────────────
+
+/// Downgrade a **raw** (unmasked) event tree — produced by a single turn resolution
+/// with event tracking on — into the stream a specific `observer` would actually see.
+///
+/// This is the sound alternative to resolving a turn twice with different observers:
+/// `sample_turn`/`simulate_turn` pick a weighted-*random* trajectory (damage rolls, crit,
+/// status durations, `sample_one_weighted`), so two independent resolutions would follow
+/// two different random universes and could not be soundly attributed to the same
+/// `next_state`. Instead the turn is resolved **once**, tracking exact HP/`max_hp` and
+/// true+disguise species everywhere; `mask_events_for` is then a **pure, deterministic**
+/// transform of that one trajectory, callable once per player to get both perspectives.
+///
+/// It only *rewrites* the handful of perspective-sensitive fields — `PokemonHP` on
+/// `DamageDealt`/`Healed`/`SetHp`/`SwitchState`, and `SwitchState.species` under Illusion —
+/// never drops a node: every other `EventKind` (statuses, boosts, items, abilities, field
+/// effects, `IllusionEnded`, `Transformed`, …) is public to both players in this engine's
+/// model and passes through unchanged. Reactions are recursed in place.
+///
+/// Feeding `mask_events_for(Player::P1, raw)` must reproduce exactly what
+/// `sample_turn(..., Some(Player::P1))` returned before this refactor — that parity is the
+/// regression anchor (see `mask_events_for_p1_parity` in the test suite). The P2 stream is
+/// simply the same transform with the observer flipped.
+pub fn mask_events_for(observer: Player, events: &[InformationEvent]) -> Vec<InformationEvent> {
+    events.iter().map(|ev| mask_event(observer, ev)).collect()
+}
+
+fn mask_event(observer: Player, ev: &InformationEvent) -> InformationEvent {
+    let kind = mask_event_kind(observer, &ev.kind);
+    let reactions = ev.reactions.iter().map(|r| mask_event(observer, r)).collect();
+    InformationEvent { kind, reactions }
+}
+
+/// `raw` is the true HP as `PokemonHP::Number` (pre-mask contract); `max_hp` is its
+/// companion. Returns the observer-appropriate `Number` (own slot) or `Percent` (foe slot).
+fn mask_hp(observer: Player, slot_player: Player, raw: &PokemonHP, max_hp: u16) -> PokemonHP {
+    let hp = match raw {
+        PokemonHP::Number(n) => *n,
+        // Already masked (shouldn't occur pre-mask, but stay sound if it ever does).
+        PokemonHP::Percent(p) => return PokemonHP::Percent(*p),
+    };
+    if slot_player == observer {
+        PokemonHP::Number(hp)
+    } else {
+        PokemonHP::Percent(crate::simulator::helpers::hp_to_percent(hp, max_hp))
+    }
+}
+
+fn mask_switch_state(observer: Player, raw: &SwitchState) -> SwitchState {
+    let species = if raw.slot.player == observer {
+        raw.species.clone()
+    } else {
+        raw.disguise_species.clone().unwrap_or_else(|| raw.species.clone())
+    };
+    let hp = mask_hp(observer, raw.slot.player, &raw.hp, raw.max_hp);
+    SwitchState {
+        slot: raw.slot,
+        species,
+        level: raw.level,
+        hp,
+        status: raw.status.clone(),
+        tera_type: raw.tera_type.clone(),
+        // Vestigial post-mask; nothing downstream reads these once `hp`/`species` are set.
+        disguise_species: None,
+        max_hp: raw.max_hp,
+    }
+}
+
+fn mask_event_kind(observer: Player, kind: &EventKind) -> EventKind {
+    match kind {
+        EventKind::DamageDealt { target, new_hp, max_hp } => EventKind::DamageDealt {
+            target: *target,
+            new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
+            max_hp: *max_hp,
+        },
+        EventKind::Healed { target, new_hp, max_hp } => EventKind::Healed {
+            target: *target,
+            new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
+            max_hp: *max_hp,
+        },
+        EventKind::SetHp { target, new_hp, max_hp } => EventKind::SetHp {
+            target: *target,
+            new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
+            max_hp: *max_hp,
+        },
+        EventKind::Switch(sw) => EventKind::Switch(mask_switch_state(observer, sw)),
+        EventKind::SimultaneousSwitch { switches } => EventKind::SimultaneousSwitch {
+            switches: switches.iter().map(|sw| mask_switch_state(observer, sw)).collect(),
+        },
+        // No perspective-sensitive payload — every other event category (major actions
+        // sans HP, hit qualifiers, status, boosts, field effects, items, abilities,
+        // IllusionEnded, Transformed) is public to both players in this engine's model.
+        other => other.clone(),
+    }
 }

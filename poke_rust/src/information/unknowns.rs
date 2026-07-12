@@ -411,43 +411,45 @@ impl UnknownTeamPreviewState {
     /// ground truth stay in lockstep.
     ///
     /// `active_indices` and `back_indices` together only cover `brought_per_side`
-    /// mons. In a bring-N-of-M format, any `p2_mons` entry whose index appears in
+    /// mons. In a bring-N-of-M format, any opponent-side entry whose index appears in
     /// neither list was shown at team preview but never brought into this battle —
-    /// those go to `p2_possible_back_mons` at the bare species-only baseline (no
-    /// moves/item/ability/nature reveal, regardless of information mode: a mon that's
-    /// not in this battle can never affect it, so there is nothing more to know).
-    /// The viewer's own side (`p1`) has no such gap — it's always fully known,
-    /// brought or not — so `p1_possible_back_mons` is always empty.
+    /// those go to that side's `possible_back_mons` at the bare species-only baseline
+    /// (no moves/item/ability/nature reveal, regardless of information mode: a mon
+    /// that's not in this battle can never affect it, so there is nothing more to
+    /// know). The viewer's own side has no such gap — it's always fully known,
+    /// brought or not — so its `possible_back_mons` is always empty.
+    ///
+    /// `self.p1_mons`/`self.p2_mons` are **physically bound**: `p1_mons` always holds
+    /// physical P1's team, `p2_mons` always holds physical P2's team, at whichever fog
+    /// level `viewer` implies (see `UnknownMatchState::team_preview_open_sheet_from_perspective`'s
+    /// tuple destructuring — the `my_team`/`opponent_team` fog levels land in the
+    /// PHYSICALLY correct bucket, not a "viewer's own" bucket). `viewer` here decides
+    /// which physical side gets the direct known-active treatment (its own picks,
+    /// `p{viewer}_active_indices`/`p{viewer}_back_indices`) and which gets the
+    /// whole-roster-to-`possible_back` treatment — the SAME split for whichever
+    /// belief this seeds, just applied to the opposite physical side when viewer=P2.
     pub fn into_battle_state(
         &self,
+        viewer: Player,
         p1_active_indices: &[usize],
         p1_back_indices: &[usize],
-        // No longer used to place P2's roster: the belief must not be built from
-        // P2's true active/back split (see the doc comment on `p2_possible_back_mons`
-        // below) — the whole roster goes to `possible_back` regardless, and the caller
-        // resolves activity via the event log instead. Kept in the signature so
-        // callers (session.rs) don't need to change and so a future bring-fewer-
-        // than-full-roster format still has a slot to plumb "never brought at all"
-        // through if that ever needs different treatment.
-        _p2_active_indices: &[usize],
-        _p2_back_indices: &[usize],
+        p2_active_indices: &[usize],
+        p2_back_indices: &[usize],
     ) -> UnknownBattleState {
         let pick = |mons: &[UnknownPokemonState], indices: &[usize]| -> Vec<UnknownPokemonState> {
             indices.iter().filter_map(|&i| mons.get(i).cloned()).collect()
         };
 
-        let p1_active_mons = pick(&self.p1_mons, p1_active_indices);
-        let p1_known_back_mons = pick(&self.p1_mons, p1_back_indices);
-        // The opponent's ENTIRE roster — including whatever P2 selected as active —
-        // starts in `possible_back`, and `p2_active_mons` starts empty. This is
-        // deliberate, not an oversight: unlike P1 (the observer's own side, always
-        // fully known), the observer never learns WHICH physical roster slot P2
-        // truly leads with — only what's DISPLAYED once it's sent out, which can be
-        // an Illusion disguise. Directly copying `self.p2_mons[p2_active_indices[i]]`
-        // (the old behavior) used the true physical index — ground truth the belief
-        // has no business knowing — so a leading, disguised Zoroark was built as
-        // `Known(Zoroark)` with its full real stats/moves/item from turn 0, and the
-        // "possibly in the back" entry for that same physical mon never got created.
+        // The non-viewer side's ENTIRE roster — including whatever it selected as
+        // active — starts in `possible_back`, and its `active_mons` starts empty.
+        // This is deliberate, not an oversight: unlike the viewer's own side (always
+        // fully known), the viewer never learns WHICH physical roster slot the
+        // opponent truly leads with — only what's DISPLAYED once it's sent out,
+        // which can be an Illusion disguise. Directly copying the true active index
+        // (the old behavior) used ground truth the belief has no business knowing —
+        // so a leading, disguised Zoroark was built as `Known(Zoroark)` with its full
+        // real stats/moves/item from turn 0, and the "possibly in the back" entry for
+        // that same physical mon never got created.
         //
         // Instead, the caller (`session.rs::resolve_turn`) is now expected to run
         // `apply_information` over the team-preview transition's own event log
@@ -469,11 +471,18 @@ impl UnknownTeamPreviewState {
         // being active and then withdrawn — exactly what `bench_outgoing_mon` does
         // mid-battle, and what `pass1_switch`'s known-then-possible fallback already
         // expects to pull a first-time switch-in from. Dumping any indices straight
-        // into `known_back` here bypasses that and makes an opponent bench mon
-        // "immediately show up" as already-revealed at turn 0.
-        let p2_active_mons: Vec<UnknownPokemonState> = Vec::new();
-        let p2_known_back_mons: Vec<UnknownPokemonState> = Vec::new();
-        let p2_possible_back_mons: Vec<UnknownPokemonState> = self.p2_mons.clone();
+        // into `known_back` here bypasses that and makes a bench mon "immediately
+        // show up" as already-revealed at turn 0.
+        let (p1_active_mons, p1_known_back_mons, p1_possible_back_mons) = if viewer == Player::P1 {
+            (pick(&self.p1_mons, p1_active_indices), pick(&self.p1_mons, p1_back_indices), Vec::new())
+        } else {
+            (Vec::new(), Vec::new(), self.p1_mons.clone())
+        };
+        let (p2_active_mons, p2_known_back_mons, p2_possible_back_mons) = if viewer == Player::P2 {
+            (pick(&self.p2_mons, p2_active_indices), pick(&self.p2_mons, p2_back_indices), Vec::new())
+        } else {
+            (Vec::new(), Vec::new(), self.p2_mons.clone())
+        };
 
         let total_roster = self.p1_mons.len().max(self.p2_mons.len()) as u8;
 
@@ -485,7 +494,7 @@ impl UnknownTeamPreviewState {
             p2_active_mons,
             p1_known_back_mons,
             p2_known_back_mons,
-            p1_possible_back_mons: Vec::new(),
+            p1_possible_back_mons,
             p2_possible_back_mons,
 
             turn_number: 0,

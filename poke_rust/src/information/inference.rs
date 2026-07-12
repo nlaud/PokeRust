@@ -587,7 +587,7 @@ fn process_team_preview_event(
         }
 
         // ── HP changes ───────────────────────────────────────────────────────
-        EventKind::DamageDealt { target, new_hp } => {
+        EventKind::DamageDealt { target, new_hp, .. } => {
             if let Some(mon) =
                 find_preview_mon(state, &target.player, target.slot_index, slot_map)
             {
@@ -595,7 +595,7 @@ fn process_team_preview_event(
             }
         }
 
-        EventKind::Healed { target, new_hp } => {
+        EventKind::Healed { target, new_hp, .. } => {
             if let Some(mon) =
                 find_preview_mon(state, &target.player, target.slot_index, slot_map)
             {
@@ -1208,7 +1208,7 @@ fn pass1_apply_event(
             }
         }
 
-        EventKind::DamageDealt { target, new_hp } => {
+        EventKind::DamageDealt { target, new_hp, .. } => {
             let old_hp = mon_idx_for_active_slot(state, target)
                 .and_then(|i| get_mon_by_idx(state, i))
                 .map(|m| m.hp.clone());
@@ -1278,10 +1278,10 @@ fn pass1_apply_event(
                 }
             }
         }
-        EventKind::Healed { target, new_hp } => {
+        EventKind::Healed { target, new_hp, .. } => {
             update_mon_hp(state, target, new_hp.clone());
         }
-        EventKind::SetHp { target, new_hp } => {
+        EventKind::SetHp { target, new_hp, .. } => {
             update_mon_hp(state, target, new_hp.clone());
         }
 
@@ -5290,14 +5290,14 @@ fn pass3_damage_to_stats(
 
         for reaction in &event.reactions {
             let new_hp = match &reaction.kind {
-                EventKind::Healed { target, new_hp } | EventKind::SetHp { target, new_hp }
+                EventKind::Healed { target, new_hp, .. } | EventKind::SetHp { target, new_hp, .. }
                     if target == target_slot =>
                 {
                     // Baseline moves without being a damaging hit.
                     current_hp = new_hp.clone();
                     continue;
                 }
-                EventKind::DamageDealt { target, new_hp } if target == target_slot => new_hp,
+                EventKind::DamageDealt { target, new_hp, .. } if target == target_slot => new_hp,
                 _ => continue,
             };
             // S39: `Crit{target}` is emitted as a REACTION (child) of its `DamageDealt`

@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import Fade from '../components/common/Fade'
 import { storedBattleId, useBattle } from '../store/battleStore'
 import SetupPanel from './simulate/SetupPanel'
 import BattleScreen from './simulate/BattleScreen'
@@ -14,6 +15,10 @@ export default function SimulatePage() {
     }
   }, [battleId, restore])
 
-  if (!battleId || !view) return <SetupPanel />
-  return <BattleScreen />
+  const inBattle = !!battleId && !!view
+  return (
+    <Fade fadeKey={inBattle ? 'battle' : 'setup'} className="h-full">
+      {inBattle ? <BattleScreen /> : <SetupPanel />}
+    </Fade>
+  )
 }

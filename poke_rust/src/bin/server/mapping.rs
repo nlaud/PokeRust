@@ -305,7 +305,16 @@ fn belief_battle_state(belief: Option<&UnknownMatchState>) -> Option<&UnknownBat
     }
 }
 
-fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchState>) -> SideView {
+/// `belief` is always the fog state *for `perspective`* — but its `p1_*`/`p2_*`
+/// fields are **physically bound** to true Player::P1/P2 identity, exactly like
+/// ground truth (`UnknownMatchState::team_preview_open_sheet_from_perspective`'s
+/// `my_team`/`opponent_team` fog levels land in the physically correct bucket, not
+/// a "viewer's own" bucket — see `into_battle_state`'s doc comment). So masking a
+/// physical `player`'s side reads that SAME `player`'s belief fields
+/// (`belief.p1_*` for `player == P1`, `belief.p2_*` for `player == P2`) — the same
+/// `player`-keyed match already used to read ground truth above — whenever
+/// `player != perspective`.
+fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchState>, perspective: Player) -> SideView {
     let (active, back, can_tera, can_mega, conditions, condition_turns, slot_conditions) =
         match player {
             Player::P1 => (
@@ -328,22 +337,29 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
             ),
         };
 
-    // Only P2 (the opponent) is ever masked — P1 is the viewer's own team, always
-    // fully known. `active` is zipped by index with the belief's active mons (both
-    // stay in lockstep, actives-first, throughout the battle); known/possible back
-    // mons are rendered straight from the belief alone (see
+    // Only the non-viewer side is ever masked — the belief's own viewer sees their
+    // team fully known. `active` is zipped by index with the belief's active mons
+    // (both stay in lockstep, actives-first, throughout the battle); known/possible
+    // back mons are rendered straight from the belief alone (see
     // `bench_pokemon_view_from_belief`'s doc comment for why no concrete pairing is
     // attempted there).
-    let fog = if player == Player::P2 { belief_battle_state(belief) } else { None };
+    let fog = if player != perspective { belief_battle_state(belief) } else { None };
 
     let (active_views, back_views, possible_back_views) = match fog {
         Some(fog) => {
+            // Belief fields are physically bound — read the SAME `player` this
+            // function is rendering, not a constant `p2_*` (see this function's doc
+            // comment).
+            let (fog_active, fog_known_back, fog_possible_back) = match player {
+                Player::P1 => (&fog.p1_active_mons, &fog.p1_known_back_mons, &fog.p1_possible_back_mons),
+                Player::P2 => (&fog.p2_active_mons, &fog.p2_known_back_mons, &fog.p2_possible_back_mons),
+            };
             let active_views: Vec<PokemonView> = active
                 .iter()
                 .enumerate()
                 .map(|(i, mon)| {
                     let base = pokemon_view(mon);
-                    match fog.p2_active_mons.get(i) {
+                    match fog_active.get(i) {
                         Some(unk) => mask_pokemon_view(base, unk),
                         None => base,
                     }
@@ -354,14 +370,12 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
             // section's fallback base well above that (and apart from each other)
             // guarantees no two bench rows ever collide on `mon_id` — see
             // `bench_pokemon_view_from_belief`'s doc comment.
-            let back_views: Vec<PokemonView> = fog
-                .p2_known_back_mons
+            let back_views: Vec<PokemonView> = fog_known_back
                 .iter()
                 .enumerate()
                 .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 100 + i as u8))
                 .collect();
-            let possible_back_views: Vec<PokemonView> = fog
-                .p2_possible_back_mons
+            let possible_back_views: Vec<PokemonView> = fog_possible_back
                 .iter()
                 .enumerate()
                 .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 150 + i as u8))
@@ -430,40 +444,52 @@ pub fn phase_of(state: &MatchState) -> PhaseDto {
     }
 }
 
-fn preview_view(preview: &TeamPreviewState, belief: Option<&UnknownMatchState>) -> PreviewView {
-    // Mirrors `side_view`: only P2 is ever masked, zipped by index with the
-    // belief's team-preview mon list (both built from the same species list in the
-    // same order — see `team_preview_open_sheet_from_perspective`).
-    let fog_p2_mons: Option<&[UnknownPokemonState]> = match belief {
-        Some(UnknownMatchState::TeamPreview(fog)) => Some(&fog.p2_mons),
-        _ => None,
+fn preview_view(preview: &TeamPreviewState, belief: Option<&UnknownMatchState>, perspective: Player) -> PreviewView {
+    // Mirrors `side_view`: only the non-viewer physical side is ever masked, zipped
+    // by index with the belief's team-preview mon list (both built from the same
+    // species list in the same order — see `team_preview_open_sheet_from_perspective`).
+    // The belief's `p1_mons`/`p2_mons` are physically bound (see `side_view`'s doc
+    // comment) — mask physical p1 against `belief.p1_mons`, physical p2 against
+    // `belief.p2_mons`, never a constant side.
+    let (fog_p1_mons, fog_p2_mons): (Option<&[UnknownPokemonState]>, Option<&[UnknownPokemonState]>) =
+        match belief {
+            Some(UnknownMatchState::TeamPreview(fog)) => (Some(&fog.p1_mons), Some(&fog.p2_mons)),
+            _ => (None, None),
+        };
+    let mask_side = |mons: &[PokemonState], is_own_side: bool, fog_mons: Option<&[UnknownPokemonState]>| -> Vec<PokemonView> {
+        mons.iter()
+            .enumerate()
+            .map(|(i, mon)| {
+                let base = pokemon_view(mon);
+                if is_own_side {
+                    return base;
+                }
+                match fog_mons.and_then(|f| f.get(i)) {
+                    Some(unk) => mask_pokemon_view(base, unk),
+                    None => base,
+                }
+            })
+            .collect()
     };
-    let p2_mons: Vec<PokemonView> = preview
-        .p2_mons
-        .iter()
-        .enumerate()
-        .map(|(i, mon)| {
-            let base = pokemon_view(mon);
-            match fog_p2_mons.and_then(|mons| mons.get(i)) {
-                Some(unk) => mask_pokemon_view(base, unk),
-                None => base,
-            }
-        })
-        .collect();
 
     PreviewView {
         active_per_side: preview.active_per_side,
         brought_per_side: preview.brought_per_side,
-        p1_mons: preview.p1_mons.iter().map(pokemon_view).collect(),
-        p2_mons,
+        p1_mons: mask_side(&preview.p1_mons, perspective == Player::P1, fog_p1_mons),
+        p2_mons: mask_side(&preview.p2_mons, perspective == Player::P2, fog_p2_mons),
     }
 }
 
+/// Build a `BattleView` from `perspective`'s point of view: `belief` must be the fog
+/// state tracked *for that perspective* (session.rs holds one belief per physical
+/// player — pass the matching one). `state`/`active_per_side`/`brought_per_side` are
+/// ground truth and don't depend on perspective; only masking does.
 pub fn battle_view(
     state: &MatchState,
     active_per_side: u8,
     brought_per_side: u8,
     belief: Option<&UnknownMatchState>,
+    perspective: Player,
 ) -> BattleView {
     let phase = phase_of(state);
     let mut view = BattleView {
@@ -482,12 +508,12 @@ pub fn battle_view(
 
     match state {
         MatchState::TeamPreviewState(preview) => {
-            view.preview = Some(preview_view(preview, belief));
+            view.preview = Some(preview_view(preview, belief, perspective));
         }
         MatchState::BattleState(battle) => {
             view.turn_number = battle.turn_number;
-            view.p1 = Some(side_view(battle, Player::P1, belief));
-            view.p2 = Some(side_view(battle, Player::P2, belief));
+            view.p1 = Some(side_view(battle, Player::P1, belief, perspective));
+            view.p2 = Some(side_view(battle, Player::P2, belief, perspective));
             view.field = Some(field_view(battle));
             view.self_switch = battle
                 .self_switch_pending
@@ -501,8 +527,8 @@ pub fn battle_view(
             // Show the field as it stood when the battle ended (fainted mon,
             // final HP) behind the winner overlay.
             view.turn_number = final_state.turn_number;
-            view.p1 = Some(side_view(final_state, Player::P1, belief));
-            view.p2 = Some(side_view(final_state, Player::P2, belief));
+            view.p1 = Some(side_view(final_state, Player::P1, belief, perspective));
+            view.p2 = Some(side_view(final_state, Player::P2, belief, perspective));
             view.field = Some(field_view(final_state));
         }
     }
@@ -668,15 +694,15 @@ fn event_kind_dto(kind: &EventKind) -> EventKindDto {
             slot: field_slot_dto(*slot),
             r#move: move_used.to_string(),
         },
-        EventKind::DamageDealt { target, new_hp } => EventKindDto::DamageDealt {
+        EventKind::DamageDealt { target, new_hp, .. } => EventKindDto::DamageDealt {
             target: field_slot_dto(*target),
             new_hp: observed_hp_dto(new_hp),
         },
-        EventKind::Healed { target, new_hp } => EventKindDto::Healed {
+        EventKind::Healed { target, new_hp, .. } => EventKindDto::Healed {
             target: field_slot_dto(*target),
             new_hp: observed_hp_dto(new_hp),
         },
-        EventKind::SetHp { target, new_hp } => EventKindDto::SetHp {
+        EventKind::SetHp { target, new_hp, .. } => EventKindDto::SetHp {
             target: field_slot_dto(*target),
             new_hp: observed_hp_dto(new_hp),
         },
@@ -821,5 +847,139 @@ fn event_kind_dto(kind: &EventKind) -> EventKindDto {
             into_slot: field_slot_dto(*into_slot),
             into_species: into_species.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use poke_rust::information::unknowns::InformationMode;
+    use poke_rust::simulator;
+    use poke_rust::state::battle::MatchState;
+    use poke_rust::state::dex_data::{parse_move_dex, parse_pokemon_dex};
+
+    // Distinct, easily-identifiable moves/items/abilities per side so a mixup
+    // between the two teams is unmistakable in assertions.
+    const TEAM_P1: &str = "Aerodactyl @ Aerodactylite\nAbility: Unnerve\nLevel: 50\nEVs: 12 HP / 12 Atk / 9 Def / 1 SpD / 32 Spe\nJolly Nature\n- Rock Slide\n- Dual Wingbeat\n- Tailwind\n- Protect\n";
+    const TEAM_P2: &str = "Dragonite @ Choice Band\nAbility: Multiscale\nLevel: 50\nEVs: 4 HP / 252 Atk / 252 Spe\nAdamant Nature\n- Extreme Speed\n- Outrage\n- Earthquake\n- Fire Punch\n";
+
+    /// Regression for the P2-perspective display bugs: under P2's belief, physical
+    /// P1's team-preview entry must carry P1's OWN open-sheet data (species, item,
+    /// ability, moves) — not P2's, and not blank/hidden-style. Exercises the exact
+    /// scenario the live diagnostic caught: `preview_view` mixing up which physical
+    /// side's fog list masks which physical side's ground truth.
+    #[test]
+    fn preview_view_p2_perspective_shows_p1s_own_open_sheet_data_not_p2s() {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+        );
+
+        let belief_p2 = poke_rust::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P2,
+            &preview.p2_mons,
+            &preview.p1_mons,
+            &pokemon_dex,
+            1,
+            1,
+            50,
+            InformationMode::OpenTeamSheet,
+            true,
+        );
+
+        let view = preview_view(&preview, Some(&belief_p2), Player::P2);
+
+        assert_eq!(view.p1_mons.len(), 1);
+        let p1_mon = &view.p1_mons[0];
+        assert_eq!(p1_mon.species, "Aerodactyl", "P1 tab must show P1's species");
+        assert_eq!(
+            p1_mon.item.as_deref(),
+            Some("Aerodactylite"),
+            "openSheet mode reveals items immediately — P1's item must show, not P2's ('Choice Band') or blank"
+        );
+        assert_eq!(
+            p1_mon.ability, "Unnerve",
+            "P1's ability must show (Unnerve), not P2's (Multiscale)"
+        );
+        let move_names: Vec<&str> = p1_mon.moves.iter().flatten().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            move_names,
+            vec!["Rock Slide", "Dual Wingbeat", "Tailwind", "Protect"],
+            "openSheet mode reveals all 4 moves immediately — must be P1's own moves, not P2's or blank '???'s"
+        );
+
+        // Sanity: physical P2's own tab (the belief's own viewer) must be fully known
+        // ground truth, unmasked.
+        let p2_mon = &view.p2_mons[0];
+        assert_eq!(p2_mon.species, "Dragonite");
+        assert_eq!(p2_mon.item.as_deref(), Some("Choice Band"));
+        assert_eq!(p2_mon.ability, "Multiscale");
+    }
+
+    /// Companion check at battle phase (not just team preview): P2's belief must
+    /// correctly report physical P1's OTHER (non-active) mon under `possibleBack`,
+    /// not P2's own roster — the second bug the live diagnostic caught.
+    #[test]
+    fn side_view_p2_perspective_possible_back_shows_p1s_roster_not_p2s() {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        let team_p1_two = format!("{TEAM_P1}\nCharizard @ Charizardite Y\nAbility: Blaze\nLevel: 50\nEVs: 32 HP / 10 Def / 11 SpA / 13 Spe\nModest Nature\n- Heat Wave\n- Weather Ball\n- Solar Beam\n- Protect\n");
+        let team_p2_two = format!("{TEAM_P2}\nTyranitar @ Sitrus Berry\nAbility: Sand Stream\nLevel: 50\nEVs: 252 HP / 4 Atk / 252 SpD\nCareful Nature\n- Rock Slide\n- Crunch\n- Earthquake\n- Protect\n");
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            &team_p1_two, &team_p2_two, &pokemon_dex, &move_dex, 1, 2, true,
+        );
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand { active_indices: vec![0], back_indices: vec![1] };
+        let p2_tp = p1_tp.clone();
+        let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
+        let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
+
+        let UnknownMatchState::TeamPreview(tp_belief_p2) =
+            poke_rust::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+                Player::P2, &preview.p2_mons, &preview.p1_mons, &pokemon_dex, 1, 2, 50,
+                InformationMode::OpenTeamSheet, true,
+            )
+        else {
+            panic!("expected TeamPreview");
+        };
+        let battle_belief_p2 = UnknownMatchState::Battle(tp_belief_p2.into_battle_state(
+            Player::P2,
+            &p1_tp.active_indices, &p1_tp.back_indices,
+            &p2_tp.active_indices, &p2_tp.back_indices,
+        ));
+
+        // Resolve the team-preview -> battle transition through the same public
+        // entry point session.rs uses, requesting events masked for P2 — mirrors
+        // `advance_belief`'s real pipeline (seed via `into_battle_state`, then let
+        // `apply_information` walk the transition's own switch-in event log to pull
+        // each side's lead out of `possible_back` into `active`).
+        let (next_state, events, _prob) = simulator::sample_turn(
+            &MatchState::TeamPreviewState(preview),
+            &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1, Some(Player::P2),
+        );
+        let MatchState::BattleState(battle_state) = next_state else {
+            panic!("expected BattleState")
+        };
+        let events = events.expect("observer set — events must be Some");
+        let inference_config = poke_rust::information::inference::InferenceConfig {
+            use_stat_points: true,
+            force_max_ivs: true,
+            ..Default::default()
+        };
+        let battle_belief_p2 = poke_rust::information::inference::apply_information(
+            battle_belief_p2, &events, false, &pokemon_dex, &move_dex,
+            &std::collections::HashMap::new(), &inference_config,
+        );
+
+        let view = side_view(&battle_state, Player::P1, Some(&battle_belief_p2), Player::P2);
+        let possible_back_species: Vec<&str> = view.possible_back.iter().map(|m| m.species.as_str()).collect();
+        assert_eq!(
+            possible_back_species,
+            vec!["Charizard"],
+            "P1's possibleBack under P2's perspective must list P1's own bench (Charizard), not P2's roster"
+        );
     }
 }

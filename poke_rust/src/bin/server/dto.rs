@@ -494,14 +494,24 @@ fn default_info_mode() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct CreateBattleResponse {
     pub battle_id: String,
+    /// P1's fog-of-war view of the battle.
     pub state: BattleView,
+    /// P2's fog-of-war view of the same battle — mirrors `state` with the masked
+    /// side flipped. The frontend selects between the two based on whose perspective
+    /// is currently being shown (see `battleStore.ts`'s `currentPlayer`).
+    pub state_p2: BattleView,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetBattleResponse {
     pub state: BattleView,
+    pub state_p2: BattleView,
+    /// P1's turn log — every turn's events masked for P1's perspective.
     pub log: Vec<TurnLogEntry>,
+    /// P2's turn log — the same turns, masked for P2's perspective instead. Under
+    /// Perfect Information this is identical to `log` (no fog to differ on).
+    pub log_p2: Vec<TurnLogEntry>,
 }
 
 #[derive(Deserialize)]
@@ -515,7 +525,11 @@ pub struct TurnRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TurnResponse {
     pub state: BattleView,
+    pub state_p2: BattleView,
+    /// This turn's events masked for P1's perspective.
     pub events: Vec<EventNode>,
+    /// This turn's events masked for P2's perspective instead.
+    pub events_p2: Vec<EventNode>,
     pub probability: f64,
 }
 

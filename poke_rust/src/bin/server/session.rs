@@ -9,6 +9,7 @@ use poke_rust::data::ability::Ability;
 use poke_rust::data::pokemon_move::PokemonMove;
 use poke_rust::data::species::Species;
 use poke_rust::information::inference::{apply_information, InferenceConfig};
+use poke_rust::information::information::{mask_events_for, InformationEvent};
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::simulator;
 use poke_rust::state::battle::{
@@ -48,25 +49,48 @@ pub struct SessionConfig {
 pub struct BattleSession {
     pub state: MatchState,
     pub config: SessionConfig,
-    pub log: Vec<TurnLogEntry>,
-    /// The observer's (P1's) evolving fog-of-war belief about the opponent's team,
-    /// under `config.information_mode`. `None` for `InformationMode::PerfectInformation`
-    /// — a true zero-overhead no-op that keeps ground-truth behavior byte-identical;
-    /// `Some` for the other modes, advanced each turn in `resolve_turn` via
-    /// `into_battle_state` (team preview → battle) or `apply_information` (every
-    /// turn after).
-    pub belief: Option<UnknownMatchState>,
-    /// Built once at session creation; `Some` exactly when `belief` is `Some`.
+    /// P1's turn log — every turn's events masked for P1's perspective.
+    pub log_p1: Vec<TurnLogEntry>,
+    /// P2's turn log — the SAME turns, masked for P2's perspective instead. Under
+    /// Perfect Information the two masked streams are identical (no fog to differ
+    /// on); under any other mode they diverge exactly like `belief_p1`/`belief_p2`.
+    pub log_p2: Vec<TurnLogEntry>,
+    /// P1's evolving fog-of-war belief about P2's team, under `config.information_mode`.
+    /// `None` for `InformationMode::PerfectInformation` — a true zero-overhead no-op
+    /// that keeps ground-truth behavior byte-identical; `Some` for the other modes,
+    /// advanced each turn in `resolve_turn` via `into_battle_state` (team preview →
+    /// battle) or `apply_information` (every turn after).
+    ///
+    /// Both beliefs are tracked against the SAME resolved turn (see `resolve_turn`'s
+    /// doc comment) — never by resolving the turn twice, which would draw independent
+    /// randomness and could desync the two beliefs from each other and from `state`.
+    /// `belief_p2` is P2's mirror-image belief about P1's team, seeded and advanced
+    /// through the exact same `into_battle_state`/`apply_information` machinery as
+    /// `belief_p1` — see `into_battle_state`'s doc comment: the belief's `p1_*`/`p2_*`
+    /// fields are physically bound to true Player::P1/P2 identity, so no event
+    /// relabeling is needed between the two beliefs, only different masking
+    /// (`mask_events_for(Player::P1, ..)` vs `mask_events_for(Player::P2, ..)`).
+    pub belief_p1: Option<UnknownMatchState>,
+    pub belief_p2: Option<UnknownMatchState>,
+    /// Built once at session creation; `Some` exactly when the beliefs are `Some`.
+    /// Shared by both beliefs — nothing in `InferenceConfig` is perspective-specific.
     pub inference_config: Option<InferenceConfig>,
 }
 
 impl BattleSession {
-    pub fn view(&self) -> BattleView {
+    /// Build the `BattleView` for `perspective` — P1's or P2's fog-of-war view of the
+    /// same ground-truth state, per the belief tracked for that player.
+    pub fn view(&self, perspective: Player) -> BattleView {
+        let belief = match perspective {
+            Player::P1 => self.belief_p1.as_ref(),
+            Player::P2 => self.belief_p2.as_ref(),
+        };
         mapping::battle_view(
             &self.state,
             self.config.active_per_side,
             self.config.brought_per_side,
-            self.belief.as_ref(),
+            belief,
+            perspective,
         )
     }
 }
@@ -281,23 +305,103 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Advance one belief (P1's or P2's — whichever `viewer` names) through the
+/// transition from the pre-turn state, using both players' true team-preview picks
+/// (if this turn was the team-preview transition — `into_battle_state` uses `viewer`
+/// to decide which physical side gets the known-active treatment) and `events` —
+/// already masked *for `viewer`*, carrying TRUE physical `FieldSlot`s throughout
+/// (the belief's `p1_*`/`p2_*` fields are physically bound to real Player::P1/P2
+/// identity — see `into_battle_state`'s doc comment — so `apply_information`'s
+/// absolute slot-indexing already lines up correctly with no relabeling needed).
+/// Returns `Ok(None)` unchanged when no belief is tracked (Perfect Information).
+fn advance_belief(
+    belief: Option<UnknownMatchState>,
+    was_team_preview: bool,
+    viewer: Player,
+    p1_cmd: &PlayerCommand,
+    p2_cmd: &PlayerCommand,
+    events: &[InformationEvent],
+    dexes: &Dexes,
+    inference_config: Option<&InferenceConfig>,
+) -> Result<Option<UnknownMatchState>, String> {
+    let Some(belief) = belief else {
+        return Ok(None);
+    };
+
+    // Team-preview -> battle needs two steps, not one: `into_battle_state`
+    // structurally seeds the belief (the viewer fully known as usual; the opponent's
+    // entire roster parked in `possible_back`, nothing placed active yet — see its
+    // doc comment), and THEN `apply_information` walks this transition's own event
+    // log (the `SimultaneousSwitch` for both sides' leads, plus entry
+    // abilities/hazards/weather) through the exact same Pass 1 switch-in handling
+    // every mid-battle switch already gets — including Illusion widening. Skipping
+    // the second step (the old behavior) left the opponent's belief built from the
+    // true physical active index instead of what's actually displayed, which is
+    // wrong the moment a lead is a disguised Zoroark. `belief` is used as the seed
+    // only when `was_team_preview`; `reconstruct_player_command` already guarantees
+    // both commands are `PlayerCommand::TeamPreview` whenever the incoming state was
+    // `TeamPreviewState`.
+    let seeded = if was_team_preview {
+        match (&belief, p1_cmd, p2_cmd) {
+            (
+                UnknownMatchState::TeamPreview(preview),
+                PlayerCommand::TeamPreview(p1_tp),
+                PlayerCommand::TeamPreview(p2_tp),
+            ) => UnknownMatchState::Battle(preview.into_battle_state(
+                viewer,
+                &p1_tp.active_indices,
+                &p1_tp.back_indices,
+                &p2_tp.active_indices,
+                &p2_tp.back_indices,
+            )),
+            _ => belief,
+        }
+    } else {
+        belief
+    };
+    let config = inference_config.expect("belief is only Some alongside a built inference_config");
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        apply_information(
+            seeded,
+            events,
+            false,
+            &dexes.pokemon_dex,
+            &dexes.move_dex,
+            &dexes.ability_dex,
+            config,
+        )
+    }));
+    match caught {
+        Ok(next) => Ok(Some(next)),
+        // Tag which belief (P1's or P2's) panicked — without this the error message
+        // alone doesn't say whether the contradiction came from the P1 or P2 fog
+        // state, which matters for triage since they're seeded/advanced separately.
+        Err(payload) => Err(format!("[{:?} belief] {}", viewer, panic_message(payload))),
+    }
+}
+
 /// Advance one turn, or fail without mutating `session` at all.
 ///
 /// The fog-of-war inference engine (`apply_information`) can still panic on an
 /// unresolved contradiction (see `information/AUDIT.md`) — a single malformed
 /// belief update must not take the whole gateway down with it. Everything below is
-/// computed into locals first; `session.state`/`session.belief`/`session.log` are
-/// only written at the very end, once we know the belief update actually
+/// computed into locals first; `session.state`/`session.belief_p1`/`belief_p2`/`log`
+/// are only written at the very end, once we know BOTH belief updates actually
 /// succeeded. On failure the session is left exactly as it was before this call —
 /// "most recent good information stays the source of truth" — and the caller
 /// reports the error instead of silently desyncing belief from ground truth by one
 /// turn (which would corrupt every future switch-in / masking decision).
+///
+/// The turn is resolved **once** (`sample_turn_raw`) — not once per belief. Sample
+/// resolution picks a weighted-*random* trajectory, so resolving twice would let the
+/// two beliefs (and `next_state`) drift out of sync with each other. Instead the one
+/// raw trajectory is masked twice — see `mask_events_for`'s doc comment.
 pub fn resolve_turn(
     session: &mut BattleSession,
     dexes: &Dexes,
     p1_cmd: &PlayerCommand,
     p2_cmd: &PlayerCommand,
-) -> Result<(Vec<EventNode>, f64), String> {
+) -> Result<(Vec<EventNode>, Vec<EventNode>, f64), String> {
     let label = match &session.state {
         MatchState::TeamPreviewState(_) => "Team Preview".to_string(),
         MatchState::BattleState(state) => format!("Turn {}", state.turn_number),
@@ -305,7 +409,7 @@ pub fn resolve_turn(
     };
     let was_team_preview = matches!(session.state, MatchState::TeamPreviewState(_));
 
-    let (next_state, events, probability) = simulator::sample_turn(
+    let (next_state, raw_events, probability) = simulator::sample_turn_raw(
         &session.state,
         p1_cmd,
         p2_cmd,
@@ -313,78 +417,53 @@ pub fn resolve_turn(
         &dexes.pokemon_dex,
         session.config.consider_crit,
         session.config.damage_rolls,
-        Some(Player::P1),
+        Some(Player::P1), // tracking-on sentinel — no longer biases what's captured
     );
+    let raw_events = raw_events.unwrap_or_default();
 
-    let events = events.unwrap_or_default();
-    let event_nodes: Vec<EventNode> = events.iter().map(mapping::event_node).collect();
+    // P1's masked stream drives P1's turn log and belief; P2's is P2's own masked
+    // stream, driving its own log and belief. Both carry true physical FieldSlots
+    // throughout — no relabeling needed, since the belief's own fields are
+    // physically bound (see `advance_belief`'s doc comment). `event_node`/
+    // `event_kind_dto` are pure structural transforms with no perspective logic of
+    // their own — they just render whichever already-masked stream they're given.
+    let events_p1 = mask_events_for(Player::P1, &raw_events);
+    let events_p2 = mask_events_for(Player::P2, &raw_events);
+    let event_nodes_p1: Vec<EventNode> = events_p1.iter().map(mapping::event_node).collect();
+    let event_nodes_p2: Vec<EventNode> = events_p2.iter().map(mapping::event_node).collect();
 
-    // Advance the fog-of-war belief in lockstep with the ground-truth transition
-    // above, when a non-Perfect-Information mode is tracking one. Cloned rather than
-    // `.take()`n so `session.belief` is untouched if this whole function bails out
-    // early below.
-    let next_belief: Option<UnknownMatchState> = match session.belief.clone() {
-        None => None,
-        Some(belief) => {
-            // Team-preview -> battle needs two steps, not one: `into_battle_state`
-            // structurally seeds the belief (P1 fully known as usual; P2's entire
-            // roster parked in `possible_back`, nothing placed active yet — see its
-            // doc comment), and THEN `apply_information` walks this transition's own
-            // event log (the `SimultaneousSwitch` for both sides' leads, plus entry
-            // abilities/hazards/weather) through the exact same Pass 1 switch-in
-            // handling every mid-battle switch already gets — including Illusion
-            // widening. Skipping the second step (the old behavior) left P2's belief
-            // built from the true physical active index instead of what's actually
-            // displayed, which is wrong the moment a lead is a disguised Zoroark.
-            // Both steps use `belief` as the seed only when `was_team_preview`;
-            // `reconstruct_player_command` already guarantees both commands are
-            // `PlayerCommand::TeamPreview` whenever the incoming state was
-            // `TeamPreviewState`.
-            let seeded = if was_team_preview {
-                match (&belief, p1_cmd, p2_cmd) {
-                    (
-                        UnknownMatchState::TeamPreview(preview),
-                        PlayerCommand::TeamPreview(p1_tp),
-                        PlayerCommand::TeamPreview(p2_tp),
-                    ) => UnknownMatchState::Battle(preview.into_battle_state(
-                        &p1_tp.active_indices,
-                        &p1_tp.back_indices,
-                        &p2_tp.active_indices,
-                        &p2_tp.back_indices,
-                    )),
-                    _ => belief,
-                }
-            } else {
-                belief
-            };
-            let config = session
-                .inference_config
-                .as_ref()
-                .expect("belief is only Some alongside a built inference_config");
-            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                apply_information(
-                    seeded,
-                    &events,
-                    false,
-                    &dexes.pokemon_dex,
-                    &dexes.move_dex,
-                    &dexes.ability_dex,
-                    config,
-                )
-            }));
-            match caught {
-                Ok(next) => Some(next),
-                Err(payload) => return Err(panic_message(payload)),
-            }
-        }
-    };
+    let next_belief_p1 = advance_belief(
+        session.belief_p1.clone(),
+        was_team_preview,
+        Player::P1,
+        p1_cmd,
+        p2_cmd,
+        &events_p1,
+        dexes,
+        session.inference_config.as_ref(),
+    )?;
+    let next_belief_p2 = advance_belief(
+        session.belief_p2.clone(),
+        was_team_preview,
+        Player::P2,
+        p1_cmd,
+        p2_cmd,
+        &events_p2,
+        dexes,
+        session.inference_config.as_ref(),
+    )?;
 
     session.state = next_state;
-    session.belief = next_belief;
-    session.log.push(TurnLogEntry {
+    session.belief_p1 = next_belief_p1;
+    session.belief_p2 = next_belief_p2;
+    session.log_p1.push(TurnLogEntry {
+        label: label.clone(),
+        events: event_nodes_p1.clone(),
+    });
+    session.log_p2.push(TurnLogEntry {
         label,
-        events: event_nodes.clone(),
+        events: event_nodes_p2.clone(),
     });
 
-    Ok((event_nodes, probability))
+    Ok((event_nodes_p1, event_nodes_p2, probability))
 }

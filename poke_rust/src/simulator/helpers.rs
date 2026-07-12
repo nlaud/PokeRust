@@ -61,14 +61,9 @@ pub fn with_reactions<R>(
 /// borrow prevented inline emission.  Each tuple is `(slot, post-heal hp, max hp)`.
 /// No-ops when `event_observer` is `None`.
 pub fn emit_healed_batch(bs: &mut BattleState, batch: &[(FieldSlot, u16, u16)]) {
-    if let Some(observer) = bs.event_observer {
+    if bs.event_observer.is_some() {
         for &(slot, hp, max_hp) in batch {
-            let new_hp = if slot.player == observer {
-                PokemonHP::Number(hp)
-            } else {
-                PokemonHP::Percent(hp_to_percent(hp, max_hp))
-            };
-            emit(bs, EventKind::Healed { target: slot, new_hp });
+            emit(bs, EventKind::Healed { target: slot, new_hp: PokemonHP::Number(hp), max_hp });
         }
     }
 }
@@ -109,18 +104,18 @@ pub(crate) fn emit_eot_hp_deltas(state: &mut BattleState, before: &[(FieldSlot, 
             if fainted {
                 handle_pokemon_faint(state, slot.player, slot.slot_index);
             }
-            if let Some(observer) = state.event_observer {
+            if state.event_observer.is_some() {
                 let shown = if fainted { 0 } else { after };
-                let new_hp = observed_hp_value(observer, slot.player, shown, max_hp);
-                emit(state, EventKind::DamageDealt { target: slot, new_hp });
+                let new_hp = PokemonHP::Number(shown);
+                emit(state, EventKind::DamageDealt { target: slot, new_hp, max_hp });
                 if fainted {
                     emit(state, EventKind::Faint { slot });
                 }
             }
-        } else if let Some(observer) = state.event_observer {
+        } else if state.event_observer.is_some() {
             // Net heal (residual chip overtaken by a berry heal).
-            let new_hp = observed_hp_value(observer, slot.player, after, max_hp);
-            emit(state, EventKind::Healed { target: slot, new_hp });
+            let new_hp = PokemonHP::Number(after);
+            emit(state, EventKind::Healed { target: slot, new_hp, max_hp });
         }
     }
 }
@@ -138,35 +133,36 @@ pub fn hp_to_percent(hp: u16, max_hp: u16) -> u8 {
     p.clamp(1, 99) as u8
 }
 
-/// Return `PokemonHP` from the observer's perspective for the given slot:
-/// - `Number(exact)` for the observer's own Pokémon
-/// - `Percent(display)` for the opponent's Pokémon
-pub fn observed_hp(bs: &BattleState, slot: FieldSlot, observer: Player) -> PokemonHP {
+/// Raw (pre-mask) `PokemonHP` for the given slot: always the true, exact value.
+///
+/// Perspective-based masking (`Number` for the observer's own Pokémon, `Percent` for
+/// the foe's) no longer happens at emission time — it happens once, after the whole
+/// turn has resolved, in [`crate::information::information::mask_events_for`]. This is
+/// the "resolve once, mask twice" design: `sample_turn` picks a weighted-*random*
+/// trajectory, so resolving twice (once per observer) would follow two different random
+/// universes and desync the two players' beliefs. A single raw resolution plus a pure
+/// post-hoc masking pass keeps both players' views sound against the same trajectory.
+///
+/// `observer` is accepted for signature compatibility with existing call sites but is no
+/// longer used to decide the returned value.
+pub fn observed_hp(bs: &BattleState, slot: FieldSlot, _observer: Player) -> PokemonHP {
     let mon = get_pokemon_at_slot(bs, slot)
         .expect("observed_hp: no mon at slot");
-    if slot.player == observer {
-        PokemonHP::Number(mon.hp)
-    } else {
-        PokemonHP::Percent(hp_to_percent(mon.hp, mon.stats[0]))
-    }
+    PokemonHP::Number(mon.hp)
 }
 
-/// Perspective-correct `PokemonHP` from already-captured `(hp, max_hp)` values.
+/// Raw (pre-mask) `PokemonHP` from already-captured `(hp, max_hp)` values.
 ///
 /// Use this variant (instead of [`observed_hp`]) when the post-mutation HP has already
-/// been read from the Pokémon *before* the mutable borrow was released — e.g. inside
-/// the 28+ inline `if slot.player == observer { Number(hp) } else { Percent(...) }`
-/// sites that exist throughout `simulator/mod.rs` and `simulator/helpers.rs`.
-///
-/// Consolidating those sites here removes a whole class of perspective-leak risk: any
-/// future mistake would only need to be fixed in one place.
+/// been read from the Pokémon *before* the mutable borrow was released. See
+/// [`observed_hp`]'s doc comment for why masking has moved out of this function to
+/// [`crate::information::information::mask_events_for`] — `observer`/`slot_player` are
+/// accepted for call-site compatibility but no longer affect the returned value; callers
+/// still separately have `max_hp` in hand to populate the new `max_hp` field alongside
+/// this on `EventKind`/`SwitchState`.
 #[inline]
-pub fn observed_hp_value(observer: Player, slot_player: Player, hp: u16, max_hp: u16) -> PokemonHP {
-    if slot_player == observer {
-        PokemonHP::Number(hp)
-    } else {
-        PokemonHP::Percent(hp_to_percent(hp, max_hp))
-    }
+pub fn observed_hp_value(_observer: Player, _slot_player: Player, hp: u16, _max_hp: u16) -> PokemonHP {
+    PokemonHP::Number(hp)
 }
 
 // ── Move-outcome resolver ─────────────────────────────────────────────────────
@@ -3885,7 +3881,7 @@ pub fn apply_damage_and_check_game_over(
         // Emit DamageDealt (hp=0 at faint) then Faint as a sibling.
         if let Some(observer) = state.event_observer {
             let new_hp = observed_hp_value(observer, target_slot.player, 0, max_hp);
-            emit(state, EventKind::DamageDealt { target: target_slot, new_hp });
+            emit(state, EventKind::DamageDealt { target: target_slot, new_hp, max_hp });
             emit(state, EventKind::Faint { slot: target_slot });
         }
         if !team_has_remaining_pokemon(state, target_slot.player) {
@@ -3902,7 +3898,7 @@ pub fn apply_damage_and_check_game_over(
     } else {
         if let Some(observer) = state.event_observer {
             let new_hp = observed_hp_value(observer, target_slot.player, post_hp, max_hp);
-            emit(state, EventKind::DamageDealt { target: target_slot, new_hp });
+            emit(state, EventKind::DamageDealt { target: target_slot, new_hp, max_hp });
         }
         // Berserk: if HP crossed from above 50% to ≤ 50%, emit the reveal + boost event.
         if let Some((hp_before, max_hp_b, old_boost)) = berserk_pre {
@@ -5775,7 +5771,7 @@ fn finish_hazard_chip(state: &mut BattleState, slot: FieldSlot, max_hp: u16) {
     if let Some(observer) = state.event_observer {
         let shown = if fainted { 0 } else { post_hp };
         let new_hp = observed_hp_value(observer, slot.player, shown, max_hp);
-        emit(state, EventKind::DamageDealt { target: slot, new_hp });
+        emit(state, EventKind::DamageDealt { target: slot, new_hp, max_hp });
         if fainted {
             emit(state, EventKind::Faint { slot });
         }
@@ -6134,7 +6130,7 @@ pub fn process_pokemon_send_out(
                         if let Some(observer) = bs.event_observer {
                             if current_hp < max_hp {
                                 let new_hp = observed_hp_value(observer, slot.player, max_hp, max_hp);
-                                emit(bs, EventKind::Healed { target: slot, new_hp });
+                                emit(bs, EventKind::Healed { target: slot, new_hp, max_hp });
                             }
                             if let Some(ref status) = old_status {
                                 emit(bs, EventKind::StatusCured { target: slot, status: status.clone() });
@@ -8506,15 +8502,8 @@ fn resolve_wish_slot_conditions(state: &mut BattleState) {
                 condition: crate::state::dex_data::SlotCondition::Wish { heal: 0, turns_remaining: 0 },
             },
             |bs| {
-                if post_hp != pre_hp {
-                    if let Some(observer) = bs.event_observer {
-                        let new_hp = if player == observer {
-                            PokemonHP::Number(post_hp)
-                        } else {
-                            PokemonHP::Percent(hp_to_percent(post_hp, max_hp))
-                        };
-                        emit(bs, EventKind::Healed { target: slot, new_hp });
-                    }
+                if post_hp != pre_hp && bs.event_observer.is_some() {
+                    emit(bs, EventKind::Healed { target: slot, new_hp: PokemonHP::Number(post_hp), max_hp });
                 }
             },
         );
@@ -8714,7 +8703,7 @@ fn apply_future_move_damage(
                     let shown = if fainted { 0 } else { post_hp };
                     let new_hp =
                         observed_hp_value(observer, target_slot.player, shown, max_hp);
-                    emit(&mut new_state, EventKind::DamageDealt { target: target_slot, new_hp });
+                    emit(&mut new_state, EventKind::DamageDealt { target: target_slot, new_hp, max_hp });
                     if fainted {
                         emit(&mut new_state, EventKind::Faint { slot: target_slot });
                     }
@@ -10744,7 +10733,8 @@ fn apply_healing_move(
     if post_hp > pre_hp {
         if let Some(observer) = bs.event_observer {
             let new_hp = observed_hp(bs, attacker_slot, observer);
-            emit(bs, EventKind::Healed { target: attacker_slot, new_hp });
+            let max_hp = get_pokemon_at_slot(bs, attacker_slot).map(|m| m.stats[0].max(1)).unwrap_or(1);
+            emit(bs, EventKind::Healed { target: attacker_slot, new_hp, max_hp });
         }
     }
     true
@@ -11564,7 +11554,7 @@ pub(crate) fn apply_hp_damage_to_attacker(
     if let Some(observer) = bs.event_observer {
         let shown_hp = if fainted { 0 } else { post_hp };
         let new_hp = observed_hp_value(observer, attacker_slot.player, shown_hp, max_hp);
-        emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp });
+        emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp, max_hp });
         if fainted {
             emit(bs, EventKind::Faint { slot: attacker_slot });
         }
@@ -11610,7 +11600,7 @@ fn apply_flat_hp_damage_to_attacker(bs: &mut BattleState, attacker_slot: FieldSl
     if let Some(observer) = bs.event_observer {
         let shown_hp = if fainted { 0 } else { post.0 };
         let new_hp = observed_hp_value(observer, attacker_slot.player, shown_hp, post.1);
-        emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp });
+        emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp, max_hp: post.1 });
         if fainted {
             emit(bs, EventKind::Faint { slot: attacker_slot });
         }
@@ -12379,7 +12369,7 @@ pub(crate) fn try_absorb_move(
             with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: target_ability.clone() }, |state| {
                 if let (Some(observer), Some((hp, max))) = (state.event_observer, healed_to) {
                     let new_hp = observed_hp_value(observer, target_slot.player, hp, max);
-                    emit(state, EventKind::Healed { target: target_slot, new_hp });
+                    emit(state, EventKind::Healed { target: target_slot, new_hp, max_hp: max });
                 }
             });
             true
@@ -12660,7 +12650,7 @@ pub fn apply_secondary_effects(
                 // from the secondaries path that creates it.
                 if let Some(observer) = bs.event_observer {
                     let new_hp = observed_hp_value(observer, attacker_slot.player, post.0, post.1);
-                    emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp });
+                    emit(bs, EventKind::DamageDealt { target: attacker_slot, new_hp, max_hp: post.1 });
                 }
             }
         }

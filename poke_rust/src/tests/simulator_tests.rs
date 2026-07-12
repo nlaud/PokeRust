@@ -33184,6 +33184,86 @@ mod event_round_trip {
         );
     }
 
+    // ── Test 5b: mask_events_for mirror symmetry (resolve once, mask twice) ────
+    //
+    // `sample_turn`/`simulate_turn` no longer mask HP/species at emission time — a
+    // single resolution now records the raw trajectory (exact HP + true/disguise
+    // species on both sides), and `mask_events_for` derives each observer's masked
+    // view afterward. This is the soundness-critical seam for tracking two
+    // simultaneous fog-of-war beliefs (one per player) against the SAME resolved
+    // turn, instead of resolving twice (which would draw independent randomness
+    // and could desync the two beliefs — see `mask_events_for`'s doc comment).
+    //
+    // This test resolves ONE turn via `sample_turn_raw`, then masks that single raw
+    // stream for both observers and checks they're correct mirror images of each
+    // other: each observer sees their own side's HP as exact `Number` and the foe's
+    // as `Percent`, with the two masked streams disagreeing on exactly that.
+    #[test]
+    fn mask_events_for_produces_mirrored_perspectives_from_one_resolution() {
+        use crate::information::information::mask_events_for;
+
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(initial);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        // One resolution, tracking on (the Player value passed here is only a
+        // tracking-on sentinel post-refactor — it no longer biases what's captured).
+        let (_, raw_events, _) = crate::simulator::sample_turn_raw(
+            &state, &p1_cmd, &p2_cmd, md, pd, false, 1, Some(Player::P1),
+        );
+        let raw_events = raw_events.expect("observer set — raw events must be Some");
+
+        // Raw capture must be lossless: DamageDealt on P2's slot carries the true
+        // exact HP (Number), not a pre-masked Percent — masking happens only in
+        // mask_events_for, never at emission time anymore.
+        fn damage_dealt_kind(events: &[InformationEvent], target: FieldSlot) -> EventKind {
+            events.iter()
+                .flat_map(|ev| std::iter::once(ev).chain(ev.reactions.iter()))
+                .find(|e| matches!(&e.kind, EventKind::DamageDealt { target: t, .. } if *t == target))
+                .map(|e| e.kind.clone())
+                .expect("DamageDealt for P2 slot 0 not found")
+        }
+        let raw_view = damage_dealt_kind(&raw_events, p2s0());
+        assert!(
+            matches!(&raw_view, EventKind::DamageDealt { new_hp: PokemonHP::Number(_), .. }),
+            "raw (pre-mask) capture should always carry exact HP, got {raw_view:?}"
+        );
+
+        let p1_masked = mask_events_for(Player::P1, &raw_events);
+        let p2_masked = mask_events_for(Player::P2, &raw_events);
+
+        let p1_sees_p2 = damage_dealt_kind(&p1_masked, p2s0());
+        let p2_sees_p2 = damage_dealt_kind(&p2_masked, p2s0());
+        assert!(
+            matches!(&p1_sees_p2, EventKind::DamageDealt { new_hp: PokemonHP::Percent(_), .. }),
+            "P1's masked view of P2's HP should be Percent (foe), got {p1_sees_p2:?}"
+        );
+        assert!(
+            matches!(&p2_sees_p2, EventKind::DamageDealt { new_hp: PokemonHP::Number(_), .. }),
+            "P2's masked view of its own HP should be Number (self), got {p2_sees_p2:?}"
+        );
+        // The two masked streams must actually differ — the mirror property has bite.
+        assert_ne!(
+            p1_sees_p2, p2_sees_p2,
+            "the two observers' masked views of the same event must not be identical"
+        );
+    }
+
     // ── Test 6: Crit event appears in crit branch, absent from non-crit branch ─
 
     /// With `consider_crit=true`, the crit and non-crit branches carry different
@@ -33863,7 +33943,7 @@ mod event_round_trip {
         // DamageDealt must report the PRE-berry HP: at or below the 50% threshold,
         // not healed back up.
         let damage_pct: Option<u8> = mv.reactions.iter().find_map(|e| match &e.kind {
-            EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p) }
+            EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p), .. }
                 if *target == p2s0() => Some(*p),
             _ => None,
         });
@@ -33885,7 +33965,7 @@ mod event_round_trip {
              reactions = {:#?}", mv.reactions
         ));
         let heal_pct: Option<u8> = item_lost.reactions.iter().find_map(|e| match &e.kind {
-            EventKind::Healed { target, new_hp: PokemonHP::Percent(p) }
+            EventKind::Healed { target, new_hp: PokemonHP::Percent(p), .. }
                 if *target == p2s0() => Some(*p),
             _ => None,
         });
@@ -33998,7 +34078,7 @@ mod event_round_trip {
         // Chip nested as a reaction, HP below 100%.
         assert!(
             any_kind(&sw.reactions, |k| matches!(k,
-                EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p) }
+                EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p), .. }
                 if *target == p2s0() && *p < 100)),
             "Stealth Rock chip must emit a DamageDealt nested under Switch;\n\
              reactions = {:#?}", sw.reactions
@@ -34114,7 +34194,7 @@ mod event_round_trip {
             .expect("MoveUsed for P2 slot 0 must be present");
         assert!(
             any_kind(&mv.reactions, |k| matches!(k,
-                EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p) }
+                EventKind::DamageDealt { target, new_hp: PokemonHP::Percent(p), .. }
                 if *target == p2s0() && *p <= 50)),
             "Belly Drum's HP cut must emit DamageDealt (≤50%);\nreactions = {:#?}", mv.reactions
         );

@@ -106,11 +106,11 @@ pub async fn create_battle(
         other => return unprocessable(format!("unknown informationMode: {other}")),
     };
 
-    // Perfect Information keeps `belief`/`inference_config` at `None` — a true
+    // Perfect Information keeps both beliefs/`inference_config` at `None` — a true
     // zero-overhead no-op that leaves ground-truth behavior byte-identical to
     // before this feature existed.
-    let (belief, inference_config) = if information_mode == InformationMode::PerfectInformation {
-        (None, None)
+    let (belief_p1, belief_p2, inference_config) = if information_mode == InformationMode::PerfectInformation {
+        (None, None, None)
     } else {
         let config = InferenceConfig {
             use_stat_points: req.stat_points,
@@ -118,7 +118,7 @@ pub async fn create_battle(
             learnset_dex: app.dexes.learnset_dex.clone(),
             ..InferenceConfig::default()
         };
-        let belief = UnknownMatchState::team_preview_open_sheet_from_perspective(
+        let belief_p1 = UnknownMatchState::team_preview_open_sheet_from_perspective(
             Player::P1,
             &preview.p1_mons,
             &preview.p2_mons,
@@ -129,7 +129,20 @@ pub async fn create_battle(
             information_mode,
             req.force_max_ivs,
         );
-        (Some(belief), Some(config))
+        // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
+        // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
+        let belief_p2 = UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P2,
+            &preview.p2_mons,
+            &preview.p1_mons,
+            &app.dexes.pokemon_dex,
+            req.active_per_side,
+            req.brought_per_side,
+            50,
+            information_mode,
+            req.force_max_ivs,
+        );
+        (Some(belief_p1), Some(belief_p2), Some(config))
     };
 
     let session = BattleSession {
@@ -141,18 +154,22 @@ pub async fn create_battle(
             damage_rolls: req.damage_rolls,
             information_mode,
         },
-        log: Vec::new(),
-        belief,
+        log_p1: Vec::new(),
+        log_p2: Vec::new(),
+        belief_p1,
+        belief_p2,
         inference_config,
     };
 
     let battle_id = Uuid::new_v4().to_string();
-    let view = session.view();
+    let view = session.view(Player::P1);
+    let view_p2 = session.view(Player::P2);
     lock_sessions(&app).insert(battle_id.clone(), session);
 
     Json(CreateBattleResponse {
         battle_id,
         state: view,
+        state_p2: view_p2,
     })
     .into_response()
 }
@@ -163,8 +180,10 @@ pub async fn get_battle(State(app): State<AppState>, Path(id): Path<String>) -> 
         return not_found();
     };
     Json(GetBattleResponse {
-        state: session.view(),
-        log: session.log.clone(),
+        state: session.view(Player::P1),
+        state_p2: session.view(Player::P2),
+        log: session.log_p1.clone(),
+        log_p2: session.log_p2.clone(),
     })
     .into_response()
 }
@@ -216,14 +235,16 @@ pub async fn submit_turn(
     // (both ground-truth state and belief) is left untouched on failure, so the
     // battle is still there to retry or continue against on the next request. See
     // `resolve_turn`'s doc comment for the full atomicity argument.
-    let (events, probability) = match session::resolve_turn(session, &app.dexes, &p1_cmd, &p2_cmd) {
+    let (events, events_p2, probability) = match session::resolve_turn(session, &app.dexes, &p1_cmd, &p2_cmd) {
         Ok(result) => result,
         Err(message) => return internal_error(message),
     };
 
     Json(TurnResponse {
-        state: session.view(),
+        state: session.view(Player::P1),
+        state_p2: session.view(Player::P2),
         events,
+        events_p2,
         probability,
     })
     .into_response()

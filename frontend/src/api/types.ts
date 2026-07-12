@@ -252,12 +252,21 @@ export interface CreateBattleRequest {
 
 export interface CreateBattleResponse {
   battleId: string
+  /** P1's fog-of-war view of the battle. */
   state: BattleView
+  /** P2's fog-of-war view of the same battle — mirrors `state` with the masked side
+   * flipped. Pick between the two based on whose perspective is currently shown
+   * (see `battleStore.ts`'s `currentPlayer`). */
+  stateP2: BattleView
 }
 
 export interface GetBattleResponse {
   state: BattleView
+  stateP2: BattleView
+  /** P1's turn log — every turn's events masked for P1's perspective. */
   log: TurnLogEntry[]
+  /** P2's turn log — the same turns, masked for P2's perspective instead. */
+  logP2: TurnLogEntry[]
 }
 
 export interface TurnRequest {
@@ -267,6 +276,10 @@ export interface TurnRequest {
 
 export interface TurnResponse {
   state: BattleView
+  stateP2: BattleView
+  /** This turn's events masked for P1's perspective. */
   events: EventNode[]
+  /** This turn's events masked for P2's perspective instead. */
+  eventsP2: EventNode[]
   probability: number
 }

@@ -295,7 +295,7 @@ export default function TeamInfoSidebar() {
   const view = useBattle((s) => s.view)
   const [tab, setTab] = useState<Tab>('p1')
   // Expansion is keyed by player + monId at the sidebar level, so a mon stays
-  // expanded when flipping between "Your Team" and "Opponent" and back.
+  // expanded when flipping between "Player 1" and "Player 2" and back.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const toggle = (key: string) => {
@@ -354,7 +354,7 @@ export default function TeamInfoSidebar() {
             activeTab === 'p1' ? 'border-b-2 border-primary text-primary' : 'text-ink-muted hover:text-ink'
           }`}
         >
-          Your Team
+          Player 1
         </button>
         <button
           onClick={() => setTab('p2')}
@@ -362,7 +362,7 @@ export default function TeamInfoSidebar() {
             activeTab === 'p2' ? 'border-b-2 border-primary text-primary' : 'text-ink-muted hover:text-ink'
           }`}
         >
-          Opponent
+          Player 2
         </button>
         {hasBelief && (
           <button

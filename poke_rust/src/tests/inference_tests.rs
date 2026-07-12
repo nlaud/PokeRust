@@ -243,7 +243,7 @@ fn test_damage_dealt_to_zero_sets_fainted() {
     let state = battle_with_p2(vec![unknown_mon()]);
     let result = apply(
         state,
-        vec![event(EventKind::DamageDealt {
+        vec![event(EventKind::DamageDealt { max_hp: 0,
             target: p2(0),
             new_hp: PokemonHP::Percent(0),
         })],
@@ -407,14 +407,14 @@ fn test_times_hit_excludes_self_damage_and_eot_chip() {
                     targets: vec![p1(0)],
                 },
                 vec![
-                    event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(200) }),
-                    event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(90) }),
+                    event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(200) }),
+                    event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(90) }),
                 ],
             ),
             // EOT chip on P2 with no enclosing MoveUsed (e.g. Sandstorm).
             event_with(
                 EventKind::EndOfTurn,
-                vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(80) })],
+                vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(80) })],
             ),
         ],
         HashMap::new(),
@@ -565,7 +565,7 @@ fn test_switch_from_known_back_to_active() {
 
     let result = apply(
         state,
-        vec![event(EventKind::Switch(SwitchState {
+        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -611,7 +611,7 @@ fn test_no_recoil_excludes_life_orb() {
                 move_used: PokemonMove::Earthquake,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p1(0),
                 new_hp: PokemonHP::Number(200),
             })],
@@ -645,11 +645,11 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
                 targets: vec![p1(0)],
             },
             vec![
-                event(EventKind::DamageDealt {
+                event(EventKind::DamageDealt { max_hp: 0,
                     target: p1(0),
                     new_hp: PokemonHP::Number(200),
                 }),
-                event(EventKind::DamageDealt {
+                event(EventKind::DamageDealt { max_hp: 0,
                     target: p2(0), // self-damage = Life Orb recoil
                     new_hp: PokemonHP::Percent(90),
                 }),
@@ -692,7 +692,7 @@ fn test_life_orb_not_excluded_when_user_faints_during_move() {
                 targets: vec![p1(0)],
             },
             vec![
-                event(EventKind::DamageDealt {
+                event(EventKind::DamageDealt { max_hp: 0,
                     target: p1(0),
                     new_hp: PokemonHP::Number(50),
                 }),
@@ -900,7 +900,7 @@ fn test_s18_speed_comparison_purged_on_switch() {
     let fresh_min = unknown_mon_species(Species::Aggron).minStats[5];
     let result = apply(
         state,
-        vec![event(EventKind::Switch(SwitchState {
+        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Aggron,
             level: 50,
@@ -942,7 +942,7 @@ fn test_s18_item_clause_purged_on_switch() {
     let result = apply(
         state,
         vec![
-            event(EventKind::Switch(SwitchState {
+            event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
                 slot: p2(0),
                 species: Species::Aggron,
                 level: 50,
@@ -1061,7 +1061,7 @@ fn test_s26_transform_reverts_moves_on_switch_out() {
                 })],
             ),
             // …then switches out for a fresh Snorlax.
-            event(EventKind::Switch(SwitchState {
+            event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
                 slot: p2(0), species: Species::Snorlax, level: 50,
                 hp: PokemonHP::Percent(100), status: None, tera_type: None,
             })),
@@ -1146,7 +1146,7 @@ fn test_s25_blaze_pinch_keeps_true_atk_feasible() {
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::FirePunch, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(469) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(469) })],
         )],
         garchomp_dex(),
         move_dex,
@@ -1188,7 +1188,7 @@ fn test_s24_self_boost_secondary_keeps_true_atk_feasible() {
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
             vec![
                 // The hit itself: 34 damage (500 → 466), dealt at stage 0.
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(466) }),
+                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(466) }),
                 // The self-boost lands AFTER the hit.
                 event(EventKind::BoostChanged { target: p2(0), boost_idx: 0, stages: 1 }),
             ],
@@ -1232,7 +1232,7 @@ fn test_s27_streak_resets_on_missed_move() {
             // First use connects: streak 0, last_used = Tackle.
             event_with(
                 EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
-                vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(90) })],
+                vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(90) })],
             ),
             // Second use misses: the sim resets the streak and nulls last_used_move.
             event_with(
@@ -1650,7 +1650,7 @@ fn test_switch_widens_species_for_possible_illusion() {
 
     let result = apply(
         state,
-        vec![event(EventKind::Switch(SwitchState {
+        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -1696,7 +1696,7 @@ fn test_illusion_item_tied_to_species_via_predicate() {
     // "Garchomp" switches in — might really be the disguised Zoroark.
     let after_switch = apply(
         state,
-        vec![event(EventKind::Switch(SwitchState {
+        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -1775,7 +1775,7 @@ fn test_illusion_widens_from_possible_back_zoroark() {
 
     let result = apply(
         state,
-        vec![event(EventKind::Switch(SwitchState {
+        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -1811,7 +1811,7 @@ fn test_s29_illusion_switch_preserves_benched_teammate() {
 
     let result = apply(
         state,
-        vec![event(EventKind::Switch(SwitchState {
+        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -1859,12 +1859,12 @@ fn test_s29_ambiguous_disguise_discarded_on_switch_out() {
         state,
         vec![
             // "Garchomp" (possibly the Zoroark) switches in → ambiguous active entry.
-            event(EventKind::Switch(SwitchState {
+            event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
                 slot: p2(0), species: Species::Garchomp, level: 50,
                 hp: PokemonHP::Percent(100), status: None, tera_type: None,
             })),
             // …then switches back out for Snorlax before the disguise ever broke.
-            event(EventKind::Switch(SwitchState {
+            event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
                 slot: p2(0), species: Species::Snorlax, level: 50,
                 hp: PokemonHP::Percent(100), status: None, tera_type: None,
             })),
@@ -1952,7 +1952,7 @@ fn test_guaranteed_sleep_absence_emits_sleep_preventers() {
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Tackle, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(80) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(80) })],
             // No StatusInflicted — the sleep was prevented.
         )],
         garchomp_dex(),
@@ -2144,7 +2144,7 @@ fn run_direction_b(p2_mon: UnknownPokemonState, damage: u16) -> crate::informati
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
         )],
         garchomp_dex(),
         move_dex,
@@ -2339,7 +2339,7 @@ fn test_pass3_fixed_damage_move_skipped() {
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::SeismicToss, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(450) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(450) })],
         )],
         garchomp_dex(),
         move_dex,
@@ -2408,7 +2408,7 @@ fn test_pass3_dir_b_choice_band_loosens_unconditional_bound() {
             // Move event that produces damage 91.
             event_with(
                 EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-                vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+                vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
             ),
             // Item revealed: NOT Choice Band — eliminates the booster disjunct in BCP.
             event(EventKind::ItemRevealed { slot: p2(0), item: Item::LumBerry }),
@@ -2461,7 +2461,7 @@ fn test_pass3_dir_b_crit_observed_no_contradiction() {
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
             vec![event_with(
-                EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(359) }, // 141 damage
+                EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(359) }, // 141 damage
                 vec![event(EventKind::Crit { target: p1(0) })], // crit signalled
             )],
         )],
@@ -2910,8 +2910,8 @@ fn test_pass3_multihit_2hits_no_contradiction() {
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
             vec![
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(460) }),
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(422) }),
+                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(460) }),
+                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(422) }),
                 event(EventKind::HitCount { target: p1(0), hits: 2 }),
             ],
         )],
@@ -2973,10 +2973,10 @@ fn test_s23_multihit_mixed_crit_keeps_true_atk_feasible() {
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
             vec![
                 // Hit 1: non-crit, 33 damage (500 → 467), no nested Crit.
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(467) }),
+                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(467) }),
                 // Hit 2: crit, 45 damage (467 → 422) — Crit nested under this hit's own DamageDealt.
                 event_with(
-                    EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(422) },
+                    EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(422) },
                     vec![event(EventKind::Crit { target: p1(0) })],
                 ),
                 event(EventKind::HitCount { target: p1(0), hits: 2 }),
@@ -3022,11 +3022,11 @@ fn test_s23_multihit_heal_between_hits_keeps_true_atk_feasible() {
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
             vec![
                 // Hit 1: 28 damage (500 → 472).
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(472) }),
+                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(472) }),
                 // Berry-style heal on the target: 472 → 478.
-                event(EventKind::Healed { target: p1(0), new_hp: PokemonHP::Number(478) }),
+                event(EventKind::Healed { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(478) }),
                 // Hit 2: 33 damage measured from the healed baseline (478 → 445).
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(445) }),
+                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(445) }),
                 event(EventKind::HitCount { target: p1(0), hits: 2 }),
             ],
         )],
@@ -3088,8 +3088,8 @@ fn test_pass3_multihit_tighter_than_single_hit() {
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
             vec![
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(472) }), // 28 dmg
-                event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(443) }), // 29 dmg
+                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(472) }), // 28 dmg
+                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(443) }), // 29 dmg
                 event(EventKind::HitCount { target: p1(0), hits: 2 }),
             ],
         )],
@@ -3102,7 +3102,7 @@ fn test_pass3_multihit_tighter_than_single_hit() {
         battle_1v1(p1_mon, p2_mon),
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(472) })], // 28 dmg
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(472) })], // 28 dmg
         )],
         garchomp_dex(),
         move_dex_single,
@@ -3484,7 +3484,7 @@ fn test_contact_absence_excludes_rocky_helmet() {
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Earthquake, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(50) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(50) })],
             // No ItemRevealed{RockyHelmet} — helmet is absent.
         )],
         garchomp_dex(),
@@ -3523,7 +3523,7 @@ fn test_s21_no_helmet_exclusion_under_magic_room() {
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Earthquake, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(50) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(50) })],
         )],
         garchomp_dex(),
         move_dex,
@@ -3559,7 +3559,7 @@ fn test_s21_no_life_orb_exclusion_under_magic_room() {
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Number(120) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(120) })],
         )],
         garchomp_dex(),
         move_dex,
@@ -3763,7 +3763,7 @@ fn test_eot_heal_reveals_leftovers() {
         state,
         vec![event_with(
             EventKind::EndOfTurn,
-            vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(100) })],
+            vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(100) })],
         )],
     );
 
@@ -3794,7 +3794,7 @@ fn test_eot_heal_poison_type_includes_black_sludge() {
         state,
         vec![event_with(
             EventKind::EndOfTurn,
-            vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(100) })],
+            vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(100) })],
         )],
     );
 
@@ -3850,7 +3850,7 @@ fn test_guaranteed_status_absence_emits_preventer_clause() {
         state,
         vec![event_with(
             EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Ember, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(80) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(80) })],
             // No StatusInflicted — burn was prevented.
         )],
         garchomp_dex(),
@@ -3894,7 +3894,7 @@ fn test_guaranteed_status_absence_skipped_on_fainted_target() {
             EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Ember, targets: vec![p2(0)] },
             vec![
                 // The hit KOs the target — no burn can land.
-                event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(0) }),
+                event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(0) }),
                 event(EventKind::Faint { slot: p2(0) }),
             ],
         )],
@@ -4260,7 +4260,7 @@ fn test_damage_dealt_records_delta() {
                 move_used: PokemonMove::Ember,
                 targets:   vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80), // old=100, new=80 → delta=20
             })],
@@ -4334,7 +4334,7 @@ fn test_life_orb_not_excluded_without_damage() {
                 move_used: PokemonMove::Earthquake,
                 targets:   vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(80) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(80) })],
         )],
         HashMap::new(),
         move_dex2,
@@ -4449,7 +4449,7 @@ fn test_pass3_dir_a_assault_vest_defender_does_not_exclude_true_bsv() {
                 targets:   vec![p2(0)],
             },
             // P2 takes 20% damage (100 % → 80 %) — consistent with AV-boosted SpD = 70×1.5 = 105.
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -4602,7 +4602,7 @@ fn test_s6_shield_dust_explains_secondary_paralysis_absence() {
                 move_used: PokemonMove::Nuzzle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -4661,7 +4661,7 @@ fn test_s6_freeze_in_sun_emits_no_clause() {
                 move_used: PokemonMove::Blizzard,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -4750,7 +4750,7 @@ fn test_s6_leaf_guard_explains_poison_absence_in_sun() {
                 move_used: PokemonMove::SludgeBomb,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -4824,7 +4824,7 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
                 move_used: PokemonMove::Psychic,
                 targets:   vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target:  p2(0),
                 new_hp:  PokemonHP::Percent(80), // 20% damage
             })],
@@ -4891,7 +4891,7 @@ fn test_pass3_dir_a_skipped_for_opponent_ally_hit() {
                 move_used: PokemonMove::Psychic,
                 targets: vec![p2(1)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p2(1),
                 new_hp: PokemonHP::Percent(80), // 20% damage
             })],
@@ -4976,7 +4976,7 @@ fn test_e1_binary_search_direction_b_preserves_precision() {
                 move_used: PokemonMove::Tackle,
                 targets:   vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p1(0),
                 new_hp: PokemonHP::Number(158), // 200 − 158 = 42 exact HP dealt
             })],
@@ -5420,7 +5420,7 @@ fn test_pass3_dir_a_ev_lattice_hp_does_not_exclude_true_bsv() {
                 move_used: PokemonMove::Psychic,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(50), // 50% damage
             })],
@@ -6631,7 +6631,7 @@ fn test_leftovers_eot_heal_reveals_item() {
 
     let events = vec![event_with(
         EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers },
-        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(50) })],
+        vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(50) })],
     )];
 
     let result = apply(state, events);
@@ -6862,7 +6862,7 @@ fn flinch_deduces_kings_rock_single_attacker() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt {
+            vec![event(EventKind::DamageDealt { max_hp: 0,
                 target: p1(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -6904,7 +6904,7 @@ fn flinch_no_deduction_multiple_attackers() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(80) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(80) })],
         ),
         event_with(
             EventKind::MoveUsed {
@@ -6912,7 +6912,7 @@ fn flinch_no_deduction_multiple_attackers() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(60) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(60) })],
         ),
         event(EventKind::Cant { slot: p1(0), reason: CantReason::Flinch }),
     ];
@@ -6953,7 +6953,7 @@ fn flinch_no_deduction_move_has_flinch_secondary() {
                 move_used: PokemonMove::IronHead,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: PokemonHP::Percent(70) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(70) })],
         ),
         event(EventKind::Cant { slot: p1(0), reason: CantReason::Flinch }),
     ];
@@ -7003,7 +7003,7 @@ fn flinch_no_deduction_when_observer_side_flinches() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(70) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(70) })],
         ),
         event(EventKind::Cant { slot: p2(0), reason: CantReason::Flinch }),
     ];
@@ -7031,7 +7031,7 @@ fn flinch_no_deduction_when_observer_side_flinches() {
 fn test_c1_switch_tera_type_not_leaked_when_none() {
     // ── Case 1: non-tera switch (tera_type: None) ──────────────────────────
     let state_a = battle_with_p2(vec![unknown_mon()]);
-    let events_a = vec![event(EventKind::Switch(SwitchState {
+    let events_a = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -7051,7 +7051,7 @@ fn test_c1_switch_tera_type_not_leaked_when_none() {
 
     // ── Case 2: tera switch (tera_type: Some(Fire)) ─────────────────────────
     let state_b = battle_with_p2(vec![unknown_mon()]);
-    let events_b = vec![event(EventKind::Switch(SwitchState {
+    let events_b = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -7144,7 +7144,7 @@ fn test_c2_analytic_first_mover_does_not_exclude_true_stat() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p1(0), new_hp: new_hp_val })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: new_hp_val })],
         ),
     ];
 
@@ -7169,7 +7169,7 @@ fn test_c3_intrepid_sword_not_excluded_on_reentry() {
     let state = battle_with_p2(vec![unknown_mon()]);
     let events_turn1 = vec![
         event_with(
-            EventKind::Switch(SwitchState {
+            EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
                 slot: p2(0),
                 species: Species::Garchomp,
                 level: 50,
@@ -7194,7 +7194,7 @@ fn test_c3_intrepid_sword_not_excluded_on_reentry() {
     // Turn 2: P2 re-enters with NO +1 Atk boost (once-per-battle ability exhausted).
     // The absence inference must NOT exclude IntrepidSword because one_time_ability_used = true.
     let events_turn2 = vec![
-        event(EventKind::Switch(SwitchState {
+        event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -7227,7 +7227,7 @@ fn test_c4_weather_setter_not_excluded_under_primordial_weather() {
     // Under Heavy Rain, set_weather silently no-ops, so no WeatherChanged event fires.
     let events = vec![
         event_with(
-            EventKind::Switch(SwitchState {
+            EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
                 slot: p2(0),
                 species: Species::Garchomp,
                 level: 50,
@@ -7275,7 +7275,7 @@ fn test_c5_weather_setter_not_excluded_under_same_normal_weather() {
     // — set_weather no-ops because Sandstorm is already active.
     let events = vec![
         event_with(
-            EventKind::Switch(SwitchState {
+            EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
                 slot: p2(0),
                 species: Species::Tyranitar,
                 level: 50,
@@ -7526,14 +7526,14 @@ mod roundtrip_soundness {
         let UnknownMatchState::TeamPreview(preview) = preview else {
             panic!("expected TeamPreview")
         };
-        let fog = preview.into_battle_state(&[0], &[], &[0], &[]);
+        let fog = preview.into_battle_state(Player::P1, &[0], &[], &[0], &[]);
 
         // The exact event shape the real server emits for this transition: both
         // leads sent out simultaneously.
         let events = vec![InformationEvent {
             kind: crate::information::information::EventKind::SimultaneousSwitch {
                 switches: vec![
-                    crate::information::information::SwitchState {
+                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
                         slot: super::p1(0),
                         species: Species::Tyranitar,
                         level: 50,
@@ -7541,7 +7541,7 @@ mod roundtrip_soundness {
                         status: None,
                         tera_type: None,
                     },
-                    crate::information::information::SwitchState {
+                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
                         slot: super::p2(0),
                         species: Species::Snorlax,
                         level: 50,
@@ -8690,7 +8690,7 @@ fn test_team_preview_switch_updates_hp_and_level() {
         p2_mons: vec![p2_garchomp, p2_snorlax],
     });
 
-    let events = vec![event(EventKind::Switch(SwitchState {
+    let events = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot:      p2(0),
         species:   Species::Garchomp,
         level:     50,
@@ -8753,7 +8753,7 @@ fn test_team_preview_simultaneous_switch_two_leads() {
     // P2 leads with Garchomp at slot 0 and Snorlax at slot 1.
     let events = vec![event(EventKind::SimultaneousSwitch {
         switches: vec![
-            SwitchState {
+            SwitchState { disguise_species: None, max_hp: 0,
                 slot:      p2(0),
                 species:   Species::Garchomp,
                 level:     50,
@@ -8761,7 +8761,7 @@ fn test_team_preview_simultaneous_switch_two_leads() {
                 status:    None,
                 tera_type: None,
             },
-            SwitchState {
+            SwitchState { disguise_species: None, max_hp: 0,
                 slot:      p2(1),
                 species:   Species::Snorlax,
                 level:     50,
@@ -9008,8 +9008,8 @@ fn test_eot_heal_not_inferred_when_same_target_also_took_chip_this_eot() {
     let eot = event_with(
         EventKind::EndOfTurn,
         vec![
-            event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(40) }),
-            event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(55) }),
+            event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(40) }),
+            event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(55) }),
         ],
     );
     let result = apply(state, vec![eot]);
@@ -9040,7 +9040,7 @@ fn test_sand_immunity_not_inferred_when_target_healed_this_eot() {
     // the netted result of a sand chip clobbered by a pinch berry.
     let eot = event_with(
         EventKind::EndOfTurn,
-        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(55) })],
+        vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(55) })],
     );
     let result = apply(state, vec![eot]);
 
@@ -9147,7 +9147,7 @@ fn test_contact_absence_magic_guard_attacker_does_not_exclude_rough_skin_iron_ba
                 move_used: PokemonMove::Tackle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(75) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(75) })],
         )],
         HashMap::new(),
         move_dex,
@@ -9199,7 +9199,7 @@ fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(75) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(75) })],
         )],
         HashMap::new(),
         move_dex,
@@ -9250,7 +9250,7 @@ fn test_contact_absence_skipped_when_defender_may_be_suppressed() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { target: p2(0), new_hp: PokemonHP::Percent(75) })],
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(75) })],
         )],
         HashMap::new(),
         move_dex,
@@ -9306,7 +9306,7 @@ fn p2_back_with_intimidate_possible(dex: &HashMap<Species, PokemonData>) -> Vec<
 /// Common switch event used in C2 tests: P2's Garchomp enters, no BoostChanged{Atk,−1}.
 fn p2_switch_event() -> InformationEvent {
     event(EventKind::SimultaneousSwitch {
-        switches: vec![SwitchState {
+        switches: vec![SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -9421,7 +9421,7 @@ fn test_b1_bench_hp_preserved_across_switch_out() {
     state.active_per_side = 1;
     state.back_mons_per_side = 5;
 
-    let switch_ev = event(EventKind::Switch(SwitchState {
+    let switch_ev = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p1(0),
         species: Species::Snorlax,
         level: 50,
@@ -9464,7 +9464,7 @@ fn test_b2_regenerator_inferred_from_hp_gain_on_reentry() {
     state.p2_known_back_mons = vec![garchomp];
 
     // ── Turn 1: P2 switches to Garchomp (Snorlax goes to bench at 50%) ────────
-    let t1 = vec![event(EventKind::Switch(SwitchState {
+    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9484,7 +9484,7 @@ fn test_b2_regenerator_inferred_from_hp_gain_on_reentry() {
     assert_eq!(benched_snorlax.hp, PokemonHP::Percent(50), "bench HP must be 50%");
 
     // ── Turn 2: Snorlax returns at 83% (50% + 33% Regen heal) ────────────────
-    let t2 = vec![event(EventKind::Switch(SwitchState {
+    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Snorlax,
         level: 50,
@@ -9523,7 +9523,7 @@ fn test_b2_regenerator_excluded_when_no_hp_gain_on_reentry() {
     let mut state = battle_with_p2(vec![snorlax]);
     state.p2_known_back_mons = vec![garchomp];
 
-    let t1 = vec![event(EventKind::Switch(SwitchState {
+    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9534,7 +9534,7 @@ fn test_b2_regenerator_excluded_when_no_hp_gain_on_reentry() {
     let after_t1 = apply(state, t1);
 
     // Snorlax returns at 40% — same as it left (no Regenerator gain).
-    let t2 = vec![event(EventKind::Switch(SwitchState {
+    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Snorlax,
         level: 50,
@@ -9570,7 +9570,7 @@ fn test_b2_regenerator_skip_when_stealth_rock_present() {
     state.p2_side_condition_turns = vec![Unknown::Known(0)];
     state.p2_side_condition_setters = vec![Some(0)];
 
-    let t1 = vec![event(EventKind::Switch(SwitchState {
+    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9582,7 +9582,7 @@ fn test_b2_regenerator_skip_when_stealth_rock_present() {
 
     // Snorlax returns at 75% — looks like 50% + 33% Regen − 8% rock = 75%, but
     // the engine should skip inference entirely when rocks are present.
-    let t2 = vec![event(EventKind::Switch(SwitchState {
+    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Snorlax,
         level: 50,
@@ -9619,7 +9619,7 @@ fn test_b2_regenerator_skip_when_mon_left_near_full() {
     let mut state = battle_with_p2(vec![snorlax]);
     state.p2_known_back_mons = vec![garchomp];
 
-    let t1 = vec![event(EventKind::Switch(SwitchState {
+    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9630,7 +9630,7 @@ fn test_b2_regenerator_skip_when_mon_left_near_full() {
     let after_t1 = apply(state, t1);
 
     // Returns at 100% — could be 70% + 33% Regen (capped) or just full HP.
-    let t2 = vec![event(EventKind::Switch(SwitchState {
+    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Snorlax,
         level: 50,
@@ -9667,14 +9667,14 @@ fn test_b2_regenerator_inference_persists_across_second_switch() {
     state.p2_known_back_mons = vec![garchomp];
 
     // Turn 1: Garchomp in, Snorlax (50%) to bench.
-    let t1 = vec![event(EventKind::Switch(SwitchState {
+    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0), species: Species::Garchomp, level: 50,
         hp: PokemonHP::Percent(100), status: None, tera_type: None,
     }))];
     let after_t1 = apply(state, t1);
 
     // Turn 2: Snorlax returns at 83% → Regenerator inferred.
-    let t2 = vec![event(EventKind::Switch(SwitchState {
+    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0), species: Species::Snorlax, level: 50,
         hp: PokemonHP::Percent(83), status: None, tera_type: None,
     }))];
@@ -9686,7 +9686,7 @@ fn test_b2_regenerator_inference_persists_across_second_switch() {
 
     // Turn 3: Snorlax switches out again (bench it).
     // Turn 4: Snorlax returns at some HP — the ability should still be Known(Regenerator).
-    let t3 = vec![event(EventKind::Switch(SwitchState {
+    let t3 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0), species: Species::Garchomp, level: 50,
         hp: PokemonHP::Percent(90), status: None, tera_type: None,
     }))];
@@ -9792,7 +9792,7 @@ fn test_eot_heal_in_rain_includes_rain_dish_and_dry_skin() {
 
     let ev = event_with(
         EventKind::EndOfTurn,
-        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(90) })],
+        vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(90) })],
     );
     let result = apply(state, vec![ev]);
 
@@ -9820,7 +9820,7 @@ fn test_eot_heal_in_snow_includes_ice_body() {
 
     let ev = event_with(
         EventKind::EndOfTurn,
-        vec![event(EventKind::Healed { target: p2(0), new_hp: PokemonHP::Percent(90) })],
+        vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(90) })],
     );
     let result = apply(state, vec![ev]);
 
@@ -9848,7 +9848,7 @@ fn test_terrain_setter_excluded_when_no_terrain_change() {
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![p2_back];
 
-    let sw = event(EventKind::Switch(SwitchState {
+    let sw = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9875,7 +9875,7 @@ fn test_terrain_setter_not_excluded_when_neutralizing_gas_possible() {
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![p2_back];
 
-    let sw = event(EventKind::Switch(SwitchState {
+    let sw = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9911,7 +9911,7 @@ fn test_hadron_engine_not_excluded_by_weather_absence() {
     // Switch-in where HadronEngine sets Electric Terrain (TerrainChanged nested under
     // the AbilityRevealed wrapper), but no WeatherChanged occurs at all.
     let sw = event_with(
-        EventKind::Switch(SwitchState {
+        EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -9943,7 +9943,7 @@ fn test_hadron_engine_excluded_when_no_terrain_change() {
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![p2_back];
 
-    let sw = event(EventKind::Switch(SwitchState {
+    let sw = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9969,7 +9969,7 @@ fn test_dauntless_shield_excluded_when_no_def_boost_on_entry() {
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![p2_back];
 
-    let sw = event(EventKind::Switch(SwitchState {
+    let sw = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -10029,7 +10029,7 @@ fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
     // switches Corviknight out for a brand-new mon (Snorlax) never seen before —
     // this exercises both a Vec::remove (shrinking p1_known_back) and a push
     // (growing it), the two operations that caused the old layout to drift.
-    let switch_in_corviknight = event(EventKind::Switch(SwitchState {
+    let switch_in_corviknight = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p1(0),
         species: Species::Corviknight,
         level: 50,
@@ -10039,7 +10039,7 @@ fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
     }));
     let after_first_switch = apply(state, vec![switch_in_corviknight]);
 
-    let switch_in_new_mon = event(EventKind::Switch(SwitchState {
+    let switch_in_new_mon = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
         slot: p1(0),
         species: Species::Alakazam,
         level: 50,
@@ -10248,7 +10248,7 @@ mod information_mode_tests {
             p2_mons,
         };
 
-        let battle = preview.into_battle_state(&[0], &[], &[0], &[1, 2]);
+        let battle = preview.into_battle_state(Player::P1, &[0], &[], &[0], &[1, 2]);
 
         assert!(
             battle.p2_active_mons.is_empty(),
@@ -10303,15 +10303,15 @@ mod information_mode_tests {
             p1_mons: vec![unknown_mon_species(Species::Snorlax)],
             p2_mons,
         };
-        let seeded = preview.into_battle_state(&[0], &[], &[0], &[1, 2]);
+        let seeded = preview.into_battle_state(Player::P1, &[0], &[], &[0], &[1, 2]);
 
         let switch_events = vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
-                SwitchState {
+                SwitchState { disguise_species: None, max_hp: 0,
                     slot: p1(0), species: Species::Snorlax, level: 50,
                     hp: PokemonHP::Number(200), status: None, tera_type: None,
                 },
-                SwitchState {
+                SwitchState { disguise_species: None, max_hp: 0,
                     slot: p2(0), species: Species::Garchomp, level: 50,
                     hp: PokemonHP::Percent(100), status: None, tera_type: None,
                 },
@@ -10360,15 +10360,15 @@ mod information_mode_tests {
         // the DISPLAYED species (Milotic) — exactly what
         // `battle_state_from_preview_branching`'s perspective-gated `species` field
         // would produce for the observer.
-        let seeded = preview.into_battle_state(&[0], &[], &[1], &[0, 2]);
+        let seeded = preview.into_battle_state(Player::P1, &[0], &[], &[1], &[0, 2]);
 
         let switch_events = vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
-                SwitchState {
+                SwitchState { disguise_species: None, max_hp: 0,
                     slot: p1(0), species: Species::Snorlax, level: 50,
                     hp: PokemonHP::Number(200), status: None, tera_type: None,
                 },
-                SwitchState {
+                SwitchState { disguise_species: None, max_hp: 0,
                     slot: p2(0), species: Species::Milotic, level: 50,
                     hp: PokemonHP::Percent(100), status: None, tera_type: None,
                 },

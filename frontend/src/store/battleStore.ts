@@ -36,9 +36,33 @@ export interface PendingAttack {
   targets: { command: BattleCommand; description: string }[]
 }
 
+/** Pick whichever perspective's value is currently shown: P1's own by default, P2's
+ * once the hotseat wizard advances to P2's command entry — see TODO.md's "the
+ * frontend should always display the information that player one would have,
+ * although when choosing moves for player two it should display information that
+ * player two would have." Shared by `view` and `log`, which both flip the same way. */
+function pickForPlayer<T>(p1Value: T, p2Value: T, currentPlayer: PlayerId): T {
+  return currentPlayer === 'p1' ? p1Value : p2Value
+}
+
 interface BattleStore {
   battleId: string | null
+  /** P1's fog-of-war view of the battle (cached from the last response). */
+  viewP1: BattleView | null
+  /** P2's fog-of-war view of the same battle (cached from the last response). */
+  viewP2: BattleView | null
+  /** Derived: `viewP1` or `viewP2`, whichever matches `currentPlayer`. Recomputed
+   * at every `set()` that touches either the cached views or `currentPlayer` — see
+   * `pickForPlayer`. Kept as its own field (rather than requiring every consumer to
+   * select `viewP1`/`viewP2`/`currentPlayer` and combine them) so existing call
+   * sites reading `view` keep working unchanged. */
   view: BattleView | null
+  /** P1's turn log — every turn's events masked for P1's perspective. */
+  logP1: TurnLogEntry[]
+  /** P2's turn log — the same turns, masked for P2's perspective instead. */
+  logP2: TurnLogEntry[]
+  /** Derived: `logP1` or `logP2`, mirroring `view`'s perspective flip — see
+   * `pickForPlayer`. */
   log: TurnLogEntry[]
   probability: number | null
   error: string | null
@@ -72,6 +96,21 @@ function appendLog(log: TurnLogEntry[], label: string, events: EventNode[]): Tur
   return [...log, { label, events }]
 }
 
+/** Append the same turn to both perspectives' logs at once, keeping them in
+ * lockstep the same way `viewP1`/`viewP2` stay in lockstep. */
+function appendDualLog(
+  logP1: TurnLogEntry[],
+  logP2: TurnLogEntry[],
+  label: string,
+  eventsP1: EventNode[],
+  eventsP2: EventNode[],
+): { logP1: TurnLogEntry[]; logP2: TurnLogEntry[] } {
+  return {
+    logP1: appendLog(logP1, label, eventsP1),
+    logP2: appendLog(logP2, label, eventsP2),
+  }
+}
+
 export const useBattle = create<BattleStore>((set, get) => {
   /** After both players' commands exist, ship the turn to the server. */
   async function maybeSubmitTurn() {
@@ -89,8 +128,17 @@ export const useBattle = create<BattleStore>((set, get) => {
     const playerCommand: PlayerCommand = { kind: 'battle', commands: draftCommands }
 
     if (currentPlayer === 'p1') {
-      // P1 done — flip to P2 and fetch their legal commands.
-      set({ p1Commands: playerCommand, currentPlayer: 'p2', draftCommands: [], pendingAttack: null, commands: null })
+      // P1 done — flip to P2, showing P2's own fog-of-war view of the battle from
+      // here on, and fetch their legal commands.
+      set((s) => ({
+        p1Commands: playerCommand,
+        currentPlayer: 'p2',
+        view: pickForPlayer(s.viewP1, s.viewP2, 'p2'),
+        log: pickForPlayer(s.logP1, s.logP2, 'p2'),
+        draftCommands: [],
+        pendingAttack: null,
+        commands: null,
+      }))
       await get().fetchCommands()
       await autoFillForcedSlots()
       return
@@ -104,17 +152,24 @@ export const useBattle = create<BattleStore>((set, get) => {
         p1: p1Commands ?? { kind: 'pass' },
         p2: playerCommand,
       })
-      set((s) => ({
-        view: response.state,
-        probability: response.probability,
-        log: appendLog(s.log, turnLabel, response.events),
-        currentPlayer: 'p1',
-        draftCommands: [],
-        p1Commands: null,
-        pendingAttack: null,
-        commands: null,
-        busy: false,
-      }))
+      set((s) => {
+        const { logP1, logP2 } = appendDualLog(s.logP1, s.logP2, turnLabel, response.events, response.eventsP2)
+        return {
+          viewP1: response.state,
+          viewP2: response.stateP2,
+          view: pickForPlayer(response.state, response.stateP2, 'p1'),
+          probability: response.probability,
+          logP1,
+          logP2,
+          log: pickForPlayer(logP1, logP2, 'p1'),
+          currentPlayer: 'p1',
+          draftCommands: [],
+          p1Commands: null,
+          pendingAttack: null,
+          commands: null,
+          busy: false,
+        }
+      })
       if (response.state.phase !== 'gameOver') {
         await get().fetchCommands()
         await autoFillForcedSlots()
@@ -161,7 +216,11 @@ export const useBattle = create<BattleStore>((set, get) => {
 
   return {
     battleId: null,
+    viewP1: null,
+    viewP2: null,
     view: null,
+    logP1: [],
+    logP2: [],
     log: [],
     probability: null,
     error: null,
@@ -181,7 +240,11 @@ export const useBattle = create<BattleStore>((set, get) => {
         preloadBattleSprites(response.state)
         set({
           battleId: response.battleId,
-          view: response.state,
+          viewP1: response.state,
+          viewP2: response.stateP2,
+          view: pickForPlayer(response.state, response.stateP2, 'p1'),
+          logP1: [],
+          logP2: [],
           log: [],
           probability: null,
           currentPlayer: 'p1',
@@ -203,8 +266,12 @@ export const useBattle = create<BattleStore>((set, get) => {
         preloadBattleSprites(response.state)
         set({
           battleId,
-          view: response.state,
-          log: response.log,
+          viewP1: response.state,
+          viewP2: response.stateP2,
+          view: pickForPlayer(response.state, response.stateP2, 'p1'),
+          logP1: response.log,
+          logP2: response.logP2,
+          log: pickForPlayer(response.log, response.logP2, 'p1'),
           currentPlayer: 'p1',
           draftCommands: [],
           p1Commands: null,
@@ -225,7 +292,11 @@ export const useBattle = create<BattleStore>((set, get) => {
       sessionStorage.removeItem(BATTLE_ID_KEY)
       set({
         battleId: null,
+        viewP1: null,
+        viewP2: null,
         view: null,
+        logP1: [],
+        logP2: [],
         log: [],
         probability: null,
         error: null,
@@ -263,7 +334,13 @@ export const useBattle = create<BattleStore>((set, get) => {
           return
         }
         if (currentPlayer === 'p2') {
-          set({ currentPlayer: 'p1', p1Commands: null, previewPicks: [] })
+          set((s) => ({
+            currentPlayer: 'p1',
+            p1Commands: null,
+            previewPicks: [],
+            view: pickForPlayer(s.viewP1, s.viewP2, 'p1'),
+            log: pickForPlayer(s.logP1, s.logP2, 'p1'),
+          }))
         }
         return
       }
@@ -282,13 +359,15 @@ export const useBattle = create<BattleStore>((set, get) => {
       }
       // Nothing left to unwind for this player — flip back to P1's turn.
       if (currentPlayer === 'p2') {
-        set({
+        set((s) => ({
           currentPlayer: 'p1',
           p1Commands: null,
           draftCommands: [],
           pendingAttack: null,
           commands: null,
-        })
+          view: pickForPlayer(s.viewP1, s.viewP2, 'p1'),
+          log: pickForPlayer(s.logP1, s.logP2, 'p1'),
+        }))
         void get().fetchCommands()
       }
     },
@@ -313,7 +392,13 @@ export const useBattle = create<BattleStore>((set, get) => {
       }
 
       if (currentPlayer === 'p1') {
-        set({ p1Commands: command, currentPlayer: 'p2', previewPicks: [] })
+        set((s) => ({
+          p1Commands: command,
+          currentPlayer: 'p2',
+          previewPicks: [],
+          view: pickForPlayer(s.viewP1, s.viewP2, 'p2'),
+          log: pickForPlayer(s.logP1, s.logP2, 'p2'),
+        }))
         return
       }
 
@@ -323,16 +408,23 @@ export const useBattle = create<BattleStore>((set, get) => {
           p1: p1Commands ?? { kind: 'pass' },
           p2: command,
         })
-        set((s) => ({
-          view: response.state,
-          probability: response.probability,
-          log: appendLog(s.log, 'Team Preview', response.events),
-          currentPlayer: 'p1',
-          previewPicks: [],
-          p1Commands: null,
-          commands: null,
-          busy: false,
-        }))
+        set((s) => {
+          const { logP1, logP2 } = appendDualLog(s.logP1, s.logP2, 'Team Preview', response.events, response.eventsP2)
+          return {
+            viewP1: response.state,
+            viewP2: response.stateP2,
+            view: pickForPlayer(response.state, response.stateP2, 'p1'),
+            probability: response.probability,
+            logP1,
+            logP2,
+            log: pickForPlayer(logP1, logP2, 'p1'),
+            currentPlayer: 'p1',
+            previewPicks: [],
+            p1Commands: null,
+            commands: null,
+            busy: false,
+          }
+        })
         await get().fetchCommands()
       } catch (err) {
         set({

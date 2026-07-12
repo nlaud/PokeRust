@@ -601,7 +601,7 @@ fn apply_single_hit_branch(
                 let new_hp = simulator_helpers::observed_hp_value(
                     observer, target_slot.player, chip_hp_max.0, chip_hp_max.1,
                 );
-                simulator_helpers::emit(&mut branch_state, EventKind::DamageDealt { target: target_slot, new_hp });
+                simulator_helpers::emit(&mut branch_state, EventKind::DamageDealt { target: target_slot, new_hp, max_hp: chip_hp_max.1 });
             }
             simulator_helpers::emit(&mut branch_state, EventKind::FormeChange {
                 slot: target_slot,
@@ -1040,7 +1040,7 @@ fn apply_single_hit_branch(
         // Faint's own KO-triggered reactions) underneath it.
         if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, damage_dealt_hp_info) {
             let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
-            simulator_helpers::with_reactions(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp }, run_damage_reactions);
+            simulator_helpers::with_reactions(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp, max_hp }, run_damage_reactions);
         } else {
             run_damage_reactions(&mut bs);
         }
@@ -1052,7 +1052,7 @@ fn apply_single_hit_branch(
         if let (Some(observer), Some((new_hp, max_hp, berry))) = (bs.event_observer, berry_heal_hp_info) {
             let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
             simulator_helpers::emit_item_consumed_with(&mut bs, target_slot, berry, |bs| {
-                simulator_helpers::emit(bs, EventKind::Healed { target: target_slot, new_hp: pokemon_hp });
+                simulator_helpers::emit(bs, EventKind::Healed { target: target_slot, new_hp: pokemon_hp, max_hp });
             });
         }
 
@@ -2194,7 +2194,7 @@ fn possible_damage_outcomes_for_move(
             // player-visible (it would leak max HP); inference matches the discriminant.
             if let Some(observer) = next_state.event_observer {
                 let new_hp = simulator_helpers::observed_hp_value(observer, attacker_slot.player, post.0, post.1);
-                simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: attacker_slot, new_hp });
+                simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: attacker_slot, new_hp, max_hp: post.1 });
             }
             simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
                 target: attacker_slot,
@@ -3243,13 +3243,8 @@ fn possible_damage_outcomes_for_move(
                         if t.hp != before { Some((t.hp, t.stats[0])) } else { None }
                     } else { None };
                     if let Some((post_hp, mx)) = heal_result {
-                        if let Some(obs) = next_state.event_observer {
-                            let new_hp = if target_slot.player == obs {
-                                PokemonHP::Number(post_hp)
-                            } else {
-                                PokemonHP::Percent(simulator_helpers::hp_to_percent(post_hp, mx))
-                            };
-                            simulator_helpers::emit(&mut next_state, EventKind::Healed { target: target_slot, new_hp });
+                        if next_state.event_observer.is_some() {
+                            simulator_helpers::emit(&mut next_state, EventKind::Healed { target: target_slot, new_hp: PokemonHP::Number(post_hp), max_hp: mx });
                         }
                     }
                 }
@@ -3290,13 +3285,8 @@ fn possible_damage_outcomes_for_move(
                     if t.hp != before { Some((t.hp, t.stats[0])) } else { None }
                 } else { None };
                 if let Some((post_hp, mx)) = heal_result {
-                    if let Some(obs) = next_state.event_observer {
-                        let new_hp = if target_slot.player == obs {
-                            PokemonHP::Number(post_hp)
-                        } else {
-                            PokemonHP::Percent(simulator_helpers::hp_to_percent(post_hp, mx))
-                        };
-                        simulator_helpers::emit(&mut next_state, EventKind::Healed { target: target_slot, new_hp });
+                    if next_state.event_observer.is_some() {
+                        simulator_helpers::emit(&mut next_state, EventKind::Healed { target: target_slot, new_hp: PokemonHP::Number(post_hp), max_hp: mx });
                     }
                 }
                 decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
@@ -3340,10 +3330,10 @@ fn possible_damage_outcomes_for_move(
         if let Some(observer) = next_state.event_observer {
             let (u_hp, u_max) = user_new_hp;
             let user_new_hp_ev = simulator_helpers::observed_hp_value(observer, action.user_slot.player, u_hp, u_max);
-            simulator_helpers::emit(&mut next_state, EventKind::SetHp { target: action.user_slot, new_hp: user_new_hp_ev });
+            simulator_helpers::emit(&mut next_state, EventKind::SetHp { target: action.user_slot, new_hp: user_new_hp_ev, max_hp: u_max });
             let (t_hp, t_max) = target_new_hp;
             let target_new_hp_ev = simulator_helpers::observed_hp_value(observer, target_slot.player, t_hp, t_max);
-            simulator_helpers::emit(&mut next_state, EventKind::SetHp { target: target_slot, new_hp: target_new_hp_ev });
+            simulator_helpers::emit(&mut next_state, EventKind::SetHp { target: target_slot, new_hp: target_new_hp_ev, max_hp: t_max });
         }
         decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
@@ -3380,13 +3370,8 @@ fn possible_damage_outcomes_for_move(
             } else { None }
         } else { None };
         if let Some((post_hp, mx)) = strength_sap_heal {
-            if let Some(obs) = next_state.event_observer {
-                let new_hp = if action.user_slot.player == obs {
-                    PokemonHP::Number(post_hp)
-                } else {
-                    PokemonHP::Percent(simulator_helpers::hp_to_percent(post_hp, mx))
-                };
-                simulator_helpers::emit(&mut next_state, EventKind::Healed { target: action.user_slot, new_hp });
+            if next_state.event_observer.is_some() {
+                simulator_helpers::emit(&mut next_state, EventKind::Healed { target: action.user_slot, new_hp: PokemonHP::Number(post_hp), max_hp: mx });
             }
         }
         simulator_helpers::apply_opponent_stat_drop(
@@ -3565,7 +3550,7 @@ fn possible_damage_outcomes_for_move(
         // "X cut its own HP and maximized its Attack!" — both effects are visible.
         if let Some(observer) = next_state.event_observer {
             let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, post.0, post.1);
-            simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp });
+            simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp, max_hp: post.1 });
         }
         if post.2 != 0 {
             simulator_helpers::emit(&mut next_state, EventKind::BoostChanged {
@@ -3600,7 +3585,7 @@ fn possible_damage_outcomes_for_move(
         // The ⅓ HP cost is visible in-game (the boosts are emitted below).
         if let Some(observer) = next_state.event_observer {
             let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, cs_post.0, cs_post.1);
-            simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp });
+            simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp, max_hp: cs_post.1 });
         }
         for (boost_idx, &stages) in belly_drum_delta.iter().enumerate() {
             if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
@@ -4241,7 +4226,7 @@ fn possible_damage_outcomes_for_move(
             if let Some(observer) = next_state.event_observer {
                 let shown = if user_post.2 { 0 } else { user_post.0 };
                 let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, shown, user_post.1);
-                simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp });
+                simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp, max_hp: user_post.1 });
                 if user_post.2 {
                     simulator_helpers::emit(&mut next_state, EventKind::Faint { slot: action.user_slot });
                 }
@@ -6334,19 +6319,18 @@ fn apply_forced_switch(
             // SwitchAction path: pre-send-out state captured, send-out effects nested as
             // reactions; the whole Switch nests under the forcing MoveUsed via the
             // pending stream.
-            let switch_state: Option<InfoSwitchState> = clone.event_observer.and_then(|observer| {
+            // Raw capture: true species/HP always, plus the disguise a non-owning observer
+            // would see (if any) so `mask_events_for` can pick per-perspective later.
+            let switch_state: Option<InfoSwitchState> = clone.event_observer.and_then(|_| {
                 simulator_helpers::get_pokemon_at_slot(&clone, target_slot).map(|mon| InfoSwitchState {
                     slot: target_slot,
-                    species: if target_slot.player != observer {
-                        simulator_helpers::compute_illusion_disguise(&clone, target_slot)
-                            .unwrap_or_else(|| mon.species.clone())
-                    } else {
-                        mon.species.clone()
-                    },
+                    species: mon.species.clone(),
                     level: mon.level,
-                    hp: simulator_helpers::observed_hp_value(observer, target_slot.player, mon.hp, mon.stats[0]),
+                    hp: PokemonHP::Number(mon.hp),
                     status: mon.status.clone(),
                     tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
+                    disguise_species: simulator_helpers::compute_illusion_disguise(&clone, target_slot),
+                    max_hp: mon.stats[0],
                 })
             });
             let item_snapshot = simulator_helpers::snapshot_active_items(&clone);
@@ -6748,9 +6732,9 @@ fn apply_post_damage_move_effects(
             }
             let new_hp = simulator_helpers::observed_hp_value(observer, attacker_slot.player, hp, atk_max_hp);
             if is_damage {
-                simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: attacker_slot, new_hp });
+                simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: attacker_slot, new_hp, max_hp: atk_max_hp });
             } else {
-                simulator_helpers::emit(&mut bs, EventKind::Healed { target: attacker_slot, new_hp });
+                simulator_helpers::emit(&mut bs, EventKind::Healed { target: attacker_slot, new_hp, max_hp: atk_max_hp });
             }
         }
         if attacker_fainted {
@@ -7061,23 +7045,21 @@ fn send_out_with_switch_event(
     // reveals follow as *reactions* of the Switch event. Emitting them as
     // pre-Switch siblings made the inference engine attribute them to the
     // outgoing mon still occupying the slot. Matches the SimultaneousSwitch path.
-    let switch_state: Option<InfoSwitchState> = state.event_observer.and_then(|observer| {
+    let switch_state: Option<InfoSwitchState> = state.event_observer.and_then(|_| {
         simulator_helpers::get_pokemon_at_slot(state, slot).map(|mon| InfoSwitchState {
             slot,
-            // Illusion disguise is only installed inside process_pokemon_send_out
-            // (not yet run) — compute the disguise species from party composition
-            // directly, as the SimultaneousSwitch path does.
-            species: if slot.player != observer {
-                simulator_helpers::compute_illusion_disguise(state, slot)
-                    .unwrap_or_else(|| mon.species.clone())
-            } else {
-                mon.species.clone()
-            },
+            // Raw capture: true species/HP always; disguise (if any) computed alongside
+            // for mask_events_for. Illusion disguise is only installed inside
+            // process_pokemon_send_out (not yet run) — compute the disguise species from
+            // party composition directly, as the SimultaneousSwitch path does.
+            species: mon.species.clone(),
             level: mon.level,
-            hp: simulator_helpers::observed_hp_value(observer, slot.player, mon.hp, mon.stats[0]),
+            hp: PokemonHP::Number(mon.hp),
             status: mon.status.clone(),
             // Only reveal tera type if the mon has already Terastallized.
             tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
+            disguise_species: simulator_helpers::compute_illusion_disguise(state, slot),
+            max_hp: mon.stats[0],
         })
     });
     // Item-loss ledger across the entry effects (pinch berry eaten from hazard
@@ -7356,6 +7338,21 @@ fn step_action_queue(
     execute_action(next_state, action, move_dex, pokemon_dex, config)
 }
 
+/// Mask a raw (unmasked) event stream for `observer`, once resolution is done.
+///
+/// Internally, resolution now always records the *raw* trajectory (exact HP on both
+/// sides, true + Illusion-disguise species) regardless of which `Player` is passed as
+/// the tracking-on observer — see `mask_events_for`'s doc comment for why ("resolve
+/// once, mask twice"). This is the seam where the public API's long-standing contract
+/// (masked-for-`observer`, e.g. what every existing caller/test expects) is restored;
+/// callers that need *both* perspectives from one resolution should call
+/// `crate::information::information::mask_events_for` directly per observer instead of
+/// going through `simulate_turn`/`sample_turn` twice (which would re-resolve the turn —
+/// unsound, see the same doc comment).
+fn mask_optional_events(observer: Player, events: Option<Vec<InformationEvent>>) -> Option<Vec<InformationEvent>> {
+    events.map(|raw| crate::information::information::mask_events_for(observer, &raw))
+}
+
 pub fn simulate_turn(
     state: &MatchState,
     p1_cmd: &PlayerCommand,
@@ -7367,7 +7364,14 @@ pub fn simulate_turn(
     observer: Option<Player>,
 ) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
     let config = DamageConfig { consider_crit, damage_rolls, sample: false };
-    simulate_turn_impl(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, config, observer)
+    let results = simulate_turn_impl(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, config, observer);
+    match observer {
+        Some(obs) => results
+            .into_iter()
+            .map(|(st, ev, p)| (st, mask_optional_events(obs, ev), p))
+            .collect(),
+        None => results,
+    }
 }
 
 /// Sample mode: resolve the turn as a single weighted trajectory. At every
@@ -7381,6 +7385,38 @@ pub fn simulate_turn(
 /// the resulting *state*'s probability — it is the chance of the specific
 /// sequence of intermediate outcomes that was rolled.
 pub fn sample_turn(
+    state: &MatchState,
+    p1_cmd: &PlayerCommand,
+    p2_cmd: &PlayerCommand,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+    consider_crit: bool,
+    damage_rolls: u8,
+    observer: Option<Player>,
+) -> (MatchState, Option<Vec<InformationEvent>>, f64) {
+    let (st, ev, p) = sample_turn_raw(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, observer);
+    let ev = match observer {
+        Some(obs) => mask_optional_events(obs, ev),
+        None => ev,
+    };
+    (st, ev, p)
+}
+
+/// Like [`sample_turn`], but returns the **raw** (unmasked) event stream instead of
+/// masking it for `observer` — exact HP on both sides, true + Illusion-disguise species.
+/// `observer` still only controls whether events are tracked at all (`Some(_)` = on,
+/// `None` = off); which `Player` variant is passed no longer affects the *content*
+/// returned here (see `mask_events_for`'s doc comment for the "resolve once, mask
+/// twice" rationale).
+///
+/// Intended for callers that need **more than one player's** perspective on the same
+/// resolved turn (e.g. a server tracking both players' fog-of-war beliefs): resolve once
+/// with this function, then call
+/// `crate::information::information::mask_events_for` once per observer on the same
+/// returned stream. Calling `sample_turn`/`sample_turn_raw` a second time to get a
+/// second observer's events would re-resolve the turn — unsound, since resolution picks
+/// a weighted-*random* trajectory.
+pub fn sample_turn_raw(
     state: &MatchState,
     p1_cmd: &PlayerCommand,
     p2_cmd: &PlayerCommand,
@@ -7891,21 +7927,18 @@ fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[
         let switches: Vec<InfoSwitchState> = if st.event_observer.is_some() {
             order.iter().filter_map(|slot| {
                 let mon = simulator_helpers::get_pokemon_at_slot(base_state, *slot)?;
-                let hp = simulator_helpers::observed_hp(base_state, *slot, st.event_observer.unwrap());
+                // Raw capture: true species/HP always; disguise (if any) computed alongside
+                // for mask_events_for. base_state is pre-send-out, so illusion_disguise is
+                // not yet set; compute the disguise species from party composition directly.
                 Some(InfoSwitchState {
                     slot: *slot,
-                    // Illusion disguise: base_state is pre-send-out, so illusion_disguise is not
-                    // yet set; compute the disguise species from party composition directly.
-                    species: if slot.player != st.event_observer.unwrap() {
-                        simulator_helpers::compute_illusion_disguise(base_state, *slot)
-                            .unwrap_or_else(|| mon.species.clone())
-                    } else {
-                        mon.species.clone()
-                    },
+                    species: mon.species.clone(),
                     level: mon.level,
-                    hp,
+                    hp: PokemonHP::Number(mon.hp),
                     status: mon.status.clone(),
                     tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
+                    disguise_species: simulator_helpers::compute_illusion_disguise(base_state, *slot),
+                    max_hp: mon.stats[0],
                 })
             }).collect()
         } else {

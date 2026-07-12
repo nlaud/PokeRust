@@ -8,7 +8,8 @@
   - Remeber that we optimize for SOUNDNESS FIRST, so losing information is okay for the sake of soundness above all else
   - Tracking zoroark throughout the course of a battle is important and extremely difficult. I want this logic to be bulletproof, and I want the frontend to always display the information that player one would have, although when choosing moves for player 2 it should display information that player 2 would have. 
   - Also there is a bug with zoroark. While the moves should be unknown (A or B state) in the sidebar when you don't know if a pokemon is zoroark, when choosing moves it should still show the correct moves so selection goes properly.
-- Instead of denoting the two tabs your team and opponent, they should be denoted as player 1 and player 2. When choosing player 2's moves the entire battlefield should be flipped, and in an imperfect information mode it should show the information from the perspective of palyer 2. This means that you need to now track 2 separate information states (1 per player).
+- Some bug where [inference contradiction] context="item-clause#5" event=ItemRevealed { slot: P1_1, item: Leftovers } — exclude("item-clause#5") conflicts with Known value. For reference, allied Corviknight  is holding leftovers, and known to be doing that.
+- Paused state of the video should persist between playlists
 - Quick fix of all the warnings.
 ### New features
 - Add inference to the README, link all the READMEs to the main project README.
@@ -18,6 +19,7 @@
   - Default tab for battle view should be the opposing team, switching to be the opposing team whenever the players' view that we are watching changes.
   - No item should display as None not --
   - Light screen and reflect should both be the color of current reflect
+  - Display fainted mon information after possibly in the back (with information because it could be useful)
   - We need a favicon lul
 - Implement Closed Team Sheets information mode
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)
