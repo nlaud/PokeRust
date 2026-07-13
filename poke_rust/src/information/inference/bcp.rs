@@ -244,8 +244,8 @@ pub(super) fn maybe_widen_for_illusion(
     let Some(mon) = super::get_mon_mut_by_idx(state, idx) else {
         return;
     };
-    if let Unknown::Known(ref s) = mon.possible_species.clone() {
-        if !ILLUSION_FORMES.contains(s) {
+    if let Unknown::Known(ref s) = mon.possible_species.clone()
+        && !ILLUSION_FORMES.contains(s) {
             let mut candidates = vec![s.clone()];
             for zf in ILLUSION_FORMES {
                 if opponent_known_back_species.contains(zf) {
@@ -267,7 +267,6 @@ pub(super) fn maybe_widen_for_illusion(
                 mon.possible_species = Unknown::Possibly(candidates);
             }
         }
-    }
 }
 
 /// Companion to `maybe_widen_for_illusion`, called only after that widening actually
@@ -350,30 +349,30 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
         Statement::Not(inner) => eval_true(state, inner),
         Statement::HasItem { mon_idx, item } => {
             super::get_mon_by_idx(state, *mon_idx)
-                .map_or(false, |m| super::unknown_is_excluded(&m.item, item))
+                .is_some_and(|m| super::unknown_is_excluded(&m.item, item))
         }
         Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| super::unknown_is_excluded(&m.possible_abilities, ability)),
+            .is_some_and(|m| super::unknown_is_excluded(&m.possible_abilities, ability)),
         Statement::HasSpecies { mon_idx, species } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| super::unknown_is_excluded(&m.possible_species, species)),
+            .is_some_and(|m| super::unknown_is_excluded(&m.possible_species, species)),
         Statement::NatureBoostsStat { mon_idx, stat } => {
-            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
                 boosting_natures_for_stat(stat)
                     .iter()
                     .all(|n| super::unknown_is_excluded(&m.possible_natures, n))
             })
         }
         Statement::NatureNerfsStat { mon_idx, stat } => {
-            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
                 nerfing_natures_for_stat(stat)
                     .iter()
                     .all(|n| super::unknown_is_excluded(&m.possible_natures, n))
             })
         }
         Statement::EVIVStatGE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] < *value),
+            .is_some_and(|m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] < *value),
         Statement::EVIVStatLE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] > *value),
+            .is_some_and(|m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] > *value),
         Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
             let fast_max =
                 super::get_mon_by_idx(state, *fast_idx).map_or(999u64, |m| m.max_stats[5] as u64);
@@ -387,11 +386,11 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
         Statement::WeatherTurns { turns } => state
             .weather_turns
             .as_ref()
-            .map_or(false, |wt| super::unknown_is_excluded(wt, &(*turns as u8))),
+            .is_some_and(|wt| super::unknown_is_excluded(wt, &(*turns as u8))),
         Statement::TerrainTurns { turns } => state
             .terrain_turns
             .as_ref()
-            .map_or(false, |tt| super::unknown_is_excluded(tt, &(*turns as u8))),
+            .is_some_and(|tt| super::unknown_is_excluded(tt, &(*turns as u8))),
         Statement::SideConditionTurns { side, side_condition, turns } => {
             let (conditions, turns_vec) = match side {
                 Player::P1 => (&state.p1_side_conditions, &state.p1_side_condition_turns),
@@ -400,10 +399,10 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
             conditions
                 .iter()
                 .position(|c| c == side_condition)
-                .map_or(false, |i| {
+                .is_some_and(|i| {
                     turns_vec
                         .get(i)
-                        .map_or(false, |ct| super::unknown_is_excluded(ct, &(*turns as u8)))
+                        .is_some_and(|ct| super::unknown_is_excluded(ct, &(*turns as u8)))
                 })
         }
         // KnowsThreateningMove is a persistent relational constraint — never pruned
@@ -416,15 +415,15 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
     match lit {
         Statement::Not(inner) => eval_false(state, inner),
         Statement::HasItem { mon_idx, item } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| super::unknown_is_known_as(&m.item, item)),
+            .is_some_and(|m| super::unknown_is_known_as(&m.item, item)),
         Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| super::unknown_is_known_as(&m.possible_abilities, ability)),
+            .is_some_and(|m| super::unknown_is_known_as(&m.possible_abilities, ability)),
         Statement::HasSpecies { mon_idx, species } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| super::unknown_is_known_as(&m.possible_species, species)),
+            .is_some_and(|m| super::unknown_is_known_as(&m.possible_species, species)),
         Statement::EVIVStatGE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] >= *value),
+            .is_some_and(|m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] >= *value),
         Statement::EVIVStatLE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
-            .map_or(false, |m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] <= *value),
+            .is_some_and(|m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] <= *value),
         Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
             let fast_min =
                 super::get_mon_by_idx(state, *fast_idx).map_or(0u64, |m| m.min_stats[5] as u64);
@@ -433,7 +432,7 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
             fast_min * (*fast_mult as u64) >= slow_max * (*slow_mult as u64)
         }
         Statement::NatureBoostsStat { mon_idx, stat } => {
-            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
                 let boosters = boosting_natures_for_stat(stat);
                 match &m.possible_natures {
                     Unknown::Known(n) => boosters.contains(n),
@@ -443,7 +442,7 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
             })
         }
         Statement::NatureNerfsStat { mon_idx, stat } => {
-            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
                 let nerfers = nerfing_natures_for_stat(stat);
                 match &m.possible_natures {
                     Unknown::Known(n) => nerfers.contains(n),
@@ -455,11 +454,11 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
         Statement::WeatherTurns { turns } => state
             .weather_turns
             .as_ref()
-            .map_or(false, |wt| matches!(wt, Unknown::Known(v) if *v == *turns as u8)),
+            .is_some_and(|wt| matches!(wt, Unknown::Known(v) if *v == *turns as u8)),
         Statement::TerrainTurns { turns } => state
             .terrain_turns
             .as_ref()
-            .map_or(false, |tt| matches!(tt, Unknown::Known(v) if *v == *turns as u8)),
+            .is_some_and(|tt| matches!(tt, Unknown::Known(v) if *v == *turns as u8)),
         Statement::SideConditionTurns { side, side_condition, turns } => {
             let (conditions, turns_vec) = match side {
                 Player::P1 => (&state.p1_side_conditions, &state.p1_side_condition_turns),
@@ -469,7 +468,7 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
                 .iter()
                 .position(|c| c == side_condition)
                 .and_then(|i| turns_vec.get(i))
-                .map_or(false, |ct| matches!(ct, Unknown::Known(v) if *v == *turns as u8))
+                .is_some_and(|ct| matches!(ct, Unknown::Known(v) if *v == *turns as u8))
         }
         // KnowsThreateningMove is satisfied once a known OHKO move is on the mon.
         Statement::KnowsThreateningMove { mon_idx, .. } => {
@@ -479,10 +478,10 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
                 PokemonMove::HornDrill,
                 PokemonMove::SheerCold,
             ];
-            super::get_mon_by_idx(state, *mon_idx).map_or(false, |m| {
+            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
                 m.known_moves
                     .iter()
-                    .any(|mv| mv.as_ref().map_or(false, |m| OHKO_MOVES.contains(m)))
+                    .any(|mv| mv.as_ref().is_some_and(|m| OHKO_MOVES.contains(m)))
             })
         }
     }
@@ -641,7 +640,7 @@ fn filter_natures_to_set(natures: &mut Unknown<Nature>, valid: &[Nature], ctx: &
                 inference_contradiction!(ctx, "No valid natures remain after constraint");
             }
             if v.len() == 1 {
-                let n = v[0].clone();
+                let n = v[0];
                 *natures = Unknown::Known(n);
             }
         }
@@ -652,7 +651,7 @@ fn div_ceil(a: u64, b: u64) -> u64 {
     if b == 0 {
         return a;
     }
-    (a + b - 1) / b
+    a.div_ceil(b)
 }
 
 // ── Nature helpers ────────────────────────────────────────────────────────────

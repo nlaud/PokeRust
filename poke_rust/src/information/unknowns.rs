@@ -538,6 +538,7 @@ impl UnknownTeamPreviewState {
 /// player's perspective so observation code can pattern-match symmetrically with the
 /// concrete state machine.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum UnknownMatchState {
     TeamPreview(UnknownTeamPreviewState),
     Battle(UnknownBattleState),
@@ -736,19 +737,19 @@ impl UnknownPokemonState {
             max_evs: [252; 6],
             min_ivs: [0; 6],
             max_ivs: [31; 6],
-            min_stats: min_stats,
-            max_stats: max_stats,
+            min_stats,
+            max_stats,
             min_pre_nature_stat: min_pre_nature,
             max_pre_nature_stat: max_pre_nature,
             boosts: [0; 7],
             status: None,
             volatiles: Vec::new(),
-            possible_original_abilities: if data.map_or(false, |d| !d.abilities.is_empty()) {
+            possible_original_abilities: if data.is_some_and(|d| !d.abilities.is_empty()) {
                 Unknown::Possibly(data.unwrap().abilities.clone())
             } else {
                 Unknown::Not(Vec::new())
             },
-            possible_abilities: if data.map_or(false, |d| !d.abilities.is_empty()) {
+            possible_abilities: if data.is_some_and(|d| !d.abilities.is_empty()) {
                 Unknown::Possibly(data.unwrap().abilities.clone())
             } else {
                 Unknown::Not(Vec::new())
@@ -848,7 +849,7 @@ impl UnknownPokemonState {
         unk.possible_tera_type = Unknown::Known(mon.tera_type.clone());
 
         if reveal_nature {
-            unk.possible_natures = Unknown::Known(mon.nature.clone());
+            unk.possible_natures = Unknown::Known(mon.nature);
             let base = dex
                 .get(&mon.species)
                 .map(|d| d.base_stats)

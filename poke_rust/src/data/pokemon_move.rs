@@ -959,6 +959,7 @@ pub enum PokemonMove {
 }
 
 impl PokemonMove {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let normalize = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect::<String>();
         let normalized = normalize(s);
@@ -1922,6 +1923,7 @@ impl PokemonMove {
             _ => PokemonMove::Unknown(s.to_string()),
         }
     }
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         match self {
             PokemonMove::Num10000000VoltThunderbolt => "10,000,000 Volt Thunderbolt".to_string(),

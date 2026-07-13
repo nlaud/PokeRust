@@ -908,12 +908,11 @@ fn extract_array2(line: &str, key: &str) -> Option<[u8; 2]> {
         if let Some(end) = rest.find(']') {
             let inner = &rest[..end];
             let nums: Vec<&str> = inner.split(',').collect();
-            if nums.len() == 2 {
-                if let (Ok(a), Ok(b)) = (nums[0].trim().parse::<u8>(), nums[1].trim().parse::<u8>())
+            if nums.len() == 2
+                && let (Ok(a), Ok(b)) = (nums[0].trim().parse::<u8>(), nums[1].trim().parse::<u8>())
                 {
                     return Some([a, b]);
                 }
-            }
         }
     }
     None
@@ -968,14 +967,13 @@ fn parse_flags_from_text(text: &str) -> Vec<MoveFlag> {
             continue;
         }
 
-        if let Some((key, _)) = part.split_once(':') {
-            if let Some(flag) = parse_flag(
+        if let Some((key, _)) = part.split_once(':')
+            && let Some(flag) = parse_flag(
                 key.trim()
                     .trim_matches(|c: char| c == '{' || c == '}' || c == '\'' || c == '"'),
             ) {
                 flags.push(flag);
             }
-        }
     }
     flags
 }
@@ -1129,8 +1127,7 @@ fn is_function_line(line: &str) -> bool {
 fn collect_block(lines: &[String], start_idx: usize) -> (String, usize) {
     let mut depth: i32 = 0;
     let mut block = String::new();
-    for i in start_idx..lines.len() {
-        let line = &lines[i];
+    for (i, line) in lines.iter().enumerate().skip(start_idx) {
         depth += line.chars().filter(|&c| c == '{').count() as i32;
         depth -= line.chars().filter(|&c| c == '}').count() as i32;
         block.push_str(line);
@@ -1233,8 +1230,8 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
             }
         } else if trimmed.starts_with("types:") {
             // types: ["Grass", "Poison"],
-            if let Some(start) = trimmed.find('[') {
-                if let Some(end) = trimmed.find(']') {
+            if let Some(start) = trimmed.find('[')
+                && let Some(end) = trimmed.find(']') {
                     let inner = &trimmed[start + 1..end];
                     for part in inner.split(',') {
                         let t = part.trim().trim_matches('"');
@@ -1243,11 +1240,10 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
                         }
                     }
                 }
-            }
         } else if trimmed.starts_with("baseStats:") {
             // baseStats: { hp: 45, atk: 49, def: 49, spa: 65, spd: 65, spe: 45 },
-            if let Some(start) = trimmed.find('{') {
-                if let Some(end) = trimmed.find('}') {
+            if let Some(start) = trimmed.find('{')
+                && let Some(end) = trimmed.find('}') {
                     let inner = &trimmed[start + 1..end];
                     for part in inner.split(',') {
                         if let Some((k, v)) = part.split_once(':') {
@@ -1265,7 +1261,6 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
                         }
                     }
                 }
-            }
         } else if trimmed.starts_with("weightkg:") {
             // weightkg: 6.9, -> store as hectograms (u16)
             if let Some(rest) = trimmed.strip_prefix("weightkg:") {
@@ -1314,8 +1309,8 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
             // genderRatio: { M: 0.875, F: 0.125 }
             let mut m_ratio = 0.5;
             let mut f_ratio = 0.5;
-            if let Some(start) = trimmed.find('{') {
-                if let Some(end) = trimmed.find('}') {
+            if let Some(start) = trimmed.find('{')
+                && let Some(end) = trimmed.find('}') {
                     let inner = &trimmed[start + 1..end];
                     for part in inner.split(',') {
                         if let Some((k, v)) = part.split_once(':') {
@@ -1330,7 +1325,6 @@ fn parse_pokemon_entry(lines: &[String]) -> Option<(Species, PokemonData)> {
                         }
                     }
                 }
-            }
             if m_ratio > f_ratio {
                 default_gender = crate::state::pokemon::PokemonGender::Male;
             } else if f_ratio > m_ratio {
@@ -1487,11 +1481,10 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                 category = parse_category(&c);
             }
         } else if trimmed.starts_with("type:") {
-            if let Some(t) = extract_quoted(trimmed, "type") {
-                if let Some(pt) = parse_type(&t) {
+            if let Some(t) = extract_quoted(trimmed, "type")
+                && let Some(pt) = parse_type(&t) {
                     pokemon_type = pt;
                 }
-            }
         } else if trimmed.starts_with("priority:") {
             if let Some(v) = extract_int::<i8>(trimmed, "priority") {
                 priority = v;
@@ -1614,11 +1607,10 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
         } else if trimmed.starts_with("hasCrashDamage:") {
             has_crash_damage = extract_bool(trimmed, "hasCrashDamage").unwrap_or(false);
         } else if trimmed.starts_with("overrideOffensivePokemon:") {
-            if let Some(s) = extract_quoted(trimmed, "overrideOffensivePokemon") {
-                if s == "target" {
+            if let Some(s) = extract_quoted(trimmed, "overrideOffensivePokemon")
+                && s == "target" {
                     foul_play = true;
                 }
-            }
         } else if trimmed.starts_with("boosts:") && depth <= 1 {
             // Top-level boosts — must extract only the { ... } inner content,
             // not the "boosts: " prefix, or parse_boosts_from_text mis-splits it.
@@ -1672,61 +1664,54 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             }
         } else if trimmed.starts_with("status:") && depth <= 1 {
             // Top-level status: always-apply 100% secondary
-            if let Some(s) = extract_quoted(trimmed, "status") {
-                if let Some(nv) = parse_nvstatus(&s) {
+            if let Some(s) = extract_quoted(trimmed, "status")
+                && let Some(nv) = parse_nvstatus(&s) {
                     let mut e = empty_hit_effect();
                     e.status = Some(nv);
                     secondaries.push(PokemonSecondaryEffect::simple(100, e));
                 }
-            }
         } else if trimmed.starts_with("volatileStatus:") && depth <= 1 {
-            if let Some(s) = extract_quoted(trimmed, "volatileStatus") {
-                if let Some(vs) = parse_volatile(&s) {
+            if let Some(s) = extract_quoted(trimmed, "volatileStatus")
+                && let Some(vs) = parse_volatile(&s) {
                     let mut e = empty_hit_effect();
                     e.volatile_status = Some(vs);
                     secondaries.push(PokemonSecondaryEffect::simple(100, e));
                 }
-            }
         } else if trimmed.starts_with("sideCondition:") && depth <= 1 {
-            if let Some(s) = extract_quoted(trimmed, "sideCondition") {
-                if let Some(sc) = parse_side_condition(&s) {
+            if let Some(s) = extract_quoted(trimmed, "sideCondition")
+                && let Some(sc) = parse_side_condition(&s) {
                     let mut e = empty_hit_effect();
                     e.side_condition = Some(sc);
                     secondaries.push(PokemonSecondaryEffect::simple(100, e));
                 }
-            }
         } else if trimmed.starts_with("terrain:") && depth <= 1 {
-            if let Some(s) = extract_quoted(trimmed, "terrain") {
-                if let Some(t) = parse_terrain(&s) {
+            if let Some(s) = extract_quoted(trimmed, "terrain")
+                && let Some(t) = parse_terrain(&s) {
                     let mut e = empty_hit_effect();
                     e.terrain = Some(t);
                     secondaries.push(PokemonSecondaryEffect::simple(100, e));
                 }
-            }
         } else if trimmed.starts_with("weather:") && depth <= 1 {
-            if let Some(s) = extract_quoted(trimmed, "weather") {
-                if let Some(w) = parse_weather_val(&s) {
+            if let Some(s) = extract_quoted(trimmed, "weather")
+                && let Some(w) = parse_weather_val(&s) {
                     let mut e = empty_hit_effect();
                     e.weather = Some(w);
                     secondaries.push(PokemonSecondaryEffect::simple(100, e));
                 }
-            }
         } else if trimmed.starts_with("pseudoWeather:") && depth <= 1 {
-            if let Some(s) = extract_quoted(trimmed, "pseudoWeather") {
-                if let Some(pw) = parse_pseudo_weather(&s) {
+            if let Some(s) = extract_quoted(trimmed, "pseudoWeather")
+                && let Some(pw) = parse_pseudo_weather(&s) {
                     let mut e = empty_hit_effect();
                     e.pseudo_weather = Some(pw);
                     secondaries.push(PokemonSecondaryEffect::simple(100, e));
                 }
-            }
         } else if trimmed.starts_with("slotCondition:") && depth <= 1 {
-            if let Some(s) = extract_quoted(trimmed, "slotCondition") {
-                if let Some(slc) = parse_slot_condition(&s) {
+            if let Some(s) = extract_quoted(trimmed, "slotCondition")
+                && let Some(slc) = parse_slot_condition(&s) {
                     let mut e = empty_hit_effect();
                     e.slot_condition = Some(slc);
                     secondaries.push(PokemonSecondaryEffect::simple(100, e));
                 }
-            }
         } else if trimmed.starts_with("self:")
             && !trimmed.starts_with("selfSwitch")
             && !trimmed.starts_with("selfdestruct")
@@ -1734,9 +1719,9 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
         {
             // Top-level self: { ... } block, converted to a self-secondary.
             let (block, end) = collect_block(lines, i);
-            if let Some(ob) = block.find('{') {
-                if let Some(cb) = block.rfind('}') {
-                    if cb > ob {
+            if let Some(ob) = block.find('{')
+                && let Some(cb) = block.rfind('}')
+                    && cb > ob {
                         let inner = block[ob + 1..cb].to_string();
                         let self_effect = parse_effect_from_text(&inner);
                         let has_self = self_effect.status.is_some()
@@ -1746,8 +1731,6 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
                             self_secondaries.push(PokemonSecondaryEffect::simple(100, self_effect));
                         }
                     }
-                }
-            }
             i = end;
         } else if trimmed.starts_with("willCrit:") {
             if extract_bool(trimmed, "willCrit") == Some(true) {
@@ -1781,11 +1764,10 @@ fn parse_move_entry(lines: &[String]) -> Option<(PokemonMove, MoveData)> {
             } else if let Some(v) = extract_int::<u16>(trimmed, "damage") {
                 damage_override = DamageOverride::Number(v);
             }
-        } else if trimmed.starts_with("damageOverride:") {
-            if let Some(s) = extract_quoted(trimmed, "damageOverride") {
+        } else if trimmed.starts_with("damageOverride:")
+            && let Some(s) = extract_quoted(trimmed, "damageOverride") {
                 damage_override = parse_damage_override(&s).unwrap_or(DamageOverride::None);
             }
-        }
 
         i += 1;
     }
@@ -1989,7 +1971,7 @@ pub fn parse_ability_dex(file_path: &str) -> HashMap<Ability, AbilityData> {
     let entries = split_entries(&content);
     let mut result = HashMap::new();
     for (_key, lines) in &entries {
-        if let Some((ability, data)) = parse_ability_entry(&lines) {
+        if let Some((ability, data)) = parse_ability_entry(lines) {
             result.insert(ability, data);
         }
     }

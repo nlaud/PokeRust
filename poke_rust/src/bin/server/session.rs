@@ -314,6 +314,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 /// identity — see `into_battle_state`'s doc comment — so `apply_information`'s
 /// absolute slot-indexing already lines up correctly with no relabeling needed).
 /// Returns `Ok(None)` unchanged when no belief is tracked (Perfect Information).
+#[allow(clippy::too_many_arguments)]
 fn advance_belief(
     belief: Option<UnknownMatchState>,
     was_team_preview: bool,

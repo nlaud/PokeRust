@@ -223,11 +223,10 @@ fn prompt_choice(prompt: &str, options: &[String]) -> usize {
         io::stdin().read_line(&mut input).unwrap();
         let trimmed = input.trim();
 
-        if let Ok(index) = trimmed.parse::<usize>() {
-            if (1..=options.len()).contains(&index) {
+        if let Ok(index) = trimmed.parse::<usize>()
+            && (1..=options.len()).contains(&index) {
                 return index - 1;
             }
-        }
 
         let normalized_input = humanize_identifier(trimmed).to_lowercase();
         if let Some(index) = options.iter().position(|option| humanize_identifier(option).to_lowercase() == normalized_input) {

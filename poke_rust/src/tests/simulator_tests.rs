@@ -81,8 +81,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Magikarp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some(splash_set.clone()),
                 None,
@@ -96,8 +96,8 @@ mod tests {
             );
             let p2_mon = build_pokemon_state(
                 Species::Shuckle,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some(splash_set),
                 None,
@@ -121,8 +121,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -148,8 +148,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Magikarp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -163,8 +163,8 @@ mod tests {
             );
             let p2_mon = build_pokemon_state(
                 Species::Shuckle,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -196,8 +196,8 @@ mod tests {
 
             let urshifu = build_pokemon_state(
                 Species::UrshifuRapidStrike,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::SurgingStrikes), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -212,8 +212,8 @@ mod tests {
 
             let altaria = build_pokemon_state(
                 Species::Altaria,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -251,10 +251,10 @@ mod tests {
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
             crate::SHARED_MULTIHIT_DAMAGE_ROLLS.store(false, Ordering::Relaxed);
-            let independent_outcomes = simulate_turn(&MatchState::BattleState(initial_state.clone()), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 16);
+            let independent_outcomes = simulate_turn(&MatchState::BattleState(initial_state.clone()), &p1_cmd, &p2_cmd, move_dex, pokemon_dex, false, 16);
 
             crate::SHARED_MULTIHIT_DAMAGE_ROLLS.store(true, Ordering::Relaxed);
-            let shared_outcomes = simulate_turn(&MatchState::BattleState(initial_state), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 16);
+            let shared_outcomes = simulate_turn(&MatchState::BattleState(initial_state), &p1_cmd, &p2_cmd, move_dex, pokemon_dex, false, 16);
             crate::SHARED_MULTIHIT_DAMAGE_ROLLS.store(false, Ordering::Relaxed);
 
             let expected_independent = repeat_hit_distribution(&single_hit, 3);
@@ -274,8 +274,8 @@ mod tests {
 
             let tsareena = build_pokemon_state(
                 Species::Tsareena,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::TripleAxel), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -290,8 +290,8 @@ mod tests {
 
             let venusaur = build_pokemon_state(
                 Species::Venusaur,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -370,7 +370,7 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-            let outcomes = simulate_turn(&MatchState::BattleState(initial_state), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 16);
+            let outcomes = simulate_turn(&MatchState::BattleState(initial_state), &p1_cmd, &p2_cmd, move_dex, pokemon_dex, false, 16);
 
             let expected = combine_hit_distributions_with_hit_chances(&[hit1, hit2, hit3], &[hit_chance, hit_chance, hit_chance]);
 
@@ -384,8 +384,8 @@ mod tests {
 
             let mut boosted_tyranitar = build_pokemon_state(
                 Species::Tyranitar,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::BeatUp), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -407,8 +407,8 @@ mod tests {
 
             let magikarp = build_pokemon_state(
                 Species::Magikarp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -423,8 +423,8 @@ mod tests {
 
             let bidoof = build_pokemon_state(
                 Species::Bidoof,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -439,8 +439,8 @@ mod tests {
 
             let target = build_pokemon_state(
                 Species::Altaria,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -459,8 +459,8 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
-            let boosted_outcomes = simulate_turn(&MatchState::BattleState(boosted_state), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1);
-            let unboosted_outcomes = simulate_turn(&MatchState::BattleState(unboosted_state), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1);
+            let boosted_outcomes = simulate_turn(&MatchState::BattleState(boosted_state), &p1_cmd, &p2_cmd, move_dex, pokemon_dex, false, 1);
+            let unboosted_outcomes = simulate_turn(&MatchState::BattleState(unboosted_state), &p1_cmd, &p2_cmd, move_dex, pokemon_dex, false, 1);
 
             let boosted_damage = boosted_outcomes
                 .iter()
@@ -494,8 +494,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -510,8 +510,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -535,8 +535,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 16,
             );
@@ -576,8 +576,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Bite), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -592,8 +592,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Bite), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -617,8 +617,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -649,8 +649,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Bite), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -665,8 +665,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Bite), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -690,8 +690,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 2,
             );
@@ -726,8 +726,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -742,8 +742,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -767,8 +767,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 true,
                 1,
             );
@@ -803,8 +803,8 @@ mod tests {
 
             let attacker = build_pokemon_state(
                 Species::Magikarp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(1),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None,
@@ -818,8 +818,8 @@ mod tests {
             );
             let defender = build_pokemon_state(
                 Species::Aggron,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -837,8 +837,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let (state, _) = extract_battle_state(outcomes);
@@ -856,8 +856,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -872,8 +872,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -897,8 +897,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 true,
                 16,
             );
@@ -950,8 +950,8 @@ mod tests {
 
             let mut p1_mon = build_pokemon_state(
                 Species::Kingambit,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::BrickBreak), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -968,8 +968,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Kingambit,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -989,8 +989,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 true,
                 1,
             );
@@ -1039,8 +1039,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Kingambit,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::BrickBreak), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -1055,8 +1055,8 @@ mod tests {
 
             let mut p2_mon = build_pokemon_state(
                 Species::Kingambit,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -1077,8 +1077,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 true,
                 1,
             );
@@ -1123,8 +1123,8 @@ mod tests {
 
             let mut p1_mon = build_pokemon_state(
                 Species::Kingambit,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::BrickBreak), Some(PokemonMove::LaserFocus), None, None]),
                 None,
@@ -1140,8 +1140,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -1189,8 +1189,8 @@ mod tests {
             let make_state = |ability: Ability| {
                 let p1_mon = build_pokemon_state(
                     Species::Kingambit,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(PokemonMove::BrickBreak), None, None, None]),
                     None,
@@ -1205,8 +1205,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -1275,8 +1275,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Venusaur,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::MagicalLeaf), None, None, None]),
                 None,
@@ -1291,8 +1291,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::RotomWash,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -1316,8 +1316,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -1348,8 +1348,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Blastoise,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::WaterGun), None, None, None]),
                 None,
@@ -1364,8 +1364,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::RotomWash,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -1389,8 +1389,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -1424,7 +1424,7 @@ mod tests {
 
             let p1 = build_pokemon_state(
                 Species::Lapras,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::IceBeam), None, None, None]),
                 None, None, Some(Nature::Modest), None, None,
@@ -1433,7 +1433,7 @@ mod tests {
 
             let p2_4x = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, None, Some(Nature::Hardy), None, None,
@@ -1442,7 +1442,7 @@ mod tests {
 
             let p2_neutral = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, None, Some(Nature::Hardy), None, None,
@@ -1457,7 +1457,7 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex, false, 16,
+                    move_dex, pokemon_dex, false, 16,
                 )
             };
 
@@ -1493,8 +1493,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::BodyPress), None, None, None]),
                 None,
@@ -1509,8 +1509,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Gengar,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -1534,8 +1534,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -1569,8 +1569,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::RotomWash,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::HydroPump), None, None, None]),
                 None,
@@ -1585,8 +1585,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Sableye,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -1610,8 +1610,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -1644,8 +1644,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::RotomWash,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::HydroPump), None, None, None]),
                 None,
@@ -1660,8 +1660,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Sableye,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -1685,8 +1685,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 16,
             );
@@ -1734,8 +1734,8 @@ mod tests {
             for (move_name, weather, expected_hit_probability) in cases {
                 let attacker = build_pokemon_state(
                     Species::DragoniteMega,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(move_name), None, None, None]),
                     None,
@@ -1750,8 +1750,8 @@ mod tests {
 
                 let defender = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -1774,8 +1774,8 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!((outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
@@ -1785,8 +1785,8 @@ mod tests {
             for move_name in [PokemonMove::Thunder, PokemonMove::Hurricane] {
                 let attacker = build_pokemon_state(
                     Species::DragoniteMega,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(move_name), None, None, None]),
                     None,
@@ -1801,8 +1801,8 @@ mod tests {
 
                 let mut defender = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -1826,8 +1826,8 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!((outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
@@ -1848,8 +1848,8 @@ mod tests {
             for (weather, expected_hit_probability) in cases {
                 let attacker = build_pokemon_state(
                     Species::Ninetales,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(PokemonMove::Blizzard), None, None, None]),
                     None,
@@ -1864,8 +1864,8 @@ mod tests {
 
                 let defender = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -1888,8 +1888,8 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!((outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
@@ -1898,8 +1898,8 @@ mod tests {
 
             let attacker = build_pokemon_state(
                 Species::Ninetales,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::Blizzard), None, None, None]),
                 None,
@@ -1914,8 +1914,8 @@ mod tests {
 
             let mut defender = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -1938,8 +1938,8 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!((outcomes.iter().map(|(_, probability)| *probability).sum::<f64>() - 1.0).abs() < 1e-9);
@@ -1959,8 +1959,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(100),
                 Some([Some(PokemonMove::DragonClaw), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -1975,8 +1975,8 @@ mod tests {
 
             let mut p2_mon = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::DragonClaw), Some(PokemonMove::Splash), None, None]),
                 None,
@@ -1997,8 +1997,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![1])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -2020,8 +2020,8 @@ mod tests {
 
             let p1_mon_initial = build_pokemon_state(
                 Species::Mimikyu,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([
                     Some(PokemonMove::SwordsDance),
@@ -2041,8 +2041,8 @@ mod tests {
 
             let p2_mon_initial = build_pokemon_state(
                 Species::Aerodactyl,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([
                     Some(PokemonMove::Splash),
@@ -2074,8 +2074,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd_t1,
                 &p2_cmd_t1,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -2101,8 +2101,8 @@ mod tests {
                 &MatchState::BattleState(state_after_t1),
                 &p1_cmd_t2,
                 &p2_cmd_t2,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -2126,8 +2126,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Tyranitar,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([
                     Some(PokemonMove::DragonDance),
@@ -2147,8 +2147,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Tyranitar,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([
                     Some(PokemonMove::Splash),
@@ -2180,8 +2180,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd_t1,
                 &p2_cmd_t1,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -2208,8 +2208,8 @@ mod tests {
                 &MatchState::BattleState(state_after_t1),
                 &p1_cmd_t2,
                 &p2_cmd_t2,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -2233,8 +2233,8 @@ mod tests {
 
             let p1_mon = build_pokemon_state(
                 Species::Tyranitar,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([
                     Some(PokemonMove::Splash),
@@ -2254,8 +2254,8 @@ mod tests {
 
             let p2_mon = build_pokemon_state(
                 Species::Aggron,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([
                     Some(PokemonMove::IronDefense),
@@ -2283,8 +2283,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 16,
             );
@@ -2306,8 +2306,8 @@ mod tests {
                 &MatchState::BattleState(state_t1),
                 &p1_cmd_2,
                 &p2_cmd_2,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 16,
             );
@@ -2389,12 +2389,12 @@ mod tests {
         fn belly_drum_maxes_attack_and_halves_hp() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::BellyDrum), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::BellyDrum), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
             let max_hp = initial.p1_active_mons[0].hp;
 
-            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&initial, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             assert_eq!(state.p1_active_mons[0].boosts[0], 6);
             assert_eq!(state.p1_active_mons[0].hp, max_hp - max_hp / 2);
         }
@@ -2403,14 +2403,14 @@ mod tests {
         fn belly_drum_fails_when_hp_too_low() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mut p1 = build_mon(Species::Snorlax, [Some(PokemonMove::BellyDrum), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let mut p1 = build_mon(Species::Snorlax, [Some(PokemonMove::BellyDrum), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
             // Belly Drum fails when HP is strictly less than ½ max (not at exactly ½).
             p1.hp = p1.stats[0] / 2 - 1;
             let below_half_hp = p1.hp;
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
-            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&initial, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             assert_eq!(state.p1_active_mons[0].boosts[0], 0);
             assert_eq!(state.p1_active_mons[0].hp, below_half_hp);
             // The move still consumed PP.
@@ -2421,12 +2421,12 @@ mod tests {
         fn clangorous_soul_raises_all_and_costs_a_third() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let p1 = build_mon(Species::Kommoo, [Some(PokemonMove::ClangorousSoul), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p1 = build_mon(Species::Kommoo, [Some(PokemonMove::ClangorousSoul), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
             let max_hp = initial.p1_active_mons[0].hp;
 
-            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&initial, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             assert_eq!(&state.p1_active_mons[0].boosts[0..5], &[1, 1, 1, 1, 1]);
             assert_eq!(state.p1_active_mons[0].hp, max_hp - max_hp / 3);
         }
@@ -2435,11 +2435,11 @@ mod tests {
         fn charge_raises_spdef_and_sets_volatile() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let p1 = build_mon(Species::Pikachu, [Some(PokemonMove::Charge), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p1 = build_mon(Species::Pikachu, [Some(PokemonMove::Charge), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
-            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&initial, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             assert_eq!(state.p1_active_mons[0].boosts[3], 1); // Sp. Def
             assert!(state.p1_active_mons[0].volatiles.iter().any(|v|
                 matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Charge, _))));
@@ -2449,11 +2449,11 @@ mod tests {
         fn focus_energy_applies_crit_volatile_and_table() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::FocusEnergy), None, None, None], None, &pokemon_dex, &move_dex);
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::FocusEnergy), None, None, None], None, pokemon_dex, move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
-            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&initial, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             assert!(simulator_helpers::has_status_volatile(&state.p1_active_mons[0], &VolatileStatus::FocusEnergy));
             // +2 crit stages: a base-1 ratio becomes 3.
             assert_eq!(simulator_helpers::effective_crit_ratio(&state, &state.p1_active_mons[0], 1), 3);
@@ -2464,7 +2464,7 @@ mod tests {
             assert!((crit_chance - 0.5).abs() < 1e-9, "expected 50% crit, got {crit_chance}");
 
             // Using Focus Energy again fails (no second volatile stacked).
-            let state2 = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let state2 = first_state(run(&state, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             let count = state2.p1_active_mons[0].volatiles.iter()
                 .filter(|v| matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, _)))
                 .count();
@@ -2476,13 +2476,13 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Slot 0 (Snorlax) uses Dragon Cheer on its Dragon-type ally (Garchomp, slot 1).
-            let user = build_mon(Species::Snorlax, [Some(PokemonMove::DragonCheer), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
-            let ally = build_mon(Species::Garchomp, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
-            let foe_a = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
-            let foe_b = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let user = build_mon(Species::Snorlax, [Some(PokemonMove::DragonCheer), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
+            let ally = build_mon(Species::Garchomp, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
+            let foe_a = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
+            let foe_b = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![user, ally], vec![], vec![foe_a, foe_b], vec![]);
 
-            let state = first_state(run(&initial, vec![0, 0], vec![0, 0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&initial, vec![0, 0], vec![0, 0], move_dex, pokemon_dex, false, 1));
             // The Dragon ally received +2 (DragonCheer(2)).
             assert!(state.p1_active_mons[1].volatiles.iter().any(|v|
                 matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::DragonCheer(2), _))));
@@ -2496,13 +2496,13 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // User has Plus; ally has a non-Plus/Minus ability and must not be boosted.
-            let user = build_mon(Species::Plusle, [Some(PokemonMove::MagneticFlux), Some(PokemonMove::Splash), None, None], Some(Ability::Plus), &pokemon_dex, &move_dex);
-            let ally = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Some(Ability::Illuminate), &pokemon_dex, &move_dex);
-            let foe_a = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
-            let foe_b = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let user = build_mon(Species::Plusle, [Some(PokemonMove::MagneticFlux), Some(PokemonMove::Splash), None, None], Some(Ability::Plus), pokemon_dex, move_dex);
+            let ally = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], Some(Ability::Illuminate), pokemon_dex, move_dex);
+            let foe_a = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
+            let foe_b = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![user, ally], vec![], vec![foe_a, foe_b], vec![]);
 
-            let state = first_state(run(&initial, vec![0, 0], vec![0, 0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&initial, vec![0, 0], vec![0, 0], move_dex, pokemon_dex, false, 1));
             // Plus user gains +1 Def/Sp. Def.
             assert_eq!(state.p1_active_mons[0].boosts[1], 1);
             assert_eq!(state.p1_active_mons[0].boosts[3], 1);
@@ -2515,11 +2515,11 @@ mod tests {
         fn minimize_raises_evasion_and_sets_volatile() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Minimize), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Minimize), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
-            let state = first_state(run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&initial, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             assert_eq!(state.p1_active_mons[0].boosts[6], 2); // evasion
             assert!(simulator_helpers::has_status_volatile(&state.p1_active_mons[0], &VolatileStatus::Minimize));
         }
@@ -2528,17 +2528,17 @@ mod tests {
         fn minimize_doubles_body_slam_and_never_misses() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let atk = build_mon(Species::Snorlax, [Some(PokemonMove::BodySlam), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
-            let def = build_mon(Species::Snorlax, [Some(PokemonMove::Minimize), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
+            let atk = build_mon(Species::Snorlax, [Some(PokemonMove::BodySlam), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
+            let def = build_mon(Species::Snorlax, [Some(PokemonMove::Minimize), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![atk], vec![], vec![def], vec![]);
             let full_hp = initial.p2_active_mons[0].hp;
 
-            let control = run(&initial, vec![0], vec![1], &move_dex, &pokemon_dex, false, 1);
+            let control = run(&initial, vec![0], vec![1], move_dex, pokemon_dex, false, 1);
             let control_dmg = *damage_distribution(&control, full_hp).keys().max().unwrap();
             assert!(control_dmg > 0);
 
-            let minimized = first_state(run(&initial, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1));
-            let after = run(&minimized, vec![0], vec![1], &move_dex, &pokemon_dex, false, 1);
+            let minimized = first_state(run(&initial, vec![1], vec![0], move_dex, pokemon_dex, false, 1));
+            let after = run(&minimized, vec![0], vec![1], move_dex, pokemon_dex, false, 1);
             // Always hits a minimized target.
             assert!((hit_probability(&after, full_hp) - 1.0).abs() < 1e-9);
             let minimized_dmg = *damage_distribution(&after, full_hp).keys().max().unwrap();
@@ -2549,18 +2549,18 @@ mod tests {
         fn stockpile_stacks_to_three_then_fails() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::Splash), None, None], None, &pokemon_dex, &move_dex);
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::Splash), None, None], None, pokemon_dex, move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
             for expected in 1..=3u8 {
-                state = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+                state = first_state(run(&state, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
                 assert_eq!(simulator_helpers::stockpile_level(&state.p1_active_mons[0]), expected);
                 assert_eq!(state.p1_active_mons[0].boosts[1], expected as i8); // Def
                 assert_eq!(state.p1_active_mons[0].boosts[3], expected as i8); // Sp. Def
             }
             // Fourth use fails — level stays at 3, boosts unchanged.
-            state = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            state = first_state(run(&state, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             assert_eq!(simulator_helpers::stockpile_level(&state.p1_active_mons[0]), 3);
             assert_eq!(state.p1_active_mons[0].boosts[1], 3);
         }
@@ -2570,21 +2570,21 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let make = || {
-                let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::SpitUp), None, None], None, &pokemon_dex, &move_dex);
-                let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+                let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::SpitUp), None, None], None, pokemon_dex, move_dex);
+                let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
                 battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])
             };
             let full_hp = make().p2_active_mons[0].hp;
 
             // One layer of Stockpile, then Spit Up (100 BP).
-            let s1 = first_state(run(&make(), vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
-            let out1 = run(&s1, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1);
+            let s1 = first_state(run(&make(), vec![0], vec![0], move_dex, pokemon_dex, false, 1));
+            let out1 = run(&s1, vec![1], vec![0], move_dex, pokemon_dex, false, 1);
             let dmg1 = *damage_distribution(&out1, full_hp).keys().max().unwrap();
 
             // Two layers, then Spit Up (200 BP) deals more.
-            let mut s2 = first_state(run(&make(), vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
-            s2 = first_state(run(&s2, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
-            let out2 = run(&s2, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1);
+            let mut s2 = first_state(run(&make(), vec![0], vec![0], move_dex, pokemon_dex, false, 1));
+            s2 = first_state(run(&s2, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
+            let out2 = run(&s2, vec![1], vec![0], move_dex, pokemon_dex, false, 1);
             let dmg2 = *damage_distribution(&out2, full_hp).keys().max().unwrap();
 
             assert!(dmg2 > dmg1, "200 BP Spit Up ({dmg2}) should beat 100 BP ({dmg1})");
@@ -2600,12 +2600,12 @@ mod tests {
         fn spit_up_fails_without_stockpile() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::SpitUp), None, None, None], None, &pokemon_dex, &move_dex);
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::SpitUp), None, None, None], None, pokemon_dex, move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let initial = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
             let full_hp = initial.p2_active_mons[0].hp;
 
-            let out = run(&initial, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1);
+            let out = run(&initial, vec![0], vec![0], move_dex, pokemon_dex, false, 1);
             assert!(damage_distribution(&out, full_hp).keys().max().copied().unwrap_or(0) == 0);
         }
 
@@ -2613,19 +2613,19 @@ mod tests {
         fn swallow_heals_by_level_and_consumes_stockpile() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::Swallow), None, None], None, &pokemon_dex, &move_dex);
-            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, &pokemon_dex, &move_dex);
+            let p1 = build_mon(Species::Snorlax, [Some(PokemonMove::Stockpile), Some(PokemonMove::Swallow), None, None], None, pokemon_dex, move_dex);
+            let p2 = build_mon(Species::Snorlax, [Some(PokemonMove::Splash), None, None, None], None, pokemon_dex, move_dex);
             let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
             let max_hp = state.p1_active_mons[0].hp;
 
             // Two layers of Stockpile.
-            state = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
-            state = first_state(run(&state, vec![0], vec![0], &move_dex, &pokemon_dex, false, 1));
+            state = first_state(run(&state, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
+            state = first_state(run(&state, vec![0], vec![0], move_dex, pokemon_dex, false, 1));
             // Drop the user's HP so the heal is observable and not capped.
             state.p1_active_mons[0].hp = max_hp / 4;
             let before_hp = state.p1_active_mons[0].hp;
 
-            let state = first_state(run(&state, vec![1], vec![0], &move_dex, &pokemon_dex, false, 1));
+            let state = first_state(run(&state, vec![1], vec![0], move_dex, pokemon_dex, false, 1));
             // Level 2 heals ½ max HP.
             assert_eq!(state.p1_active_mons[0].hp, before_hp + max_hp / 2);
             // Stockpile charge and its Def/Sp. Def boosts are gone.
@@ -2645,8 +2645,8 @@ mod tests {
 
             let garchomp = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Earthquake), None, None, None]),
                 None,
@@ -2661,8 +2661,8 @@ mod tests {
 
             let clefable = build_pokemon_state(
                 Species::Clefable,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -2677,8 +2677,8 @@ mod tests {
 
             let corviknight = build_pokemon_state(
                 Species::Corviknight,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -2702,8 +2702,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 16,
             );
@@ -2745,8 +2745,8 @@ mod tests {
 
             let tyranitar = build_pokemon_state(
                 Species::Tyranitar,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::RockSlide), None, None, None]),
                 None,
@@ -2761,8 +2761,8 @@ mod tests {
 
             let magikarp = build_pokemon_state(
                 Species::Magikarp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -2777,8 +2777,8 @@ mod tests {
 
             let corviknight = build_pokemon_state(
                 Species::Corviknight,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -2802,8 +2802,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 true,
                 16,
             );
@@ -2935,7 +2935,7 @@ mod tests {
                 )),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex, true, 16,
+                move_dex, pokemon_dex, true, 16,
             );
             let single_initial_hp = corviknight.hp;
             let single_dmg_mean: f64 = {
@@ -2980,8 +2980,8 @@ mod tests {
 
             let excadrill = build_pokemon_state(
                 Species::Excadrill,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Dig), None, None, None]),
                 None,
@@ -2996,8 +2996,8 @@ mod tests {
 
             let snorlax = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), Some(PokemonMove::BodySlam), None, None]),
                 None,
@@ -3020,8 +3020,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -3044,8 +3044,8 @@ mod tests {
                 &MatchState::BattleState(state_t1),
                 &p1_cmd_2,
                 &p2_cmd_2,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -3074,8 +3074,8 @@ mod tests {
 
             let excadrill = build_pokemon_state(
                 Species::Excadrill,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Dig), None, None, None]),
                 None,
@@ -3090,8 +3090,8 @@ mod tests {
 
             let snorlax = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), Some(PokemonMove::Earthquake), None, None]),
                 None,
@@ -3114,8 +3114,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -3139,8 +3139,8 @@ mod tests {
 
             let dragonite = build_pokemon_state(
                 Species::Dragonite,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Fly), None, None, None]),
                 None,
@@ -3155,8 +3155,8 @@ mod tests {
 
             let snorlax = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([Some(PokemonMove::Splash), Some(PokemonMove::BodySlam), None, None]),
                 None,
@@ -3179,8 +3179,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &p1_cmd,
                 &p2_cmd,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -3203,8 +3203,8 @@ mod tests {
                 &MatchState::BattleState(state_t1),
                 &p1_cmd_2,
                 &p2_cmd_2,
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -3715,8 +3715,8 @@ mod tests {
 
             let venusaur = build_pokemon_state(
                 Species::Venusaur,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::SolarBeam), None, None, None]),
                 None,
@@ -3731,8 +3731,8 @@ mod tests {
 
             let basculegion = build_pokemon_state(
                 Species::Basculegion,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(1),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -3753,8 +3753,8 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert_eq!(outcomes.len(), 1);
@@ -3770,8 +3770,8 @@ mod tests {
             let make_state = |weather: Option<Weather>| {
                 let archaludon = build_pokemon_state(
                     Species::Archaludon,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(PokemonMove::ElectroShot), None, None, None]),
                     None,
@@ -3786,8 +3786,8 @@ mod tests {
 
                 let basculegion = build_pokemon_state(
                     Species::Basculegion,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(1),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -3802,8 +3802,8 @@ mod tests {
 
                 let dummy_back_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -3827,8 +3827,8 @@ mod tests {
                 &MatchState::BattleState(make_state(Some(Weather::Rain))),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert_eq!(rain_outcomes.len(), 1);
@@ -3846,8 +3846,8 @@ mod tests {
                 &MatchState::BattleState(make_state(None)),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert_eq!(no_weather_outcomes.len(), 1);
@@ -3869,8 +3869,8 @@ mod tests {
             let make_state = |weather: Option<Weather>| {
                 let attacker = build_pokemon_state(
                     Species::Archaludon,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(100),
                     Some([Some(PokemonMove::MeteorBeam), None, None, None]),
                     None,
@@ -3885,8 +3885,8 @@ mod tests {
 
                 let target = build_pokemon_state(
                     Species::Basculegion,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -3911,8 +3911,8 @@ mod tests {
                 &MatchState::BattleState(make_state(None)),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             ));
             assert!((no_weather_probability - 1.0).abs() < 1e-9);
             assert_eq!(no_weather_state.p1_active_mons[0].boosts[2], 1);
@@ -3923,8 +3923,8 @@ mod tests {
                 &MatchState::BattleState(make_state(Some(Weather::Rain))),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             ));
             assert!((rain_probability - 1.0).abs() < 1e-9);
             assert_eq!(rain_state.p1_active_mons[0].boosts[2], 1);
@@ -3996,8 +3996,8 @@ mod tests {
                 &MatchState::BattleState(make_state(None)),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -4016,8 +4016,8 @@ mod tests {
                 &MatchState::BattleState(make_state(Some(Item::Tyranitarite))),
                 &PlayerCommand::Battle(simple_attack_mega(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -4044,8 +4044,8 @@ mod tests {
 
             let charizard = build_pokemon_state(
                 Species::Charizard,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -4059,8 +4059,8 @@ mod tests {
             );
             let foe = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -4081,8 +4081,8 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack_mega(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -4104,8 +4104,8 @@ mod tests {
 
             let manectric = build_pokemon_state(
                 Species::Manectric,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -4119,8 +4119,8 @@ mod tests {
             );
             let foe = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -4141,8 +4141,8 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack_mega(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -4171,8 +4171,8 @@ mod tests {
 
             let pelipper = build_pokemon_state(
                 Species::Pelipper,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([
                     Some(PokemonMove::RainDance),
@@ -4192,8 +4192,8 @@ mod tests {
 
             let torkoal = build_pokemon_state(
                 Species::Torkoal,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 None,
                 Some([
                     Some(PokemonMove::Splash),
@@ -4223,8 +4223,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let (state_after_turn, probability) = extract_battle_state(outcomes);
@@ -4243,13 +4243,13 @@ mod tests {
             let move_dex = move_dex();
 
             let tyranitar = build_pokemon_state(
-                Species::Tyranitar, &pokemon_dex, &move_dex, Some(50),
+                Species::Tyranitar, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::SandStream), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
             );
             let magikarp = build_pokemon_state(
-                Species::Magikarp, &pokemon_dex, &move_dex, Some(50),
+                Species::Magikarp, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
@@ -4263,7 +4263,7 @@ mod tests {
             state.event_observer = Some(Player::P1);
 
             let slot = crate::state::battle::FieldSlot { player: Player::P1, slot_index: 0 };
-            simulator_helpers::process_pokemon_send_out(&mut state, slot, &move_dex);
+            simulator_helpers::process_pokemon_send_out(&mut state, slot, move_dex);
 
             assert_eq!(state.weather, Some(Weather::Sandstorm));
             assert_eq!(state.weather_turns, Some(2), "reactivating an already-active weather must not reset its turn counter");
@@ -4287,13 +4287,13 @@ mod tests {
             let move_dex = move_dex();
 
             let tyranitar = build_pokemon_state(
-                Species::Tyranitar, &pokemon_dex, &move_dex, Some(50),
+                Species::Tyranitar, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::SandStream), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
             );
             let magikarp = build_pokemon_state(
-                Species::Magikarp, &pokemon_dex, &move_dex, Some(50),
+                Species::Magikarp, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
@@ -4305,7 +4305,7 @@ mod tests {
             state.event_observer = Some(Player::P1);
 
             let slot = crate::state::battle::FieldSlot { player: Player::P1, slot_index: 0 };
-            simulator_helpers::process_pokemon_send_out(&mut state, slot, &move_dex);
+            simulator_helpers::process_pokemon_send_out(&mut state, slot, move_dex);
 
             assert_eq!(state.weather, Some(Weather::Sandstorm));
             assert_eq!(state.weather_turns, Some(5));
@@ -4323,8 +4323,8 @@ mod tests {
             let make_state = |weather: Option<Weather>| {
                 let primarina = build_pokemon_state(
                     Species::Primarina,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::BubbleBeam), None, None, None]),
                     None,
@@ -4339,8 +4339,8 @@ mod tests {
 
                 let tyranitar = build_pokemon_state(
                     Species::Tyranitar,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -4369,16 +4369,16 @@ mod tests {
                 &MatchState::BattleState(no_weather_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let sandstorm_outcomes = run_single_turn(
                 &MatchState::BattleState(sandstorm_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let no_weather_probability: f64 = no_weather_outcomes.iter().map(|(_, probability)| *probability).sum();
@@ -4416,8 +4416,8 @@ mod tests {
             let make_splash_mon = |species: Species| {
                 build_pokemon_state(
                     species,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -4451,8 +4451,8 @@ mod tests {
                 &MatchState::BattleState(nonimmune_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let (nonimmune_final_state, probability) = extract_battle_state(nonimmune_outcomes);
@@ -4470,8 +4470,8 @@ mod tests {
                     &MatchState::BattleState(immune_state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let (immune_final_state, probability) = extract_battle_state(immune_outcomes);
@@ -4488,8 +4488,8 @@ mod tests {
             let make_sneasler = || {
                 build_pokemon_state(
                     Species::Sneasler,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([None, None, None, None]),
                     None,
@@ -4508,8 +4508,8 @@ mod tests {
 
                 let rotom_heat = build_pokemon_state(
                     Species::RotomHeat,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Overheat), None, None, None]),
                     None,
@@ -4538,16 +4538,16 @@ mod tests {
                 &MatchState::BattleState(no_weather_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let sun_outcomes = run_single_turn(
                 &MatchState::BattleState(sun_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let no_weather_probability: f64 = no_weather_outcomes.iter().map(|(_, probability)| *probability).sum();
@@ -4586,8 +4586,8 @@ mod tests {
             let make_sneasler = || {
                 build_pokemon_state(
                     Species::Sneasler,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([None, None, None, None]),
                     None,
@@ -4606,8 +4606,8 @@ mod tests {
 
                 let pelipper = build_pokemon_state(
                     Species::Pelipper,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::WeatherBall), None, None, None]),
                     None,
@@ -4638,24 +4638,24 @@ mod tests {
                 &MatchState::BattleState(no_weather_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let rain_outcomes = run_single_turn(
                 &MatchState::BattleState(rain_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let sun_outcomes = run_single_turn(
                 &MatchState::BattleState(sun_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let no_weather_probability: f64 = no_weather_outcomes.iter().map(|(_, probability)| *probability).sum();
@@ -4685,8 +4685,8 @@ mod tests {
             let make_sneasler = || {
                 build_pokemon_state(
                     Species::Sneasler,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([None, None, None, None]),
                     None,
@@ -4705,8 +4705,8 @@ mod tests {
 
                 let rotom_wash = build_pokemon_state(
                     Species::RotomWash,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::HydroPump), None, None, None]),
                     None,
@@ -4737,24 +4737,24 @@ mod tests {
                 &MatchState::BattleState(no_weather_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let rain_outcomes = run_single_turn(
                 &MatchState::BattleState(rain_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let sun_outcomes = run_single_turn(
                 &MatchState::BattleState(sun_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let no_weather_probability: f64 = no_weather_outcomes.iter().map(|(_, probability)| *probability).sum();
@@ -4836,8 +4836,8 @@ mod tests {
             for (p1_species, p1_ability, p2_species, p2_ability, expected_weather) in cases {
                 let p1_mon = build_pokemon_state(
                     p1_species.clone(),
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     None,
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -4852,8 +4852,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     p2_species.clone(),
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     None,
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -4909,8 +4909,8 @@ mod tests {
                 let make_state = |weather: Option<Weather>| {
                     let p1_mon = build_pokemon_state(
                         species.clone(),
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(move_name.clone()), None, None, None]),
                         None,
@@ -4925,8 +4925,8 @@ mod tests {
 
                     let p2_mon = build_pokemon_state(
                         species.clone(),
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(move_name.clone()), None, None, None]),
                         None,
@@ -4952,8 +4952,8 @@ mod tests {
                     &MatchState::BattleState(make_state(Some(weather))),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert_eq!(weather_outcomes.len(), 1);
@@ -4963,8 +4963,8 @@ mod tests {
                     &MatchState::BattleState(make_state(None)),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert_eq!(clear_outcomes.len(), 1);
@@ -4991,8 +4991,8 @@ mod tests {
             for (terrain, ability, seed_item, setter_species, boost_index) in cases {
                 let setter = build_pokemon_state(
                     setter_species,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -5007,8 +5007,8 @@ mod tests {
 
                 let seeded = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -5039,8 +5039,8 @@ mod tests {
                 let mut state = battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Amoonguss,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Spore), None, None, None]),
                         None,
@@ -5055,8 +5055,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -5079,8 +5079,8 @@ mod tests {
                 &electric_state,
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(electric_outcomes.iter().all(|(state, _)| {
@@ -5089,8 +5089,8 @@ mod tests {
 
             let mut grassy_attacker = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -5111,8 +5111,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -5135,8 +5135,8 @@ mod tests {
                 &grassy_state,
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(grassy_outcomes.iter().all(|(state, _)| {
@@ -5147,8 +5147,8 @@ mod tests {
                 let mut state = battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Amoonguss,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::ConfuseRay), None, None, None]),
                         None,
@@ -5163,8 +5163,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -5187,8 +5187,8 @@ mod tests {
                 &misty_state,
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(misty_outcomes.iter().all(|(state, _)| {
@@ -5205,8 +5205,8 @@ mod tests {
                 let mut state = battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Pikachu,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::QuickAttack), None, None, None]),
                         None,
@@ -5221,8 +5221,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -5245,8 +5245,8 @@ mod tests {
                 &priority_block_state,
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(priority_outcomes.iter().all(|(state, _)| {
@@ -5258,8 +5258,8 @@ mod tests {
                     vec![
                         build_pokemon_state(
                             Species::IndeedeeF,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::ExpandingForce), None, None, None]),
                             None,
@@ -5273,8 +5273,8 @@ mod tests {
                         ),
                         build_pokemon_state(
                             Species::Snorlax,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Splash), None, None, None]),
                             None,
@@ -5291,8 +5291,8 @@ mod tests {
                     vec![
                         build_pokemon_state(
                             Species::Snorlax,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Splash), None, None, None]),
                             None,
@@ -5306,8 +5306,8 @@ mod tests {
                         ),
                         build_pokemon_state(
                             Species::Snorlax,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Splash), None, None, None]),
                             None,
@@ -5331,8 +5331,8 @@ mod tests {
                 &expanding_force_state,
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(expanding_force_outcomes.iter().all(|(state, _)| {
@@ -5349,8 +5349,8 @@ mod tests {
                 let mut state = battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Clefable,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::NaturePower), None, None, None]),
                         None,
@@ -5365,8 +5365,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Golem,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -5389,8 +5389,8 @@ mod tests {
                 &nature_power_state,
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(nature_power_outcomes.iter().all(|(state, _)| {
@@ -5402,8 +5402,8 @@ mod tests {
                     let mut state = battle_state_from_lists(
                         vec![build_pokemon_state(
                             Species::Snorlax,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(move_name), None, None, None]),
                             None,
@@ -5418,8 +5418,8 @@ mod tests {
                         vec![],
                         vec![build_pokemon_state(
                             Species::Snorlax,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Splash), None, None, None]),
                             None,
@@ -5442,8 +5442,8 @@ mod tests {
                     &terrain_state,
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!(outcomes.iter().all(|(state, _)| {
@@ -5451,11 +5451,10 @@ mod tests {
                 }));
             }
 
-            let ground_immunity_cases = vec![
-                build_pokemon_state(
+            let ground_immunity_cases = [build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -5469,8 +5468,8 @@ mod tests {
                 ),
                 build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -5484,8 +5483,8 @@ mod tests {
                 ),
                 build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -5499,8 +5498,8 @@ mod tests {
                 ),
                 build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -5511,8 +5510,7 @@ mod tests {
                     None,
                     None,
                     false,
-                ),
-            ];
+                )];
 
             let mut magnet_rise_target = ground_immunity_cases[2].clone();
             magnet_rise_target.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, 0));
@@ -5529,8 +5527,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(
                         vec![build_pokemon_state(
                             Species::Garchomp,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Earthquake), None, None, None]),
                             None,
@@ -5548,8 +5546,8 @@ mod tests {
                     )),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!(outcomes.iter().all(|(state, _)| {
@@ -5570,8 +5568,8 @@ mod tests {
             let make_state = |ability: Ability| {
                 let attacker = build_pokemon_state(
                     Species::Basculegion,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::ShadowBall), None, None, None]),
                     None,
@@ -5597,8 +5595,8 @@ mod tests {
                 &MatchState::BattleState(no_ability_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -5607,8 +5605,8 @@ mod tests {
                 &MatchState::BattleState(adaptability_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
                 false,
                 1,
             );
@@ -5674,16 +5672,16 @@ mod tests {
 
             let initial_hp = ate_make_state(
                 Species::Incineroar, PokemonMove::BodySlam, Ability::Aerilate, Species::Gengar,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
             ).p2_active_mons[0].hp;
 
             let no_ability_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::None, Species::Gengar, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::None, Species::Gengar, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
             let aerilate_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::Aerilate, Species::Gengar, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::Aerilate, Species::Gengar, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
 
             assert_eq!(no_ability_hp, initial_hp, "Body Slam (Normal) should deal 0 to Ghost-type");
@@ -5700,16 +5698,16 @@ mod tests {
 
             let initial_hp = ate_make_state(
                 Species::Incineroar, PokemonMove::BodySlam, Ability::None, Species::Dragonite,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
             ).p2_active_mons[0].hp;
 
             let no_ability_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::None, Species::Dragonite, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::None, Species::Dragonite, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
             let refrigerate_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::Refrigerate, Species::Dragonite, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::BodySlam, Ability::Refrigerate, Species::Dragonite, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
 
             let no_ability_dmg = initial_hp - no_ability_hp;
@@ -5732,20 +5730,20 @@ mod tests {
 
             let initial_hp = ate_make_state(
                 Species::Incineroar, PokemonMove::HyperVoice, Ability::None, Species::Machamp,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
             ).p2_active_mons[0].hp;
 
             let no_ability_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::None, Species::Machamp, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::None, Species::Machamp, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
             let liquid_voice_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::LiquidVoice, Species::Machamp, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::LiquidVoice, Species::Machamp, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
             let pixilate_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::Pixilate, Species::Machamp, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::HyperVoice, Ability::Pixilate, Species::Machamp, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
 
             let no_ability_dmg = initial_hp - no_ability_hp;
@@ -5772,16 +5770,16 @@ mod tests {
 
             let initial_hp = ate_make_state(
                 Species::Incineroar, PokemonMove::Flamethrower, Ability::None, Species::Incineroar,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
             ).p2_active_mons[0].hp;
 
             let no_ability_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::Flamethrower, Ability::None, Species::Incineroar, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::Flamethrower, Ability::None, Species::Incineroar, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
             let refrigerate_hp = ate_run_and_get_p2_hp(
-                ate_make_state(Species::Incineroar, PokemonMove::Flamethrower, Ability::Refrigerate, Species::Incineroar, &pokemon_dex, &move_dex),
-                &move_dex, &pokemon_dex,
+                ate_make_state(Species::Incineroar, PokemonMove::Flamethrower, Ability::Refrigerate, Species::Incineroar, pokemon_dex, move_dex),
+                move_dex, pokemon_dex,
             );
 
             assert_eq!(
@@ -5802,7 +5800,7 @@ mod tests {
             let make = |ability: Ability, rain: bool| {
                 let mut state = ate_make_state(
                     Species::Incineroar, PokemonMove::WeatherBall, ability, Species::Incineroar,
-                    &pokemon_dex, &move_dex,
+                    pokemon_dex, move_dex,
                 );
                 if rain {
                     state.weather = Some(Weather::Rain);
@@ -5813,10 +5811,10 @@ mod tests {
 
             let initial_hp = make(Ability::None, false).p2_active_mons[0].hp;
 
-            let no_weather_no_ability_hp  = ate_run_and_get_p2_hp(make(Ability::None,    false), &move_dex, &pokemon_dex);
-            let no_weather_pixilate_hp    = ate_run_and_get_p2_hp(make(Ability::Pixilate, false), &move_dex, &pokemon_dex);
-            let rain_no_ability_hp        = ate_run_and_get_p2_hp(make(Ability::None,    true),  &move_dex, &pokemon_dex);
-            let rain_pixilate_hp          = ate_run_and_get_p2_hp(make(Ability::Pixilate, true),  &move_dex, &pokemon_dex);
+            let no_weather_no_ability_hp  = ate_run_and_get_p2_hp(make(Ability::None,    false), move_dex, pokemon_dex);
+            let no_weather_pixilate_hp    = ate_run_and_get_p2_hp(make(Ability::Pixilate, false), move_dex, pokemon_dex);
+            let rain_no_ability_hp        = ate_run_and_get_p2_hp(make(Ability::None,    true),  move_dex, pokemon_dex);
+            let rain_pixilate_hp          = ate_run_and_get_p2_hp(make(Ability::Pixilate, true),  move_dex, pokemon_dex);
 
             let no_weather_no_ability_dmg = initial_hp - no_weather_no_ability_hp;
             let no_weather_pixilate_dmg   = initial_hp - no_weather_pixilate_hp;
@@ -5845,8 +5843,8 @@ mod tests {
             let make_heliolisk = |ability: Ability, moves: [Option<PokemonMove>; 4]| {
                 build_pokemon_state(
                     Species::Heliolisk,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some(moves),
                     None,
@@ -5863,8 +5861,8 @@ mod tests {
             let make_incineroar = |moves: [Option<PokemonMove>; 4]| {
                 build_pokemon_state(
                     Species::Incineroar,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some(moves),
                     None,
@@ -5881,8 +5879,8 @@ mod tests {
             let make_primarina = |moves: [Option<PokemonMove>; 4]| {
                 build_pokemon_state(
                     Species::Primarina,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some(moves),
                     None,
@@ -5917,8 +5915,8 @@ mod tests {
                 &MatchState::BattleState(dry_skin_water_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let dry_skin_water_expected_hp = dry_skin_water_initial_hp + (dry_skin_water_max_hp / 4);
@@ -5937,8 +5935,8 @@ mod tests {
                 &MatchState::BattleState(no_dry_skin_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let dry_skin_state = battle_state_from_lists(
@@ -5953,8 +5951,8 @@ mod tests {
                 &MatchState::BattleState(dry_skin_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let no_dry_skin_hit_damage = no_dry_skin_outcomes
@@ -5990,8 +5988,8 @@ mod tests {
             let make_heliolisk = || {
                 build_pokemon_state(
                     Species::Heliolisk,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -6008,8 +6006,8 @@ mod tests {
             let make_support_mon = || {
                 build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -6038,8 +6036,8 @@ mod tests {
                 &MatchState::BattleState(rain_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let (sun_state, sun_initial_hp, sun_max_hp) = make_weather_state(Weather::Sun);
@@ -6047,8 +6045,8 @@ mod tests {
                 &MatchState::BattleState(sun_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let rain_expected_hp = rain_initial_hp + (rain_max_hp / 8);
@@ -6069,8 +6067,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Tackle), None, None, None]),
                         None,
@@ -6085,8 +6083,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -6102,8 +6100,8 @@ mod tests {
                 )),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(seed_sower_outcomes.iter().all(|(state, _)| {
@@ -6115,7 +6113,7 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex, &move_dex, Some(50),
+                        pokemon_dex, move_dex, Some(50),
                         Some([Some(PokemonMove::Tackle), None, None, None]),
                         None, Some(Ability::None), None, None,
                         Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -6123,7 +6121,7 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex, &move_dex, Some(50),
+                        pokemon_dex, move_dex, Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None, Some(Ability::None), None, None,
                         Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -6132,7 +6130,7 @@ mod tests {
                 )),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             assert!(no_seed_sower_outcomes.iter().all(|(state, _)| {
                 matches!(state, MatchState::BattleState(bs) if bs.terrain != Some(Terrain::GrassyTerrain))
@@ -6142,8 +6140,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Tackle), None, None, None]),
                         None,
@@ -6158,8 +6156,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -6175,8 +6173,8 @@ mod tests {
                 )),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(sand_spit_outcomes.iter().all(|(state, _)| {
@@ -6188,7 +6186,7 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex, &move_dex, Some(50),
+                        pokemon_dex, move_dex, Some(50),
                         Some([Some(PokemonMove::Tackle), None, None, None]),
                         None, Some(Ability::None), None, None,
                         Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -6196,7 +6194,7 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex, &move_dex, Some(50),
+                        pokemon_dex, move_dex, Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None, Some(Ability::None), None, None,
                         Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -6205,7 +6203,7 @@ mod tests {
                 )),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             assert!(no_sand_spit_outcomes.iter().all(|(state, _)| {
                 matches!(state, MatchState::BattleState(bs) if bs.weather != Some(Weather::Sandstorm))
@@ -6222,8 +6220,8 @@ mod tests {
 
             let pelipper = build_pokemon_state(
                 Species::Pelipper,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -6238,8 +6236,8 @@ mod tests {
 
             let weezing = build_pokemon_state(
                 Species::WeezingGalar,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -6255,8 +6253,8 @@ mod tests {
             // Plain back-mon with a harmless forced ability so switching it in sets no weather.
             let back_mon = build_pokemon_state(
                 Species::Torkoal,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -6279,8 +6277,8 @@ mod tests {
                 &MatchState::BattleState(initial_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let (state_after_turn, probability) = extract_battle_state(outcomes);
@@ -6297,7 +6295,7 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let mon = build_pokemon_state(
-                Species::Marill, &pokemon_dex, &move_dex, Some(50),
+                Species::Marill, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -6317,7 +6315,7 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let mon = build_pokemon_state(
-                Species::Medicham, &pokemon_dex, &move_dex, Some(50),
+                Species::Medicham, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -6334,7 +6332,7 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let mon = build_pokemon_state(
-                Species::Deino, &pokemon_dex, &move_dex, Some(50),
+                Species::Deino, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -6358,7 +6356,7 @@ mod tests {
                 &MatchState::BattleState(hustle_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex, false, 1,
+                move_dex, pokemon_dex, false, 1,
             );
             let initial_p2_hp = mon.hp;
             let hustle_hit_prob = hit_probability(&hustle_outcomes, initial_p2_hp);
@@ -6417,12 +6415,12 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Bullet Punch (40 BP, punch flag) — boosted.
-            let dmg_no  = damage_with_ability(Species::Hitmonchan, PokemonMove::BulletPunch, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_yes = damage_with_ability(Species::Hitmonchan, PokemonMove::BulletPunch, Ability::IronFist, &pokemon_dex, &move_dex);
+            let dmg_no  = damage_with_ability(Species::Hitmonchan, PokemonMove::BulletPunch, Ability::None, pokemon_dex, move_dex);
+            let dmg_yes = damage_with_ability(Species::Hitmonchan, PokemonMove::BulletPunch, Ability::IronFist, pokemon_dex, move_dex);
             assert!(dmg_yes > dmg_no, "Iron Fist should boost punch moves");
             // Tackle (no punch flag) — not boosted.
-            let dmg_tackle_no  = damage_with_ability(Species::Hitmonchan, PokemonMove::Tackle, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_tackle_yes = damage_with_ability(Species::Hitmonchan, PokemonMove::Tackle, Ability::IronFist, &pokemon_dex, &move_dex);
+            let dmg_tackle_no  = damage_with_ability(Species::Hitmonchan, PokemonMove::Tackle, Ability::None, pokemon_dex, move_dex);
+            let dmg_tackle_yes = damage_with_ability(Species::Hitmonchan, PokemonMove::Tackle, Ability::IronFist, pokemon_dex, move_dex);
             assert_eq!(dmg_tackle_no, dmg_tackle_yes, "Iron Fist must not boost non-punch moves");
         }
 
@@ -6431,12 +6429,12 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Tackle has Contact flag — boosted.
-            let dmg_no  = damage_with_ability(Species::Linoone, PokemonMove::Tackle, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_yes = damage_with_ability(Species::Linoone, PokemonMove::Tackle, Ability::ToughClaws, &pokemon_dex, &move_dex);
+            let dmg_no  = damage_with_ability(Species::Linoone, PokemonMove::Tackle, Ability::None, pokemon_dex, move_dex);
+            let dmg_yes = damage_with_ability(Species::Linoone, PokemonMove::Tackle, Ability::ToughClaws, pokemon_dex, move_dex);
             assert!(dmg_yes > dmg_no, "Tough Claws should boost contact moves");
             // Swift has no Contact flag — not boosted.
-            let dmg_swift_no  = damage_with_ability(Species::Linoone, PokemonMove::Swift, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_swift_yes = damage_with_ability(Species::Linoone, PokemonMove::Swift, Ability::ToughClaws, &pokemon_dex, &move_dex);
+            let dmg_swift_no  = damage_with_ability(Species::Linoone, PokemonMove::Swift, Ability::None, pokemon_dex, move_dex);
+            let dmg_swift_yes = damage_with_ability(Species::Linoone, PokemonMove::Swift, Ability::ToughClaws, pokemon_dex, move_dex);
             assert_eq!(dmg_swift_no, dmg_swift_yes, "Tough Claws must not boost non-contact moves");
         }
 
@@ -6445,8 +6443,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Jaw Lock (80 BP, bite flag, no probabilistic secondary) — boosted.
-            let dmg_no  = damage_with_ability(Species::Arcanine, PokemonMove::JawLock, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_yes = damage_with_ability(Species::Arcanine, PokemonMove::JawLock, Ability::StrongJaw, &pokemon_dex, &move_dex);
+            let dmg_no  = damage_with_ability(Species::Arcanine, PokemonMove::JawLock, Ability::None, pokemon_dex, move_dex);
+            let dmg_yes = damage_with_ability(Species::Arcanine, PokemonMove::JawLock, Ability::StrongJaw, pokemon_dex, move_dex);
             assert!(dmg_yes > dmg_no, "Strong Jaw should boost bite moves");
         }
 
@@ -6455,8 +6453,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Psycho Cut (70 BP, slicing flag) — boosted.
-            let dmg_no  = damage_with_ability(Species::Gallade, PokemonMove::PsychoCut, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_yes = damage_with_ability(Species::Gallade, PokemonMove::PsychoCut, Ability::Sharpness, &pokemon_dex, &move_dex);
+            let dmg_no  = damage_with_ability(Species::Gallade, PokemonMove::PsychoCut, Ability::None, pokemon_dex, move_dex);
+            let dmg_yes = damage_with_ability(Species::Gallade, PokemonMove::PsychoCut, Ability::Sharpness, pokemon_dex, move_dex);
             assert!(dmg_yes > dmg_no, "Sharpness should boost slicing moves");
         }
 
@@ -6465,12 +6463,12 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Aura Sphere (80 BP, pulse flag) — boosted.
-            let dmg_no  = damage_with_ability(Species::Blastoise, PokemonMove::AuraSphere, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_yes = damage_with_ability(Species::Blastoise, PokemonMove::AuraSphere, Ability::MegaLauncher, &pokemon_dex, &move_dex);
+            let dmg_no  = damage_with_ability(Species::Blastoise, PokemonMove::AuraSphere, Ability::None, pokemon_dex, move_dex);
+            let dmg_yes = damage_with_ability(Species::Blastoise, PokemonMove::AuraSphere, Ability::MegaLauncher, pokemon_dex, move_dex);
             assert!(dmg_yes > dmg_no, "Mega Launcher should boost pulse/aura moves");
             // Tackle (no pulse flag) — not boosted.
-            let dmg_tackle_no  = damage_with_ability(Species::Blastoise, PokemonMove::Tackle, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_tackle_yes = damage_with_ability(Species::Blastoise, PokemonMove::Tackle, Ability::MegaLauncher, &pokemon_dex, &move_dex);
+            let dmg_tackle_no  = damage_with_ability(Species::Blastoise, PokemonMove::Tackle, Ability::None, pokemon_dex, move_dex);
+            let dmg_tackle_yes = damage_with_ability(Species::Blastoise, PokemonMove::Tackle, Ability::MegaLauncher, pokemon_dex, move_dex);
             assert_eq!(dmg_tackle_no, dmg_tackle_yes, "Mega Launcher must not boost non-pulse moves");
         }
 
@@ -6484,7 +6482,7 @@ mod tests {
 
             let make_attacker = |ability: Ability, gender: PokemonGender| {
                 let mut mon = build_pokemon_state(
-                    Species::Zangoose, &pokemon_dex, &move_dex, Some(50),
+                    Species::Zangoose, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Tackle), None, None, None]),
                     None, Some(ability), Some(Nature::Hardy),
                     None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6494,7 +6492,7 @@ mod tests {
             };
             let make_defender = |gender: PokemonGender| {
                 let mut mon = build_pokemon_state(
-                    Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                    Species::Blissey, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), Some(Nature::Hardy),
                     None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6511,7 +6509,7 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex, false, 1,
+                    move_dex, pokemon_dex, false, 1,
                 );
                 let (final_state, _) = extract_battle_state(outcomes);
                 initial_hp - final_state.p2_active_mons[0].hp
@@ -6536,7 +6534,7 @@ mod tests {
 
             let make_attacker = |hp_fraction: f32| {
                 let mut mon = build_pokemon_state(
-                    Species::Charizard, &pokemon_dex, &move_dex, Some(50),
+                    Species::Charizard, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Ember), None, None, None]),
                     None, Some(Ability::Blaze), Some(Nature::Hardy),
                     None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6546,7 +6544,7 @@ mod tests {
                 mon
             };
             let defender = build_pokemon_state(
-                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Species::Blissey, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6559,7 +6557,7 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex, false, 1,
+                    move_dex, pokemon_dex, false, 1,
                 );
                 outcomes.iter().map(|(s, p)| {
                     let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
@@ -6573,7 +6571,7 @@ mod tests {
 
             // A non-Fire move from a Blaze user at low HP should NOT be boosted.
             let mut blaze_tackle = build_pokemon_state(
-                Species::Charizard, &pokemon_dex, &move_dex, Some(50),
+                Species::Charizard, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::Blaze), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6592,7 +6590,7 @@ mod tests {
             let move_dex = move_dex();
             let make = |hp_frac: f32| {
                 let mut mon = build_pokemon_state(
-                    Species::Venusaur, &pokemon_dex, &move_dex, Some(50),
+                    Species::Venusaur, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::VineWhip), None, None, None]),
                     None, Some(Ability::Overgrow), Some(Nature::Hardy),
                     None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6601,7 +6599,7 @@ mod tests {
                 mon
             };
             let defender = build_pokemon_state(
-                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Species::Blissey, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6613,7 +6611,7 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex, false, 1,
+                    move_dex, pokemon_dex, false, 1,
                 );
                 outcomes.iter().map(|(s, p)| {
                     let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
@@ -6629,7 +6627,7 @@ mod tests {
             let move_dex = move_dex();
             let make = |hp_frac: f32| {
                 let mut mon = build_pokemon_state(
-                    Species::Scizor, &pokemon_dex, &move_dex, Some(50),
+                    Species::Scizor, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::XScissor), None, None, None]),
                     None, Some(Ability::Swarm), Some(Nature::Hardy),
                     None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6638,7 +6636,7 @@ mod tests {
                 mon
             };
             let defender = build_pokemon_state(
-                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Species::Blissey, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6650,7 +6648,7 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex, false, 1,
+                    move_dex, pokemon_dex, false, 1,
                 );
                 outcomes.iter().map(|(s, p)| {
                     let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
@@ -6666,7 +6664,7 @@ mod tests {
             let move_dex = move_dex();
             let make = |hp_frac: f32| {
                 let mut mon = build_pokemon_state(
-                    Species::Blastoise, &pokemon_dex, &move_dex, Some(50),
+                    Species::Blastoise, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::WaterGun), None, None, None]),
                     None, Some(Ability::Torrent), Some(Nature::Hardy),
                     None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6675,7 +6673,7 @@ mod tests {
                 mon
             };
             let defender = build_pokemon_state(
-                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Species::Blissey, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6687,7 +6685,7 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex, false, 1,
+                    move_dex, pokemon_dex, false, 1,
                 );
                 outcomes.iter().map(|(s, p)| {
                     let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
@@ -6704,18 +6702,18 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Tackle (40 BP) — boosted.
-            let dmg_tackle_no  = damage_with_ability(Species::Meowth, PokemonMove::Tackle, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_tackle_yes = damage_with_ability(Species::Meowth, PokemonMove::Tackle, Ability::Technician, &pokemon_dex, &move_dex);
+            let dmg_tackle_no  = damage_with_ability(Species::Meowth, PokemonMove::Tackle, Ability::None, pokemon_dex, move_dex);
+            let dmg_tackle_yes = damage_with_ability(Species::Meowth, PokemonMove::Tackle, Ability::Technician, pokemon_dex, move_dex);
             assert!(dmg_tackle_yes > dmg_tackle_no, "Technician should boost 40 BP move");
 
             // Swift (60 BP exactly) — also boosted (threshold is inclusive).
-            let dmg_swift_no  = damage_with_ability(Species::Meowth, PokemonMove::Swift, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_swift_yes = damage_with_ability(Species::Meowth, PokemonMove::Swift, Ability::Technician, &pokemon_dex, &move_dex);
+            let dmg_swift_no  = damage_with_ability(Species::Meowth, PokemonMove::Swift, Ability::None, pokemon_dex, move_dex);
+            let dmg_swift_yes = damage_with_ability(Species::Meowth, PokemonMove::Swift, Ability::Technician, pokemon_dex, move_dex);
             assert!(dmg_swift_yes > dmg_swift_no, "Technician should boost exactly 60 BP move");
 
             // Aura Sphere (80 BP) — not boosted.
-            let dmg_aura_no  = damage_with_ability(Species::Meowth, PokemonMove::AuraSphere, Ability::None, &pokemon_dex, &move_dex);
-            let dmg_aura_yes = damage_with_ability(Species::Meowth, PokemonMove::AuraSphere, Ability::Technician, &pokemon_dex, &move_dex);
+            let dmg_aura_no  = damage_with_ability(Species::Meowth, PokemonMove::AuraSphere, Ability::None, pokemon_dex, move_dex);
+            let dmg_aura_yes = damage_with_ability(Species::Meowth, PokemonMove::AuraSphere, Ability::Technician, pokemon_dex, move_dex);
             assert_eq!(dmg_aura_no, dmg_aura_yes, "Technician must not boost moves above 60 BP");
         }
 
@@ -6730,7 +6728,7 @@ mod tests {
             // across species with incompatible base speeds.
             let make_attacker = |ability: Ability, spe_stat: u16| {
                 let mut mon = build_pokemon_state(
-                    Species::Magmar, &pokemon_dex, &move_dex, Some(50),
+                    Species::Magmar, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Ember), None, None, None]),
                     None, Some(ability), Some(Nature::Hardy),
                     None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6740,7 +6738,7 @@ mod tests {
             };
             let defender = {
                 let mut d = build_pokemon_state(
-                    Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                    Species::Blissey, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), Some(Nature::Hardy),
                     None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6758,7 +6756,7 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex, false, 1,
+                    move_dex, pokemon_dex, false, 1,
                 );
                 outcomes.iter().map(|(s, p)| {
                     let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
@@ -6788,13 +6786,13 @@ mod tests {
 
             // P1 attacker uses Dazzling Gleam (Fairy, 80 BP).
             let make_attacker = || build_pokemon_state(
-                Species::Sylveon, &pokemon_dex, &move_dex, Some(50),
+                Species::Sylveon, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::DazzlingGleam), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
             );
             let make_defender = || build_pokemon_state(
-                Species::Blissey, &pokemon_dex, &move_dex, Some(50),
+                Species::Blissey, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -6807,7 +6805,7 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex, false, 1,
+                    move_dex, pokemon_dex, false, 1,
                 );
                 outcomes.iter().map(|(s, p)| {
                     let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => 0 };
@@ -6867,8 +6865,8 @@ mod tests {
 
                 let mut burned_mon = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -6884,8 +6882,8 @@ mod tests {
 
                 let healthy_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -6905,8 +6903,8 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let (end_state, probability) = extract_battle_state(outcomes);
@@ -6922,8 +6920,8 @@ mod tests {
                 let make_state = |ability: Ability, status: Option<Status>, mov: PokemonMove| {
                     let mut attacker = build_pokemon_state(
                         Species::Mimikyu,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(mov), None, None, None]),
                         None,
@@ -6939,8 +6937,8 @@ mod tests {
 
                     let target = build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7002,8 +7000,8 @@ mod tests {
 
                 let attacker = build_pokemon_state(
                     Species::RotomHeat,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::WillOWisp), None, None, None]),
                     None,
@@ -7018,8 +7016,8 @@ mod tests {
 
                 let control_target = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7036,8 +7034,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![control_target], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
                 assert!(control_outcomes.iter().any(|(state, _)| {
                     matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Burn)))
@@ -7045,8 +7043,8 @@ mod tests {
 
                 let mut already_statused = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7063,8 +7061,8 @@ mod tests {
                 let immune_targets = vec![
                     build_pokemon_state(
                         Species::Charizard,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7078,8 +7076,8 @@ mod tests {
                     ),
                     build_pokemon_state(
                         Species::Vaporeon,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7093,8 +7091,8 @@ mod tests {
                     ),
                     build_pokemon_state(
                         Species::Komala,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7114,8 +7112,8 @@ mod tests {
                         &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                         &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                        &move_dex,
-                        &pokemon_dex,
+                        move_dex,
+                        pokemon_dex,
                     );
 
                     assert!(outcomes.iter().all(|(state, _)| {
@@ -7133,8 +7131,8 @@ mod tests {
 
                 let attacker = build_pokemon_state(
                     Species::RotomHeat,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::WillOWisp), None, None, None]),
                     None,
@@ -7150,8 +7148,8 @@ mod tests {
                 for ability in [Ability::ThermalExchange, Ability::WaterBubble, Ability::PurifyingSalt] {
                     let target = build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7168,8 +7166,8 @@ mod tests {
                         &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                         &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                        &move_dex,
-                        &pokemon_dex,
+                        move_dex,
+                        pokemon_dex,
                     );
 
                     assert!(outcomes.iter().all(|(state, _)| {
@@ -7189,8 +7187,8 @@ mod tests {
 
                 let mut frozen_mon = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::SwordsDance), None, None, None]),
                     None,
@@ -7206,8 +7204,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7224,8 +7222,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![frozen_mon], vec![], vec![p2_mon], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let total_probability_t1: f64 = turn1.iter().map(|(_, p)| *p).sum();
@@ -7267,8 +7265,8 @@ mod tests {
                     &MatchState::BattleState(frozen_state_for_t2.expect("expected frozen branch after turn 1")),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let total_probability: f64 = turn2.iter().map(|(_, p)| *p).sum();
@@ -7310,8 +7308,8 @@ mod tests {
                     &MatchState::BattleState(frozen_state_for_t3.expect("expected frozen branch after turn 2")),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let (state_after_t3, p3) = extract_battle_state(turn3);
@@ -7327,8 +7325,8 @@ mod tests {
 
                 let mut frozen_mon = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::SwordsDance), None, None, None]),
                     None,
@@ -7344,8 +7342,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7366,8 +7364,8 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let (end_state, probability) = extract_battle_state(outcomes);
@@ -7383,8 +7381,8 @@ mod tests {
 
                 let attacker = build_pokemon_state(
                     Species::Charizard,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Flamethrower), None, None, None]),
                     None,
@@ -7399,8 +7397,8 @@ mod tests {
 
                 let mut defender = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7419,8 +7417,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!(outcomes.iter().all(|(state, _)| {
@@ -7438,8 +7436,8 @@ mod tests {
 
                 let attacker = build_pokemon_state(
                     Species::Lapras,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::IceBeam), None, None, None]),
                     None,
@@ -7454,8 +7452,8 @@ mod tests {
 
                 let control_target = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7472,8 +7470,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![control_target], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
                 assert!(control_outcomes.iter().any(|(state, _)| {
                     matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Frozen(_))))
@@ -7482,8 +7480,8 @@ mod tests {
                 let immune_targets = vec![
                     build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7497,8 +7495,8 @@ mod tests {
                     ),
                     build_pokemon_state(
                         Species::Komala,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7515,8 +7513,8 @@ mod tests {
                     // not the freeze status).
                     build_pokemon_state(
                         Species::Glaceon,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7535,8 +7533,8 @@ mod tests {
                         &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                         &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                        &move_dex,
-                        &pokemon_dex,
+                        move_dex,
+                        pokemon_dex,
                     );
 
                     assert!(outcomes.iter().all(|(state, _)| {
@@ -7556,8 +7554,8 @@ mod tests {
 
                 let mut p1_mon = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::SwordsDance), None, None, None]),
                     None,
@@ -7573,8 +7571,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7591,8 +7589,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![p1_mon], vec![], vec![p2_mon], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let total_probability: f64 = outcomes.iter().map(|(_, p)| *p).sum();
@@ -7625,8 +7623,8 @@ mod tests {
 
                 let p1_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7641,8 +7639,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7676,8 +7674,8 @@ mod tests {
                     moves_last: false,
                 });
 
-                let base_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &state, &move_dex);
-                let par_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &par_state, &move_dex);
+                let base_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &state, move_dex);
+                let par_order = simulator_helpers::compare_action_order(&action_p1, &action_p2, &par_state, move_dex);
 
                 assert_eq!(base_order, std::cmp::Ordering::Equal);
                 assert_eq!(par_order, std::cmp::Ordering::Greater);
@@ -7690,8 +7688,8 @@ mod tests {
 
                 let attacker = build_pokemon_state(
                     Species::Pikachu,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::ThunderWave), None, None, None]),
                     None,
@@ -7706,8 +7704,8 @@ mod tests {
 
                 let control_target = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7724,8 +7722,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![control_target], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!(control_outcomes.iter().any(|(state, _)| {
@@ -7744,8 +7742,8 @@ mod tests {
                     let ability_debug = format!("{ability:?}");
                     let target = build_pokemon_state(
                         species,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7762,8 +7760,8 @@ mod tests {
                         &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                         &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                        &move_dex,
-                        &pokemon_dex,
+                        move_dex,
+                        pokemon_dex,
                     );
 
                     assert!(outcomes.iter().all(|(state, _)| {
@@ -7776,7 +7774,7 @@ mod tests {
                 // mon with the same base speed.
                 let mut qf_paralyzed = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex, &move_dex, Some(50),
+                    pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::QuickFeet), None, None, None, None, None, false,
                 );
@@ -7784,7 +7782,7 @@ mod tests {
 
                 let qf_normal = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex, &move_dex, Some(50),
+                    pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
@@ -7811,8 +7809,8 @@ mod tests {
 
                 let mut poison_mon = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7828,8 +7826,8 @@ mod tests {
 
                 let mut toxic_mon = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7850,8 +7848,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![poison_mon], vec![], vec![toxic_mon], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let (end_state, probability) = extract_battle_state(outcomes);
@@ -7868,8 +7866,8 @@ mod tests {
 
                 let mut toxic_active = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7885,8 +7883,8 @@ mod tests {
 
                 let healthy_bench = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7901,8 +7899,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7921,8 +7919,8 @@ mod tests {
                     &MatchState::BattleState(initial_state),
                     &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let (end_state, probability) = extract_battle_state(outcomes);
@@ -7937,8 +7935,8 @@ mod tests {
 
                 let control_attacker = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Toxic), None, None, None]),
                     None,
@@ -7953,8 +7951,8 @@ mod tests {
 
                 let control_target = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -7971,8 +7969,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![control_attacker.clone()], vec![], vec![control_target], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
                 assert!(control_outcomes.iter().any(|(state, _)| {
                     matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::ToxicPoison(_))))
@@ -7981,8 +7979,8 @@ mod tests {
                 let immune_targets = vec![
                     build_pokemon_state(
                         Species::Gengar,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -7996,8 +7994,8 @@ mod tests {
                     ),
                     build_pokemon_state(
                         Species::Corviknight,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8011,8 +8009,8 @@ mod tests {
                     ),
                     build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8026,8 +8024,8 @@ mod tests {
                     ),
                     build_pokemon_state(
                         Species::Komala,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8046,8 +8044,8 @@ mod tests {
                         &MatchState::BattleState(battle_state_from_lists(vec![control_attacker.clone()], vec![], vec![target], vec![])),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                         &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                        &move_dex,
-                        &pokemon_dex,
+                        move_dex,
+                        pokemon_dex,
                     );
 
                     assert!(outcomes.iter().all(|(state, _)| {
@@ -8057,8 +8055,8 @@ mod tests {
 
                 let corrosion_attacker = build_pokemon_state(
                     Species::Salazzle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Toxic), None, None, None]),
                     None,
@@ -8074,8 +8072,8 @@ mod tests {
                 for target in [
                     build_pokemon_state(
                         Species::Gengar,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8089,8 +8087,8 @@ mod tests {
                     ),
                     build_pokemon_state(
                         Species::Corviknight,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8107,8 +8105,8 @@ mod tests {
                         &MatchState::BattleState(battle_state_from_lists(vec![corrosion_attacker.clone()], vec![], vec![target], vec![])),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                         &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                        &move_dex,
-                        &pokemon_dex,
+                        move_dex,
+                        pokemon_dex,
                     );
 
                     assert!(outcomes.iter().any(|(state, _)| {
@@ -8128,8 +8126,8 @@ mod tests {
 
                 let p1_mon = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([
                         Some(PokemonMove::SleepTalk),
@@ -8149,8 +8147,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -8169,8 +8167,8 @@ mod tests {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                     false,
                     1,
                 );
@@ -8185,7 +8183,9 @@ mod tests {
                 let pokemon_dex = pokemon_dex();
                 let move_dex = move_dex();
 
-                let cases: Vec<([Option<PokemonMove>; 4], Vec<(Weather, f64)>)> = vec![
+                // (moveset, expected weather distribution) test cases.
+                type WeatherCase = ([Option<PokemonMove>; 4], Vec<(Weather, f64)>);
+                let cases: Vec<WeatherCase> = vec![
                     (
                         [Some(PokemonMove::SleepTalk), Some(PokemonMove::RainDance), None, None],
                         vec![(Weather::Rain, 1.0)],
@@ -8213,8 +8213,8 @@ mod tests {
                 for (moves, expected_weather_probabilities) in cases {
                     let mut p1_mon = build_pokemon_state(
                         Species::Shuckle,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some(moves),
                         None,
@@ -8230,8 +8230,8 @@ mod tests {
 
                     let p2_mon = build_pokemon_state(
                         Species::Magikarp,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8250,8 +8250,8 @@ mod tests {
                         &MatchState::BattleState(state),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                         &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                        &move_dex,
-                        &pokemon_dex,
+                        move_dex,
+                        pokemon_dex,
                         false,
                         1,
                     );
@@ -8288,8 +8288,8 @@ mod tests {
 
                 let mut sleeping_mon = build_pokemon_state(
                     Species::Shuckle,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::SwordsDance), None, None, None]),
                     None,
@@ -8305,8 +8305,8 @@ mod tests {
 
                 let p2_mon = build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -8323,8 +8323,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![sleeping_mon], vec![], vec![p2_mon], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let (state_after_t1, p1) = extract_battle_state(turn1);
@@ -8336,8 +8336,8 @@ mod tests {
                     &MatchState::BattleState(state_after_t1.clone()),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let total_probability: f64 = turn2.iter().map(|(_, p)| *p).sum();
@@ -8379,8 +8379,8 @@ mod tests {
                     &MatchState::BattleState(sleeping_state_for_t3.expect("expected sleeping branch after turn 2")),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let (state_after_t3, p3) = extract_battle_state(turn3);
@@ -8396,8 +8396,8 @@ mod tests {
 
                 let attacker = build_pokemon_state(
                     Species::Amoonguss,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Spore), None, None, None]),
                     None,
@@ -8412,8 +8412,8 @@ mod tests {
 
                 let control_target = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -8430,8 +8430,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![control_target], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
                 assert!(control_outcomes.iter().any(|(state, _)| {
                     matches!(state, MatchState::BattleState(bs) if matches!(bs.p2_active_mons[0].status, Some(Status::Sleep(_))))
@@ -8440,8 +8440,8 @@ mod tests {
                 for ability in [Ability::Insomnia, Ability::VitalSpirit] {
                     let target = build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8458,8 +8458,8 @@ mod tests {
                         &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![target], vec![])),
                         &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                         &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                        &move_dex,
-                        &pokemon_dex,
+                        move_dex,
+                        pokemon_dex,
                     );
 
                     assert!(outcomes.iter().all(|(state, _)| {
@@ -8473,14 +8473,14 @@ mod tests {
                 let pokemon_dex = pokemon_dex();
                 let move_dex = move_dex();
                 let mut attacker = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Yawn), None, None, None]),
                     None, Some(Ability::None), None, None,
                     Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
                 );
                 attacker.stats[5] = 200; // moves first
                 let target = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::VitalSpirit), None, None,
                     Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -8489,7 +8489,7 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex,
+                    move_dex, pokemon_dex,
                 );
                 assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
                     if !simulator_helpers::has_status_volatile(&bs.p2_active_mons[0], &crate::state::dex_data::VolatileStatus::Yawn))),
@@ -8501,7 +8501,7 @@ mod tests {
                 let pokemon_dex = pokemon_dex();
                 let move_dex = move_dex();
                 let mut rester = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Rest), None, None, None]),
                     None, Some(Ability::VitalSpirit), None, None,
                     Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -8510,7 +8510,7 @@ mod tests {
                 rester.hp = rester.stats[0] / 2; // damaged, so Rest would otherwise heal
                 let hp_before = rester.hp;
                 let foe = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None,
                     Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -8519,7 +8519,7 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![rester], vec![], vec![foe], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex, &pokemon_dex,
+                    move_dex, pokemon_dex,
                 );
                 assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
                     if bs.p1_active_mons[0].status.is_none() && bs.p1_active_mons[0].hp == hp_before)),
@@ -8538,8 +8538,8 @@ mod tests {
                 let duration_state = MatchState::BattleState(battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Amoonguss,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::ConfuseRay), None, None, None]),
                         None,
@@ -8554,8 +8554,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8574,8 +8574,8 @@ mod tests {
                     &duration_state,
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!(duration_outcomes.iter().all(|(state, _)| {
@@ -8585,8 +8585,8 @@ mod tests {
                 let own_tempo_state = MatchState::BattleState(battle_state_from_lists(
                     vec![build_pokemon_state(
                         Species::Amoonguss,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::ConfuseRay), None, None, None]),
                         None,
@@ -8601,8 +8601,8 @@ mod tests {
                     vec![],
                     vec![build_pokemon_state(
                         Species::Snorlax,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Splash), None, None, None]),
                         None,
@@ -8621,8 +8621,8 @@ mod tests {
                     &own_tempo_state,
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 assert!(own_tempo_outcomes.iter().all(|(state, _)| {
@@ -8639,8 +8639,8 @@ mod tests {
                     let mut state = battle_state_from_lists(
                         vec![build_pokemon_state(
                             Species::Snorlax,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Earthquake), None, None, None]),
                             None,
@@ -8655,8 +8655,8 @@ mod tests {
                         vec![],
                         vec![build_pokemon_state(
                             Species::Garchomp,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Splash), None, None, None]),
                             None,
@@ -8684,8 +8684,8 @@ mod tests {
                     &initial_state,
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                     false,
                     1,
                 );
@@ -8703,8 +8703,8 @@ mod tests {
                     let mut state = battle_state_from_lists(
                         vec![build_pokemon_state(
                             Species::Snorlax,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::DoubleEdge), Some(PokemonMove::Splash), None, None]),
                             None,
@@ -8719,8 +8719,8 @@ mod tests {
                         vec![],
                         vec![build_pokemon_state(
                             Species::Garchomp,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Splash), None, None, None]),
                             None,
@@ -8753,8 +8753,8 @@ mod tests {
                     &initial_state,
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                     false,
                     16,
                 );
@@ -8807,8 +8807,8 @@ mod tests {
                     let mut state = battle_state_from_lists(
                         vec![build_pokemon_state(
                             Species::Snorlax,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::DoubleEdge), Some(PokemonMove::Splash), None, None]),
                             None,
@@ -8823,8 +8823,8 @@ mod tests {
                         vec![],
                         vec![build_pokemon_state(
                             Species::Garchomp,
-                            &pokemon_dex,
-                            &move_dex,
+                            pokemon_dex,
+                            move_dex,
                             Some(50),
                             Some([Some(PokemonMove::Splash), None, None, None]),
                             None,
@@ -8857,8 +8857,8 @@ mod tests {
                     &initial_state,
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                     false,
                     16,
                 );
@@ -8904,13 +8904,13 @@ mod tests {
                 // Weak attacker vs a bulky Normal-type target so the target always survives
                 // (and can legally be burned/frozen/paralyzed), leaving only the status rolls.
                 let attacker = build_pokemon_state(
-                    Species::Magikarp, &pokemon_dex, &move_dex, Some(1),
+                    Species::Magikarp, pokemon_dex, move_dex, Some(1),
                     Some([Some(PokemonMove::TriAttack), None, None, None]),
                     None, Some(Ability::None), None, None,
                     Some(crate::state::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
                 );
                 let target = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(100),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(100),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None,
                     Some(crate::state::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -8920,8 +8920,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 let dist = status_distribution(&outcomes);
@@ -8931,7 +8931,7 @@ mod tests {
                 assert!((dist.get("frz").copied().unwrap_or(0.0) - each).abs() < 1e-9);
                 assert!((dist.get("par").copied().unwrap_or(0.0) - each).abs() < 1e-9);
                 // No other statuses should appear.
-                assert!(dist.get("psn").is_none() && dist.get("slp").is_none());
+                assert!(!dist.contains_key("psn") && !dist.contains_key("slp"));
             }
 
             #[test]
@@ -8940,13 +8940,13 @@ mod tests {
                 let move_dex = move_dex();
 
                 let attacker = build_pokemon_state(
-                    Species::Magikarp, &pokemon_dex, &move_dex, Some(1),
+                    Species::Magikarp, pokemon_dex, move_dex, Some(1),
                     Some([Some(PokemonMove::DireClaw), None, None, None]),
                     None, Some(Ability::None), None, None,
                     Some(crate::state::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
                 );
                 let target = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(100),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(100),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None,
                     Some(crate::state::dex_data::PokemonType::Normal), Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -8956,8 +8956,8 @@ mod tests {
                     &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![target], vec![])),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
 
                 // Pokémon Champions: Dire Claw has 30% total chance of inflicting a status,
@@ -8968,7 +8968,7 @@ mod tests {
                 assert!((dist.get("psn").copied().unwrap_or(0.0) - each).abs() < 1e-9);
                 assert!((dist.get("par").copied().unwrap_or(0.0) - each).abs() < 1e-9);
                 assert!((dist.get("slp").copied().unwrap_or(0.0) - each).abs() < 1e-9);
-                assert!(dist.get("brn").is_none() && dist.get("frz").is_none());
+                assert!(!dist.contains_key("brn") && !dist.contains_key("frz"));
             }
         }
     }
@@ -8984,8 +8984,8 @@ mod tests {
             let move_dex = move_dex();
             let slow = build_pokemon_state(
                 Species::Torkoal,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -8999,8 +8999,8 @@ mod tests {
             );
             let fast = build_pokemon_state(
                 Species::Pelipper,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -9034,11 +9034,11 @@ mod tests {
             let slow_priority = move_action(Player::P1, 1);
             let fast_normal = move_action(Player::P2, 0);
             assert_eq!(
-                simulator_helpers::compare_action_order(&slow_priority, &fast_normal, &state, &move_dex),
+                simulator_helpers::compare_action_order(&slow_priority, &fast_normal, &state, move_dex),
                 std::cmp::Ordering::Less
             );
             assert_eq!(
-                simulator_helpers::compare_action_order(&fast_normal, &slow_priority, &state, &move_dex),
+                simulator_helpers::compare_action_order(&fast_normal, &slow_priority, &state, move_dex),
                 std::cmp::Ordering::Greater
             );
         }
@@ -9051,11 +9051,11 @@ mod tests {
             let fast = move_action(Player::P2, 0);
             // Pelipper (P2) outspeeds Torkoal (P1).
             assert_eq!(
-                simulator_helpers::compare_action_order(&fast, &slow, &state, &move_dex),
+                simulator_helpers::compare_action_order(&fast, &slow, &state, move_dex),
                 std::cmp::Ordering::Less
             );
             assert_eq!(
-                simulator_helpers::compare_action_order(&slow, &fast, &state, &move_dex),
+                simulator_helpers::compare_action_order(&slow, &fast, &state, move_dex),
                 std::cmp::Ordering::Greater
             );
         }
@@ -9071,7 +9071,7 @@ mod tests {
             let slow = move_action(Player::P1, 0);
             let fast = move_action(Player::P2, 0);
             assert_eq!(
-                simulator_helpers::compare_action_order(&slow, &fast, &state, &move_dex),
+                simulator_helpers::compare_action_order(&slow, &fast, &state, move_dex),
                 std::cmp::Ordering::Less
             );
 
@@ -9079,7 +9079,7 @@ mod tests {
             let fast_priority = move_action(Player::P2, 1);
             let slow_normal = move_action(Player::P1, 0);
             assert_eq!(
-                simulator_helpers::compare_action_order(&fast_priority, &slow_normal, &state, &move_dex),
+                simulator_helpers::compare_action_order(&fast_priority, &slow_normal, &state, move_dex),
                 std::cmp::Ordering::Less
             );
         }
@@ -9101,8 +9101,8 @@ mod tests {
             let plain = |species: Species| {
                 build_pokemon_state(
                     species,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -9128,8 +9128,8 @@ mod tests {
             let move_dex = move_dex();
             build_pokemon_state(
                 species,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -9148,8 +9148,8 @@ mod tests {
             let move_dex = move_dex();
             let mut mon = build_pokemon_state(
                 Species::Clefable,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -9247,8 +9247,8 @@ mod tests {
             let move_dex = move_dex();
             let mut p = build_pokemon_state(
                 species,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -9271,8 +9271,8 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             extract_battle_state(outcomes).0
         }
@@ -9412,8 +9412,8 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(p1_cmds),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(outcomes.iter().all(|(state, _)| {
@@ -9431,8 +9431,8 @@ mod tests {
             let backup = mon(Species::Clefable, Ability::Pressure, None, None);
             let attacker = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Earthquake), None, None, None]),
                 None,
@@ -9451,8 +9451,8 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             // The holder is KO'd in every branch, so Extreme Sunlight ends in all of them.
@@ -9479,8 +9479,8 @@ mod tests {
                     &MatchState::BattleState(initial),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
                 extract_battle_state(outcomes).0
             };
@@ -9505,8 +9505,8 @@ mod tests {
                     &MatchState::BattleState(initial),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
                 extract_battle_state(outcomes).0
             };
@@ -9525,8 +9525,8 @@ mod tests {
             let move_dex = move_dex();
             let mut p = build_pokemon_state(
                 species,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None,          // gender
@@ -9550,8 +9550,8 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             extract_battle_state(outcomes).0
         }
@@ -9617,8 +9617,8 @@ mod tests {
                 let move_dex = move_dex();
                 let mut m = build_pokemon_state(
                     Species::Blissey,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Tackle), None, None, None]),
                     None,
@@ -9639,8 +9639,8 @@ mod tests {
                 let move_dex = move_dex();
                 build_pokemon_state(
                     Species::Blissey,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Tackle), None, None, None]),
                     None,
@@ -9787,8 +9787,8 @@ mod tests {
             let build_attacker = |fainted_count: u8| {
                 let attacker = build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Tackle), None, None, None]),
                     None,
@@ -9811,8 +9811,8 @@ mod tests {
             // Bulky target: Blissey — high HP, neutral to Normal, won't faint.
             let make_target = || build_pokemon_state(
                 Species::Blissey,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None,
@@ -9837,8 +9837,8 @@ mod tests {
                     &MatchState::BattleState(state.clone()),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &move_dex,
-                    &pokemon_dex,
+                    move_dex,
+                    pokemon_dex,
                 );
                 let target_hp = simulator_helpers::get_pokemon_at_slot(&state, FieldSlot { player: Player::P2, slot_index: 0 }).unwrap().hp;
                 damage_distribution(&outcomes, target_hp)
@@ -9919,8 +9919,8 @@ mod tests {
             // Imposter Ditto vs a Snorlax with specific moves.
             let target = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Tackle), None, None]),
                 None,
@@ -9932,8 +9932,8 @@ mod tests {
             );
             let ditto = build_pokemon_state(
                 Species::Ditto,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Transform), None, None, None]),
                 None,
@@ -9969,8 +9969,8 @@ mod tests {
             let target = mon(Species::Snorlax, Ability::ThickFat, None, None);
             let ditto = build_pokemon_state(
                 Species::Ditto,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Transform), None, None, None]),
                 None,
@@ -10006,8 +10006,8 @@ mod tests {
 
             let ditto = build_pokemon_state(
                 Species::Ditto,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Transform), None, None, None]),
                 None,
@@ -10032,8 +10032,8 @@ mod tests {
             // Ditto with Transform move vs Snorlax.
             let user = build_pokemon_state(
                 Species::Ditto,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Transform), None, None, None]),
                 None,
@@ -10045,8 +10045,8 @@ mod tests {
             );
             let target = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Earthquake), None, None, None]),
                 None,
@@ -10061,8 +10061,8 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             let (result, _) = extract_battle_state(outcomes);
             let transformed = &result.p1_active_mons[0];
@@ -10084,8 +10084,8 @@ mod tests {
 
             let balloon_target = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10100,8 +10100,8 @@ mod tests {
 
             let weak_hitter = build_pokemon_state(
                 Species::Magikarp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None,
@@ -10118,8 +10118,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![weak_hitter], vec![], vec![balloon_target], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             )).0;
 
             assert_eq!(state_after_hit.p2_active_mons[0].item, Item::None);
@@ -10130,8 +10130,8 @@ mod tests {
                     let mut state = state_after_hit.clone();
                     state.p1_active_mons[0] = build_pokemon_state(
                         Species::Garchomp,
-                        &pokemon_dex,
-                        &move_dex,
+                        pokemon_dex,
+                        move_dex,
                         Some(50),
                         Some([Some(PokemonMove::Earthquake), None, None, None]),
                         None,
@@ -10147,8 +10147,8 @@ mod tests {
                 }),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(grounded_hit.iter().any(|(state, _)| matches!(state, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < state_after_hit.p2_active_mons[0].hp)));
@@ -10165,8 +10165,8 @@ mod tests {
 
             let garchomp = build_pokemon_state(
                 Species::Garchomp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Earthquake), None, None, None]),
                 None,
@@ -10181,8 +10181,8 @@ mod tests {
 
             let garchomp_partner = build_pokemon_state(
                 Species::Magikarp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10197,8 +10197,8 @@ mod tests {
 
             let aggron = build_pokemon_state(
                 Species::Aggron,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10213,8 +10213,8 @@ mod tests {
 
             let aggron_partner = build_pokemon_state(
                 Species::Aggron,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10231,8 +10231,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![garchomp.clone(), garchomp_partner.clone()], vec![], vec![aggron.clone(), aggron_partner.clone()], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             // Without Wonder Room, Aggron's high Defense absorbs Earthquake — no KO.
             assert!(outside_outcomes.iter().all(|(state, _)| !matches!(state, MatchState::GameOverState { .. })),
@@ -10259,8 +10259,8 @@ mod tests {
                 &MatchState::BattleState(wonder_state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(wonder_outcomes.iter().any(|(state, _)| matches!(state, MatchState::GameOverState { winner, .. } if *winner == Player::P1)));
@@ -10273,8 +10273,8 @@ mod tests {
 
             let sand_target = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10290,8 +10290,8 @@ mod tests {
             let mut outside_room = battle_state_from_lists(
                 vec![build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -10316,8 +10316,8 @@ mod tests {
             let mut magic_room = battle_state_from_lists(
                 vec![build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -10354,12 +10354,12 @@ mod tests {
             let move_dex = move_dex();
 
             let user = build_pokemon_state(
-                Species::Sinistcha, &pokemon_dex, &move_dex, Some(50),
+                Species::Sinistcha, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::TrickRoom), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
             let foe = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -10369,8 +10369,8 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             let after = extract_battle_state(outcomes).0;
 
@@ -10392,7 +10392,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mon = |species, mv| build_pokemon_state(
-                species, &pokemon_dex, &move_dex, Some(50),
+                species, pokemon_dex, move_dex, Some(50),
                 Some([Some(mv), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -10410,8 +10410,8 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             let after = extract_battle_state(outcomes).0;
 
@@ -10433,8 +10433,8 @@ mod tests {
 
             let attacker = build_pokemon_state(
                 Species::Magikarp,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10448,8 +10448,8 @@ mod tests {
             );
             let defender = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10466,8 +10466,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let (state, _) = extract_battle_state(outcomes);
@@ -10482,8 +10482,8 @@ mod tests {
 
             let mut venusaur = build_pokemon_state(
                 Species::Venusaur,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::GigaDrain), None, None, None]),
                 None,
@@ -10498,8 +10498,8 @@ mod tests {
             venusaur.hp = venusaur.hp.saturating_sub(120);
             let basculegion = build_pokemon_state(
                 Species::Basculegion,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10518,8 +10518,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![venusaur], vec![], vec![basculegion], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             let (state, _) = extract_battle_state(outcomes);
             assert_eq!(before_bas_hp - state.p2_active_mons[0].hp, 164);
@@ -10527,8 +10527,8 @@ mod tests {
 
             let snorlax = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::DoubleEdge), None, None, None]),
                 None,
@@ -10542,8 +10542,8 @@ mod tests {
             );
             let whimsicott = build_pokemon_state(
                 Species::Whimsicott,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10562,8 +10562,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![snorlax], vec![], vec![whimsicott], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             let (state, _) = extract_battle_state(outcomes);
             assert_eq!(before_whimsicott_hp - state.p2_active_mons[0].hp, 100);
@@ -10577,8 +10577,8 @@ mod tests {
 
             let mut attacker = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::DoubleEdge), None, None, None]),
                 None,
@@ -10594,8 +10594,8 @@ mod tests {
 
             let mut defender = build_pokemon_state(
                 Species::Whimsicott,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10613,8 +10613,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             assert!(outcomes.iter().any(|(state, _)| matches!(state, MatchState::GameOverState { winner, .. } if *winner == Player::P1)));
@@ -10627,8 +10627,8 @@ mod tests {
 
             let rock_head_attacker = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::DoubleEdge), None, None, None]),
                 None,
@@ -10642,8 +10642,8 @@ mod tests {
             );
             let recoil_target = build_pokemon_state(
                 Species::Whimsicott,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10661,8 +10661,8 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![rock_head_attacker], vec![], vec![recoil_target.clone()], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             let (state, _) = extract_battle_state(outcomes);
             assert_eq!(state.p1_active_mons[0].hp, before_hp);
@@ -10670,8 +10670,8 @@ mod tests {
             let normal_state = battle_state_from_lists(
                 vec![build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::DoubleEdge), None, None, None]),
                     None,
@@ -10690,8 +10690,8 @@ mod tests {
             let reckless_state = battle_state_from_lists(
                 vec![build_pokemon_state(
                     Species::Snorlax,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::DoubleEdge), None, None, None]),
                     None,
@@ -10712,15 +10712,15 @@ mod tests {
                 &MatchState::BattleState(normal_state.clone()),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             let reckless_outcomes = run_single_turn(
                 &MatchState::BattleState(reckless_state.clone()),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
 
             let (normal_after, _) = extract_battle_state(normal_outcomes);
@@ -10731,8 +10731,8 @@ mod tests {
 
             let mut magic_guard_mon = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex,
-                &move_dex,
+                pokemon_dex,
+                move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -10752,8 +10752,8 @@ mod tests {
                 vec![],
                 vec![build_pokemon_state(
                     Species::Magikarp,
-                    &pokemon_dex,
-                    &move_dex,
+                    pokemon_dex,
+                    move_dex,
                     Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None,
@@ -10810,20 +10810,20 @@ mod tests {
 
             let make = |item: Option<Item>| {
                 let atk = build_pokemon_state(
-                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Species::Arcanine, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Flamethrower), None, None, None]),
                     None, Some(Ability::None), None, item, None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
                 battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
             };
 
-            let no_item  = raw_damage(&make(None),                 &PokemonMove::Flamethrower, &move_dex);
-            let charcoal = raw_damage(&make(Some(Item::Charcoal)), &PokemonMove::Flamethrower, &move_dex);
+            let no_item  = raw_damage(&make(None),                 &PokemonMove::Flamethrower, move_dex);
+            let charcoal = raw_damage(&make(Some(Item::Charcoal)), &PokemonMove::Flamethrower, move_dex);
 
             assert!(charcoal > no_item, "Charcoal should boost Fire-move damage");
             // The boost should be close to 1.2× (integer floor rounding is fine)
@@ -10838,20 +10838,20 @@ mod tests {
 
             let make = |item: Option<Item>| {
                 let atk = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::BodySlam), None, None, None]),
                     None, Some(Ability::None), None, item, None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Lapras, &pokemon_dex, &move_dex, Some(50),
+                    Species::Lapras, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
                 battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
             };
 
-            let no_item    = raw_damage(&make(None),                  &PokemonMove::BodySlam, &move_dex);
-            let silk_scarf = raw_damage(&make(Some(Item::SilkScarf)), &PokemonMove::BodySlam, &move_dex);
+            let no_item    = raw_damage(&make(None),                  &PokemonMove::BodySlam, move_dex);
+            let silk_scarf = raw_damage(&make(Some(Item::SilkScarf)), &PokemonMove::BodySlam, move_dex);
 
             assert!(silk_scarf > no_item, "Silk Scarf should boost Normal-move damage");
             assert!(silk_scarf as f64 >= no_item as f64 * 1.15);
@@ -10865,20 +10865,20 @@ mod tests {
 
             let make = |item: Option<Item>| {
                 let atk = build_pokemon_state(
-                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Species::Arcanine, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::WaterPulse), None, None, None]),
                     None, Some(Ability::None), None, item, None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
                 battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
             };
 
-            let no_item  = raw_damage(&make(None),                 &PokemonMove::WaterPulse, &move_dex);
-            let charcoal = raw_damage(&make(Some(Item::Charcoal)), &PokemonMove::WaterPulse, &move_dex);
+            let no_item  = raw_damage(&make(None),                 &PokemonMove::WaterPulse, move_dex);
+            let charcoal = raw_damage(&make(Some(Item::Charcoal)), &PokemonMove::WaterPulse, move_dex);
 
             assert_eq!(charcoal, no_item, "Charcoal should not boost non-Fire moves");
         }
@@ -10890,12 +10890,12 @@ mod tests {
 
             let make = |suppressed: bool| {
                 let atk = build_pokemon_state(
-                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Species::Arcanine, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Flamethrower), None, None, None]),
                     None, Some(Ability::None), None, Some(Item::Charcoal), None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
@@ -10907,8 +10907,8 @@ mod tests {
                 state
             };
 
-            let boosted    = raw_damage(&make(false), &PokemonMove::Flamethrower, &move_dex);
-            let suppressed = raw_damage(&make(true),  &PokemonMove::Flamethrower, &move_dex);
+            let boosted    = raw_damage(&make(false), &PokemonMove::Flamethrower, move_dex);
+            let suppressed = raw_damage(&make(true),  &PokemonMove::Flamethrower, move_dex);
 
             assert!(boosted > suppressed,
                 "Charcoal boost should be suppressed under Magic Room (MagicDeluge)");
@@ -10924,20 +10924,20 @@ mod tests {
             // Chikorita is Grass-type → 2× weak to Fire
             let make_target = |item: Option<Item>| {
                 let atk = build_pokemon_state(
-                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Species::Arcanine, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Flamethrower), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Chikorita, &pokemon_dex, &move_dex, Some(50),
+                    Species::Chikorita, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, item, None, None, None, false,
                 );
                 battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
             };
 
-            let dmg_bare = raw_damage(&make_target(None),                  &PokemonMove::Flamethrower, &move_dex);
-            let dmg_occa = raw_damage(&make_target(Some(Item::OccaBerry)), &PokemonMove::Flamethrower, &move_dex);
+            let dmg_bare = raw_damage(&make_target(None),                  &PokemonMove::Flamethrower, move_dex);
+            let dmg_occa = raw_damage(&make_target(Some(Item::OccaBerry)), &PokemonMove::Flamethrower, move_dex);
 
             assert!(dmg_occa < dmg_bare, "Occa Berry should reduce SE Fire damage");
             assert!(dmg_occa as f64 >= dmg_bare as f64 * 0.45, "Reduction should be ~0.5×");
@@ -10950,7 +10950,7 @@ mod tests {
                 &MatchState::BattleState(make_target(Some(Item::OccaBerry))),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let any_not_consumed = full_outcomes.iter().any(|(ms, _)|
                 matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::OccaBerry)
@@ -10967,20 +10967,20 @@ mod tests {
             // Snorlax is Normal-type → Fire hits at 1.0× (not super-effective); Occa should not fire.
             let make = |item: Option<Item>| {
                 let atk = build_pokemon_state(
-                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Species::Arcanine, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Flamethrower), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, item, None, None, None, false,
                 );
                 battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
             };
 
-            let dmg_with_berry = raw_damage(&make(Some(Item::OccaBerry)), &PokemonMove::Flamethrower, &move_dex);
-            let dmg_no_berry   = raw_damage(&make(None),                   &PokemonMove::Flamethrower, &move_dex);
+            let dmg_with_berry = raw_damage(&make(Some(Item::OccaBerry)), &PokemonMove::Flamethrower, move_dex);
+            let dmg_no_berry   = raw_damage(&make(None),                   &PokemonMove::Flamethrower, move_dex);
 
             assert_eq!(dmg_with_berry, dmg_no_berry,
                 "Occa Berry should not reduce neutral Fire damage");
@@ -10991,7 +10991,7 @@ mod tests {
                 &MatchState::BattleState(make(Some(Item::OccaBerry))),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             for (ms, _) in &full_outcomes {
                 if let MatchState::BattleState(bs) = ms {
@@ -11012,20 +11012,20 @@ mod tests {
             // Tackle has no secondary effects, so the turn produces a single deterministic outcome.
             let make = |item: Option<Item>| {
                 let atk = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Tackle), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Lapras, &pokemon_dex, &move_dex, Some(50),
+                    Species::Lapras, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, item, None, None, None, false,
                 );
                 battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
             };
 
-            let dmg_bare   = raw_damage(&make(None),                     &PokemonMove::Tackle, &move_dex);
-            let dmg_chilan = raw_damage(&make(Some(Item::ChilanBerry)), &PokemonMove::Tackle, &move_dex);
+            let dmg_bare   = raw_damage(&make(None),                     &PokemonMove::Tackle, move_dex);
+            let dmg_chilan = raw_damage(&make(Some(Item::ChilanBerry)), &PokemonMove::Tackle, move_dex);
 
             assert!(dmg_chilan < dmg_bare, "Chilan Berry should halve Normal-move damage even when not SE");
             assert!(dmg_chilan as f64 >= dmg_bare as f64 * 0.45, "Reduction should be ~0.5×");
@@ -11035,7 +11035,7 @@ mod tests {
                 &MatchState::BattleState(make(Some(Item::ChilanBerry))),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             )).0;
 
             assert_eq!(after.p2_active_mons[0].item, Item::None,
@@ -11051,20 +11051,20 @@ mod tests {
             // Berry only fires for Normal-type moves — it should not reduce Fighting damage.
             let make = |item: Option<Item>| {
                 let atk = build_pokemon_state(
-                    Species::Machamp, &pokemon_dex, &move_dex, Some(50),
+                    Species::Machamp, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::CloseCombat), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                    Species::Snorlax, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, item, None, None, None, false,
                 );
                 battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
             };
 
-            let dmg_bare   = raw_damage(&make(None),                     &PokemonMove::CloseCombat, &move_dex);
-            let dmg_chilan = raw_damage(&make(Some(Item::ChilanBerry)), &PokemonMove::CloseCombat, &move_dex);
+            let dmg_bare   = raw_damage(&make(None),                     &PokemonMove::CloseCombat, move_dex);
+            let dmg_chilan = raw_damage(&make(Some(Item::ChilanBerry)), &PokemonMove::CloseCombat, move_dex);
 
             assert_eq!(dmg_chilan, dmg_bare,
                 "Chilan Berry should not reduce Fighting-move damage");
@@ -11075,7 +11075,7 @@ mod tests {
                 &MatchState::BattleState(make(Some(Item::ChilanBerry))),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let any_consumed = full_outcomes.iter().any(|(ms, _)|
                 matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::None)
@@ -11092,12 +11092,12 @@ mod tests {
             // Occa Berry on a 2× Fire-weak target under Magic Room — no reduction, no consumption.
             let make = |suppressed: bool| {
                 let atk = build_pokemon_state(
-                    Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                    Species::Arcanine, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Flamethrower), None, None, None]),
                     None, Some(Ability::None), None, None, None, None, None, false,
                 );
                 let tgt = build_pokemon_state(
-                    Species::Chikorita, &pokemon_dex, &move_dex, Some(50),
+                    Species::Chikorita, pokemon_dex, move_dex, Some(50),
                     Some([Some(PokemonMove::Splash), None, None, None]),
                     None, Some(Ability::None), None, Some(Item::OccaBerry), None, None, None, false,
                 );
@@ -11109,8 +11109,8 @@ mod tests {
                 state
             };
 
-            let dmg_normal     = raw_damage(&make(false), &PokemonMove::Flamethrower, &move_dex);
-            let dmg_suppressed = raw_damage(&make(true),  &PokemonMove::Flamethrower, &move_dex);
+            let dmg_normal     = raw_damage(&make(false), &PokemonMove::Flamethrower, move_dex);
+            let dmg_suppressed = raw_damage(&make(true),  &PokemonMove::Flamethrower, move_dex);
 
             assert!(dmg_suppressed > dmg_normal,
                 "Occa Berry reduction should be suppressed by Magic Room");
@@ -11121,7 +11121,7 @@ mod tests {
                 &MatchState::BattleState(make(true)),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let any_consumed = full_outcomes.iter().any(|(ms, _)|
                 matches!(ms, MatchState::BattleState(bs) if bs.p2_active_mons[0].item == Item::None)
@@ -11140,12 +11140,12 @@ mod tests {
             // Thunder Wave onto a Cheri Berry holder. In any branch where the move hits,
             // the paralysis should be immediately cured and the berry consumed.
             let atk = build_pokemon_state(
-                Species::Pikachu, &pokemon_dex, &move_dex, Some(50),
+                Species::Pikachu, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::ThunderWave), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
             let tgt = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::CheriBerry), None, None, None, false,
             );
@@ -11155,7 +11155,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             // Target should never end up paralyzed — whenever Thunder Wave hits, Cheri cures it.
@@ -11182,12 +11182,12 @@ mod tests {
             let move_dex = move_dex();
 
             let atk = build_pokemon_state(
-                Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                Species::Arcanine, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Toxic), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
             let tgt = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::PechaBerry), None, None, None, false,
             );
@@ -11197,7 +11197,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             // Target should never end up poisoned/badly poisoned.
@@ -11224,12 +11224,12 @@ mod tests {
             let move_dex = move_dex();
 
             let atk = build_pokemon_state(
-                Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                Species::Arcanine, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::WillOWisp), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
             let tgt = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::LumBerry), None, None, None, false,
             );
@@ -11239,7 +11239,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             // Target should never end up burned — Lum cures immediately.
@@ -11267,12 +11267,12 @@ mod tests {
             // Confuse Ray has 100% accuracy and always confuses. With Lum Berry, confusion
             // is immediately cured and the berry is consumed.
             let atk = build_pokemon_state(
-                Species::Gastly, &pokemon_dex, &move_dex, Some(50),
+                Species::Gastly, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::ConfuseRay), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
             let tgt = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::LumBerry), None, None, None, false,
             );
@@ -11282,7 +11282,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             )).0;
 
             assert!(
@@ -11300,12 +11300,12 @@ mod tests {
 
             // (a) ConfuseRay onto PersimBerry holder: confusion cured, berry consumed.
             let atk_c = build_pokemon_state(
-                Species::Gastly, &pokemon_dex, &move_dex, Some(50),
+                Species::Gastly, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::ConfuseRay), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
             let tgt_c = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::PersimBerry), None, None, None, false,
             );
@@ -11315,7 +11315,7 @@ mod tests {
                 ),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             )).0;
 
             assert!(
@@ -11327,12 +11327,12 @@ mod tests {
 
             // (b) WillOWisp onto PersimBerry holder: burn remains, berry NOT consumed.
             let atk_b = build_pokemon_state(
-                Species::Arcanine, &pokemon_dex, &move_dex, Some(50),
+                Species::Arcanine, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::WillOWisp), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
             let tgt_b = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::PersimBerry), None, None, None, false,
             );
@@ -11342,7 +11342,7 @@ mod tests {
                 ),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             // Persim should never be consumed — it only cures confusion, not burn.
@@ -11361,12 +11361,12 @@ mod tests {
 
             // Confuse Ray onto PersimBerry holder under Magic Room — berry should not fire.
             let atk = build_pokemon_state(
-                Species::Gastly, &pokemon_dex, &move_dex, Some(50),
+                Species::Gastly, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::ConfuseRay), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
             let tgt = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::PersimBerry), None, None, None, false,
             );
@@ -11378,7 +11378,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             )).0;
 
             assert!(
@@ -11430,7 +11430,7 @@ mod tests {
             // Machamp (Fighting) at level 50 uses Seismic Toss.
             let attacker = build_pokemon_state(
                 Species::Machamp,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::SeismicToss), None, None, None]),
                 None,
@@ -11444,7 +11444,7 @@ mod tests {
             // Venusaur is not Ghost-type, so it is not immune.
             let target = build_pokemon_state(
                 Species::Venusaur,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -11456,7 +11456,7 @@ mod tests {
                 false,
             );
             let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
-            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 1.0, &move_dex);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 1.0, move_dex);
 
             assert_eq!(damages, vec![50], "Seismic Toss should deal exactly user level (50) damage");
         }
@@ -11469,7 +11469,7 @@ mod tests {
             // Gengar (Ghost) at level 50 uses Night Shade.
             let attacker = build_pokemon_state(
                 Species::Gengar,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::NightShade), None, None, None]),
                 None,
@@ -11483,7 +11483,7 @@ mod tests {
             // Machamp is not Normal-type, so Night Shade is not immune.
             let target = build_pokemon_state(
                 Species::Machamp,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -11495,7 +11495,7 @@ mod tests {
                 false,
             );
             let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
-            let damages = damage_values(&attacker, &target, &state, PokemonMove::NightShade, 1.0, &move_dex);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::NightShade, 1.0, move_dex);
 
             assert_eq!(damages, vec![50], "Night Shade should deal exactly user level (50) damage");
         }
@@ -11509,7 +11509,7 @@ mod tests {
 
             let attacker = build_pokemon_state(
                 Species::Dragonite,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::DragonRage), None, None, None]),
                 None,
@@ -11522,7 +11522,7 @@ mod tests {
             );
             let target = build_pokemon_state(
                 Species::Venusaur,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -11534,7 +11534,7 @@ mod tests {
                 false,
             );
             let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
-            let damages = damage_values(&attacker, &target, &state, PokemonMove::DragonRage, 1.0, &move_dex);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::DragonRage, 1.0, move_dex);
 
             assert_eq!(damages, vec![40], "Dragon Rage should always deal exactly 40 damage");
         }
@@ -11549,7 +11549,7 @@ mod tests {
             // Seismic Toss is Fighting-type; Ghost types are immune.
             let attacker = build_pokemon_state(
                 Species::Machamp,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::SeismicToss), None, None, None]),
                 None,
@@ -11562,7 +11562,7 @@ mod tests {
             );
             let target = build_pokemon_state(
                 Species::Gengar,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -11574,7 +11574,7 @@ mod tests {
                 false,
             );
             let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
-            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 1.0, &move_dex);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 1.0, move_dex);
 
             assert_eq!(damages, vec![0], "Seismic Toss should deal 0 damage to Ghost-type targets");
         }
@@ -11587,7 +11587,7 @@ mod tests {
             // Night Shade is Ghost-type; Normal types are immune.
             let attacker = build_pokemon_state(
                 Species::Gengar,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::NightShade), None, None, None]),
                 None,
@@ -11600,7 +11600,7 @@ mod tests {
             );
             let target = build_pokemon_state(
                 Species::Snorlax,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -11612,7 +11612,7 @@ mod tests {
                 false,
             );
             let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
-            let damages = damage_values(&attacker, &target, &state, PokemonMove::NightShade, 1.0, &move_dex);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::NightShade, 1.0, move_dex);
 
             assert_eq!(damages, vec![0], "Night Shade should deal 0 damage to Normal-type targets");
         }
@@ -11626,7 +11626,7 @@ mod tests {
 
             let attacker = build_pokemon_state(
                 Species::Machamp,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::SeismicToss), None, None, None]),
                 None,
@@ -11639,7 +11639,7 @@ mod tests {
             );
             let target = build_pokemon_state(
                 Species::Venusaur,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -11653,7 +11653,7 @@ mod tests {
             let state = battle_state_from_lists(vec![attacker.clone()], vec![], vec![target.clone()], vec![]);
 
             // With a 0.75 spread multiplier (doubles penalty) the result must still be 50.
-            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 0.75, &move_dex);
+            let damages = damage_values(&attacker, &target, &state, PokemonMove::SeismicToss, 0.75, move_dex);
             assert_eq!(damages, vec![50],
                 "Fixed-damage moves should deal full damage regardless of spread multiplier");
         }
@@ -11672,7 +11672,7 @@ mod tests {
 
             let attacker = build_pokemon_state(
                 Species::Machamp,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::SeismicToss), None, None, None]),
                 None,
@@ -11685,7 +11685,7 @@ mod tests {
             );
             let target = build_pokemon_state(
                 Species::Venusaur,
-                &pokemon_dex, &move_dex,
+                pokemon_dex, move_dex,
                 Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None,
@@ -11808,15 +11808,15 @@ mod tests {
             // P1: fast (high Spe) U-turn user with a healthy bench mon.
             // P2: slow Shuckle using Splash — it should NOT have acted yet.
             let p1_active = build_pokemon_state(
-                Species::Jolteon, &pokemon_dex, &move_dex, None,
+                Species::Jolteon, pokemon_dex, move_dex, None,
                 Some(u_turn_set()), None, None, None, None, None, None, None, false,
             );
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -11829,7 +11829,7 @@ mod tests {
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
             let outcomes = run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             );
 
             let bs = single_battle_state(&outcomes);
@@ -11858,15 +11858,15 @@ mod tests {
             let move_dex = move_dex();
 
             let p1_active = build_pokemon_state(
-                Species::Jolteon, &pokemon_dex, &move_dex, None,
+                Species::Jolteon, pokemon_dex, move_dex, None,
                 Some(u_turn_set()), None, None, None, None, None, None, None, false,
             );
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -11878,13 +11878,13 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let outcomes = run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             );
             let bs = single_battle_state(&outcomes);
             assert!(bs.self_switch_pending.is_some());
 
             // Pending slot (P1 slot 0) should only offer Switch commands
-            let p1_cmds = get_possible_commands_for_active_slot(&bs, Player::P1, 0, &move_dex, &pokemon_dex);
+            let p1_cmds = get_possible_commands_for_active_slot(&bs, Player::P1, 0, move_dex, pokemon_dex);
             assert!(!p1_cmds.is_empty(), "pending slot must have at least one command");
             for cmd in &p1_cmds {
                 assert!(matches!(cmd, BattleCommand::Switch(_)),
@@ -11892,7 +11892,7 @@ mod tests {
             }
 
             // P2 (non-pending) should only get Pass
-            let p2_cmds = get_possible_commands_for_active_slot(&bs, Player::P2, 0, &move_dex, &pokemon_dex);
+            let p2_cmds = get_possible_commands_for_active_slot(&bs, Player::P2, 0, move_dex, pokemon_dex);
             assert_eq!(p2_cmds, vec![BattleCommand::Pass],
                 "non-pending player must only have Pass");
         }
@@ -11905,15 +11905,15 @@ mod tests {
             let move_dex = move_dex();
 
             let p1_active = build_pokemon_state(
-                Species::Jolteon, &pokemon_dex, &move_dex, None,
+                Species::Jolteon, pokemon_dex, move_dex, None,
                 Some(u_turn_set()), None, None, None, None, None, None, None, false,
             );
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -11924,14 +11924,14 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let after_uturn = single_battle_state(&run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             ));
             assert!(after_uturn.self_switch_pending.is_some());
 
             let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
             let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
             let after_switch = single_battle_state(&run_single_turn(
-                &MatchState::BattleState(after_uturn), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(after_uturn), &p1_switch, &p2_pass, move_dex, pokemon_dex,
             ));
 
             assert!(after_switch.self_switch_pending.is_none(), "pending should be cleared after switch-in");
@@ -11951,11 +11951,11 @@ mod tests {
             let move_dex = move_dex();
 
             let p1_active = build_pokemon_state(
-                Species::Jolteon, &pokemon_dex, &move_dex, None,
+                Species::Jolteon, pokemon_dex, move_dex, None,
                 Some(u_turn_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -11966,7 +11966,7 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let outcomes = run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             );
             let bs = single_battle_state(&outcomes);
 
@@ -11986,15 +11986,15 @@ mod tests {
             let move_dex = move_dex();
 
             let p1_active = build_pokemon_state(
-                Species::Torkoal, &pokemon_dex, &move_dex, None,
+                Species::Torkoal, pokemon_dex, move_dex, None,
                 Some(u_turn_set()), None, Some(Ability::DesolateLand), None, None, None, None, None, false,
             );
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -12009,7 +12009,7 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let after_uturn = single_battle_state(&run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             ));
             assert!(after_uturn.self_switch_pending.is_some());
             // The physical switch (and thus handle_pokemon_switch_out) has not happened yet;
@@ -12022,7 +12022,7 @@ mod tests {
             let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
             let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
             let after_switch = single_battle_state(&run_single_turn(
-                &MatchState::BattleState(after_uturn), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(after_uturn), &p1_switch, &p2_pass, move_dex, pokemon_dex,
             ));
 
             // DesolateLand source (Torkoal) left the field → extreme sun should be gone
@@ -12038,7 +12038,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1_active = build_pokemon_state(
-                Species::Espeon, &pokemon_dex, &move_dex, None,
+                Species::Espeon, pokemon_dex, move_dex, None,
                 Some(baton_pass_set()), None, None, None, None, None, None, None, false,
             );
             // Give Espeon +2 Atk and a LeechSeed volatile
@@ -12048,11 +12048,11 @@ mod tests {
             p1_active.status = Some(Status::Burn);
 
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -12064,7 +12064,7 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let after_bp = single_battle_state(&run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             ));
             assert!(after_bp.self_switch_pending.is_some());
             let pending = after_bp.self_switch_pending.unwrap();
@@ -12074,7 +12074,7 @@ mod tests {
             let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
             let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
             let after_switch = single_battle_state(&run_single_turn(
-                &MatchState::BattleState(after_bp), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(after_bp), &p1_switch, &p2_pass, move_dex, pokemon_dex,
             ));
 
             let replacement = &after_switch.p1_active_mons[0];
@@ -12101,15 +12101,15 @@ mod tests {
             let move_dex = move_dex();
 
             let p1_active = build_pokemon_state(
-                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Species::Orthworm, pokemon_dex, move_dex, None,
                 Some(shed_tail_set()), None, None, None, None, None, None, None, false,
             );
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -12121,7 +12121,7 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let after_shed = single_battle_state(&run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             ));
 
             assert!(after_shed.self_switch_pending.is_some(), "Shed Tail should set self_switch_pending");
@@ -12129,7 +12129,7 @@ mod tests {
             assert!(matches!(pending.1, SelfSwitchType::ShedTail));
 
             // Orthworm lost ~half HP to create the substitute
-            let expected_hp_after = max_hp - (max_hp + 1) / 2;
+            let expected_hp_after = max_hp - max_hp.div_ceil(2);
             let hp_after = after_shed.p1_active_mons[0].hp;
             assert!(hp_after <= expected_hp_after + 1, "Orthworm should have lost ~half HP for Shed Tail");
 
@@ -12137,7 +12137,7 @@ mod tests {
             let p1_switch = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
             let p2_pass = PlayerCommand::Battle(vec![BattleCommand::Pass]);
             let after_switch = single_battle_state(&run_single_turn(
-                &MatchState::BattleState(after_shed), &p1_switch, &p2_pass, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(after_shed), &p1_switch, &p2_pass, move_dex, pokemon_dex,
             ));
 
             let replacement = &after_switch.p1_active_mons[0];
@@ -12161,7 +12161,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1_active = build_pokemon_state(
-                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Species::Orthworm, pokemon_dex, move_dex, None,
                 Some(shed_tail_set()), None, None, None, None, None, None, None, false,
             );
             // Set HP to exactly 50% — should fail
@@ -12169,11 +12169,11 @@ mod tests {
             p1_active.hp = max_hp / 2;
 
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -12184,7 +12184,7 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let outcomes = run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             );
             let bs = single_battle_state(&outcomes);
 
@@ -12204,7 +12204,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1_active = build_pokemon_state(
-                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Species::Orthworm, pokemon_dex, move_dex, None,
                 Some(shed_tail_set()), None, None, None, None, None, None, None, false,
             );
             let initial_hp = p1_active.hp;
@@ -12212,11 +12212,11 @@ mod tests {
             p1_active.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(30), 0));
 
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -12227,7 +12227,7 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let outcomes = run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             );
             let bs = single_battle_state(&outcomes);
 
@@ -12251,13 +12251,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1_active = build_pokemon_state(
-                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Species::Orthworm, pokemon_dex, move_dex, None,
                 Some(shed_tail_set()), None, None, None, None, None, None, None, false,
             );
             let initial_hp = p1_active.hp;
             // No bench mons at all
             let p2_active = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some(splash_set()), None, None, None, None, None, None, None, false,
             );
 
@@ -12268,7 +12268,7 @@ mod tests {
             let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
             let outcomes = run_single_turn(
-                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &MatchState::BattleState(initial), &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             );
             let bs = single_battle_state(&outcomes);
 
@@ -12297,7 +12297,7 @@ mod tests {
 
             // Snorlax: very bulky, easy to control HP maths.
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::OranBerry),
                 None, None, None, false,
@@ -12308,7 +12308,7 @@ mod tests {
             p1.status = Some(Status::Poison);
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -12318,7 +12318,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12337,7 +12337,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::SitrusBerry),
                 None, None, None, false,
@@ -12347,7 +12347,7 @@ mod tests {
             p1.status = Some(Status::Poison);
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -12357,7 +12357,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12376,7 +12376,7 @@ mod tests {
 
             // P1: Snorlax at full HP with poison — poison damage stays well above 50%.
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::OranBerry),
                 None, None, None, false,
@@ -12387,7 +12387,7 @@ mod tests {
             p1.status = Some(Status::Poison);
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -12397,7 +12397,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12418,7 +12418,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::OranBerry),
                 None, None, None, false,
@@ -12428,7 +12428,7 @@ mod tests {
             p1.status = Some(Status::Poison);
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -12442,7 +12442,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12464,7 +12464,7 @@ mod tests {
 
             // P1 uses Splash with 1 PP remaining — after the turn it hits 0, triggering Leppa.
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::LeppaBerry),
                 None, None, None, false,
@@ -12472,7 +12472,7 @@ mod tests {
             p1.move_pp[0] = 1; // will hit 0 after this use
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -12482,7 +12482,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12502,7 +12502,7 @@ mod tests {
 
             // P1 has 5 PP remaining — Splash use brings it to 4, not 0.
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::LeppaBerry),
                 None, None, None, false,
@@ -12510,7 +12510,7 @@ mod tests {
             p1.move_pp[0] = 5;
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -12520,7 +12520,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12540,7 +12540,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Species::Orthworm, pokemon_dex, move_dex, None,
                 Some([Some(PokemonMove::ShedTail), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::SitrusBerry),
                 None, None, None, false,
@@ -12550,12 +12550,12 @@ mod tests {
             p1.hp = 100;
 
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, None, None, None, None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, None, None, None, None, None, None, false,
             );
@@ -12567,7 +12567,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12591,7 +12591,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Orthworm, &pokemon_dex, &move_dex, None,
+                Species::Orthworm, pokemon_dex, move_dex, None,
                 Some([Some(PokemonMove::ShedTail), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::SitrusBerry),
                 None, None, None, false,
@@ -12603,12 +12603,12 @@ mod tests {
             p1.hp = 101;
 
             let p1_bench = build_pokemon_state(
-                Species::Slowpoke, &pokemon_dex, &move_dex, None,
+                Species::Slowpoke, pokemon_dex, move_dex, None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, None, None, None, None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, None,
+                Species::Shuckle, pokemon_dex, move_dex, None,
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, None, None, None, None, None, None, false,
             );
@@ -12620,7 +12620,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12646,7 +12646,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::FocusSash),
                 None, None, None, false,
@@ -12655,7 +12655,7 @@ mod tests {
             p1.hp = 1; // at full HP (1 == stats[0])
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -12666,7 +12666,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             // Both crit and non-crit branches both trigger Sash → same surviving
             // state → coalesce_branches merges to exactly 1 outcome.
@@ -12683,7 +12683,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::FocusSash),
                 None, None, None, false,
@@ -12692,7 +12692,7 @@ mod tests {
             p1.hp = 1; // NOT at full HP (1 < 2)
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -12703,7 +12703,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             // Sash full-HP condition fails → holder faints → game over (P2 wins).
@@ -12722,13 +12722,13 @@ mod tests {
             // Snorlax at full HP (~330 HP at level 50). Shuckle's Tackle deals
             // only ~3 damage — far from lethal — so Sash has no reason to fire.
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::FocusSash),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -12739,7 +12739,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             // Across all branches (including crits): Sash should always be retained.
@@ -12762,7 +12762,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::FocusBand),
                 None, None, None, false,
@@ -12771,7 +12771,7 @@ mod tests {
             p1.hp = 1;
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -12782,7 +12782,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             let survive_prob: f64 = outcomes.iter().map(|(s, p)| {
@@ -12816,13 +12816,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::WhiteHerb),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Growl), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -12833,7 +12833,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12851,13 +12851,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::WhiteHerb),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::Intimidate), None, None,
                 None, None, None, false,
@@ -12879,13 +12879,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::SwordsDance), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::WhiteHerb),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -12896,7 +12896,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12914,13 +12914,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::WhiteHerb),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Growl), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -12935,7 +12935,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12955,13 +12955,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::MentalHerb),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Taunt), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -12972,7 +12972,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -12992,13 +12992,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::MentalHerb),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::ConfuseRay), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -13009,7 +13009,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             // Across all branches (including confusion self-hit branching):
@@ -13031,13 +13031,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::MentalHerb),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Taunt), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -13051,7 +13051,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -13073,7 +13073,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::Leftovers),
                 None, None, None, false,
@@ -13083,7 +13083,7 @@ mod tests {
             p1.hp = max_hp / 2;
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13093,7 +13093,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -13109,7 +13109,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::Leftovers),
                 None, None, None, false,
@@ -13119,7 +13119,7 @@ mod tests {
             p1.hp = max_hp;
 
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13129,7 +13129,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -13145,7 +13145,7 @@ mod tests {
 
             // Attacker with Shell Bell; starts below max HP so there is room to heal.
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::ShellBell),
                 None, None, None, false,
@@ -13155,7 +13155,7 @@ mod tests {
             let p1_before_hp = p1.hp;
 
             let p2 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13166,7 +13166,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -13192,13 +13192,13 @@ mod tests {
             let move_dex = move_dex();
 
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::ScopeLens),
                 None, None, None, false,
             );
             let p2 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13208,7 +13208,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
                 true, // consider crits
                 1,    // one damage roll → exactly two outcome buckets
             );
@@ -13240,7 +13240,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::KingsRock),
                 None, None, None, false,
@@ -13248,7 +13248,7 @@ mod tests {
             p1.stats[5] = 200; // guarantee P1 moves first
 
             let p2 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13259,7 +13259,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
                 false, // no crits — keep it to 2 branches
                 1,
             );
@@ -13284,7 +13284,7 @@ mod tests {
 
             // DoubleKick: Fighting, exactly 2 hits, 100% accuracy, no flinch secondary.
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::DoubleKick), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::KingsRock),
                 None, None, None, false,
@@ -13292,7 +13292,7 @@ mod tests {
             p1.stats[5] = 200;
 
             let p2 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13303,7 +13303,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
                 false,
                 1,
             );
@@ -13329,7 +13329,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::AirSlash), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::KingsRock),
                 None, None, None, false,
@@ -13337,7 +13337,7 @@ mod tests {
             p1.stats[5] = 200;
 
             let p2 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13348,7 +13348,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
                 false,
                 1,
             );
@@ -13378,7 +13378,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::RazorFang),
                 None, None, None, false,
@@ -13386,7 +13386,7 @@ mod tests {
             p1.stats[5] = 200; // guarantee P1 moves first
 
             let p2 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13397,7 +13397,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
                 false, 1,
             );
 
@@ -13423,7 +13423,7 @@ mod tests {
             let move_dex = move_dex();
 
             let pikachu_no_item = build_pokemon_state(
-                Species::Pikachu, &pokemon_dex, &move_dex, Some(50),
+                Species::Pikachu, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -13469,18 +13469,18 @@ mod tests {
         fn liechi_berry_fires_at_quarter_hp() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::None, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::None, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             // Start just above the ≤25% threshold, then let poison drop below it.
             p1.hp = max_hp / 4 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Liechi Berry should give +1 Atk at ≤25% HP");
@@ -13491,18 +13491,18 @@ mod tests {
         fn liechi_berry_does_not_fire_above_quarter_hp() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::None, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::None, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             // At 50% HP, poison drops us to ~43% — still above the 25% threshold.
             p1.hp = max_hp / 2;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 0, "Liechi Berry should NOT fire above 25% threshold");
@@ -13514,17 +13514,17 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Bold lowers Atk — Figy Berry dislikes lowered Atk → confusion.
-            let mut p1 = snorlax_with(Item::FigyBerry, Ability::None, Nature::Bold, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::FigyBerry, Ability::None, Nature::Bold, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 4 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].item, Item::None, "Figy Berry should be consumed");
@@ -13542,17 +13542,17 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Hardy is neutral — no confusion.
-            let mut p1 = snorlax_with(Item::FigyBerry, Ability::None, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::FigyBerry, Ability::None, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 4 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].item, Item::None, "Figy Berry should still be consumed");
@@ -13563,19 +13563,19 @@ mod tests {
         fn gluttony_fires_pinch_berry_at_half_hp() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::Gluttony, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::Gluttony, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             // Start just above 50% so poison residual (max_hp/8) drops us into the Gluttony window
             // (between 25% and 50%). Without Gluttony the ≤25% threshold would not be reached.
             p1.hp = max_hp / 2 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             let poison_dmg = (max_hp / 8).max(1);
@@ -13591,17 +13591,17 @@ mod tests {
         fn ripen_doubles_oran_berry_heal() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mut p1 = snorlax_with(Item::OranBerry, Ability::Ripen, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::OranBerry, Ability::Ripen, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 2 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             let poison_dmg = (max_hp / 8).max(1);
@@ -13615,17 +13615,17 @@ mod tests {
         fn ripen_doubles_liechi_berry_stages() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::Ripen, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::Ripen, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 4 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 2, "Ripen should double Liechi Berry to +2 Atk");
@@ -13636,17 +13636,17 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Hardy is neutral → no confusion; Ripen should double heal to ⅔.
-            let mut p1 = snorlax_with(Item::FigyBerry, Ability::Ripen, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::FigyBerry, Ability::Ripen, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 4 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             let poison_dmg = (max_hp / 8).max(1);
@@ -13659,17 +13659,17 @@ mod tests {
         fn cheek_pouch_adds_third_heal_on_top_of_berry() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CheekPouch, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CheekPouch, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 4 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             // Liechi gives +1 Atk (its effect); Cheek Pouch adds ⅓ max HP heal on top.
@@ -13685,12 +13685,12 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // P1 holds Oran Berry and is at ≤50% HP, but P2 has Unnerve → berry must not fire.
-            let mut p1 = snorlax_with(Item::OranBerry, Ability::None, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::OranBerry, Ability::None, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 2 + 1;
             p1.status = Some(Status::Poison);
             let p2 = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::Unnerve), None, None, None, None, None, false,
             );
@@ -13699,7 +13699,7 @@ mod tests {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             let poison_dmg = (max_hp / 8).max(1);
@@ -13715,17 +13715,17 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // P1 has Unnerve and holds Oran Berry — Unnerve only affects the *opponent*.
-            let mut p1 = snorlax_with(Item::OranBerry, Ability::Unnerve, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::OranBerry, Ability::Unnerve, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 2 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             // Berry should fire normally.
@@ -13738,17 +13738,17 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             // Turn 1: Liechi Berry fires (P1 at ≤25% HP via poison). Cud Chew arms the re-eat.
-            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CudChew, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CudChew, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 4 + 1;
             p1.status = Some(Status::Poison);
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             let turn1_outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (mut bs1, _) = extract_battle_state(turn1_outcomes);
             // After turn 1: berry consumed, +1 Atk, Cud Chew armed for next EOT.
@@ -13763,7 +13763,7 @@ mod tests {
                 &MatchState::BattleState(bs1),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs2, _) = extract_battle_state(turn2_outcomes);
             assert_eq!(bs2.p1_active_mons[0].boosts[0], 2, "Cud Chew should add another +1 Atk on the following turn");
@@ -13773,23 +13773,23 @@ mod tests {
         fn cud_chew_pending_cleared_on_switch_out() {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
-            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CudChew, Nature::Hardy, &move_dex, &pokemon_dex);
+            let mut p1 = snorlax_with(Item::LiechiBerry, Ability::CudChew, Nature::Hardy, move_dex, pokemon_dex);
             let max_hp = p1.stats[0];
             p1.hp = max_hp / 4;
             // Bench mon to switch to.
             let bench = build_pokemon_state(
-                Species::Shuckle, &pokemon_dex, &move_dex, Some(50),
+                Species::Shuckle, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
-            let p2 = splash_mon(&pokemon_dex, &move_dex);
+            let p2 = splash_mon(pokemon_dex, move_dex);
 
             // Turn 1: berry fires, Cud Chew arms re-eat.
             let turn1_outcomes = run_single_turn(
                 &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![bench], vec![p2], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (mut bs1, _) = extract_battle_state(turn1_outcomes);
 
@@ -13799,7 +13799,7 @@ mod tests {
                 &MatchState::BattleState(bs1.clone()),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs2, _) = extract_battle_state(turn2_outcomes);
             // P1's original Snorlax is now on bench. Its boost should still be +1 (the Liechi
@@ -13818,7 +13818,7 @@ mod tests {
             let move_dex = move_dex();
 
             let raichu_no_item = build_pokemon_state(
-                Species::Raichu, &pokemon_dex, &move_dex, Some(50),
+                Species::Raichu, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
                 None, None, None, false,
@@ -13850,7 +13850,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mon = build_pokemon_state(
-                Species::Raticate, &pokemon_dex, &move_dex, Some(50),
+                Species::Raticate, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13876,7 +13876,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mon = build_pokemon_state(
-                Species::Kadabra, &pokemon_dex, &move_dex, Some(50),
+                Species::Kadabra, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Psychic), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13904,7 +13904,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mon = build_pokemon_state(
-                Species::Raticate, &pokemon_dex, &move_dex, Some(50),
+                Species::Raticate, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None, None, None, None, false,
             );
@@ -13934,13 +13934,13 @@ mod tests {
 
             // Use Tackle (100% accuracy) to avoid multi-branch outcomes from accuracy.
             let banded = build_pokemon_state(
-                Species::Machoke, &pokemon_dex, &move_dex, Some(50),
+                Species::Machoke, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), Some(PokemonMove::BodySlam), None, None]),
                 None, Some(Ability::None), None, Some(Item::ChoiceBand),
                 Some(crate::state::dex_data::PokemonType::Fighting), None, None, false,
             );
             let dummy = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -13948,7 +13948,7 @@ mod tests {
 
             // Before any move: both moves available.
             let state = battle_state_from_lists(vec![banded.clone()], vec![], vec![dummy.clone()], vec![]);
-            let initial_cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &move_dex, &pokemon_dex);
+            let initial_cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, move_dex, pokemon_dex);
             let initial_attack_count = initial_cmds.iter()
                 .filter(|c| matches!(c, BattleCommand::Attack(_))).count();
             assert_eq!(initial_attack_count, 2, "both moves should be available before locking");
@@ -13958,11 +13958,11 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             )).0;
 
             let locked_cmds = get_possible_commands_for_active_slot(
-                &state_after, Player::P1, 0, &move_dex, &pokemon_dex,
+                &state_after, Player::P1, 0, move_dex, pokemon_dex,
             );
             let locked_attacks: Vec<_> = locked_cmds.iter()
                 .filter(|c| matches!(c, BattleCommand::Attack(_))).collect();
@@ -13986,19 +13986,19 @@ mod tests {
             let move_dex = move_dex();
 
             let banded = build_pokemon_state(
-                Species::Machoke, &pokemon_dex, &move_dex, Some(50),
+                Species::Machoke, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), Some(PokemonMove::BodySlam), None, None]),
                 None, Some(Ability::None), None, Some(Item::ChoiceBand),
                 Some(crate::state::dex_data::PokemonType::Fighting), None, None, false,
             );
             let bench = build_pokemon_state(
-                Species::Rattata, &pokemon_dex, &move_dex, Some(50),
+                Species::Rattata, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
             let dummy = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -14013,11 +14013,11 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             )).0;
 
             let locked = get_possible_commands_for_active_slot(
-                &after_t1, Player::P1, 0, &move_dex, &pokemon_dex,
+                &after_t1, Player::P1, 0, move_dex, pokemon_dex,
             );
             let body_slam_before_switch = locked.iter().any(|c| {
                 if let BattleCommand::Attack(a) = c {
@@ -14031,7 +14031,7 @@ mod tests {
                 &MatchState::BattleState(after_t1),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             )).0;
 
             // Turn 3: switch banded back in.
@@ -14039,11 +14039,11 @@ mod tests {
                 &MatchState::BattleState(after_t2),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             )).0;
 
             let unlocked = get_possible_commands_for_active_slot(
-                &after_t3, Player::P1, 0, &move_dex, &pokemon_dex,
+                &after_t3, Player::P1, 0, move_dex, pokemon_dex,
             );
             let body_slam_after_switch = unlocked.iter().any(|c| {
                 if let BattleCommand::Attack(a) = c {
@@ -14065,7 +14065,7 @@ mod tests {
             // Both mons at 1 HP with Tackle, so whoever moves first wins. P1 is slower but holds
             // Quick Claw (20% to move first anyway), so P(P1 wins) == P(Quick Claw fired).
             let mut slow_qc = build_pokemon_state(
-                Species::Golem, &pokemon_dex, &move_dex, Some(50),
+                Species::Golem, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::QuickClaw),
                 Some(crate::state::dex_data::PokemonType::Rock), None, None, false,
@@ -14073,7 +14073,7 @@ mod tests {
             slow_qc.hp = 1;
 
             let mut fast_no_item = build_pokemon_state(
-                Species::Electrode, &pokemon_dex, &move_dex, Some(50),
+                Species::Electrode, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Electric), None, None, false,
@@ -14087,7 +14087,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             let p1_wins: f64 = outcomes.iter()
@@ -14112,13 +14112,13 @@ mod tests {
             // Slow mon with Quick Claw uses priority-0 move.
             // Opponent uses +1 priority move (QuickAttack). QC must never beat +1.
             let slow_qc = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::BodySlam), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::QuickClaw),
                 Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
             let fast_priority = build_pokemon_state(
-                Species::Pikachu, &pokemon_dex, &move_dex, Some(50),
+                Species::Pikachu, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::QuickAttack), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Electric), None, None, false,
@@ -14131,7 +14131,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             // Pikachu's Quick Attack (+1 priority) must always go first.
@@ -14169,16 +14169,16 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            let mon = exhausted_mon(Species::Rattata, &pokemon_dex, &move_dex);
+            let mon = exhausted_mon(Species::Rattata, pokemon_dex, move_dex);
             let dummy = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
 
             let state = battle_state_from_lists(vec![mon], vec![], vec![dummy], vec![]);
-            let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &move_dex, &pokemon_dex);
+            let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, move_dex, pokemon_dex);
 
             let has_struggle = cmds.iter().any(|c| matches!(c, BattleCommand::Struggle { .. }));
             let has_attack = cmds.iter().any(|c| matches!(c, BattleCommand::Attack(_)));
@@ -14192,7 +14192,7 @@ mod tests {
             let move_dex = move_dex();
 
             let mut mon = build_pokemon_state(
-                Species::Rattata, &pokemon_dex, &move_dex, Some(50),
+                Species::Rattata, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Tackle), Some(PokemonMove::QuickAttack), None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -14200,14 +14200,14 @@ mod tests {
             mon.move_pp[0] = 0; // Tackle out of PP; Quick Attack still has PP.
 
             let dummy = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
             );
 
             let state = battle_state_from_lists(vec![mon.clone()], vec![], vec![dummy], vec![]);
-            let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &move_dex, &pokemon_dex);
+            let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, move_dex, pokemon_dex);
 
             let has_struggle = cmds.iter().any(|c| matches!(c, BattleCommand::Struggle { .. }));
             let has_tackle = cmds.iter().any(|c| {
@@ -14231,9 +14231,9 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
 
-            let attacker = exhausted_mon(Species::Rattata, &pokemon_dex, &move_dex);
+            let attacker = exhausted_mon(Species::Rattata, pokemon_dex, move_dex);
             let ghost_target = build_pokemon_state(
-                Species::Gengar, &pokemon_dex, &move_dex, Some(50),
+                Species::Gengar, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Ghost), None, None, false,
@@ -14247,7 +14247,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(vec![BattleCommand::Struggle { target: Some(crate::state::battle::FieldSlot { player: Player::P2, slot_index: 0 }) }]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             let ghost_took_damage = outcomes.iter().any(|(state, _)| {
@@ -14266,11 +14266,11 @@ mod tests {
             let move_dex = move_dex();
 
             // Rock Head normally blocks recoil — Struggle must bypass it.
-            let mut attacker = exhausted_mon(Species::Aggron, &pokemon_dex, &move_dex);
+            let mut attacker = exhausted_mon(Species::Aggron, pokemon_dex, move_dex);
             attacker.ability = Ability::RockHead;
 
             let target = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), None, None,
                 Some(crate::state::dex_data::PokemonType::Normal), None, None, false,
@@ -14284,7 +14284,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(vec![BattleCommand::Struggle { target: Some(crate::state::battle::FieldSlot { player: Player::P2, slot_index: 0 }) }]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
 
             let attacker_took_recoil = outcomes.iter().any(|(state, _)| {
@@ -14311,7 +14311,7 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(first_move), None, None, None]),
                 None, Some(ability), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -14371,7 +14371,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
@@ -14391,7 +14391,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
@@ -14410,7 +14410,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[1], -1,
@@ -14430,7 +14430,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[1], 0,
@@ -14449,7 +14449,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], -1,
@@ -14471,7 +14471,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[1], -1,
@@ -14494,7 +14494,7 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             build_pokemon_state(
-                Species::Snorlax, &pokemon_dex, &move_dex, Some(50),
+                Species::Snorlax, pokemon_dex, move_dex, Some(50),
                 Some([Some(first_move), None, None, None]),
                 None, Some(ability), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -14526,7 +14526,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
@@ -14546,7 +14546,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 3,
@@ -14569,7 +14569,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 1,
@@ -14606,7 +14606,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             // The Atk drop stays (Competitive raises SpA, not Atk).
@@ -14645,7 +14645,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 0,
@@ -14680,7 +14680,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             // P2 Atk unchanged (Mirror Armor bounced it)
@@ -14705,7 +14705,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             // P2 bounced the Growl drop back to P1; P1 has Mirror Armor but already_reflected=true
@@ -14729,7 +14729,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], -1,
@@ -14753,7 +14753,7 @@ mod tests {
             let pdex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &pdex, &mdex, Some(50),
+                species, pdex, mdex, Some(50),
                 Some([Some(first_move), None, None, None]),
                 None, Some(ability), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -14773,7 +14773,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[1], 1, "Stamina: +1 Def on hit");
@@ -14790,7 +14790,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[1], 0, "Stamina: no trigger on status-only move");
@@ -14811,7 +14811,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // Note: Sucker Punch fails unless target is using a damaging move, so use a
             // different Dark move. Use Bite instead.
@@ -14824,16 +14824,15 @@ mod tests {
                 &MatchState::BattleState(initial2),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let _ = outcomes;
             for (s, _) in &outcomes2 {
-                if let MatchState::BattleState(bs) = s {
-                    if bs.p1_active_mons[0].hp < bs.p1_active_mons[0].stats[0] {
+                if let MatchState::BattleState(bs) = s
+                    && bs.p1_active_mons[0].hp < bs.p1_active_mons[0].stats[0] {
                         // was hit
                         assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Justified: +1 Atk on Dark hit");
                     }
-                }
             }
         }
 
@@ -14848,7 +14847,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -14878,7 +14877,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
                 true, // consider_crit — required for crit_is_guaranteed to fire
                 1,
             );
@@ -14906,7 +14905,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // Some branches should cross 50% → Berserk fires → SpA == +1
             let any_berserk = outcomes.iter().any(|(s, _)| {
@@ -14930,7 +14929,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -14956,7 +14955,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // Sanity: the boosted hit must actually drop the holder below 50% while it survives,
             // otherwise the test would pass even if suppression were broken.
@@ -14965,12 +14964,11 @@ mod tests {
                     && (bs.p1_active_mons[0].hp as u32) * 2 <= max_hp as u32));
             assert!(crossed_alive, "setup: boosted Iron Head should drop the Berserk holder below 50% while alive");
             for (s, _) in &outcomes {
-                if let MatchState::BattleState(bs) = s {
-                    if !bs.p1_active_mons[0].fainted {
+                if let MatchState::BattleState(bs) = s
+                    && !bs.p1_active_mons[0].fainted {
                         assert_eq!(bs.p1_active_mons[0].boosts[2], 0,
                             "Sheer Force: Berserk must not fire on a boosted move");
                     }
-                }
             }
         }
 
@@ -14990,7 +14988,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let any_berserk = outcomes.iter().any(|(s, _)| {
                 matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[2] == 1)
@@ -15013,7 +15011,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // Some branches: flinch → +1 Spe; others: no flinch → +0 Spe
             let any_steadfast = outcomes.iter().any(|(s, _)| {
@@ -15046,7 +15044,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // P2's active faints; game continues (backup in back_mons) → BattleState.
             // P1 should have +1 Atk from Moxie on every branch.
@@ -15069,7 +15067,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             let has_charge = bs.p1_active_mons[0].volatiles.iter().any(|v| {
@@ -15108,7 +15106,7 @@ mod tests {
                 )),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let base_avg = avg_damage(&base_outcomes);
 
@@ -15124,7 +15122,7 @@ mod tests {
                 )),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let charged_avg = avg_damage(&charged_outcomes);
 
@@ -15156,7 +15154,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p1_active_mons[0].boosts[0], 2, "P1 Swords Dance: +2 Atk");
@@ -15176,7 +15174,7 @@ mod tests {
                 &MatchState::BattleState(initial),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             assert_eq!(bs.p2_active_mons[0].boosts[0], 2,
@@ -15197,7 +15195,7 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             build_pokemon_state(
-                species, &pokemon_dex, &move_dex, Some(50),
+                species, pokemon_dex, move_dex, Some(50),
                 Some([Some(first_move), None, None, None]),
                 None, Some(ability), Some(Nature::Hardy),
                 None, None, Some([0, 0, 0, 0, 0, 0]), None, false,
@@ -15240,9 +15238,9 @@ mod tests {
             let attacker = make_mon(Species::Blastoise, Ability::None, PokemonMove::WaterGun);
             // Charizard (Fire/Flying) is 2× weak to Water.  A 4× target (Geodude) would
             // faint in both the Filter and no-Filter cases, masking the reduction.
-            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Charizard, Ability::None,      PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_filter = run_damage(attacker.clone(), make_mon(Species::Charizard, Ability::Filter,    PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_solid  = run_damage(attacker,         make_mon(Species::Charizard, Ability::SolidRock, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Charizard, Ability::None,      PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_filter = run_damage(attacker.clone(), make_mon(Species::Charizard, Ability::Filter,    PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_solid  = run_damage(attacker,         make_mon(Species::Charizard, Ability::SolidRock, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_filter / dmg_none - 0.75).abs() < 0.02,
                 "Filter: expected ~0.75× SE damage, got {:.4}", dmg_filter / dmg_none);
             assert!((dmg_solid / dmg_none - 0.75).abs() < 0.02,
@@ -15256,8 +15254,8 @@ mod tests {
             let move_dex = move_dex();
             let attacker = make_mon(Species::Blastoise, Ability::None, PokemonMove::WaterGun);
             // Snorlax is Normal — Water is neutral (×1).
-            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_filter = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Filter, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_filter = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Filter, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_filter - dmg_none).abs() < 1.0,
                 "Filter must not reduce neutral hits (expected {dmg_none:.1}, got {dmg_filter:.1})");
         }
@@ -15274,8 +15272,8 @@ mod tests {
             let mut defender_damaged = defender_full.clone();
             defender_damaged.hp -= 1; // one below max → ability does not fire
 
-            let dmg_full    = run_damage(attacker.clone(), defender_full,    &move_dex, &pokemon_dex);
-            let dmg_damaged = run_damage(attacker,         defender_damaged, &move_dex, &pokemon_dex);
+            let dmg_full    = run_damage(attacker.clone(), defender_full,    move_dex, pokemon_dex);
+            let dmg_damaged = run_damage(attacker,         defender_damaged, move_dex, pokemon_dex);
 
             assert!((dmg_full / dmg_damaged - 0.5).abs() < 0.05,
                 "Multiscale: expected ~0.5× damage at full HP (ratio={:.4})", dmg_full / dmg_damaged);
@@ -15290,8 +15288,8 @@ mod tests {
             let defender_shield  = make_mon(Species::Snorlax, Ability::ShadowShield, PokemonMove::Splash);
             let defender_no_abil = make_mon(Species::Snorlax, Ability::None,         PokemonMove::Splash);
 
-            let dmg_shield = run_damage(attacker.clone(), defender_shield,  &move_dex, &pokemon_dex);
-            let dmg_none   = run_damage(attacker,         defender_no_abil, &move_dex, &pokemon_dex);
+            let dmg_shield = run_damage(attacker.clone(), defender_shield,  move_dex, pokemon_dex);
+            let dmg_none   = run_damage(attacker,         defender_no_abil, move_dex, pokemon_dex);
 
             assert!((dmg_shield / dmg_none - 0.5).abs() < 0.05,
                 "Shadow Shield: expected ~0.5× damage at full HP (ratio={:.4})", dmg_shield / dmg_none);
@@ -15305,8 +15303,8 @@ mod tests {
             let move_dex = move_dex();
             // Close Combat is Physical (120 BP Fighting).  Snorlax is Normal — neutral.
             let attacker = make_mon(Species::Lucario, Ability::None, PokemonMove::CloseCombat);
-            let dmg_none     = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,    PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_fur_coat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::FurCoat, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none     = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,    PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_fur_coat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::FurCoat, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_fur_coat / dmg_none - 0.5).abs() < 0.02,
                 "Fur Coat: expected ~0.5× physical damage (ratio={:.4})", dmg_fur_coat / dmg_none);
         }
@@ -15317,8 +15315,8 @@ mod tests {
             let move_dex = move_dex();
             // Psychic is Special.
             let attacker = make_mon(Species::Alakazam, Ability::None, PokemonMove::Psychic);
-            let dmg_none     = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,    PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_fur_coat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::FurCoat, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none     = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,    PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_fur_coat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::FurCoat, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_fur_coat - dmg_none).abs() < 1.0,
                 "Fur Coat must not reduce special damage (expected {dmg_none:.1}, got {dmg_fur_coat:.1})");
         }
@@ -15330,8 +15328,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::Flamethrower);
-            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,      PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_heatproof = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Heatproof, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,      PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_heatproof = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Heatproof, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_heatproof / dmg_none - 0.5).abs() < 0.02,
                 "Heatproof: expected ~0.5× Fire damage (ratio={:.4})", dmg_heatproof / dmg_none);
         }
@@ -15352,7 +15350,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             let expected_residual = ((max_hp as u32 / 32) as u16).max(1);
@@ -15368,8 +15366,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::Flamethrower);
-            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,     PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_thick_fat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,     PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_thick_fat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_thick_fat / dmg_none - 0.5).abs() < 0.02,
                 "Thick Fat: expected ~0.5× Fire damage (ratio={:.4})", dmg_thick_fat / dmg_none);
         }
@@ -15379,8 +15377,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let attacker = make_mon(Species::Lapras, Ability::None, PokemonMove::IceBeam);
-            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,     PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_thick_fat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none      = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,     PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_thick_fat = run_damage(attacker,         make_mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_thick_fat / dmg_none - 0.5).abs() < 0.02,
                 "Thick Fat: expected ~0.5× Ice damage (ratio={:.4})", dmg_thick_fat / dmg_none);
         }
@@ -15393,8 +15391,8 @@ mod tests {
             let move_dex = move_dex();
             // Tackle is a Normal-type contact move (no Fire interaction).
             let attacker = make_mon(Species::Snorlax, Ability::None, PokemonMove::Tackle);
-            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_fluffy / dmg_none - 0.5).abs() < 0.02,
                 "Fluffy: expected ~0.5× contact damage (ratio={:.4})", dmg_fluffy / dmg_none);
         }
@@ -15405,8 +15403,8 @@ mod tests {
             let move_dex = move_dex();
             // Flamethrower is Fire-type and non-contact.
             let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::Flamethrower);
-            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_fluffy / dmg_none - 2.0).abs() < 0.04,
                 "Fluffy: expected ~2.0× Fire damage (ratio={:.4})", dmg_fluffy / dmg_none);
         }
@@ -15417,8 +15415,8 @@ mod tests {
             let move_dex = move_dex();
             // Fire Punch is Fire-type AND makes contact: ×0.5 contact × ×2 Fire = ×1.
             let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::FirePunch);
-            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_fluffy / dmg_none - 1.0).abs() < 0.02,
                 "Fluffy: Fire + contact should be neutral (ratio={:.4})", dmg_fluffy / dmg_none);
         }
@@ -15429,8 +15427,8 @@ mod tests {
             let move_dex = move_dex();
             // Long Reach removes contact, so the ×0.5 halving is negated but Fire still doubles.
             let attacker = make_mon(Species::Charizard, Ability::LongReach, PokemonMove::FirePunch);
-            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,   PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_fluffy = run_damage(attacker,         make_mon(Species::Snorlax, Ability::Fluffy, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_fluffy / dmg_none - 2.0).abs() < 0.04,
                 "Fluffy vs Long Reach: contact halving negated, Fire still doubles (ratio={:.4})", dmg_fluffy / dmg_none);
         }
@@ -15443,8 +15441,8 @@ mod tests {
             let move_dex = move_dex();
             // High Jump Kick has crash damage but no recoil array; Reckless must still boost it ×1.2.
             // Charizard (Fire/Flying) resists Fighting, so it survives both runs (no faint clipping).
-            let dmg_none     = run_damage(make_mon(Species::Machamp, Ability::None,     PokemonMove::HighJumpKick), make_mon(Species::Charizard, Ability::None, PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_reckless = run_damage(make_mon(Species::Machamp, Ability::Reckless, PokemonMove::HighJumpKick), make_mon(Species::Charizard, Ability::None, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none     = run_damage(make_mon(Species::Machamp, Ability::None,     PokemonMove::HighJumpKick), make_mon(Species::Charizard, Ability::None, PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_reckless = run_damage(make_mon(Species::Machamp, Ability::Reckless, PokemonMove::HighJumpKick), make_mon(Species::Charizard, Ability::None, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_reckless / dmg_none - 1.2).abs() < 0.04,
                 "Reckless: expected ~1.2× on High Jump Kick (crash move) (ratio={:.4})", dmg_reckless / dmg_none);
         }
@@ -15456,8 +15454,8 @@ mod tests {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             let attacker = make_mon(Species::Charizard, Ability::None, PokemonMove::Flamethrower);
-            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,        PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_bubble = run_damage(attacker,         make_mon(Species::Snorlax, Ability::WaterBubble, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none   = run_damage(attacker.clone(), make_mon(Species::Snorlax, Ability::None,        PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_bubble = run_damage(attacker,         make_mon(Species::Snorlax, Ability::WaterBubble, PokemonMove::Splash), move_dex, pokemon_dex);
             // Tolerance is 0.05 (not 0.02) because WaterBubble prevents burn so the
             // no-ability branch includes occasional burn residual that skews the ratio.
             assert!((dmg_bubble / dmg_none - 0.5).abs() < 0.05,
@@ -15474,12 +15472,12 @@ mod tests {
             let dmg_none   = run_damage(
                 make_mon(Species::Blastoise, Ability::None,        PokemonMove::Surf),
                 make_mon(Species::Snorlax,  Ability::None,         PokemonMove::Splash),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             let dmg_bubble = run_damage(
                 make_mon(Species::Blastoise, Ability::WaterBubble, PokemonMove::Surf),
                 make_mon(Species::Snorlax,  Ability::None,         PokemonMove::Splash),
-                &move_dex, &pokemon_dex,
+                move_dex, pokemon_dex,
             );
             assert!((dmg_bubble / dmg_none - 2.0).abs() < 0.05,
                 "Water Bubble: expected ~2× Water move power (ratio={:.4})", dmg_bubble / dmg_none);
@@ -15493,8 +15491,8 @@ mod tests {
             let move_dex = move_dex();
             // Machamp (Fighting) is not immune to Ghost (unlike Normal/Dark types).
             let attacker = make_mon(Species::Gengar, Ability::None, PokemonMove::ShadowBall);
-            let dmg_none = run_damage(attacker.clone(), make_mon(Species::Machamp, Ability::None,          PokemonMove::Splash), &move_dex, &pokemon_dex);
-            let dmg_salt = run_damage(attacker,         make_mon(Species::Machamp, Ability::PurifyingSalt, PokemonMove::Splash), &move_dex, &pokemon_dex);
+            let dmg_none = run_damage(attacker.clone(), make_mon(Species::Machamp, Ability::None,          PokemonMove::Splash), move_dex, pokemon_dex);
+            let dmg_salt = run_damage(attacker,         make_mon(Species::Machamp, Ability::PurifyingSalt, PokemonMove::Splash), move_dex, pokemon_dex);
             assert!((dmg_salt / dmg_none - 0.5).abs() < 0.02,
                 "Purifying Salt: expected ~0.5× Ghost damage (ratio={:.4})", dmg_salt / dmg_none);
         }
@@ -15537,7 +15535,7 @@ mod tests {
             );
             let outcomes_no = run_single_turn(
                 &MatchState::BattleState(state_no_guard),
-                &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             );
             let dmg_no_guard: f64 = outcomes_no.iter().map(|(s, p)| {
                 let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[1].hp, _ => 0 };
@@ -15552,7 +15550,7 @@ mod tests {
             );
             let outcomes_guard = run_single_turn(
                 &MatchState::BattleState(state_guard),
-                &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex,
+                &p1_cmd, &p2_cmd, move_dex, pokemon_dex,
             );
             let dmg_guard: f64 = outcomes_guard.iter().map(|(s, p)| {
                 let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[1].hp, _ => 0 };
@@ -15574,7 +15572,7 @@ mod tests {
             let dex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(mv), None, None, None]),
                 None, Some(ability), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
@@ -15602,7 +15600,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let expected_hp = initial_hp + max_hp / 4;
             assert!(
@@ -15630,7 +15628,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let expected_hp = initial_hp + max_hp / 4;
             assert!(
@@ -15658,7 +15656,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let expected_hp = initial_hp + max_hp / 4;
             assert!(
@@ -15684,7 +15682,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[0] == 1)),
@@ -15707,7 +15705,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].boosts[4] == 1)),
@@ -15739,7 +15737,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let expected_hp_on_hit = initial_hp + max_hp / 4;
             // There must be a branch where HP was healed (the hit branch).
@@ -15773,7 +15771,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -15801,7 +15799,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // There must be a hit branch where Attack was boosted.
             assert!(
@@ -15838,7 +15836,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -15870,7 +15868,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // There must be a hit branch where FlashFire volatile was set.
             assert!(
@@ -15909,7 +15907,7 @@ mod tests {
                 &MatchState::BattleState(state_base),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let dmg_base: f64 = outcomes_base.iter().map(|(s, p)| {
                 let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => snorlax_max_hp };
@@ -15930,7 +15928,7 @@ mod tests {
                 &MatchState::BattleState(state_boost),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let dmg_boost: f64 = outcomes_boost.iter().map(|(s, p)| {
                 let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => snorlax_max_hp };
@@ -15962,7 +15960,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -15989,7 +15987,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // All branches (hit and miss) should show +1 Sp. Atk and full HP.
             for (s, _) in &outcomes {
@@ -16018,7 +16016,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -16045,7 +16043,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -16112,7 +16110,7 @@ mod tests {
             ]);
             let outcomes = run_single_turn(
                 &MatchState::BattleState(state),
-                &p1_cmd, &p2_cmd, &mdex, &pdex,
+                &p1_cmd, &p2_cmd, mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -16147,7 +16145,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // Should take some damage (not full HP in all branches)
             assert!(
@@ -16176,7 +16174,7 @@ mod tests {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].hp < max_hp)),
@@ -17566,7 +17564,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             let mut p = build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(ability), None, item, None, Some([0; 6]), None, false,
             );
@@ -17578,7 +17576,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(PokemonMove::AuraWheel), None, None, None]),
                 None, Some(Ability::HungerSwitch), None, None, None, Some([0; 6]), None, false,
             )
@@ -17591,7 +17589,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )
         }
 
@@ -17658,23 +17656,21 @@ mod priority_abilities {
 
             // Cured branches must have taken no burn damage (Shed Skin fires before burn).
             for (s, _) in &outcomes {
-                if let MatchState::BattleState(bs) = s {
-                    if bs.p1_active_mons[0].status.is_none() {
+                if let MatchState::BattleState(bs) = s
+                    && bs.p1_active_mons[0].status.is_none() {
                         assert_eq!(bs.p1_active_mons[0].hp, max_hp,
                             "Cured branch should take no burn damage (Shed Skin fires before damage)");
                     }
-                }
             }
 
             // Burned branches must have taken burn damage.
             let burn_dmg = (max_hp as u32 / 16).max(1) as u16;
             for (s, _) in &outcomes {
-                if let MatchState::BattleState(bs) = s {
-                    if bs.p1_active_mons[0].status.is_some() {
+                if let MatchState::BattleState(bs) = s
+                    && bs.p1_active_mons[0].status.is_some() {
                         assert!(bs.p1_active_mons[0].hp <= max_hp.saturating_sub(burn_dmg),
                             "Burned branch should have taken burn damage");
                     }
-                }
             }
         }
 
@@ -17854,7 +17850,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -17877,7 +17873,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -17898,7 +17894,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -17913,7 +17909,7 @@ mod priority_abilities {
             let mdex = move_dex();
             // Give a non-Morpeko (Snorlax) the Aura Wheel move.
             let p1 = build_pokemon_state(
-                Species::Snorlax, &pokemon_dex(), &move_dex(), Some(50),
+                Species::Snorlax, pokemon_dex(), move_dex(), Some(50),
                 Some([Some(PokemonMove::AuraWheel), None, None, None]),
                 None, Some(Ability::None), None, None, None, Some([0; 6]), None, false,
             );
@@ -17924,7 +17920,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -17957,7 +17953,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(ability), None, item, None, Some([0; 6]), None, false,
             )
@@ -17967,7 +17963,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(ability), None, item, None, Some([0; 6]), None, false,
             )
@@ -17980,7 +17976,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )
         }
 
@@ -18075,7 +18071,7 @@ mod priority_abilities {
                 &MatchState::BattleState(bs),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs2, _) = extract_battle_state(outcomes);
             assert!(!bs2.p1_back_mons[0].item_lost,
@@ -18156,7 +18152,7 @@ mod priority_abilities {
             let mdex = move_dex();
             let p1 = splash_mon(Species::Shuckle, Ability::Pickpocket, None);
             let p2 = build_pokemon_state(
-                Species::Snorlax, &dex, &mdex, Some(50),
+                Species::Snorlax, dex, mdex, Some(50),
                 Some([Some(PokemonMove::Swift), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::Leftovers),
                 None, Some([0; 6]), None, false,
@@ -18189,7 +18185,7 @@ mod priority_abilities {
             let mdex = move_dex();
             let p1 = splash_mon(Species::Shuckle, Ability::Pickpocket, None);
             let p2 = build_pokemon_state(
-                Species::Snorlax, &dex, &mdex, Some(50),
+                Species::Snorlax, dex, mdex, Some(50),
                 Some([Some(PokemonMove::IcePunch), None, None, None]),
                 None, Some(Ability::SheerForce), None, Some(Item::Leftovers),
                 None, Some([0; 6]), None, false,
@@ -18272,7 +18268,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -18298,7 +18294,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
 
@@ -18331,7 +18327,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(mv), None, None, None]),
                 None, Some(ability), None, None, None, Some([0; 6]), None, false,
             )
@@ -18344,7 +18340,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )
         }
 
@@ -18355,7 +18351,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             extract_battle_state(outcomes).0
         }
@@ -18463,7 +18459,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             let aegi = build_pokemon_state(
-                Species::Aegislash, &dex, &mdex, Some(50),
+                Species::Aegislash, dex, mdex, Some(50),
                 Some([Some(PokemonMove::Tackle), Some(PokemonMove::KingsShield), None, None]),
                 None, Some(Ability::StanceChange), None, None, None, Some([0; 6]), None, false,
             );
@@ -18478,7 +18474,7 @@ mod priority_abilities {
                 &MatchState::BattleState(bs),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &dex,
+                mdex, dex,
             );
             let (bs2, _) = extract_battle_state(outcomes);
             assert_eq!(bs2.p1_active_mons[0].species, Species::Aegislash,
@@ -18624,7 +18620,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(mv), None, None, None]),
                 None, Some(ability), None, None, None, Some([0; 6]), None, false,
             )
@@ -18648,7 +18644,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             extract_battle_state(outcomes).0
         }
@@ -18705,7 +18701,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(mv), None, None, None]),
                 None, Some(ability), None, None, None, Some([0; 6]), None, false,
             )
@@ -18718,7 +18714,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )
         }
 
@@ -18874,7 +18870,7 @@ mod priority_abilities {
                 vec![mon(Species::Snorlax, Ability::None, PokemonMove::Splash)], vec![],
             );
             let holder = build_pokemon_state(
-                Species::Snorlax, &dex, &mdex, Some(50),
+                Species::Snorlax, dex, mdex, Some(50),
                 Some([Some(PokemonMove::Acrobatics), None, None, None]),
                 None, Some(Ability::None), None, Some(Item::SafetyGoggles),
                 None, Some([0; 6]), None, false,
@@ -18929,7 +18925,7 @@ mod priority_abilities {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                    &mdex, &pdex,
+                    mdex, pdex,
                 );
                 let (bs, _) = extract_battle_state(outcomes);
                 initial - bs.p2_active_mons[0].hp
@@ -19000,7 +18996,7 @@ mod priority_abilities {
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(vec![crate::state::battle::BattleCommand::Switch(
                     crate::state::battle::SwitchCommand { party_index: 0 })]),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let (bs, _) = extract_battle_state(outcomes);
             let switch_dmg = initial - bs.p2_active_mons[0].hp;
@@ -19089,7 +19085,7 @@ mod priority_abilities {
             let two_turns = |first_move: PokemonMove| -> (u16, bool) {
                 let dex = pokemon_dex();
                 let p1 = build_pokemon_state(
-                    Species::Snorlax, &dex, &mdex, Some(50),
+                    Species::Snorlax, dex, mdex, Some(50),
                     Some([Some(first_move), Some(PokemonMove::StompingTantrum), None, None]),
                     None, Some(Ability::None), None, None, None, Some([0; 6]), None, false,
                 );
@@ -19102,7 +19098,7 @@ mod priority_abilities {
                     &MatchState::BattleState(state),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &mdex, &pdex,
+                    mdex, pdex,
                 );
                 let (bs, _) = extract_battle_state(outcomes);
                 let hp_before = bs.p2_active_mons[0].hp;
@@ -19111,7 +19107,7 @@ mod priority_abilities {
                     &MatchState::BattleState(bs),
                     &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
                     &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                    &mdex, &pdex,
+                    mdex, pdex,
                 );
                 let (bs2, _) = extract_battle_state(outcomes);
                 (hp_before - bs2.p2_active_mons[0].hp, bs2.p1_active_mons[0].last_move_failed)
@@ -19197,7 +19193,7 @@ mod priority_abilities {
             let dex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &dex, &mdex, Some(50),
+                species, dex, mdex, Some(50),
                 Some([Some(mv), None, None, None]),
                 None, Some(ability), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
@@ -19220,7 +19216,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19243,7 +19239,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19266,7 +19262,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19291,7 +19287,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19317,7 +19313,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19339,7 +19335,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19359,7 +19355,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19380,7 +19376,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19404,7 +19400,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19434,7 +19430,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             ));
             assert_eq!(
                 bs.p1_active_mons[0].hp, max_hp,
@@ -19461,7 +19457,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19492,7 +19488,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19520,7 +19516,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19545,7 +19541,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // No branch should have the target poisoned.
             let poison_prob: f64 = outcomes.iter().map(|(s, p)| {
@@ -19576,7 +19572,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // Self-boost is on the ATTACKER (P1 = p1_active_mons[0], boosts[2] = SpA).
             let attacker_spa_boost_prob: f64 = outcomes.iter().map(|(s, p)| {
@@ -19605,7 +19601,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19631,7 +19627,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19662,7 +19658,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             // With evasion ignored, Tackle (100% acc) should hit every branch.
             let hit_prob: f64 = outcomes.iter().map(|(s, p)| {
@@ -19695,7 +19691,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             ));
             assert_eq!(
                 bs.p1_active_mons[0].hp, max_hp,
@@ -19720,7 +19716,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             ));
             assert_eq!(
                 bs.p1_active_mons[0].hp, max_hp,
@@ -19743,7 +19739,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(
                 outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
@@ -19767,7 +19763,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19793,7 +19789,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19823,7 +19819,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19850,7 +19846,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let burn_prob: f64 = outcomes.iter().map(|(s, p)| {
                 if matches!(s, MatchState::BattleState(bs)
@@ -19877,7 +19873,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19905,7 +19901,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19933,7 +19929,7 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             for (s, _) in &outcomes {
                 if let MatchState::BattleState(bs) = s {
@@ -19967,7 +19963,7 @@ mod priority_abilities {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             build_pokemon_state(
-                species, &pokemon_dex, &move_dex, Some(50),
+                species, pokemon_dex, move_dex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(ability), None, item, None, None, None, false,
             )
@@ -19977,7 +19973,7 @@ mod priority_abilities {
             let pokemon_dex = pokemon_dex();
             let move_dex = move_dex();
             build_pokemon_state(
-                species, &pokemon_dex, &move_dex, Some(50),
+                species, pokemon_dex, move_dex, Some(50),
                 Some([Some(mv), Some(PokemonMove::Splash), None, None]),
                 None, Some(ability), None, None, None, None, None, false,
             )
@@ -20002,8 +19998,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             extract_battle_state(outcomes).0
         }
@@ -20222,8 +20218,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             )).0;
 
             assert_eq!(after.p1_active_mons[0].boosts[4], 0, "Mirror Armor holder is not lowered");
@@ -20246,8 +20242,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             )).0;
 
             assert_eq!(after.p1_active_mons[0].boosts[4], 0, "Mirror Armor holder unaffected");
@@ -20267,8 +20263,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             )).0;
             assert!(after.p2_side_conditions.iter().any(|c| matches!(c, SideCondition::Spikes(1))));
         }
@@ -20292,8 +20288,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             // 90% accuracy → Spikes set in the hit branch only.
             let p = prob_foe_hazard(&outcomes, |c| matches!(c, SideCondition::Spikes(_)));
@@ -20311,8 +20307,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             );
             let p = prob_foe_hazard(&outcomes, |c| matches!(c, SideCondition::StealthRock));
             assert!((p - 0.9).abs() < 0.02, "expected ~0.9 Stealth Rock probability, got {p}");
@@ -20327,8 +20323,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![mv_slot])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex,
-                &pokemon_dex,
+                move_dex,
+                pokemon_dex,
             )).0
         }
 
@@ -20467,7 +20463,7 @@ mod priority_abilities {
             let pd = pokemon_dex();
             let md = move_dex();
             build_pokemon_state(
-                species, &pd, &md, Some(50),
+                species, pd, md, Some(50),
                 Some([Some(m0), Some(m1), None, None]),
                 None, Some(ability), None, None, None, None, None, false,
             )
@@ -20479,8 +20475,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![s1])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![s2])),
-                &move_dex(),
-                &pokemon_dex(),
+                move_dex(),
+                pokemon_dex(),
             )
         }
 
@@ -20616,8 +20612,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0, 1])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0, 0])),
-                &move_dex(),
-                &pokemon_dex(),
+                move_dex(),
+                pokemon_dex(),
             );
             let after = extract_battle_state(outcomes).0;
             assert_eq!(after.p1_active_mons[0].hp, after.p1_active_mons[0].stats[0]);
@@ -20675,7 +20671,7 @@ mod priority_abilities {
             let pd = pokemon_dex();
             let md = move_dex();
             build_pokemon_state(
-                species, &pd, &md, Some(50),
+                species, pd, md, Some(50),
                 Some([Some(m0), Some(PokemonMove::Splash), None, None]),
                 None, Some(ability), None, None, None, None, None, false,
             )
@@ -20686,8 +20682,8 @@ mod priority_abilities {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![s1])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![s2])),
-                &move_dex(),
-                &pokemon_dex(),
+                move_dex(),
+                pokemon_dex(),
             )
         }
 
@@ -20915,7 +20911,7 @@ mod binding_trapping {
         let dex = pokemon_dex();
         let mdex = move_dex();
         let mut m = build_pokemon_state(
-            species, &dex, &mdex, Some(50),
+            species, dex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(ability), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -20944,7 +20940,7 @@ mod binding_trapping {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         // Every hit branch must have PartiallyTrapped on the foe.
         let has_trap_in_any = outcomes.iter().any(|(s, _)| matches!(s,
@@ -20967,7 +20963,7 @@ mod binding_trapping {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         // After a full turn (including EOT decrement), duration 4→3 or 5→4.
         for (s, _) in &outcomes {
@@ -21036,7 +21032,7 @@ mod binding_trapping {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         // After a full turn (including EOT decrement), 7 becomes 6.
         for (s, _) in &outcomes {
@@ -21065,7 +21061,7 @@ mod binding_trapping {
             VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p1_id), 3),
         );
         let cmds = simulator::get_possible_commands_for_active_slot(
-            &state, Player::P2, 0, &mdex, &pdex,
+            &state, Player::P2, 0, mdex, pdex,
         );
         let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
         assert!(!has_switch, "PartiallyTrapped target should not be able to switch");
@@ -21097,7 +21093,7 @@ mod binding_trapping {
         assert!(hp_after < hp_before, "Ghost should still take binding chip damage");
         // But should be allowed to switch out.
         let cmds = simulator::get_possible_commands_for_active_slot(
-            &state, Player::P1, 0, &mdex, &pdex,
+            &state, Player::P1, 0, mdex, pdex,
         );
         let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
         assert!(has_switch, "Ghost-type should be able to switch despite PartiallyTrapped");
@@ -21119,7 +21115,7 @@ mod binding_trapping {
             VolatileStatusState::TurnStatus(VolatileStatus::PartiallyTrapped(p1_id), 3),
         );
         let cmds = simulator::get_possible_commands_for_active_slot(
-            &state, Player::P2, 0, &mdex, &pdex,
+            &state, Player::P2, 0, mdex, pdex,
         );
         let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
         assert!(has_switch, "Shed Shell holder should bypass PartiallyTrapped switch-lock");
@@ -21146,7 +21142,7 @@ mod binding_trapping {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         for (s, _) in &outcomes {
             if let MatchState::BattleState(bs) = s {
@@ -21190,7 +21186,7 @@ mod binding_trapping {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         for (s, _) in &outcomes {
             if let MatchState::BattleState(bs) = s {
@@ -21216,7 +21212,7 @@ mod binding_trapping {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let trapped_branch = outcomes.iter().find(|(s, _)| matches!(s,
             MatchState::BattleState(bs)
@@ -21228,7 +21224,7 @@ mod binding_trapping {
         // In the trapped branch the foe cannot switch.
         if let Some((MatchState::BattleState(bs), _)) = trapped_branch {
             let cmds = simulator::get_possible_commands_for_active_slot(
-                bs, Player::P2, 0, &mdex, &pdex,
+                bs, Player::P2, 0, mdex, pdex,
             );
             let has_switch = cmds.iter().any(|c| matches!(c, BattleCommand::Switch(_)));
             assert!(!has_switch, "Mean Look target should not be able to switch");
@@ -21247,7 +21243,7 @@ mod binding_trapping {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         for (s, _) in &outcomes {
             if let MatchState::BattleState(bs) = s {
@@ -21274,7 +21270,7 @@ mod binding_trapping {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         // Should deal damage (HP decreased) AND apply Trapped.
         let hit_and_trapped = outcomes.iter().any(|(s, _)| matches!(s,
@@ -21312,7 +21308,7 @@ mod healing_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(the_move), None, None, None]),
             None, Some(ability), None, item, None, None, None, false,
         )
@@ -21330,7 +21326,7 @@ mod healing_moves {
             &MatchState::BattleState(initial),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs, _) = extract_battle_state(outcomes);
         bs
@@ -21350,7 +21346,7 @@ mod healing_moves {
             &MatchState::BattleState(initial),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         outcomes.into_iter().find_map(|(s, _)| match s {
             MatchState::BattleState(bs) if pred(&bs) => Some(bs),
@@ -21473,7 +21469,7 @@ mod healing_moves {
             &MatchState::BattleState(bs1),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs2, _) = extract_battle_state(outcomes);
         let expected = (1 + max / 2).min(max);
@@ -21638,13 +21634,13 @@ mod move_restriction {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50), Some(moves),
+            species, pdex, mdex, Some(50), Some(moves),
             None, Some(Ability::None), None, item, None, None, None, false,
         )
     }
 
     fn p1_commands(state: &BattleState) -> Vec<BattleCommand> {
-        get_possible_commands_for_active_slot(state, Player::P1, 0, &move_dex(), &pokemon_dex())
+        get_possible_commands_for_active_slot(state, Player::P1, 0, move_dex(), pokemon_dex())
     }
 
     fn has_move(cmds: &[BattleCommand], mon: &PokemonState, mv: PokemonMove) -> bool {
@@ -21693,7 +21689,7 @@ mod move_restriction {
             &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Taunt), "Taunt move applies the volatile");
@@ -21711,7 +21707,7 @@ mod move_restriction {
             &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Taunt));
@@ -21740,7 +21736,7 @@ mod move_restriction {
             &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::ThroatChop), "Throat Chop applies its volatile on hit");
@@ -21759,7 +21755,7 @@ mod move_restriction {
             &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::ThroatChop));
@@ -21837,7 +21833,7 @@ mod move_restriction {
             &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::Encore(PokemonMove::Struggle)),
@@ -21859,7 +21855,7 @@ mod move_restriction {
             &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), // P2 selected Splash (slot 0)
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::Encore(PokemonMove::Struggle)), "Encore applied");
@@ -21892,7 +21888,7 @@ mod volatile_status_debuffs {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         let mut m = build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(ability), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -21924,7 +21920,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::SaltCure),
@@ -22021,7 +22017,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         // Syrup Bomb has 90% accuracy; at least one branch should have the volatile.
         let hit = outcomes.into_iter().any(|(s, _)| matches!(&s,
@@ -22070,7 +22066,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::SyrupBomb),
@@ -22088,7 +22084,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PerishSong),
@@ -22108,7 +22104,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (mut bs, _) = extract_battle_state(outcomes);
         // After the turn's EOT: 4→3
@@ -22151,7 +22147,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::PerishSong),
@@ -22170,7 +22166,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::PerishSong),
@@ -22190,7 +22186,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Uproar),
@@ -22207,7 +22203,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert_eq!(bs.p2_active_mons[0].status, None,
@@ -22245,7 +22241,7 @@ mod volatile_status_debuffs {
         let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let cmds = get_possible_commands_for_active_slot(
-            &state, Player::P1, 0, &move_dex(), &pokemon_dex(),
+            &state, Player::P1, 0, move_dex(), pokemon_dex(),
         );
         let has_uproar = cmds.iter().any(|c| matches!(c,
             BattleCommand::Attack(a) if
@@ -22273,7 +22269,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::Yawn),
@@ -22402,7 +22398,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         // If counter was refreshed (bug), sleep would not apply yet (n would be 2→1 after EOT).
@@ -22424,7 +22420,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::HealBlock),
@@ -22473,7 +22469,7 @@ mod volatile_status_debuffs {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::HealBlock),
@@ -22503,7 +22499,7 @@ mod stat_manipulation {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -22519,7 +22515,7 @@ mod stat_manipulation {
             &MatchState::BattleState(battle_state_from_lists(vec![p1], vec![], vec![p2], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         bs
     }
@@ -22758,7 +22754,7 @@ mod stat_manipulation {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         // The Snorlax switched to bench — its stats should be reverted.
@@ -22801,7 +22797,7 @@ mod stat_manipulation {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         let snorlax = &bs.p1_back_mons[0];
@@ -22823,7 +22819,7 @@ mod stat_manipulation {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         let snorlax = &bs.p1_back_mons[0];
@@ -22846,7 +22842,7 @@ mod stat_manipulation {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (after_swap, _) = extract_battle_state(swap_outcomes);
         assert_eq!(after_swap.p1_active_mons[0].stats[5], 80,  "Speed Swap: user should have target's speed");
@@ -22855,7 +22851,7 @@ mod stat_manipulation {
             &MatchState::BattleState(after_swap),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(switch_outcomes);
         let snorlax = &bs.p1_back_mons[0];
@@ -22883,7 +22879,7 @@ mod self_fainting_and_crash_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -22894,7 +22890,7 @@ mod self_fainting_and_crash_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(ability), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -22906,7 +22902,7 @@ mod self_fainting_and_crash_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         )
     }
 
@@ -23177,7 +23173,7 @@ mod self_fainting_and_crash_moves {
             if let MatchState::BattleState(bs) = s {
                 assert!(bs.p1_active_mons[0].fainted,
                     "Healing Wish: user must faint after use");
-                let has_hw = bs.p1_slot_conditions.get(0)
+                let has_hw = bs.p1_slot_conditions.first()
                     .map(|conds| conds.iter().any(|sc| matches!(sc, SlotCondition::HealingWish)))
                     .unwrap_or(false);
                 assert!(has_hw,
@@ -23231,7 +23227,7 @@ mod self_fainting_and_crash_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let replacement_phase_state = after_hw.into_iter().find_map(|(s, _)| {
             if let MatchState::BattleState(bs) = s { Some(bs) } else { None }
@@ -23239,7 +23235,7 @@ mod self_fainting_and_crash_moves {
 
         assert!(replacement_phase_state.p1_active_mons[0].fainted,
             "HW Turn 1: user should be fainted");
-        let has_hw_cond = replacement_phase_state.p1_slot_conditions.get(0)
+        let has_hw_cond = replacement_phase_state.p1_slot_conditions.first()
             .map(|conds| conds.iter().any(|sc| matches!(sc, SlotCondition::HealingWish)))
             .unwrap_or(false);
         assert!(has_hw_cond, "HW Turn 1: slot condition must be set");
@@ -23249,7 +23245,7 @@ mod self_fainting_and_crash_moves {
             &MatchState::BattleState(replacement_phase_state),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         for (s, _) in &after_entry {
             if let MatchState::BattleState(bs) = s {
@@ -23459,7 +23455,7 @@ mod rampaging_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -23471,7 +23467,7 @@ mod rampaging_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         )
     }
 
@@ -23518,7 +23514,7 @@ mod rampaging_moves {
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
 
         let cmds = simulator::get_possible_commands_for_active_slot(
-            &state, Player::P1, 0, &move_dex(), &pokemon_dex(),
+            &state, Player::P1, 0, move_dex(), pokemon_dex(),
         );
         // Only attack commands for Thrash (no switch commands)
         for cmd in &cmds {
@@ -23677,25 +23673,25 @@ mod rampaging_moves {
         let mdex = move_dex();
 
         let attacker = build_pokemon_state(
-            Species::Dragonite, &pdex, &mdex, Some(50),
+            Species::Dragonite, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Outrage), None, None, None]),
             None, Some(Ability::None), Some(crate::state::pokemon::Nature::Hardy),
             None, None, Some([0; 6]), None, false,
         );
         let ally = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(crate::state::pokemon::Nature::Hardy),
             None, None, Some([0; 6]), None, false,
         );
         let foe0 = build_pokemon_state(
-            Species::Blissey, &pdex, &mdex, Some(50),
+            Species::Blissey, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(crate::state::pokemon::Nature::Hardy),
             None, None, Some([0; 6]), None, false,
         );
         let foe1 = build_pokemon_state(
-            Species::Blissey, &pdex, &mdex, Some(50),
+            Species::Blissey, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(crate::state::pokemon::Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -23720,13 +23716,13 @@ mod rampaging_moves {
         let outcomes: Vec<(crate::state::battle::MatchState, f64)> = crate::simulator::simulate_turn(
             &crate::state::battle::MatchState::BattleState(state),
             &p1_cmd, &p2_cmd,
-            &mdex, &pdex, false, 1, None,
+            mdex, pdex, false, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         // Probability that foe slot 0 was hit (lost HP)
         let foe0_hit_prob: f64 = outcomes.iter()
             .filter(|(s, _)| matches!(s, crate::state::battle::MatchState::BattleState(bs)
-                if bs.p2_active_mons.get(0).map(|m| m.hp < initial_hp).unwrap_or(false)))
+                if bs.p2_active_mons.first().map(|m| m.hp < initial_hp).unwrap_or(false)))
             .map(|(_, p)| p)
             .sum();
 
@@ -23794,7 +23790,7 @@ mod counter_retaliation_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -23806,7 +23802,7 @@ mod counter_retaliation_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         )
     }
 
@@ -24388,10 +24384,10 @@ mod ability_manipulation_moves {
         fn ohko_faints_target_on_hit_at_equal_level() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(pdex, mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             let hit = hit_probability(&outcomes, target_hp);
             assert!((hit - 0.30).abs() < 1e-9, "equal-level OHKO should hit 30%, got {hit}");
@@ -24405,10 +24401,10 @@ mod ability_manipulation_moves {
             // 80 − 50 + 30 = 60% accuracy.
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 80, PokemonMove::HornDrill, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 80, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(pdex, mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             let hit = hit_probability(&outcomes, target_hp);
             assert!((hit - 0.60).abs() < 1e-9, "OHKO 30 levels above target should hit 60%, got {hit}");
@@ -24418,10 +24414,10 @@ mod ability_manipulation_moves {
         fn ohko_fails_against_higher_level_target() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Snorlax, 80, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(pdex, mdex, Species::Snorlax, 80, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             let hit = hit_probability(&outcomes, target_hp);
             assert!(hit < 1e-9, "OHKO must always fail against a higher-level target, got {hit}");
@@ -24432,10 +24428,10 @@ mod ability_manipulation_moves {
             // Non-Ice user, equal level → 0 + 20 = 20% accuracy.
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::SheerCold, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Snorlax, 50, PokemonMove::SheerCold, Ability::None, None);
+            let target = build(pdex, mdex, Species::Tauros, 50, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             let hit = hit_probability(&outcomes, target_hp);
             assert!((hit - 0.20).abs() < 1e-9, "Sheer Cold from a non-Ice user should hit 20%, got {hit}");
@@ -24446,10 +24442,10 @@ mod ability_manipulation_moves {
             // Ice-type user (Glaceon), equal level → 0 + 30 = 30% accuracy.
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Glaceon, 50, PokemonMove::SheerCold, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Glaceon, 50, PokemonMove::SheerCold, Ability::None, None);
+            let target = build(pdex, mdex, Species::Tauros, 50, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             let hit = hit_probability(&outcomes, target_hp);
             assert!((hit - 0.30).abs() < 1e-9, "Sheer Cold from an Ice-type user should hit 30%, got {hit}");
@@ -24459,10 +24455,10 @@ mod ability_manipulation_moves {
         fn fissure_does_not_affect_flying_type() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Fissure, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Pidgeot, 50, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::Fissure, Ability::None, None);
+            let target = build(pdex, mdex, Species::Pidgeot, 50, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             assert!(hit_probability(&outcomes, target_hp) < 1e-9,
                 "Fissure (Ground) must not affect a Flying-type target");
@@ -24472,10 +24468,10 @@ mod ability_manipulation_moves {
         fn fissure_does_not_affect_levitate() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Fissure, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::Levitate, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::Fissure, Ability::None, None);
+            let target = build(pdex, mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::Levitate, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             assert!(hit_probability(&outcomes, target_hp) < 1e-9,
                 "Fissure (Ground) must not affect a Levitate target");
@@ -24485,10 +24481,10 @@ mod ability_manipulation_moves {
         fn guillotine_does_not_affect_ghost_type() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::Guillotine, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Gengar, 50, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::Guillotine, Ability::None, None);
+            let target = build(pdex, mdex, Species::Gengar, 50, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             assert!(hit_probability(&outcomes, target_hp) < 1e-9,
                 "Guillotine (Normal) must not affect a Ghost-type target");
@@ -24498,10 +24494,10 @@ mod ability_manipulation_moves {
         fn sheer_cold_does_not_affect_ice_type() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::SheerCold, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Glaceon, 50, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Snorlax, 50, PokemonMove::SheerCold, Ability::None, None);
+            let target = build(pdex, mdex, Species::Glaceon, 50, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             assert!(hit_probability(&outcomes, target_hp) < 1e-9,
                 "Sheer Cold (Ice) must not affect an Ice-type target");
@@ -24511,10 +24507,10 @@ mod ability_manipulation_moves {
         fn sturdy_is_immune_to_ohko() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::Sturdy, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(pdex, mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::Sturdy, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             assert!(hit_probability(&outcomes, target_hp) < 1e-9,
                 "Sturdy must grant full immunity to OHKO moves");
@@ -24524,9 +24520,9 @@ mod ability_manipulation_moves {
         fn focus_sash_survives_ohko_at_full_hp() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
-            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, Some(Item::FocusSash));
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::None, None);
+            let target = build(pdex, mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, Some(Item::FocusSash));
+            let outcomes = run(mdex, pdex, attacker, target);
 
             // Focus Sash converts every lethal OHKO hit into survival at 1 HP, so the target
             // never faints: no game-over branch exists.
@@ -24550,10 +24546,10 @@ mod ability_manipulation_moves {
         fn no_guard_guarantees_ohko_hit() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::NoGuard, None);
-            let target = build(&pdex, &mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::NoGuard, None);
+            let target = build(pdex, mdex, Species::Snorlax, 50, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             let hit = hit_probability(&outcomes, target_hp);
             assert!((hit - 1.0).abs() < 1e-9, "No Guard should make an equal-level OHKO always hit, got {hit}");
@@ -24563,10 +24559,10 @@ mod ability_manipulation_moves {
         fn no_guard_still_fails_against_higher_level_target() {
             let pdex = pokemon_dex();
             let mdex = move_dex();
-            let attacker = build(&pdex, &mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::NoGuard, None);
-            let target = build(&pdex, &mdex, Species::Snorlax, 80, PokemonMove::Splash, Ability::None, None);
+            let attacker = build(pdex, mdex, Species::Tauros, 50, PokemonMove::HornDrill, Ability::NoGuard, None);
+            let target = build(pdex, mdex, Species::Snorlax, 80, PokemonMove::Splash, Ability::None, None);
             let target_hp = target.hp;
-            let outcomes = run(&mdex, &pdex, attacker, target);
+            let outcomes = run(mdex, pdex, attacker, target);
 
             assert!(hit_probability(&outcomes, target_hp) < 1e-9,
                 "No Guard does not override the higher-level OHKO failure rule");
@@ -24584,7 +24580,7 @@ mod ability_manipulation_moves {
             let pdex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &pdex, &mdex, Some(50), Some(moves),
+                species, pdex, mdex, Some(50), Some(moves),
                 None, Some(ability), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
             )
         }
@@ -24603,7 +24599,7 @@ mod ability_manipulation_moves {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )).0
         }
 
@@ -24735,7 +24731,7 @@ mod ability_manipulation_moves {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             assert!(outcomes.iter().all(|(s, _)| matches!(s, MatchState::BattleState(bs)
                 if bs.p1_active_mons[0].hp < p1_hp)),
@@ -24766,7 +24762,7 @@ mod ability_manipulation_moves {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )).0;
             assert_eq!(after_t1.p2_active_mons[0].types, vec![PokemonType::Water]);
 
@@ -24775,7 +24771,7 @@ mod ability_manipulation_moves {
                 &MatchState::BattleState(after_t1),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
                 &PlayerCommand::Battle(vec![BattleCommand::Switch(crate::state::battle::SwitchCommand { party_index: 0 })]),
-                &mdex, &pdex,
+                mdex, pdex,
             )).0;
             let snorlax = after_t2.p2_back_mons.iter().find(|m| m.species == Species::Snorlax)
                 .expect("Soaked Snorlax should be on the bench after switching out");
@@ -24794,7 +24790,7 @@ mod ability_manipulation_moves {
             let pdex = pokemon_dex();
             let mdex = move_dex();
             build_pokemon_state(
-                species, &pdex, &mdex, Some(50), Some([Some(m), None, None, None]),
+                species, pdex, mdex, Some(50), Some([Some(m), None, None, None]),
                 None, Some(ability), Some(Nature::Hardy), Some(item), None, Some([0; 6]), None, false,
             )
         }
@@ -24812,7 +24808,7 @@ mod ability_manipulation_moves {
                 &MatchState::BattleState(state),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )).0
         }
 
@@ -25092,7 +25088,7 @@ mod turn_order_and_delayed_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(the_move), None, None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         )
@@ -25117,7 +25113,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(initial),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs, _) = extract_battle_state(outcomes);
         bs
@@ -25132,12 +25128,12 @@ mod turn_order_and_delayed_moves {
         // Torkoal should move first despite being slower.
         let pdex = pokemon_dex();
         let slow = build_pokemon_state(
-            Species::Torkoal, &pdex, &mdex, Some(50),
+            Species::Torkoal, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         );
         let fast = build_pokemon_state(
-            Species::Pelipper, &pdex, &mdex, Some(50),
+            Species::Pelipper, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         );
@@ -25148,7 +25144,7 @@ mod turn_order_and_delayed_moves {
 
         // Quashed fast action should order AFTER the slow action.
         assert_eq!(
-            simulator_helpers::compare_action_order(&slow_action, &fast_quashed, &state, &mdex),
+            simulator_helpers::compare_action_order(&slow_action, &fast_quashed, &state, mdex),
             std::cmp::Ordering::Less,
             "Non-quashed slow mon should move before quashed fast mon"
         );
@@ -25160,12 +25156,12 @@ mod turn_order_and_delayed_moves {
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let slow = build_pokemon_state(
-            Species::Torkoal, &pdex, &mdex, Some(50),
+            Species::Torkoal, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         );
         let fast = build_pokemon_state(
-            Species::Pelipper, &pdex, &mdex, Some(50),
+            Species::Pelipper, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         );
@@ -25175,7 +25171,7 @@ mod turn_order_and_delayed_moves {
         let both_flags = move_action_flags(Player::P1, 0, true, true);
         let normal = move_action_flags(Player::P2, 0, false, false);
         assert_eq!(
-            simulator_helpers::compare_action_order(&both_flags, &normal, &state, &mdex),
+            simulator_helpers::compare_action_order(&both_flags, &normal, &state, mdex),
             std::cmp::Ordering::Less,
             "moves_first should beat moves_last on the same action"
         );
@@ -25231,7 +25227,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(initial),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs1, _) = extract_battle_state(outcomes1);
         assert!(bs1.p2_slot_conditions[0].iter().any(|c| matches!(c, SlotCondition::FutureMove { .. })));
@@ -25240,7 +25236,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(bs1),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs2, _) = extract_battle_state(outcomes2);
         let count = bs2.p2_slot_conditions[0].iter().filter(|c| matches!(c, SlotCondition::FutureMove { .. })).count();
@@ -25264,7 +25260,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(initial),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs1, _) = extract_battle_state(outcomes1);
         assert_eq!(bs1.p2_active_mons[0].hp, p2_max_hp, "Future Sight does not damage on the turn it is used");
@@ -25277,7 +25273,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(bs1),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs2, _) = extract_battle_state(outcomes2);
         assert_eq!(bs2.p2_active_mons[0].hp, p2_max_hp, "Future Sight should not damage on turn 2 (one more turn to go)");
@@ -25289,7 +25285,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(bs2),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let any_damaged = outcomes3.iter().any(|(s, _)| {
             if let MatchState::BattleState(bs) = s {
@@ -25314,7 +25310,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(initial),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs1, _) = extract_battle_state(outcomes1);
         // Turn 2: no fire yet.
@@ -25322,7 +25318,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(bs1),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs2, _) = extract_battle_state(outcomes2);
         // Turn 3: Future Sight fires — should be immune (Dark type vs Psychic).
@@ -25330,7 +25326,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(bs2),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs3, _) = extract_battle_state(outcomes3);
         assert_eq!(bs3.p2_active_mons[0].hp, p2_max_hp,
@@ -25361,7 +25357,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(initial),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs1, _) = extract_battle_state(outcomes1);
         // Turn 2: nothing special.
@@ -25369,7 +25365,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(bs1),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (bs2, _) = extract_battle_state(outcomes2);
         // Turn 3: Doom Desire fires at end of turn (Steel type, Snorlax is Normal = 1× effective).
@@ -25377,7 +25373,7 @@ mod turn_order_and_delayed_moves {
             &MatchState::BattleState(bs2),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let any_damaged = outcomes3.iter().any(|(s, _)| {
             if let MatchState::BattleState(bs) = s {
@@ -25789,7 +25785,7 @@ mod side_and_field_condition_moves {
         let sg_idx = bs.p1_side_conditions.iter().position(|c| matches!(c, SideCondition::SafeGuard));
         let turns = sg_idx.map(|i| bs.p1_side_condition_turns[i]);
         assert!(
-            turns.map_or(false, |t| t >= 4),
+            turns.is_some_and(|t| t >= 4),
             "Safeguard should last ~5 turns, not 1 (got {:?})", turns
         );
     }
@@ -26190,7 +26186,7 @@ mod conditional_damage_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -26201,7 +26197,7 @@ mod conditional_damage_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(ability), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -26213,7 +26209,7 @@ mod conditional_damage_moves {
             &MatchState::BattleState(state),
             &crate::state::battle::PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &crate::state::battle::PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         )
     }
 
@@ -26378,7 +26374,7 @@ mod conditional_damage_moves {
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let mut p1 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Belch), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -26405,7 +26401,7 @@ mod conditional_damage_moves {
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let mut p1 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Belch), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -26434,7 +26430,7 @@ mod conditional_damage_moves {
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let mut p1 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Belch), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -26443,7 +26439,7 @@ mod conditional_damage_moves {
 
         let p2 = mon(Species::Snorlax, PokemonMove::Splash);
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
-        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
+        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, mdex, pdex);
         let p1_mon = &state.p1_active_mons[0];
         let has_belch = cmds.iter().any(|c| {
             if let crate::state::battle::BattleCommand::Attack(ac) = c {
@@ -26459,7 +26455,7 @@ mod conditional_damage_moves {
         let mdex = move_dex();
         let pdex = pokemon_dex();
         let mut p1 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Belch), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -26468,7 +26464,7 @@ mod conditional_damage_moves {
 
         let p2 = mon(Species::Snorlax, PokemonMove::Splash);
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
-        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
+        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, mdex, pdex);
         let p1_mon = &state.p1_active_mons[0];
         let has_belch = cmds.iter().any(|c| {
             if let crate::state::battle::BattleCommand::Attack(ac) = c {
@@ -26641,7 +26637,7 @@ mod turn_state_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -26652,7 +26648,7 @@ mod turn_state_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv1), Some(mv2), None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -26664,7 +26660,7 @@ mod turn_state_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         )
     }
 
@@ -26751,7 +26747,7 @@ mod turn_state_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state1, _) = outcomes1.into_iter().next().expect("should have outcome");
 
@@ -26761,7 +26757,7 @@ mod turn_state_moves {
             &state1,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         for (s, _) in &outcomes2 {
             if let MatchState::BattleState(bs) = s {
@@ -26805,7 +26801,7 @@ mod turn_state_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state1, _) = outcomes1.into_iter().next().expect("should have outcome");
         let initial_hp = match &state1 { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => panic!() };
@@ -26814,7 +26810,7 @@ mod turn_state_moves {
             &state1,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         for (s, _) in &outcomes2 {
             if let MatchState::BattleState(bs) = s {
@@ -26913,7 +26909,7 @@ mod turn_state_moves {
         let p1 = mon(Species::Tinkaton, PokemonMove::GigatonHammer);
         let p2 = mon(Species::Snorlax, PokemonMove::Splash);
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
-        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, &mdex, &pdex);
+        let cmds = get_possible_commands_for_active_slot(&state, Player::P1, 0, mdex, pdex);
         let has_hammer = cmds.iter().any(|c| {
             if let crate::state::battle::BattleCommand::Attack(ac) = c {
                 state.p1_active_mons[0].moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::GigatonHammer)
@@ -26941,13 +26937,13 @@ mod turn_state_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let (state1, _) = outcomes1.into_iter().next().expect("should have outcome");
 
         // Turn 2 selection: Gigaton Hammer should NOT be available.
         let bs1 = match &state1 { MatchState::BattleState(bs) => bs, _ => panic!() };
-        let cmds2 = get_possible_commands_for_active_slot(bs1, Player::P1, 0, &mdex, &pdex);
+        let cmds2 = get_possible_commands_for_active_slot(bs1, Player::P1, 0, mdex, pdex);
         let has_hammer = cmds2.iter().any(|c| {
             if let crate::state::battle::BattleCommand::Attack(ac) = c {
                 bs1.p1_active_mons[0].moves.get(ac.move_slot).and_then(|m| m.as_ref()) == Some(&PokemonMove::GigatonHammer)
@@ -27020,7 +27016,7 @@ mod first_turn_on_field_mid_turn_entry {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -27054,7 +27050,7 @@ mod first_turn_on_field_mid_turn_entry {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
 
         let pending_state = after_uturn.into_iter().find(|(s, _)| {
@@ -27071,7 +27067,7 @@ mod first_turn_on_field_mid_turn_entry {
             &pending_state,
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
             &PlayerCommand::Battle(vec![BattleCommand::Pass]),
-            &mdex, &pdex,
+            mdex, pdex,
         );
 
         // Turn 2: Ambipom uses Fake Out (slot 0). Should deal damage.
@@ -27086,7 +27082,7 @@ mod first_turn_on_field_mid_turn_entry {
                 state_t2,
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             if outcomes.iter().any(|(s, _)| {
                 if let MatchState::BattleState(bs) = s { bs.p2_active_mons[0].hp < initial_p2_hp } else { false }
@@ -27122,7 +27118,7 @@ mod new_moves_session {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(ability), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -27147,7 +27143,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let paralysis_prob: f64 = outcomes.iter()
             .filter(|(ms, _)| {
@@ -27178,7 +27174,7 @@ mod new_moves_session {
             &MatchState::BattleState(base_state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let initial_hp = p2.hp;
         let base_dmg: f64 = {
@@ -27196,7 +27192,7 @@ mod new_moves_session {
             &MatchState::BattleState(min_state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let min_dmg: f64 = {
             let dist = damage_distribution(&min_outcomes, initial_hp);
@@ -27225,7 +27221,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         let user_types = &bs.p1_active_mons[0].types;
@@ -27245,7 +27241,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let hit = hit_probability(&outcomes, initial_p2_hp);
         assert!(hit < 0.01,
@@ -27263,7 +27259,7 @@ mod new_moves_session {
         let p1 = mon(Species::Glaceon, PokemonMove::FreezeDry, Ability::None);
         let make_target = |species: Species| -> PokemonState {
             build_pokemon_state(
-                species, &pdex, &mdex, Some(50),
+                species, pdex, mdex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
@@ -27279,7 +27275,7 @@ mod new_moves_session {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![target], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )
         };
 
@@ -27316,7 +27312,7 @@ mod new_moves_session {
         p1.stats[3] = 40; // keep damage low enough that 4× target survives
         let make_target = |species: Species| -> PokemonState {
             build_pokemon_state(
-                species, &pdex, &mdex, Some(50),
+                species, pdex, mdex, Some(50),
                 Some([Some(PokemonMove::Splash), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
@@ -27332,7 +27328,7 @@ mod new_moves_session {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![target], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             )
         };
 
@@ -27376,7 +27372,7 @@ mod new_moves_session {
             &MatchState::BattleState(base_state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
 
         // With Gravity active
@@ -27387,7 +27383,7 @@ mod new_moves_session {
             &MatchState::BattleState(grav_state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
 
         let mean_dmg = |outs: &[(MatchState, f64)]| -> f64 {
@@ -27413,7 +27409,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let def_drop_prob: f64 = outcomes.iter()
             .filter(|(ms, _)| {
@@ -27439,7 +27435,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         // The move should fail (no ally in singles). P2 HP unchanged; no HelpingHand volatile.
         let (bs, _) = extract_battle_state(outcomes);
@@ -27464,7 +27460,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
 
         // Verify LockedOn volatile was applied to P1 (payload = target mon_id, any value)
@@ -27486,7 +27482,7 @@ mod new_moves_session {
             let mdex = move_dex();
             let pdex = pokemon_dex();
             let mut p1_t2 = build_pokemon_state(
-                Species::Porygon2, &pdex, &mdex, Some(50),
+                Species::Porygon2, pdex, mdex, Some(50),
                 Some([Some(PokemonMove::Tackle), None, None, None]),
                 None, Some(Ability::None), Some(Nature::Hardy),
                 None, None, Some([0; 6]), None, false,
@@ -27500,7 +27496,7 @@ mod new_moves_session {
                 &MatchState::BattleState(bs),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &mdex, &pdex,
+                mdex, pdex,
             );
             let hit = hit_probability(&turn2_outcomes, initial_hp);
             assert!(hit > 0.99,
@@ -27526,14 +27522,14 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
 
         // Turn 2: swap P1 to Tackle at +6 evasion on P2 → should hit (guarantee active)
         let (mut bs_t1, _) = extract_battle_state(after_t1);
         bs_t1.p2_active_mons[0].boosts[6] = 6;
         let mut p1_t2 = build_pokemon_state(
-            Species::Porygon2, &pdex, &mdex, Some(50),
+            Species::Porygon2, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Tackle), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -27546,7 +27542,7 @@ mod new_moves_session {
             &MatchState::BattleState(bs_t1),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let hit_t2 = hit_probability(&after_t2, initial_hp);
         assert!(hit_t2 > 0.99,
@@ -27558,7 +27554,7 @@ mod new_moves_session {
         let hp_after_t2 = bs_t2_base.p2_active_mons[0].hp;
         bs_t2_base.p2_active_mons[0].boosts[6] = 6; // keep high evasion
         let mut p1_t3 = build_pokemon_state(
-            Species::Porygon2, &pdex, &mdex, Some(50),
+            Species::Porygon2, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Tackle), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -27571,7 +27567,7 @@ mod new_moves_session {
             &MatchState::BattleState(bs_t2_base),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         // Use hp_after_t2 as baseline so we only measure Turn 3's damage (not cumulative).
         let hit_t3 = hit_probability(&after_t3, hp_after_t2);
@@ -27593,7 +27589,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert!(
@@ -27612,7 +27608,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let para_still_present: f64 = outcomes.iter()
             .filter(|(ms, _)| {
@@ -27643,14 +27639,14 @@ mod new_moves_session {
             &run_single_turn(&MatchState::BattleState(state_boosted),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex(), &pokemon_dex()),
+                move_dex(), pokemon_dex()),
             mon(Species::Snorlax, PokemonMove::Splash, Ability::None).hp,
         );
         let dist_neutral = damage_distribution(
             &run_single_turn(&MatchState::BattleState(state_neutral),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex(), &pokemon_dex()),
+                move_dex(), pokemon_dex()),
             mon(Species::Snorlax, PokemonMove::Splash, Ability::None).hp,
         );
         assert_distribution_close(dist_boosted, dist_neutral);
@@ -27669,7 +27665,7 @@ mod new_moves_session {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_boosted], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex(), &pokemon_dex()),
+                move_dex(), pokemon_dex()),
             initial_hp,
         );
         let dist_neutral = damage_distribution(
@@ -27677,7 +27673,7 @@ mod new_moves_session {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_neutral], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex(), &pokemon_dex()),
+                move_dex(), pokemon_dex()),
             initial_hp,
         );
         assert_distribution_close(dist_boosted, dist_neutral);
@@ -27698,7 +27694,7 @@ mod new_moves_session {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1_boosted.clone()], vec![], vec![p2.clone()], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex(), &pokemon_dex()),
+                move_dex(), pokemon_dex()),
             initial_hp,
         );
 
@@ -27708,7 +27704,7 @@ mod new_moves_session {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1_neutral], vec![], vec![p2.clone()], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex(), &pokemon_dex()),
+                move_dex(), pokemon_dex()),
             initial_hp,
         );
 
@@ -27729,7 +27725,7 @@ mod new_moves_session {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_neutral], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex(), &pokemon_dex()),
+                move_dex(), pokemon_dex()),
             initial_hp,
         );
         let dist_boosted = damage_distribution(
@@ -27737,7 +27733,7 @@ mod new_moves_session {
                 &MatchState::BattleState(battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_boosted], vec![])),
                 &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
                 &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-                &move_dex(), &pokemon_dex()),
+                move_dex(), pokemon_dex()),
             initial_hp,
         );
 
@@ -27769,7 +27765,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         // P1 has +1 priority from Grassy Glide → attacks first → P2 faints → P1 wins.
         // If priority were 0, P2 (faster) would go first and P1 would faint → P2 wins.
@@ -27792,7 +27788,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         // All stats maxed → Acupressure fails → exactly 1 outcome, P1 boosts unchanged.
         let (bs, _) = extract_battle_state(outcomes);
@@ -27809,7 +27805,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         // Should branch into 7 outcomes (one per stat). Each branch has exactly one stat at +2.
         assert_eq!(outcomes.len(), 7, "Acupressure on a neutral mon should produce 7 branches");
@@ -27836,7 +27832,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert_eq!(bs.p1_active_mons[0].boosts[1], 0, "Stuff Cheeks should fail if no berry held");
@@ -27854,7 +27850,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (bs, _) = extract_battle_state(outcomes);
         assert_eq!(bs.p1_active_mons[0].boosts[1], 2, "Stuff Cheeks should give +2 Def");
@@ -27874,7 +27870,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         // Copycat should fail; Splash runs second as a no-op.
         let (bs, _) = extract_battle_state(outcomes);
@@ -27898,7 +27894,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let p2_dmg_prob = hit_probability(&outcomes, initial_hp);
         assert!(p2_dmg_prob > 0.99, "Copycat should copy Tackle and deal damage; prob={p2_dmg_prob:.4}");
@@ -27918,7 +27914,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let p2_damaged_prob = hit_probability(&outcomes, initial_p2_hp);
         assert!(p2_damaged_prob > 0.99,
@@ -27941,7 +27937,7 @@ mod new_moves_session {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         // Copycat fails → P2 HP unchanged.
         let (bs, _) = extract_battle_state(outcomes);
@@ -27955,13 +27951,13 @@ mod new_moves_session {
         // Turn 2: P1 uses Copycat — should copy Tackle from the previous turn.
         let pdex = pokemon_dex(); let mdex = move_dex();
         let mut p1 = build_pokemon_state(
-            Species::Smeargle, &pdex, &mdex, Some(50),
+            Species::Smeargle, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Copycat), Some(PokemonMove::Splash), None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
         );
         p1.stats[5] = 50; // slower than P2
         let mut p2 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
         );
@@ -27977,7 +27973,7 @@ mod new_moves_session {
             &state,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])), // Splash
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), // Tackle
-            &mdex, &pdex,
+            mdex, pdex,
         );
         assert_eq!(turn1.len(), 1, "Turn 1 should produce exactly 1 outcome (Tackle has 1 roll in single-roll mode)");
         let (turn1_state, _) = turn1.into_iter().next().unwrap();
@@ -27991,13 +27987,13 @@ mod new_moves_session {
         // last_move_on_field is Tackle, not Splash): re-run with P1 faster so P1's Splash
         // resolves first and P2's Tackle resolves last.
         let mut p1b = build_pokemon_state(
-            Species::Smeargle, &pdex, &mdex, Some(50),
+            Species::Smeargle, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Copycat), Some(PokemonMove::Splash), None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
         );
         p1b.stats[5] = 999; // faster, so P1 Splash goes first, P2 Tackle goes last
         let mut p2b = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
         );
@@ -28011,7 +28007,7 @@ mod new_moves_session {
             &state_b,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])), // Splash
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])), // Tackle
-            &mdex, &pdex,
+            mdex, pdex,
         );
         assert_eq!(turn1_b.len(), 1);
         let (turn1_b_state, _) = turn1_b.into_iter().next().unwrap();
@@ -28030,7 +28026,7 @@ mod new_moves_session {
             &turn1_b_state,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])), // Copycat
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![1])), // Splash (no-op)
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let p2b_hit_prob = hit_probability(&turn2_b, initial_p2b_hp);
         assert!(p2b_hit_prob > 0.99,
@@ -28044,24 +28040,24 @@ mod new_moves_session {
         let pdex = pokemon_dex(); let mdex = move_dex();
         // P1 has: slot 0 = Smeargle (Copycat), slot 1 = Snorlax (Splash, the partner)
         let mut p1a = build_pokemon_state(
-            Species::Smeargle, &pdex, &mdex, Some(50),
+            Species::Smeargle, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Copycat), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
         );
         p1a.stats[5] = 999; // moves first
         let p1b = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
         );
         // P2 has two Garchomp (target slots for Copycat's copied Tackle)
         let p2a = build_pokemon_state(
-            Species::Garchomp, &pdex, &mdex, Some(50),
+            Species::Garchomp, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
         );
         let p2b_mon = build_pokemon_state(
-            Species::Garchomp, &pdex, &mdex, Some(50),
+            Species::Garchomp, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0;6]), None, false,
         );
@@ -28080,7 +28076,7 @@ mod new_moves_session {
         let outcomes = run_single_turn(
             &MatchState::BattleState(state),
             &cmd_p1, &cmd_p2,
-            &mdex, &pdex,
+            mdex, pdex,
         );
 
         // P1's partner (Snorlax, slot 1) must NEVER be damaged by Copycat's Tackle.
@@ -28114,7 +28110,7 @@ mod seven_new_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28125,7 +28121,7 @@ mod seven_new_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv1), Some(mv2), None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28137,7 +28133,7 @@ mod seven_new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         )
     }
 
@@ -28240,7 +28236,7 @@ mod seven_new_moves {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         let mut p1 = build_pokemon_state(
-            Species::Eevee, &pdex, &mdex, Some(50),
+            Species::Eevee, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Tackle), Some(PokemonMove::LastResort), None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28255,7 +28251,7 @@ mod seven_new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let any_hit = outcomes.iter().any(|(s, _)| matches!(s, MatchState::BattleState(bs)
             if bs.p2_active_mons[0].hp < bs.p2_active_mons[0].stats[0]));
@@ -28270,7 +28266,7 @@ mod seven_new_moves {
         let mdex = move_dex();
         // P1: Slowbro (Water/Psychic — not immune to Normal) with Destiny Bond, goes first
         let mut p1 = build_pokemon_state(
-            Species::Slowbro, &pdex, &mdex, Some(50),
+            Species::Slowbro, pdex, mdex, Some(50),
             Some([Some(PokemonMove::DestinyBond), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28280,7 +28276,7 @@ mod seven_new_moves {
 
         // P2: Snorlax with a strong Normal move (hits Slowbro fine)
         let mut p2 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::HyperBeam), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28303,7 +28299,7 @@ mod seven_new_moves {
         let mdex = move_dex();
         // P1 uses Destiny Bond turn 1
         let mut p1 = build_pokemon_state(
-            Species::Gengar, &pdex, &mdex, Some(50),
+            Species::Gengar, pdex, mdex, Some(50),
             Some([Some(PokemonMove::DestinyBond), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28388,7 +28384,7 @@ mod flying_press_tests {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         let mut m = build_pokemon_state(
-            Species::Hawlucha, &pdex, &mdex, Some(50),
+            Species::Hawlucha, pdex, mdex, Some(50),
             Some([Some(PokemonMove::FlyingPress), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28401,7 +28397,7 @@ mod flying_press_tests {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28419,7 +28415,7 @@ mod flying_press_tests {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let any_damage = outcomes.iter().any(|(s, _)| {
             matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < max_hp)
@@ -28437,7 +28433,7 @@ mod flying_press_tests {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let any_damage = outcomes.iter().any(|(s, _)| {
             matches!(s, MatchState::BattleState(bs) if bs.p2_active_mons[0].hp < p2.stats[0])
@@ -28463,7 +28459,7 @@ mod substitute_move {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(ability), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28487,7 +28483,7 @@ mod substitute_move {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         for (s, _) in &outcomes {
             if let MatchState::BattleState(bs) = s {
@@ -28514,7 +28510,7 @@ mod substitute_move {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         for (s, _) in &outcomes {
             if let MatchState::BattleState(bs) = s {
@@ -28542,7 +28538,7 @@ mod substitute_move {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         for (s, _) in &outcomes {
             if let MatchState::BattleState(bs) = s {
@@ -28567,7 +28563,7 @@ mod substitute_move {
         let real_hp = p1.stats[0]; // still at max
 
         let mut p2 = build_pokemon_state(
-            Species::Machamp, &pdex, &mdex, Some(50),
+            Species::Machamp, pdex, mdex, Some(50),
             Some([Some(PokemonMove::KarateChop), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28579,7 +28575,7 @@ mod substitute_move {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         for (s, _) in &outcomes {
             if let MatchState::BattleState(bs) = s {
@@ -28604,7 +28600,7 @@ mod substitute_move {
         p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::Substitute(1), 0));
 
         let mut p2 = build_pokemon_state(
-            Species::Machamp, &pdex, &mdex, Some(50),
+            Species::Machamp, pdex, mdex, Some(50),
             Some([Some(PokemonMove::KarateChop), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28616,7 +28612,7 @@ mod substitute_move {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let all_broke = outcomes.iter().all(|(s, _)| {
             if let MatchState::BattleState(bs) = s {
@@ -28639,7 +28635,7 @@ mod substitute_move {
         let real_hp = p1.stats[0];
 
         let mut p2 = build_pokemon_state(
-            Species::Exploud, &pdex, &mdex, Some(50),
+            Species::Exploud, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Boomburst), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28651,7 +28647,7 @@ mod substitute_move {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex, &pdex,
+            mdex, pdex,
         );
         let any_real_damage = outcomes.iter().any(|(s, _)| {
             if let MatchState::BattleState(bs) = s {
@@ -28668,7 +28664,7 @@ mod substitute_move {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         let mut p1 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             Some(Item::RockyHelmet), None, Some([0; 6]), None, false,
@@ -28679,7 +28675,7 @@ mod substitute_move {
         let pdex2 = pokemon_dex();
         let mdex2 = move_dex();
         let mut p2 = build_pokemon_state(
-            Species::Machamp, &pdex2, &mdex2, Some(50),
+            Species::Machamp, pdex2, mdex2, Some(50),
             Some([Some(PokemonMove::KarateChop), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -28692,7 +28688,7 @@ mod substitute_move {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &mdex2, &pdex2,
+            mdex2, pdex2,
         );
         for (s, _) in &outcomes {
             if let MatchState::BattleState(bs) = s {
@@ -28915,14 +28911,14 @@ mod new_ability_tests {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         let mut p1 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Rest), Some(PokemonMove::Tackle), None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
         );
         p1.stats[5] = 200;
         p1.hp = 1;
         let mut p2 = build_pokemon_state(
-            Species::Magikarp, &pdex, &mdex, Some(50),
+            Species::Magikarp, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
         );
@@ -28933,7 +28929,7 @@ mod new_ability_tests {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state_after_t1, p1_prob) = extract_battle_state(turn1);
         assert!((p1_prob - 1.0).abs() < 1e-9, "Rest itself is deterministic");
@@ -28945,7 +28941,7 @@ mod new_ability_tests {
             &MatchState::BattleState(state_after_t1),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state_after_t2, p2_prob) = extract_battle_state(turn2);
         assert!((p2_prob - 1.0).abs() < 1e-9,
@@ -28957,7 +28953,7 @@ mod new_ability_tests {
             &MatchState::BattleState(state_after_t2),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state_after_t3, p3_prob) = extract_battle_state(turn3);
         assert!((p3_prob - 1.0).abs() < 1e-9,
@@ -28969,7 +28965,7 @@ mod new_ability_tests {
             &MatchState::BattleState(state_after_t3),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state_after_t4, p4_prob) = extract_battle_state(turn4);
         assert!((p4_prob - 1.0).abs() < 1e-9);
@@ -28983,14 +28979,14 @@ mod new_ability_tests {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         let mut p1 = build_pokemon_state(
-            Species::Snorlax, &pdex, &mdex, Some(50),
+            Species::Snorlax, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Rest), Some(PokemonMove::Tackle), None, None]),
             None, Some(Ability::EarlyBird), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
         );
         p1.stats[5] = 200;
         p1.hp = 1;
         let mut p2 = build_pokemon_state(
-            Species::Magikarp, &pdex, &mdex, Some(50),
+            Species::Magikarp, pdex, mdex, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy), None, None, Some([0; 6]), None, false,
         );
@@ -29001,7 +28997,7 @@ mod new_ability_tests {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state_after_t1, _) = extract_battle_state(turn1);
         assert!(matches!(state_after_t1.p1_active_mons[0].status, Some(Status::Sleep(0))));
@@ -29013,7 +29009,7 @@ mod new_ability_tests {
             &MatchState::BattleState(state_after_t1),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state_after_t2, p2_prob) = extract_battle_state(turn2);
         assert!((p2_prob - 1.0).abs() < 1e-9,
@@ -29025,7 +29021,7 @@ mod new_ability_tests {
             &MatchState::BattleState(state_after_t2),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![1])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let (state_after_t3, p3_prob) = extract_battle_state(turn3);
         assert!((p3_prob - 1.0).abs() < 1e-9);
@@ -30911,7 +30907,7 @@ mod doubles_faint_redirection {
         let pdex = pokemon_dex();
         let mdex = move_dex();
         build_pokemon_state(
-            species, &pdex, &mdex, Some(50),
+            species, pdex, mdex, Some(50),
             Some([Some(mv), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -30956,7 +30952,7 @@ mod doubles_faint_redirection {
 
         let outcomes: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state),
-            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
+            &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), false, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         assert!(!outcomes.is_empty(), "must produce at least one outcome");
@@ -30969,7 +30965,7 @@ mod doubles_faint_redirection {
 
         let foe0_touched_prob: f64 = outcomes.iter()
             .filter(|(s, _)| matches!(s, MatchState::BattleState(bs)
-                if bs.p2_active_mons.get(0).map(|m| m.hp != 0).unwrap_or(false)))
+                if bs.p2_active_mons.first().map(|m| m.hp != 0).unwrap_or(false)))
             .map(|(_, p)| p)
             .sum();
 
@@ -31018,7 +31014,7 @@ mod doubles_faint_redirection {
         // Should not panic; the move simply fizzles (no valid redirect target).
         let outcomes: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state),
-            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
+            &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), false, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         let total_prob: f64 = outcomes.iter().map(|(_, p)| p).sum();
@@ -31040,7 +31036,7 @@ mod doubles_faint_redirection {
 
         // Blissey targets are bulky enough that neither will faint in one hit.
         let attacker = build_pokemon_state(
-            Species::Rhyperior, &pdex, &mdex, Some(50),
+            Species::Rhyperior, pdex, mdex, Some(50),
             Some([Some(PokemonMove::RockSlide), None, None, None]),
             None, Some(Ability::None), Some(Nature::Hardy),
             None, None, Some([0; 6]), None, false,
@@ -31064,7 +31060,7 @@ mod doubles_faint_redirection {
         ]);
         let out_two: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state_two),
-            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
+            &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), false, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
         let avg_dmg_two: f64 = out_two.iter().map(|(s, p)| {
             let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => initial_hp };
@@ -31082,7 +31078,7 @@ mod doubles_faint_redirection {
         );
         let out_one: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
             &MatchState::BattleState(state_one),
-            &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), false, 1, None,
+            &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), false, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
         let avg_dmg_one: f64 = out_one.iter().map(|(s, p)| {
             let hp = match s { MatchState::BattleState(bs) => bs.p2_active_mons[0].hp, _ => initial_hp };
@@ -31298,15 +31294,14 @@ mod season2_items_and_abilities {
         // Recoil: holder should lose 10% max HP (at least 1) in every outcome that doesn't faint.
         let expected_recoil = ((max_hp_orb as u32 / 10).max(1)) as u16;
         for (s, _) in &outcomes_orb {
-            if let MatchState::BattleState(bs) = s {
-                if !bs.p1_active_mons[0].fainted {
+            if let MatchState::BattleState(bs) = s
+                && !bs.p1_active_mons[0].fainted {
                     assert_eq!(
                         bs.p1_active_mons[0].hp,
                         max_hp_orb - expected_recoil,
                         "Life Orb: holder should lose {} HP as recoil", expected_recoil,
                     );
                 }
-            }
         }
     }
 
@@ -31787,13 +31782,13 @@ mod new_moves {
             &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![clean], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ), hp);
         let pois_dmg = avg_dmg_p2(&run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![poisoned], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ), hp);
 
         let ratio = pois_dmg / clean_dmg;
@@ -31817,13 +31812,13 @@ mod new_moves {
             &MatchState::BattleState(battle_state_from_lists(vec![attacker.clone()], vec![], vec![clean], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ), hp);
         let toxic_dmg = avg_dmg_p2(&run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![toxic], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ), hp);
 
         let ratio = toxic_dmg / clean_dmg;
@@ -31849,13 +31844,13 @@ mod new_moves {
             &MatchState::BattleState(battle_state_from_lists(vec![a0], vec![], vec![target.clone()], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ), hp);
         let dmg2 = avg_dmg_p2(&run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![a2], vec![], vec![target.clone()], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ), hp);
 
         assert!(dmg0 > 0.0, "Rage Fist (Ghost) should deal damage to Machamp (Fighting); dmg0={dmg0}");
@@ -31881,13 +31876,13 @@ mod new_moves {
             &MatchState::BattleState(battle_state_from_lists(vec![a7], vec![], vec![target.clone()], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ), hp);
         let d10 = avg_dmg_p2(&run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![a10], vec![], vec![target], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ), hp);
 
         assert!((d7 - d10).abs() < 1.0,
@@ -31906,7 +31901,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p1_active_mons[0].times_hit, 1,
             "times_hit should be 1 after being hit once");
@@ -31925,7 +31920,7 @@ mod new_moves {
         let p1_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]);
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
         let outcomes = run_single_turn(
-            &MatchState::BattleState(state), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(),
+            &MatchState::BattleState(state), &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(),
         );
         let times_hit_in_back = outcomes.iter().find_map(|(ms, _)| {
             if let MatchState::BattleState(bs) = ms {
@@ -31960,10 +31955,10 @@ mod new_moves {
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
         let outcomes_chant: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
-            &MatchState::BattleState(state_chant), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1, None,
+            &MatchState::BattleState(state_chant), &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), true, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
         let outcomes_none: Vec<(MatchState, f64)> = crate::simulator::simulate_turn(
-            &MatchState::BattleState(state_none), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex(), true, 1, None,
+            &MatchState::BattleState(state_none), &p1_cmd, &p2_cmd, move_dex(), pokemon_dex(), true, 1, None,
         ).into_iter().map(|(s, _ev, p)| (s, p)).collect();
 
         assert_eq!(outcomes_chant.len(), 1,
@@ -31986,7 +31981,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p1_active_mons[0].boosts[1], base_def + 1,
             "Skull Bash should raise Def +1 on the charge turn");
@@ -32006,7 +32001,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let dealt_damage = outcomes.iter().any(|(ms, _)| {
             if let MatchState::BattleState(bs) = ms { bs.p2_active_mons[0].hp < initial_hp } else { true }
@@ -32032,7 +32027,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p1_active_mons[0].boosts[1], base_def + 1,
             "Power Herb Skull Bash should still apply the +1 Def charge-turn boost");
@@ -32053,7 +32048,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p2_active_mons[0].hp, p2_max_hp,
             "Focus Punch should fail (deal no damage) when user is hit first");
@@ -32072,7 +32067,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p1_active_mons[0].move_pp[0], initial_pp,
             "PP should NOT be deducted when Focus Punch fails (Gen V+ rule)");
@@ -32091,7 +32086,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert!(bs.p2_active_mons[0].hp < p2_initial_hp,
             "Focus Punch should deal damage when user is NOT hit before acting");
@@ -32111,7 +32106,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p2_active_mons[0].hp, p2_hp,
             "Dream Eater should deal no damage to an awake target");
@@ -32131,7 +32126,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert!(bs.p1_active_mons[0].hp > p1_start_hp,
             "Dream Eater should heal user 50% of damage dealt when target is asleep");
@@ -32150,7 +32145,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p1_active_mons[0].boosts[0], 1, "Curse (non-Ghost): Atk +1");
         assert_eq!(bs.p1_active_mons[0].boosts[1], 1, "Curse (non-Ghost): Def +1");
@@ -32168,7 +32163,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert!(has_vol(&bs.p2_active_mons[0], &VolatileStatus::Curse),
             "Ghost Curse should apply Curse volatile to target");
@@ -32187,7 +32182,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         let expected = start_hp.saturating_sub(max_hp / 2);
         assert_eq!(bs.p1_active_mons[0].hp, expected,
@@ -32209,7 +32204,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p2_active_mons[0].boosts[0], -2, "Topsy-Turvy: +2 Atk -> -2");
         assert_eq!(bs.p2_active_mons[0].boosts[1], 1, "Topsy-Turvy: -1 Def -> +1");
@@ -32226,7 +32221,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert_eq!(bs.p2_active_mons[0].boosts, [0i8; 7],
             "Topsy-Turvy should fail with no effect when all target boosts are zero");
@@ -32245,7 +32240,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert!(has_vol(&bs.p1_active_mons[0], &VolatileStatus::Imprison),
             "Imprison should apply the Imprison volatile to the user");
@@ -32263,7 +32258,7 @@ mod new_moves {
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let cmds = get_possible_commands_for_active_slot(
-            &state, Player::P2, 0, &move_dex(), &pokemon_dex(),
+            &state, Player::P2, 0, move_dex(), pokemon_dex(),
         );
         let can_splash = cmds.iter().any(|c| matches!(c,
             BattleCommand::Attack(a)
@@ -32288,7 +32283,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         ));
         assert!(!has_vol(&bs.p2_active_mons[0], &VolatileStatus::Uproar),
             "Throat Chop hitting a mon mid-Uproar should remove the Uproar volatile");
@@ -32311,7 +32306,7 @@ mod new_moves {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         let hit_bs = outcomes.iter().find_map(|(ms, _)| {
             if let MatchState::BattleState(bs) = ms {
@@ -32368,7 +32363,7 @@ mod rollout {
 
     /// Run one turn and return the single deterministic battle-state (panics if branched).
     fn one_turn(state: &MatchState, p1_cmd: &PlayerCommand, p2_cmd: &PlayerCommand) -> MatchState {
-        let outcomes = run_single_turn(state, p1_cmd, p2_cmd, &move_dex(), &pokemon_dex());
+        let outcomes = run_single_turn(state, p1_cmd, p2_cmd, move_dex(), pokemon_dex());
         // Collapse miss vs hit into just the hit branch for simplicity when accuracy is
         // the only source of branching.
         if let Some((ms, _)) = outcomes.iter().find(|(ms, _)| {
@@ -32394,7 +32389,7 @@ mod rollout {
             &ms,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
         assert_eq!(outcomes.len(), 1);
         if let MatchState::BattleState(ref bs) = outcomes[0].0 {
@@ -32443,7 +32438,7 @@ mod rollout {
 
         let mut ms = state.clone();
         for _ in 0..turn {
-            let outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+            let outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex());
             // Keep the hit branch (P2 took damage or the lock continued). If no hit branch
             // exists we skip (miss); for the test we just take the first non-miss.
             let (next_ms, _) = outcomes.into_iter()
@@ -32465,7 +32460,7 @@ mod rollout {
             bs.p2_active_mons[0].hp
         } else { panic!() };
 
-        let outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+        let outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex());
         let dist = damage_distribution(&outcomes, initial_hp);
         let (total_dmg, total_prob): (f64, f64) = dist.iter()
             .filter(|&(&d, _)| d > 0)
@@ -32522,7 +32517,7 @@ mod rollout {
             &ms,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
 
         for (state, _) in &outcomes {
@@ -32560,7 +32555,7 @@ mod rollout {
             &ms,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
 
         for (state, _) in &outcomes {
@@ -32591,7 +32586,7 @@ mod rollout {
             &ms,
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &move_dex(), &pokemon_dex(),
+            move_dex(), pokemon_dex(),
         );
 
         for (state, _) in &outcomes {
@@ -32635,8 +32630,8 @@ mod rollout {
             bs.p2_active_mons[0].hp
         } else { panic!() };
 
-        let no_curl_outcomes = run_single_turn(&make_state(false), &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
-        let curl_outcomes    = run_single_turn(&make_state(true),  &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+        let no_curl_outcomes = run_single_turn(&make_state(false), &p1_cmd, &p2_cmd, move_dex(), pokemon_dex());
+        let curl_outcomes    = run_single_turn(&make_state(true),  &p1_cmd, &p2_cmd, move_dex(), pokemon_dex());
 
         let avg_dmg = |outcomes: &Vec<(MatchState, f64)>, init_hp: u16| -> f64 {
             let dist = damage_distribution(outcomes, init_hp);
@@ -32677,7 +32672,7 @@ mod rollout {
 
         // Turn 1: n_before=0 → bp=30.
         let initial_hp = if let MatchState::BattleState(bs) = &ms { bs.p2_active_mons[0].hp } else { panic!() };
-        let t1_outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+        let t1_outcomes = run_single_turn(&ms, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex());
         let dist_t1 = damage_distribution(&t1_outcomes, initial_hp);
         let (td1, tp1) = dist_t1.iter().filter(|&(&d, _)| d > 0)
             .fold((0.0f64, 0.0f64), |(td, tp), (&d, &p)| (td + d as f64 * p, tp + p));
@@ -32693,7 +32688,7 @@ mod rollout {
             .expect("should have a locked branch after Ice Ball turn 1 hit");
 
         let initial_hp2 = if let MatchState::BattleState(bs) = &ms2 { bs.p2_active_mons[0].hp } else { panic!() };
-        let t2_outcomes = run_single_turn(&ms2, &p1_cmd, &p2_cmd, &move_dex(), &pokemon_dex());
+        let t2_outcomes = run_single_turn(&ms2, &p1_cmd, &p2_cmd, move_dex(), pokemon_dex());
         let dist_t2 = damage_distribution(&t2_outcomes, initial_hp2);
         let (td2, tp2) = dist_t2.iter().filter(|&(&d, _)| d > 0)
             .fold((0.0f64, 0.0f64), |(td, tp), (&d, &p)| (td + d as f64 * p, tp + p));
@@ -32736,10 +32731,10 @@ mod event_round_trip {
     }
 
     /// Find the first top-level event whose kind is `MoveUsed` by the given slot.
-    fn find_move_used<'a>(
-        events: &'a [InformationEvent],
+    fn find_move_used(
+        events: &[InformationEvent],
         user: FieldSlot,
-    ) -> Option<&'a InformationEvent> {
+    ) -> Option<&InformationEvent> {
         events.iter().find(|e| {
             matches!(&e.kind, EventKind::MoveUsed { user: u, .. } if *u == user)
         })
@@ -33431,7 +33426,7 @@ mod event_round_trip {
         // P1 lead: Snorlax with Regenerator, damaged to 50% HP.
         // Snorlax has a high HP stat; it will not faint to anything in this test.
         let mut regen_holder = build_pokemon_state(
-            Species::Snorlax, &pd, &md, Some(50),
+            Species::Snorlax, pd, md, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::Regenerator), None, None, None, None, None, false,
         );
@@ -33441,14 +33436,14 @@ mod event_round_trip {
 
         // P1 back: a passive Clefable (no entry effects, no ability).
         let replacement = build_pokemon_state(
-            Species::Clefable, &pd, &md, Some(50),
+            Species::Clefable, pd, md, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         );
 
         // P2: a passive Snorlax so the opponent does nothing interesting.
         let p2_mon = build_pokemon_state(
-            Species::Snorlax, &pd, &md, Some(50),
+            Species::Snorlax, pd, md, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         );
@@ -33466,7 +33461,7 @@ mod event_round_trip {
         let p2_splash = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
         let mut branches_t1 = run_single_turn_with_events(
-            &state_t0, &p1_switch_out, &p2_splash, &md, &pd, Player::P2,
+            &state_t0, &p1_switch_out, &p2_splash, md, pd, Player::P2,
         );
         assert_eq!(branches_t1.len(), 1, "expected one deterministic branch for turn 1");
         let (state_t1, events_t1_opt, _) = branches_t1.remove(0);
@@ -33494,7 +33489,7 @@ mod event_round_trip {
         );
 
         let mut branches_t2 = run_single_turn_with_events(
-            &state_t1, &p1_switch_back, &p2_splash, &md, &pd, Player::P2,
+            &state_t1, &p1_switch_back, &p2_splash, md, pd, Player::P2,
         );
         assert_eq!(branches_t2.len(), 1, "expected one deterministic branch for turn 2");
         let (_, events_t2_opt, _) = branches_t2.remove(0);
@@ -33685,12 +33680,12 @@ mod event_round_trip {
         let pd = pokemon_dex();
         let md = move_dex();
         let p1 = build_pokemon_state(
-            Species::Slowbro, &pd, &md, Some(50),
+            Species::Slowbro, pd, md, Some(50),
             Some([Some(PokemonMove::FutureSight), Some(PokemonMove::Splash), None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         );
         let p2 = build_pokemon_state(
-            Species::Snorlax, &pd, &md, Some(50),
+            Species::Snorlax, pd, md, Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
             None, Some(Ability::None), None, None, None, None, None, false,
         );
@@ -35658,7 +35653,7 @@ mod playtest_fix_batch {
     fn p1s0() -> FieldSlot { FieldSlot { player: Player::P1, slot_index: 0 } }
     fn p2s0() -> FieldSlot { FieldSlot { player: Player::P2, slot_index: 0 } }
 
-    fn find_move_used<'a>(events: &'a [InformationEvent], user: FieldSlot) -> Option<&'a InformationEvent> {
+    fn find_move_used(events: &[InformationEvent], user: FieldSlot) -> Option<&InformationEvent> {
         events.iter().find(|e| matches!(&e.kind, EventKind::MoveUsed { user: u, .. } if *u == user))
     }
 
@@ -36177,7 +36172,7 @@ mod hospitality_event_visibility {
         events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
     }
 
-    fn find_switch<'a>(events: &'a [InformationEvent], slot: FieldSlot) -> &'a InformationEvent {
+    fn find_switch(events: &[InformationEvent], slot: FieldSlot) -> &InformationEvent {
         events.iter()
             .find(|e| matches!(&e.kind, EventKind::Switch(s) if s.slot == slot))
             .unwrap_or_else(|| panic!("Switch event for {slot:?} must be present; events = {events:#?}"))

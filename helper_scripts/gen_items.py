@@ -23,12 +23,22 @@ def ident_of(name):
         valid = 'Num' + valid
     return valid
 
+def fix_unicode_escapes(name):
+    # Showdown's source data embeds names using JS-style `\uXXXX` escapes (no
+    # braces) for non-ASCII characters. Rust string literals require braces
+    # around the hex digits (`\u{XXXX}`) — a bare `\uXXXX` is a compile error.
+    # No current item name is affected, but this mirrors gen_enums.py's fix in
+    # case a future item name needs it. `ident_of` filters to alphanumeric
+    # characters regardless of whether braces are present, so this is safe to
+    # apply unconditionally.
+    return re.sub(r'\\u([0-9a-fA-F]{4})', r'\\u{\1}', name)
+
 for block in re.finditer(r'^\w+: \{\n(.*?)\n\},', text, re.DOTALL | re.MULTILINE):
     body = block.group(1)
     name_match = re.search(r'name:\s*"([^"]+)"', body)
     if not name_match:
         continue
-    name = name_match.group(1)
+    name = fix_unicode_escapes(name_match.group(1))
     ident = ident_of(name)
     items.append(name)
 
@@ -78,6 +88,7 @@ with open('poke_rust/src/data/item.rs', 'w', encoding='utf-8') as f:
     f.write('}\n\n')
 
     f.write('impl Item {\n')
+    f.write('    #[allow(clippy::should_implement_trait)]\n')
     f.write('    pub fn from_str(s: &str) -> Self {\n')
     f.write('        let normalize = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect::<String>();\n')
     f.write('        let normalized = normalize(s);\n')

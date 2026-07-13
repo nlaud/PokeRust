@@ -1521,6 +1521,7 @@ pub enum Species {
 }
 
 impl Species {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let normalize = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect::<String>();
         let normalized = normalize(s);
@@ -3046,6 +3047,7 @@ impl Species {
             _ => Species::Unknown(s.to_string()),
         }
     }
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         match self {
             Species::Ababo => "Ababo".to_string(),

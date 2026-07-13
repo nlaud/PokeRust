@@ -66,7 +66,7 @@ pub fn describe_unknown_item(u: &Unknown<Item>, legal_items: Option<&HashSet<Ite
                             .collect::<Vec<_>>()
                             .join(", ")
                     } else {
-                        possible.iter().map(|i| display_name(i)).collect::<Vec<_>>().join(" or ")
+                        possible.iter().map(display_name).collect::<Vec<_>>().join(" or ")
                     }
                 }
                 // No whitelist: with ~1,000 items in the pool, a short exclusion

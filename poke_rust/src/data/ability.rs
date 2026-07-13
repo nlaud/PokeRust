@@ -324,6 +324,7 @@ pub enum Ability {
 }
 
 impl Ability {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let normalize = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect::<String>();
         let normalized = normalize(s);
@@ -652,6 +653,7 @@ impl Ability {
             _ => Ability::Unknown(s.to_string()),
         }
     }
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         match self {
             Ability::Adaptability => "Adaptability".to_string(),

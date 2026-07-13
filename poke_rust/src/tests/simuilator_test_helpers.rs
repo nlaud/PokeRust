@@ -141,12 +141,12 @@ pub fn simple_attack_mega(_player: Player, move_slots: Vec<usize>) -> Vec<Battle
         .collect()
 }
 
-pub fn is_permutation<T: PartialEq + Clone>(vec1: &Vec<T>, vec2: &Vec<T>) -> bool {
+pub fn is_permutation<T: PartialEq + Clone>(vec1: &Vec<T>, vec2: &[T]) -> bool {
     if vec1.len() != vec2.len() {
         return false;
     }
 
-    let mut vec2_copy = vec2.clone();
+    let mut vec2_copy = vec2.to_owned();
     for item1 in vec1 {
         if let Some(pos) = vec2_copy.iter().position(|item2| item1 == item2) {
             vec2_copy.remove(pos);
@@ -260,6 +260,7 @@ pub fn run_single_turn_with_events(
 
 /// Like [`run_single_turn_with_events`] but exposes `consider_crit` and `damage_rolls`
 /// for tests needing crit branching.
+#[allow(clippy::too_many_arguments)]
 pub fn run_single_turn_with_events_opts(
     state: &MatchState,
     p1_cmd: &crate::state::battle::PlayerCommand,

@@ -641,6 +641,7 @@ fn resolve_mega_info(
     (false, mega_sp, mega_ab)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_pokemon_state(
     species: Species,
     pokemon_dex: &HashMap<Species, PokemonData>,
@@ -792,8 +793,8 @@ fn resolve_mega_species(
             continue;
         }
 
-        let matches_base_species = data.base_species.as_ref() == Some(&base_species_key)
-            || data.battle_only.as_ref() == Some(&base_species_key);
+        let matches_base_species = data.base_species.as_ref() == Some(base_species_key)
+            || data.battle_only.as_ref() == Some(base_species_key);
         if !matches_base_species {
             continue;
         }
@@ -894,15 +895,12 @@ fn parse_pokemon_header(
     // state, so reduce such a line to its base species. build_pokemon_state's
     // resolve_mega_info then re-derives mega_species/has_mega_form from the held
     // mega stone, exactly as a "Tyranitar @ Tyranitarite" sheet would.
-    if let Some(data) = pokemon_dex.get(&species_key) {
-        if is_mega_dex_entry(&species_key, data) {
-            if let Some(base) = data.base_species.clone() {
-                if base != species_key {
+    if let Some(data) = pokemon_dex.get(&species_key)
+        && is_mega_dex_entry(&species_key, data)
+            && let Some(base) = data.base_species.clone()
+                && base != species_key {
                     species_key = base;
                 }
-            }
-        }
-    }
     if pokemon_dex.get(&species_key).is_none() {
         eprintln!(
             "Warning: '{}' not found in dex (key: '{:?}')",
@@ -984,12 +982,11 @@ pub fn parse_team_sheet_str(
                 ivs = Some(parse_stat_line(rest, 31));
             } else if let Some(ns) = line.strip_suffix(" Nature") {
                 nature = parse_nature_str(ns);
-            } else if let Some(mv) = line.strip_prefix("- ") {
-                if move_count < 4 {
+            } else if let Some(mv) = line.strip_prefix("- ")
+                && move_count < 4 {
                     moves[move_count] = Some(PokemonMove::from_str(mv));
                     move_count += 1;
                 }
-            }
         }
 
         let item = if header.item_str.is_empty() {

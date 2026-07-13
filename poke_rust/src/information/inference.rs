@@ -94,7 +94,7 @@ impl InferenceConfig {
     /// Returns `true` if `item` is permitted under the configured item whitelist.
     /// When no whitelist is set every item is permitted.
     pub(crate) fn legal_item_ok(&self, item: &Item) -> bool {
-        self.legal_items.as_ref().map_or(true, |l| l.contains(item))
+        self.legal_items.as_ref().is_none_or(|l| l.contains(item))
     }
 }
 
@@ -126,7 +126,7 @@ thread_local! {
     /// *definition* site (this module) regardless of which module invokes the macro,
     /// so `bcp.rs`'s call sites pick it up with no extra plumbing.
     static CURRENT_EVENT_CONTEXT: std::cell::RefCell<Option<String>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Panic with a descriptive contradiction message.  Called whenever the observed
@@ -533,7 +533,7 @@ pub fn apply_information(
 ) -> UnknownMatchState {
     match &mut state {
         UnknownMatchState::TeamPreview(preview) => {
-            apply_information_team_preview(preview, events, config, dex);
+            apply_information_team_preview(preview, events, config);
         }
         UnknownMatchState::Battle(battle) => {
             apply_information_battle(battle, events, dex, move_dex, ability_dex, config);
@@ -549,14 +549,13 @@ fn apply_information_team_preview(
     state: &mut UnknownTeamPreviewState,
     events: &[InformationEvent],
     config: &InferenceConfig,
-    dex: &HashMap<Species, PokemonData>,
 ) {
     // slot_map: (player, field_slot_index) → index in p1_mons / p2_mons.
     // Persists across top-level events so reactions at any nesting depth can
     // look up the right mon after a SimultaneousSwitch.
     let mut slot_map: Vec<(Player, u8, usize)> = Vec::new();
     for event in events {
-        process_team_preview_event(state, event, config, dex, &mut slot_map);
+        process_team_preview_event(state, event, config, &mut slot_map);
     }
 }
 
@@ -581,7 +580,6 @@ fn process_team_preview_event(
     state: &mut UnknownTeamPreviewState,
     event: &InformationEvent,
     config: &InferenceConfig,
-    dex: &HashMap<Species, PokemonData>,
     // (player, field_slot_index) → roster index in p1_mons / p2_mons.
     slot_map: &mut Vec<(Player, u8, usize)>,
 ) {
@@ -602,7 +600,7 @@ fn process_team_preview_event(
             .position(|m| unknown_is_known_as(&m.possible_species, &sw.species))
         {
             apply_switch_state_to_mon(&mut mons[roster_idx], sw, config);
-            slot_map.push((sw.slot.player.clone(), sw.slot.slot_index, roster_idx));
+            slot_map.push((sw.slot.player, sw.slot.slot_index, roster_idx));
         }
     }
 
@@ -646,11 +644,9 @@ fn process_team_preview_event(
         EventKind::BoostChanged { target, boost_idx, stages } => {
             if let Some(mon) =
                 find_preview_mon(state, &target.player, target.slot_index, slot_map)
-            {
-                if *boost_idx < 7 {
+                && *boost_idx < 7 {
                     mon.boosts[*boost_idx] = mon.boosts[*boost_idx].saturating_add(*stages);
                 }
-            }
         }
 
         EventKind::BoostsCleared { target } => {
@@ -791,7 +787,7 @@ fn process_team_preview_event(
     }
 
     for reaction in &event.reactions {
-        process_team_preview_event(state, reaction, config, dex, slot_map);
+        process_team_preview_event(state, reaction, config, slot_map);
     }
 }
 
@@ -834,11 +830,10 @@ fn run_pass5_all_mons(
         let has_known_species = get_mon_by_idx(state, idx)
             .map(|m| matches!(m.possible_species, Unknown::Known(_)))
             .unwrap_or(false);
-        if has_known_species {
-            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+        if has_known_species
+            && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                 pass5_back_solve(mon, config, dex);
             }
-        }
     }
 }
 
@@ -1013,10 +1008,10 @@ fn compute_analytic_last_movers(top_events: &[InformationEvent]) -> Vec<Option<F
     for e in top_events {
         match &e.kind {
             EventKind::MoveUsed { user, .. }
-            | EventKind::ChargingMove { user, .. } => last = Some(user.clone()),
+            | EventKind::ChargingMove { user, .. } => last = Some(*user),
             EventKind::Cant { slot, .. }
             | EventKind::MustRecharge { slot }
-            | EventKind::SingleMoveOrTurn { slot, .. } => last = Some(slot.clone()),
+            | EventKind::SingleMoveOrTurn { slot, .. } => last = Some(*slot),
             EventKind::EndOfTurn => segments.push(last.take()),
             _ => {}
         }
@@ -1038,7 +1033,7 @@ fn process_battle_event(
     });
 
     let prev_move_ctx = ctx.move_context.clone();
-    let prev_switch_slot = ctx.switch_slot.clone();
+    let prev_switch_slot = ctx.switch_slot;
 
     // Detect crit in the reaction list for the MoveContext.
     let is_crit = event
@@ -1058,7 +1053,7 @@ fn process_battle_event(
             .filter_map(|t| {
                 mon_idx_for_active_slot(state, t)
                     .and_then(|i| get_mon_by_idx(state, i))
-                    .map(|m| (t.clone(), m.hp.clone()))
+                    .map(|m| (*t, m.hp.clone()))
             })
             .collect();
 
@@ -1071,12 +1066,12 @@ fn process_battle_event(
             .filter_map(|t| {
                 mon_idx_for_active_slot(state, t)
                     .and_then(|i| get_mon_by_idx(state, i))
-                    .map(|m| (t.clone(), m.clone()))
+                    .map(|m| (*t, m.clone()))
             })
             .collect();
 
         ctx.move_context = Some(MoveContext {
-            user_slot: user.clone(),
+            user_slot: *user,
             pokemon_move: move_used.clone(),
             targets: targets.clone(),
             is_crit,
@@ -1091,18 +1086,17 @@ fn process_battle_event(
         // One entry per distinct (attacker, target) pair — multi-hit moves are deduped.
         // Self-damage (Life Orb recoil, crash) is excluded via `target != user`.
         for reaction in &event.reactions {
-            if let EventKind::DamageDealt { target, .. } = &reaction.kind {
-                if target != user {
+            if let EventKind::DamageDealt { target, .. } = &reaction.kind
+                && target != user {
                     let already_recorded = ctx
                         .damaging_hits_this_turn
                         .iter()
                         .any(|(a, t, _)| a == user && t == target);
                     if !already_recorded {
                         ctx.damaging_hits_this_turn
-                            .push((user.clone(), target.clone(), move_used.clone()));
+                            .push((*user, *target, move_used.clone()));
                     }
                 }
-            }
         }
     }
 
@@ -1110,7 +1104,7 @@ fn process_battle_event(
     // (WeatherChanged / TerrainChanged from Drizzle / Electric Surge, etc.)
     // can attribute the effect to the switching mon.
     if let EventKind::Switch(sw) = &event.kind {
-        ctx.switch_slot = Some(sw.slot.clone());
+        ctx.switch_slot = Some(sw.slot);
     }
 
     pass1_apply_event(state, event, ctx);
@@ -1121,7 +1115,7 @@ fn process_battle_event(
 
     // Pass 2/3 — item and stat inference keyed on the full MoveUsed + reactions.
     if let EventKind::MoveUsed { user, .. } = &event.kind {
-        let user_slot_for_order = user.clone();
+        let user_slot_for_order = *user;
         pass2_item_from_move(state, event, ctx);
         pass2_contact_absence(state, event, ctx);
         pass2_prankster_immunity(state, event, ctx);
@@ -1180,8 +1174,8 @@ fn pass1_apply_event(
             if *move_used == PokemonMove::Struggle {
                 return;
             }
-            if let Some(idx) = mon_idx_for_active_slot(state, user) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, user)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     reveal_move_on_mon(mon, move_used);
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
@@ -1213,7 +1207,7 @@ fn pass1_apply_event(
                     let is_damaging = ctx
                         .move_dex
                         .get(move_used)
-                        .map_or(false, |md| !matches!(md.category, MoveCategory::Status));
+                        .is_some_and(|md| !matches!(md.category, MoveCategory::Status));
                     let dealt_damage = event.reactions.iter().any(|r| {
                         matches!(&r.kind, EventKind::DamageDealt { target, .. } if target != user)
                     });
@@ -1222,7 +1216,6 @@ fn pass1_apply_event(
                         mon.last_used_move = None;
                     }
                 }
-            }
             // Field-level last-move tracker for Copycat (simulator/mod.rs sets this
             // unconditionally for any executed non-Struggle move, on the top-level state,
             // not per-mon — set after the mon borrow above ends).
@@ -1230,12 +1223,11 @@ fn pass1_apply_event(
         }
 
         EventKind::Faint { slot } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, slot)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.fainted = true;
                     mon.hp = PokemonHP::Percent(0);
                 }
-            }
         }
 
         EventKind::DamageDealt { target, new_hp, .. } => {
@@ -1248,13 +1240,11 @@ fn pass1_apply_event(
             // shows 0 only at an actual faint, so DamageDealt-to-0 implies fainted even
             // if the explicit Faint event is missing. Keeps fainted-guards in the EOT
             // passes (and ability-suppression scans) sound.
-            if matches!(new_hp, PokemonHP::Number(0) | PokemonHP::Percent(0)) {
-                if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if matches!(new_hp, PokemonHP::Number(0) | PokemonHP::Percent(0))
+                && let Some(idx) = mon_idx_for_active_slot(state, target)
+                    && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                         mon.fainted = true;
                     }
-                }
-            }
 
             // Compute the HP delta (amount of damage dealt, not the pre-hit HP value).
             // The simulator stores eff_damage (the delta) in last_damage_taken; we must
@@ -1270,8 +1260,8 @@ fn pass1_apply_event(
             };
 
             // Per-turn damage tracking (mirrors end_turn Phase 5 fields).
-            if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.damaged_this_turn = true;
                     mon.last_damage_taken = damage_delta.clone();
 
@@ -1279,18 +1269,18 @@ fn pass1_apply_event(
                     if let Some(ref mctx) = ctx.move_context {
                         let attacker = &mctx.user_slot;
                         if !mon.damaged_by_this_turn.contains(attacker) {
-                            mon.damaged_by_this_turn.push(attacker.clone());
+                            mon.damaged_by_this_turn.push(*attacker);
                         }
-                        mon.last_damage_attacker = Some(attacker.clone());
+                        mon.last_damage_attacker = Some(*attacker);
                         if let Some(md) = ctx.move_dex.get(&mctx.pokemon_move) {
                             match md.category {
                                 MoveCategory::Physical => {
                                     mon.last_physical_damage_taken = damage_delta.clone();
-                                    mon.last_physical_attacker = Some(attacker.clone());
+                                    mon.last_physical_attacker = Some(*attacker);
                                 }
                                 MoveCategory::Special => {
                                     mon.last_special_damage_taken = damage_delta.clone();
-                                    mon.last_special_attacker = Some(attacker.clone());
+                                    mon.last_special_attacker = Some(*attacker);
                                 }
                                 MoveCategory::Status => {}
                             }
@@ -1306,7 +1296,6 @@ fn pass1_apply_event(
                         }
                     }
                 }
-            }
         }
         EventKind::Healed { target, new_hp, .. } => {
             update_mon_hp(state, target, new_hp.clone());
@@ -1316,10 +1305,10 @@ fn pass1_apply_event(
         }
 
         EventKind::StatusInflicted { target, status } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    if let Some(ref existing) = mon.status.clone() {
-                        if existing != status {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    if let Some(ref existing) = mon.status.clone()
+                        && existing != status {
                             inference_contradiction!(
                                 idx,
                                 "StatusInflicted {:?} but already has {:?}",
@@ -1327,18 +1316,15 @@ fn pass1_apply_event(
                                 existing
                             );
                         }
-                    }
                     mon.status = Some(status.clone());
                 }
-            }
         }
 
         EventKind::StatusCured { target, .. } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.status = None;
                 }
-            }
         }
 
         // Heal Bell / Aromatherapy: cure the entire side including benched mons.
@@ -1353,25 +1339,23 @@ fn pass1_apply_event(
                     Player::P1 => !is_p2,
                     Player::P2 => is_p2,
                 };
-                if matches_side {
-                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                if matches_side
+                    && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                         mon.status = None;
                     }
-                }
             }
         }
 
         EventKind::ItemRevealed { slot, item } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-                if let Some(legal) = &ctx.config.legal_items {
-                    if !legal.contains(item) && *item != Item::None {
+                if let Some(legal) = &ctx.config.legal_items
+                    && !legal.contains(item) && *item != Item::None {
                         inference_contradiction!(
                             idx,
                             "ItemRevealed {:?} outside legal whitelist",
                             item
                         );
                     }
-                }
                 // Item clause: a confirmed team-built item cannot be held by any other
                 // roster member on the same side — but ONLY when this mon's own item is
                 // itself team-built. A mon carrying a transferred item (Trick/Switcheroo/
@@ -1380,7 +1364,7 @@ fn pass1_apply_event(
                 // transferred item must not exclude it from this mon's teammates (S12:
                 // e.g. Frisk revealing a foe's Tricked-in item).
                 let was_transferred = get_mon_by_idx(state, idx)
-                    .map_or(false, |m| m.item_was_transferred);
+                    .is_some_and(|m| m.item_was_transferred);
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     unknown_set_known(&mut mon.item, item.clone(), &format!("mon#{idx} item"));
                 }
@@ -1394,15 +1378,14 @@ fn pass1_apply_event(
             // Recycle, Pickup). These are not team-built items, so item-clause
             // exclusion must NOT propagate to teammates here.
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-                if let Some(legal) = &ctx.config.legal_items {
-                    if !legal.contains(item) && *item != Item::None {
+                if let Some(legal) = &ctx.config.legal_items
+                    && !legal.contains(item) && *item != Item::None {
                         inference_contradiction!(
                             idx,
                             "ItemRevealed {:?} outside legal whitelist",
                             item
                         );
                     }
-                }
                 // S19: capture the outgoing item before it is overwritten, so the
                 // stale HasItem clauses about this mon can be resolved historically.
                 let outgoing = get_mon_by_idx(state, idx).and_then(|m| match &m.item {
@@ -1443,8 +1426,8 @@ fn pass1_apply_event(
         }
 
         EventKind::AbilityRevealed { slot, ability } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, slot)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     // Narrow-vs-overwrite: if the revealed ability is still possible, narrow
                     // via `unknown_set_known`. If it's excluded under any `Unknown`
                     // representation (outside `Possibly`, in a `Not` list, or a different
@@ -1464,7 +1447,6 @@ fn pass1_apply_event(
                         );
                     }
                 }
-            }
         }
 
         EventKind::BoostChanged {
@@ -1472,8 +1454,8 @@ fn pass1_apply_event(
             boost_idx,
             stages,
         } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     if *boost_idx < 7 {
                         let new_stage =
                             (mon.boosts[*boost_idx] as i16 + *stages as i16).clamp(-6, 6) as i8;
@@ -1485,23 +1467,20 @@ fn pass1_apply_event(
                         mon.stats_lowered_this_turn = true;
                     }
                 }
-            }
         }
         EventKind::BoostsCleared { target } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.boosts = [0; 7];
                 }
-            }
         }
         EventKind::BoostsInverted { target } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     for b in mon.boosts.iter_mut() {
                         *b = -*b;
                     }
                 }
-            }
         }
         EventKind::BoostsSwapped { source, target } => {
             let src_idx = mon_idx_for_active_slot(state, source);
@@ -1586,17 +1565,16 @@ fn pass1_apply_event(
                     .dex
                     .get(into)
                     .and_then(|d| d.required_item.as_ref().map(|s| Item::from_str(s)));
-                if let Some(stone) = mega_stone {
-                    if stone != Item::None {
-                        if let Some(legal) = &ctx.config.legal_items {
-                            if !legal.contains(&stone) {
+                if let Some(stone) = mega_stone
+                    && stone != Item::None {
+                        if let Some(legal) = &ctx.config.legal_items
+                            && !legal.contains(&stone) {
                                 inference_contradiction!(
                                     idx,
                                     "Mega Stone {:?} outside legal whitelist",
                                     stone
                                 );
                             }
-                        }
                         if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                             unknown_set_known(
                                 &mut mon.item,
@@ -1605,7 +1583,6 @@ fn pass1_apply_event(
                             );
                         }
                     }
-                }
             }
         }
 
@@ -1664,11 +1641,10 @@ fn pass1_apply_event(
         }
 
         EventKind::TypeChanged { slot, new_types } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, slot)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.possible_types = Unknown::Known(new_types.clone());
                 }
-            }
         }
 
         EventKind::WeatherChanged { weather } => {
@@ -1678,7 +1654,7 @@ fn pass1_apply_event(
                 !c.iter().any(|l| matches!(l, Statement::WeatherTurns { .. }))
             });
             state.weather = weather.clone();
-            state.weather_turns = weather.as_ref().map(|w| weather_timer(w));
+            state.weather_turns = weather.as_ref().map(weather_timer);
             // I-A: record the setter so the rock item can be revealed when the timer
             // collapses from Possibly([5,8]) to Known(3) after 5 end-of-turns.
             state.weather_setter_mon_idx = if let Some(mctx) = &ctx.move_context {
@@ -1693,10 +1669,10 @@ fn pass1_apply_event(
             // Turn-count CNF pair: tie the setter's extension rock to the duration so
             // BCP propagates in BOTH directions (an item reveal collapses the timer;
             // a collapsed timer resolves the item).
-            if let (Some(setter), Some(w)) = (state.weather_setter_mon_idx, weather.as_ref()) {
-                if matches!(&state.weather_turns, Some(Unknown::Possibly(_))) {
-                    if let Some(rock) = weather_extension_item(w) {
-                        if ctx.config.legal_item_ok(&rock) {
+            if let (Some(setter), Some(w)) = (state.weather_setter_mon_idx, weather.as_ref())
+                && matches!(&state.weather_turns, Some(Unknown::Possibly(_)))
+                    && let Some(rock) = weather_extension_item(w)
+                        && ctx.config.legal_item_ok(&rock) {
                             state.predicates.push(vec![
                                 Statement::HasItem { mon_idx: setter, item: rock.clone() },
                                 Statement::WeatherTurns { turns: 5 },
@@ -1709,16 +1685,13 @@ fn pass1_apply_event(
                                 Statement::WeatherTurns { turns: 8 },
                             ]);
                         }
-                    }
-                }
-            }
         }
         EventKind::TerrainChanged { terrain } => {
             state.predicates.retain(|c| {
                 !c.iter().any(|l| matches!(l, Statement::TerrainTurns { .. }))
             });
             state.terrain = terrain.clone();
-            state.terrain_turns = terrain.as_ref().map(|t| terrain_timer(t));
+            state.terrain_turns = terrain.as_ref().map(terrain_timer);
             // I-A: record the setter for TerrainExtender reveal on timer collapse.
             state.terrain_setter_mon_idx = if let Some(mctx) = &ctx.move_context {
                 mon_idx_for_active_slot(state, &mctx.user_slot)
@@ -1727,8 +1700,8 @@ fn pass1_apply_event(
             } else {
                 None
             };
-            if let (Some(setter), Some(_t)) = (state.terrain_setter_mon_idx, terrain.as_ref()) {
-                if matches!(&state.terrain_turns, Some(Unknown::Possibly(_))) {
+            if let (Some(setter), Some(_t)) = (state.terrain_setter_mon_idx, terrain.as_ref())
+                && matches!(&state.terrain_turns, Some(Unknown::Possibly(_))) {
                     let extender = terrain_extension_item(&Terrain::ElectricTerrain);
                     if ctx.config.legal_item_ok(&extender) {
                         state.predicates.push(vec![
@@ -1744,7 +1717,6 @@ fn pass1_apply_event(
                         ]);
                     }
                 }
-            }
         }
         EventKind::PseudoWeatherStart { effect } => {
             if !state.pseudo_weathers.contains(effect) {
@@ -1789,8 +1761,8 @@ fn pass1_apply_event(
                     setter_idx,
                     screen_extension_item(condition),
                     matches!(turns.last(), Some(Unknown::Possibly(_))),
-                ) {
-                    if ctx.config.legal_item_ok(&clay) {
+                )
+                    && ctx.config.legal_item_ok(&clay) {
                         state.predicates.push(vec![
                             Statement::HasItem { mon_idx: setter, item: clay.clone() },
                             Statement::SideConditionTurns {
@@ -1811,7 +1783,6 @@ fn pass1_apply_event(
                             },
                         ]);
                     }
-                }
             }
         }
         EventKind::SideConditionEnd { side, condition } => {
@@ -1848,11 +1819,10 @@ fn pass1_apply_event(
                 Player::P2 => &mut state.p2_slot_conditions,
             };
             let i = slot.slot_index as usize;
-            if let Some(sc_vec) = slot_conds.get_mut(i) {
-                if !sc_vec.contains(condition) {
+            if let Some(sc_vec) = slot_conds.get_mut(i)
+                && !sc_vec.contains(condition) {
                     sc_vec.push(condition.clone());
                 }
-            }
         }
         EventKind::SlotConditionEnd { slot, condition } => {
             let slot_conds = match slot.player {
@@ -1874,8 +1844,8 @@ fn pass1_apply_event(
         }
 
         EventKind::VolatileStart { target, volatile } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     use crate::state::pokemon::VolatileStatusState;
                     let already = mon.volatiles.iter().any(|v| match v {
                         VolatileStatusState::TurnStatus(vs, _) => vs == volatile,
@@ -1887,11 +1857,10 @@ fn pass1_apply_event(
                             .push(VolatileStatusState::TurnStatus(volatile.clone(), 0));
                     }
                 }
-            }
         }
         EventKind::VolatileEnd { target, volatile } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, target) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, target)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     use crate::state::pokemon::VolatileStatusState;
                     mon.volatiles.retain(|v| match v {
                         VolatileStatusState::TurnStatus(vs, _) => vs != volatile,
@@ -1899,18 +1868,16 @@ fn pass1_apply_event(
                         VolatileStatusState::Charging(_, _) => true,
                     });
                 }
-            }
         }
 
         EventKind::ChargingMove { user, move_used } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, user) {
-                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            if let Some(idx) = mon_idx_for_active_slot(state, user)
+                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     reveal_move_on_mon(mon, move_used);
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
                 }
-            }
         }
 
         // ── Anticipation: add KnowsThreateningMove clause for opposing active mons ──
@@ -2074,9 +2041,9 @@ fn pass1_apply_event(
         EventKind::Transformed { slot, into_slot, into_species } => {
             let src_idx = mon_idx_for_active_slot(state, into_slot);
             let dst_idx = mon_idx_for_active_slot(state, slot);
-            if let (Some(si), Some(di)) = (src_idx, dst_idx) {
-                if let Some(src) = get_mon_by_idx(state, si).cloned() {
-                    if let Some(mon) = get_mon_mut_by_idx(state, di) {
+            if let (Some(si), Some(di)) = (src_idx, dst_idx)
+                && let Some(src) = get_mon_by_idx(state, si).cloned()
+                    && let Some(mon) = get_mon_mut_by_idx(state, di) {
                         // Save the pre-transform snapshot once (revert on switch-out).
                         if mon.pre_transform.is_none() {
                             mon.pre_transform = Some(Box::new(mon.clone()));
@@ -2111,8 +2078,6 @@ fn pass1_apply_event(
                             mon.max_pre_nature_stat[i] = src.max_pre_nature_stat[i];
                         }
                     }
-                }
-            }
             // Pre-transform SpeedComparison / EVIV / HasAbility clauses describe the
             // transformer's OWN pre-copy stats and ability — stale now. Drop them
             // (predicate purge only; setter records are unaffected by a transform).
@@ -2167,7 +2132,7 @@ fn pass1_apply_switch_event(
             // ability/item narrowing) survives for future re-entry inference.
             bench_outgoing_mon(state, &sw.slot, &sw.species);
             pass1_switch(state, sw, ctx);
-            pass1_ability_absence_inference(state, &[sw.slot.clone()], &event.reactions, ctx);
+            pass1_ability_absence_inference(state, &[sw.slot], &event.reactions, ctx);
         }
         EventKind::SimultaneousSwitch { switches } => {
             // The concrete simulator emits `switches` in GLOBAL cross-side effective-
@@ -2201,7 +2166,7 @@ fn pass1_apply_switch_event(
             // Ability-absence inference cares about the REAL activation order (e.g.
             // Unnerve vs Sand Stream) — keep the original (speed-encoded) event
             // order here, unlike the two placement loops above.
-            let slots: Vec<FieldSlot> = switches.iter().map(|sw| sw.slot.clone()).collect();
+            let slots: Vec<FieldSlot> = switches.iter().map(|sw| sw.slot).collect();
             pass1_ability_absence_inference(state, &slots, &event.reactions, ctx);
         }
         _ => {}
@@ -2807,7 +2772,7 @@ fn infer_regenerator_from_hp_delta(
     // other than Regen and hazards, which we've excluded).  Allow ±1 for rounding.
     const NO_REGEN_TOLERANCE: i16 = 1;
 
-    if delta >= REGEN_GAIN_MIN && delta <= REGEN_GAIN_MAX {
+    if (REGEN_GAIN_MIN..=REGEN_GAIN_MAX).contains(&delta) {
         // HP gain matches Regenerator; Regenerator is the only benched-heal ability.
         if !unknown_is_excluded(&mon.possible_abilities, &Ability::Regenerator) {
             unknown_set_known(
@@ -2943,7 +2908,7 @@ fn narrow_species_by_learnset(
         .iter()
         .filter(|s| {
             // Sound: keep species if learnset data is absent (can't confirm illegality).
-            learnset_dex.get(*s).map_or(true, |moves| moves.contains(move_used))
+            learnset_dex.get(*s).is_none_or(|moves| moves.contains(move_used))
         })
         .cloned()
         .collect();
@@ -3013,11 +2978,10 @@ fn pass1_choice_exclusion(mon: &mut UnknownPokemonState, new_move: &PokemonMove)
 }
 
 fn update_mon_hp(state: &mut UnknownBattleState, slot: &FieldSlot, new_hp: PokemonHP) {
-    if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-        if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+    if let Some(idx) = mon_idx_for_active_slot(state, slot)
+        && let Some(mon) = get_mon_mut_by_idx(state, idx) {
             mon.hp = new_hp;
         }
-    }
 }
 
 // ── Ability suppression helpers ────────────────────────────────────────────────
@@ -3063,11 +3027,10 @@ fn unknown_ability_might_be_suppressed(state: &UnknownBattleState, slot: &FieldS
         return true;
     }
     // Check per-mon Gastro Acid.
-    if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-        if let Some(mon) = get_mon_by_idx(state, idx) {
+    if let Some(idx) = mon_idx_for_active_slot(state, slot)
+        && let Some(mon) = get_mon_by_idx(state, idx) {
             return has_gastro_acid(mon);
         }
-    }
     false
 }
 
@@ -3133,11 +3096,10 @@ fn emit_extension_item_if_collapsed(
     }
     // After decrement, if a Possibly collapsed to Known it will now be Known(n).
     // We don't re-check the value here — the caller verifies n > 0.
-    if let Some(idx) = setter_idx {
-        if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+    if let Some(idx) = setter_idx
+        && let Some(mon) = get_mon_mut_by_idx(state, idx) {
             unknown_set_known(&mut mon.item, item, "ia-extension-item");
         }
-    }
 }
 
 /// Apply internal EOT resets that mirror `end_turn` Phase 5 and
@@ -3172,27 +3134,22 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
         matches!(k, EventKind::WeatherChanged { weather: Some(_) })
     });
     decrement_unknown_turns(&mut state.weather_turns, &mut state.weather);
-    if weather_was_possibly {
-        if let Some(Unknown::Known(n)) = &state.weather_turns {
-            if *n > 0 {
-                if let Some(weather) = &weather_type_snap {
-                    if let Some(rock) = weather_extension_item(weather) {
+    if weather_was_possibly
+        && let Some(Unknown::Known(n)) = &state.weather_turns
+            && *n > 0
+                && let Some(weather) = &weather_type_snap
+                    && let Some(rock) = weather_extension_item(weather) {
                         if weather_ended {
                             // Natural expiry at base duration → the setter has NO rock.
-                            if let Some(idx) = weather_setter {
-                                if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                            if let Some(idx) = weather_setter
+                                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                                     unknown_exclude(&mut mon.item, &rock, "natural-expiry-no-rock");
                                 }
-                            }
                         } else if !weather_overridden {
                             // Extended duration confirmed (8-turn branch survived).
                             emit_extension_item_if_collapsed(state, true, weather_setter, rock);
                         }
                     }
-                }
-            }
-        }
-    }
 
     // Terrain (same three-way resolution as weather).
     let terrain_was_possibly = matches!(&state.terrain_turns, Some(Unknown::Possibly(_)));
@@ -3204,22 +3161,19 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
         matches!(k, EventKind::TerrainChanged { terrain: Some(_) })
     });
     decrement_unknown_turns(&mut state.terrain_turns, &mut state.terrain);
-    if terrain_was_possibly {
-        if let Some(Unknown::Known(n)) = &state.terrain_turns {
-            if *n > 0 {
+    if terrain_was_possibly
+        && let Some(Unknown::Known(n)) = &state.terrain_turns
+            && *n > 0 {
                 let extender = terrain_extension_item(&Terrain::ElectricTerrain); // any Terrain
                 if terrain_ended {
-                    if let Some(idx) = terrain_setter {
-                        if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    if let Some(idx) = terrain_setter
+                        && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                             unknown_exclude(&mut mon.item, &extender, "natural-expiry-no-extender");
                         }
-                    }
                 } else if !terrain_overridden {
                     emit_extension_item_if_collapsed(state, true, terrain_setter, extender);
                 }
             }
-        }
-    }
 
     for t in state.pseudo_weather_turns.iter_mut() {
         decrement_unknown_turns_raw(t);
@@ -3250,8 +3204,8 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
                 };
                 matches!(&turns[i], Unknown::Known(n) if *n > 0)
             };
-            if was_possibly && collapsed_positive {
-                if let Some(clay) = screen_extension_item(&sc) {
+            if was_possibly && collapsed_positive
+                && let Some(clay) = screen_extension_item(&sc) {
                     let setter = match player {
                         Player::P1 => state.p1_side_condition_setters.get(i).copied().flatten(),
                         Player::P2 => state.p2_side_condition_setters.get(i).copied().flatten(),
@@ -3266,16 +3220,14 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
                     });
                     if ends_this_turn {
                         // Natural expiry at base duration → the setter has no Light Clay.
-                        if let Some(idx) = setter {
-                            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                        if let Some(idx) = setter
+                            && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                                 unknown_exclude(&mut mon.item, &clay, "natural-expiry-no-clay");
                             }
-                        }
                     } else {
                         emit_extension_item_if_collapsed(state, true, setter, clay);
                     }
                 }
-            }
         }
     }
 
@@ -3541,11 +3493,10 @@ fn intimidate_drop_would_be_visible(state: &UnknownBattleState, entering_slot: &
     for mon in non_fainted {
         // If the foe's ability is Known and blocks/redirects the drop, the −1 won't appear
         // even when Intimidate is present.
-        if let Unknown::Known(ref ability) = mon.possible_abilities {
-            if blocks_visible_drop(ability) {
+        if let Unknown::Known(ref ability) = mon.possible_abilities
+            && blocks_visible_drop(ability) {
                 return false;
             }
-        }
         // Atk already at −6: the drop is clamped to zero, nothing emitted.
         if mon.boosts[0] <= -6 {
             return false;
@@ -3597,11 +3548,10 @@ fn pass1_ability_absence_inference(
         let dauntless_fired = any_reaction_deep(reactions, &|k| {
             matches!(k, EventKind::BoostChanged { target, boost_idx: 1, stages: 1 } if target == slot)
         });
-        if intrepid_fired || dauntless_fired {
-            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+        if (intrepid_fired || dauntless_fired)
+            && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                 mon.one_time_ability_used = true;
             }
-        }
 
         // Skip if ability might be suppressed (sound: conservative).
         // Absence inferences below are gated here; presence-recording above is not.
@@ -3701,15 +3651,14 @@ fn pass1_ability_absence_inference(
                 // Only exclude Intimidate when every adjacent foe would have visibly received
                 // the −1 Atk drop.  If any foe has Clear Body, Inner Focus, Guard Dog,
                 // Mirror Armor, Contrary, etc., no −1 would appear even WITH Intimidate.
-                if intimidate_drop_would_be_visible(state, slot) {
-                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                if intimidate_drop_would_be_visible(state, slot)
+                    && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                         unknown_exclude(
                             &mut mon.possible_abilities,
                             &Ability::Intimidate,
                             "ability-absence-intimidate",
                         );
                     }
-                }
             }
         }
 
@@ -3717,28 +3666,24 @@ fn pass1_ability_absence_inference(
         // `intrepid_fired`/`dauntless_fired` were computed above (before the
         // suppression guard) — only exclude when the boost was NOT seen and
         // no prior use has been recorded.
-        if !intrepid_fired && entered_slots.len() == 1 {
-            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                if !mon.one_time_ability_used {
+        if !intrepid_fired && entered_slots.len() == 1
+            && let Some(mon) = get_mon_mut_by_idx(state, idx)
+                && !mon.one_time_ability_used {
                     unknown_exclude(
                         &mut mon.possible_abilities,
                         &Ability::IntrepidSword,
                         "ability-absence-intrepid",
                     );
                 }
-            }
-        }
-        if !dauntless_fired && entered_slots.len() == 1 {
-            if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                if !mon.one_time_ability_used {
+        if !dauntless_fired && entered_slots.len() == 1
+            && let Some(mon) = get_mon_mut_by_idx(state, idx)
+                && !mon.one_time_ability_used {
                     unknown_exclude(
                         &mut mon.possible_abilities,
                         &Ability::DauntlessShield,
                         "ability-absence-dauntless",
                     );
                 }
-            }
-        }
     }
 }
 
@@ -3755,15 +3700,14 @@ fn only_slot_with_abilities(
         if slot == this_slot {
             continue;
         }
-        if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-            if let Some(mon) = get_mon_by_idx(state, idx) {
+        if let Some(idx) = mon_idx_for_active_slot(state, slot)
+            && let Some(mon) = get_mon_by_idx(state, idx) {
                 for ab in abilities {
                     if !unknown_is_excluded(&mon.possible_abilities, ab) {
                         return false;
                     }
                 }
             }
-        }
     }
     true
 }
@@ -3842,16 +3786,16 @@ fn pass2_item_from_move(
         // reflects the post-move truth.
         let user_fainted = mon_idx_for_active_slot(state, user)
             .and_then(|i| get_mon_by_idx(state, i))
-            .map_or(false, |m| m.fainted);
+            .is_some_and(|m| m.fainted);
 
         // S21: the sim gates the LO chip on `item_is_active` — Magic Room (field-wide)
         // or Klutz on the attacker silences the recoil even when Life Orb IS held, so
         // absence is only evidence when neither can be in play.
         let items_suppressed = state.pseudo_weathers.contains(&PseudoWeather::MagicDeluge);
 
-        if hit_any_opponent && !user_fainted && !items_suppressed {
-            if let Some(user_idx) = mon_idx_for_active_slot(state, user) {
-                if !has_lo_recoil {
+        if hit_any_opponent && !user_fainted && !items_suppressed
+            && let Some(user_idx) = mon_idx_for_active_slot(state, user)
+                && !has_lo_recoil {
                     // S24 epoch note: these ability reads are post-move, which is
                     // sound here — a mid-move ability change (Mummy on contact)
                     // replaces Magic Guard BEFORE the LO chip fires in the sim, so
@@ -3860,20 +3804,20 @@ fn pass2_item_from_move(
                     let (could_mg, could_sf, could_klutz, has_secondary) = {
                         let um = get_mon_by_idx(state, user_idx);
                         (
-                            um.map_or(false, |m| {
+                            um.is_some_and(|m| {
                                 !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
                             }),
-                            um.map_or(false, |m| {
+                            um.is_some_and(|m| {
                                 !unknown_is_excluded(&m.possible_abilities, &Ability::SheerForce)
                             }),
-                            um.map_or(false, |m| {
+                            um.is_some_and(|m| {
                                 !unknown_is_excluded(&m.possible_abilities, &Ability::Klutz)
                             }),
                             !move_data.secondaries.is_empty(),
                         )
                     };
 
-                    if !could_mg && !(could_sf && has_secondary) && !could_klutz {
+                    if !(could_mg || could_klutz || could_sf && has_secondary) {
                         // Definitively no Life Orb on this mon.
                         if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
                             unknown_exclude(&mut mon.item, &Item::LifeOrb, "no-lo-recoil");
@@ -3905,15 +3849,13 @@ fn pass2_item_from_move(
                         }
                         state.predicates.push(clause);
                     }
-                }
-            }
-        } // end hit_any_opponent
+                } // end hit_any_opponent
     } // end is_damaging
 
     // ── Bright Powder / Lax Incense from 100%-accurate miss ───────────────────
     for reaction in &event.reactions {
-        if let EventKind::Missed { target } = &reaction.kind {
-            if matches!(move_data.accuracy, AccuracyType::Percent(100)) {
+        if let EventKind::Missed { target } = &reaction.kind
+            && matches!(move_data.accuracy, AccuracyType::Percent(100)) {
                 // No stat-stage accuracy/evasion modifiers in play?
                 let user_acc_stage = mon_idx_for_active_slot(state, user)
                     .and_then(|ui| get_mon_by_idx(state, ui))
@@ -3924,8 +3866,8 @@ fn pass2_item_from_move(
                     .map(|m| m.boosts[6])
                     .unwrap_or(0);
 
-                if user_acc_stage >= 0 && tgt_eva_stage <= 0 {
-                    if let Some(tgt_idx) = mon_idx_for_active_slot(state, target) {
+                if user_acc_stage >= 0 && tgt_eva_stage <= 0
+                    && let Some(tgt_idx) = mon_idx_for_active_slot(state, target) {
                         let legal_ok = |item: &Item| ctx.config.legal_item_ok(item);
                         let mut clause = Vec::new();
                         if legal_ok(&Item::BrightPowder) {
@@ -3955,7 +3897,7 @@ fn pass2_item_from_move(
                         let (tgt_abilities, tgt_has_confusion) = {
                             let tm = get_mon_by_idx(state, tgt_idx);
                             let abilities = tm.map(|m| m.possible_abilities.clone());
-                            let has_confusion = tm.map_or(false, |m| {
+                            let has_confusion = tm.is_some_and(|m| {
                                 m.volatiles.iter().any(|v| {
                                     matches!(
                                         v,
@@ -3972,7 +3914,7 @@ fn pass2_item_from_move(
                         let ability_not_excluded = |ab: &Ability| {
                             tgt_abilities
                                 .as_ref()
-                                .map_or(true, |u| !unknown_is_excluded(u, ab))
+                                .is_none_or(|u| !unknown_is_excluded(u, ab))
                         };
                         // Sand Veil: active under Sandstorm.
                         if matches!(state.weather, Some(Weather::Sandstorm))
@@ -4005,9 +3947,7 @@ fn pass2_item_from_move(
                             state.predicates.push(clause);
                         }
                     }
-                }
             }
-        }
     }
 
     let _ = targets; // suppress unused warning
@@ -4167,16 +4107,16 @@ fn pass2_contact_absence(
     let attacker_escapes = {
         let am = attacker_idx.and_then(|i| get_mon_by_idx(state, i));
         // Long Reach (attacker ability) makes the move non-contact.
-        let might_be_long_reach = am.map_or(false, |m| {
+        let might_be_long_reach = am.is_some_and(|m| {
             !unknown_is_excluded(&m.possible_abilities, &Ability::LongReach)
         });
         // Protective Pads (attacker item) prevents contact-triggered effects.
-        let might_have_pads = am.map_or(false, |m| {
+        let might_have_pads = am.is_some_and(|m| {
             !unknown_is_excluded(&m.item, &Item::ProtectivePads)
         });
         // Magic Guard on the attacker prevents ALL three contact chips (Rough Skin,
         // Iron Barbs, Rocky Helmet — indirect damage). Gates every exclusion below.
-        let might_have_magic_guard = am.map_or(false, |m| {
+        let might_have_magic_guard = am.is_some_and(|m| {
             !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
         });
         (might_be_long_reach, might_have_pads, might_have_magic_guard)
@@ -4379,11 +4319,11 @@ fn pass2_prankster_immunity(
     let user_mon = get_mon_by_idx(state, user_idx);
 
     // Already know the ability — no need to infer.
-    if user_mon.map_or(false, |m| matches!(&m.possible_abilities, Unknown::Known(_))) {
+    if user_mon.is_some_and(|m| matches!(&m.possible_abilities, Unknown::Known(_))) {
         return;
     }
     // Prankster already excluded — no clause needed.
-    if user_mon.map_or(false, |m| {
+    if user_mon.is_some_and(|m| {
         unknown_is_excluded(&m.possible_abilities, &Ability::Prankster)
     }) {
         return;
@@ -4506,11 +4446,11 @@ fn pass2_powder_immunity(
         let mut clause: Vec<Statement> = Vec::new();
         let legal_ok = |item: &Item| ctx.config.legal_item_ok(item);
         if legal_ok(&Item::SafetyGoggles)
-            && tm.map_or(true, |m| !unknown_is_excluded(&m.item, &Item::SafetyGoggles))
+            && tm.is_none_or(|m| !unknown_is_excluded(&m.item, &Item::SafetyGoggles))
         {
             clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::SafetyGoggles });
         }
-        if tm.map_or(true, |m| !unknown_is_excluded(&m.possible_abilities, &Ability::Overcoat)) {
+        if tm.is_none_or(|m| !unknown_is_excluded(&m.possible_abilities, &Ability::Overcoat)) {
             clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Overcoat });
         }
         if !clause.is_empty() {
@@ -4573,7 +4513,7 @@ fn pass2_guaranteed_status_absence(
         // is fully explained by the faint; emitting a preventer clause would be
         // unsound (e.g. Nuzzle KO). Pass 1 has already applied the Faint /
         // DamageDealt-to-0 reactions by the time this post-order pass runs.
-        let target_fainted = get_mon_by_idx(state, target_idx).map_or(true, |m| {
+        let target_fainted = get_mon_by_idx(state, target_idx).is_none_or(|m| {
             m.fainted || matches!(m.hp, PokemonHP::Number(0) | PokemonHP::Percent(0))
         });
         if target_fainted {
@@ -4592,8 +4532,8 @@ fn pass2_guaranteed_status_absence(
         let (tm_item, tm_abilities, known_types) = snapshot_item_ability_type(state, target_idx);
         let (already_statused, has_sub) = {
             let tm = get_mon_by_idx(state, target_idx);
-            let already_statused = tm.map_or(false, |m| m.status.is_some());
-            let has_sub = tm.map_or(false, |m| {
+            let already_statused = tm.is_some_and(|m| m.status.is_some());
+            let has_sub = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| matches!(
                     v,
                     VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)
@@ -4633,8 +4573,8 @@ fn pass2_guaranteed_status_absence(
         for (status, from_secondary) in &guaranteed_statuses {
             // Type-immune check (known types only — absent knowledge is not immunity).
             let type_immune = match status {
-                Status::Burn => known_types.as_ref().map_or(false, |ts| ts.contains(&PokemonType::Fire)),
-                Status::Paralysis => known_types.as_ref().map_or(false, |ts| {
+                Status::Burn => known_types.as_ref().is_some_and(|ts| ts.contains(&PokemonType::Fire)),
+                Status::Paralysis => known_types.as_ref().is_some_and(|ts| {
                     // Electric-type: unconditional paralysis immunity (Gen VI+).
                     // Ground-type: only immune to Electric-type paralysis moves (Thunder Wave,
                     // Nuzzle, Zap Cannon); Body Slam etc. CAN paralyze Ground-types.
@@ -4642,10 +4582,10 @@ fn pass2_guaranteed_status_absence(
                         || (ts.contains(&PokemonType::Ground)
                             && move_data.pokemon_type == PokemonType::Electric)
                 }),
-                Status::Poison | Status::ToxicPoison(_) => known_types.as_ref().map_or(false, |ts| {
+                Status::Poison | Status::ToxicPoison(_) => known_types.as_ref().is_some_and(|ts| {
                     ts.contains(&PokemonType::Poison) || ts.contains(&PokemonType::Steel)
                 }),
-                Status::Frozen(_) => known_types.as_ref().map_or(false, |ts| ts.contains(&PokemonType::Ice)),
+                Status::Frozen(_) => known_types.as_ref().is_some_and(|ts| ts.contains(&PokemonType::Ice)),
                 Status::Sleep(_) => false, // No blanket type immunity to sleep
             };
             if type_immune {
@@ -4677,7 +4617,7 @@ fn pass2_guaranteed_status_absence(
             // Covert Cloak: blocks secondary effects of damaging moves.
             let legal_ok = |item: &Item| ctx.config.legal_item_ok(item);
             let item_excluded_cc = tm_item.as_ref()
-                .map_or(false, |it| unknown_is_excluded(it, &Item::CovertCloak));
+                .is_some_and(|it| unknown_is_excluded(it, &Item::CovertCloak));
             if *from_secondary && legal_ok(&Item::CovertCloak) && !item_excluded_cc {
                 clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::CovertCloak });
             }
@@ -4688,7 +4628,7 @@ fn pass2_guaranteed_status_absence(
             // is sound regardless.
             if *from_secondary {
                 let sd_excluded = tm_abilities.as_ref()
-                    .map_or(false, |pa| unknown_is_excluded(pa, &Ability::ShieldDust));
+                    .is_some_and(|pa| unknown_is_excluded(pa, &Ability::ShieldDust));
                 if !sd_excluded {
                     clause.push(Statement::HasAbility {
                         mon_idx: target_idx,
@@ -4751,7 +4691,7 @@ fn pass2_guaranteed_status_absence(
                     continue;
                 }
                 let ab_excluded = tm_abilities.as_ref()
-                    .map_or(false, |pa| unknown_is_excluded(pa, ab));
+                    .is_some_and(|pa| unknown_is_excluded(pa, ab));
                 if !ab_excluded {
                     clause.push(Statement::HasAbility { mon_idx: target_idx, ability: ab.clone() });
                 }
@@ -4812,12 +4752,12 @@ fn pass_eot_heal(
         let (tm_item, tm_abilities, known_types) = snapshot_item_ability_type(state, target_idx);
         let (has_aqua_ring, has_ingrain, has_wish) = {
             let tm = get_mon_by_idx(state, target_idx);
-            let has_aqua_ring = tm.map_or(false, |m| {
+            let has_aqua_ring = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| {
                     matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::AquaRing, _))
                 })
             });
-            let has_ingrain = tm.map_or(false, |m| {
+            let has_ingrain = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| {
                     matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, _))
                 })
@@ -4825,7 +4765,7 @@ fn pass_eot_heal(
             let has_wish = state
                 .p2_slot_conditions
                 .get(target.slot_index as usize)
-                .map_or(false, |conds| {
+                .is_some_and(|conds| {
                     conds.iter().any(|c| matches!(c, SlotCondition::Wish { .. }))
                 });
             (has_aqua_ring, has_ingrain, has_wish)
@@ -4837,7 +4777,7 @@ fn pass_eot_heal(
         }
 
         // Skip if the item is already known.
-        if tm_item.as_ref().map_or(false, |it| matches!(it, Unknown::Known(_))) {
+        if tm_item.as_ref().is_some_and(|it| matches!(it, Unknown::Known(_))) {
             continue;
         }
 
@@ -4860,14 +4800,14 @@ fn pass_eot_heal(
 
         let is_poison = known_types
             .as_ref()
-            .map_or(false, |ts| ts.contains(&PokemonType::Poison));
+            .is_some_and(|ts| ts.contains(&PokemonType::Poison));
 
         let mut clause: Vec<Statement> = Vec::new();
 
         if legal_ok(&Item::Leftovers)
             && tm_item
                 .as_ref()
-                .map_or(true, |it| !unknown_is_excluded(it, &Item::Leftovers))
+                .is_none_or(|it| !unknown_is_excluded(it, &Item::Leftovers))
         {
             clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::Leftovers });
         }
@@ -4876,10 +4816,10 @@ fn pass_eot_heal(
             && legal_ok(&Item::BlackSludge)
             && tm_item
                 .as_ref()
-                .map_or(true, |it| !unknown_is_excluded(it, &Item::BlackSludge))
+                .is_none_or(|it| !unknown_is_excluded(it, &Item::BlackSludge))
             && tm_abilities
                 .as_ref()
-                .map_or(true, |_| true) // BlackSludge is unconditional on Poison types
+                .is_none_or(|_| true) // BlackSludge is unconditional on Poison types
         {
             clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::BlackSludge });
         }
@@ -4898,7 +4838,7 @@ fn pass_eot_heal(
         for ab in weather_heal_abilities {
             let excluded = tm_abilities
                 .as_ref()
-                .map_or(false, |pa| unknown_is_excluded(pa, ab));
+                .is_some_and(|pa| unknown_is_excluded(pa, ab));
             if !excluded {
                 clause.push(Statement::HasAbility { mon_idx: target_idx, ability: ab.clone() });
             }
@@ -4951,7 +4891,7 @@ fn pass_eot_sand_immunity(
         };
 
         // A fainted mon takes no chip regardless of immunity — skip.
-        if get_mon_by_idx(state, mon_idx).map_or(true, |m| m.fainted) {
+        if get_mon_by_idx(state, mon_idx).is_none_or(|m| m.fainted) {
             continue;
         }
 
@@ -5001,7 +4941,7 @@ fn pass_eot_sand_immunity(
         if legal_ok(&Item::SafetyGoggles)
             && tm_item
                 .as_ref()
-                .map_or(true, |it| !unknown_is_excluded(it, &Item::SafetyGoggles))
+                .is_none_or(|it| !unknown_is_excluded(it, &Item::SafetyGoggles))
         {
             clause.push(Statement::HasItem { mon_idx, item: Item::SafetyGoggles });
         }
@@ -5015,7 +4955,7 @@ fn pass_eot_sand_immunity(
         ] {
             let excluded = tm_abilities
                 .as_ref()
-                .map_or(false, |pa| unknown_is_excluded(pa, ab));
+                .is_some_and(|pa| unknown_is_excluded(pa, ab));
             if !excluded {
                 clause.push(Statement::HasAbility { mon_idx, ability: ab.clone() });
             }
@@ -5076,7 +5016,7 @@ fn pass_eot_self_status(
             let item = mon.map(|m| m.item.clone()).unwrap_or(Unknown::Not(Vec::new()));
             // pass1 hasn't processed this StatusInflicted yet (recursive descent runs
             // after this pass for EndOfTurn reactions), so mon.status is the pre-EOT value.
-            let had_status = mon.map_or(false, |m| m.status.is_some());
+            let had_status = mon.is_some_and(|m| m.status.is_some());
             (item, had_status)
         };
 
@@ -5170,12 +5110,12 @@ fn pass2_ground_immune_clause(
         let (tm_item, tm_abilities, known_types) = snapshot_item_ability_type(state, target_idx);
         let (has_magnet_rise, has_telekinesis) = {
             let tm = get_mon_by_idx(state, target_idx);
-            let has_magnet_rise = tm.map_or(false, |m| {
+            let has_magnet_rise = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| {
                     matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, _))
                 })
             });
-            let has_telekinesis = tm.map_or(false, |m| {
+            let has_telekinesis = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| {
                     matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Telekinesis, _))
                 })
@@ -5202,7 +5142,7 @@ fn pass2_ground_immune_clause(
         // Air Balloon item.
         let ab_excluded = tm_item
             .as_ref()
-            .map_or(false, |it| unknown_is_excluded(it, &Item::AirBalloon));
+            .is_some_and(|it| unknown_is_excluded(it, &Item::AirBalloon));
         if !ab_excluded {
             clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::AirBalloon });
         }
@@ -5210,7 +5150,7 @@ fn pass2_ground_immune_clause(
         // Levitate ability.
         let lev_excluded = tm_abilities
             .as_ref()
-            .map_or(false, |ab| unknown_is_excluded(ab, &Ability::Levitate));
+            .is_some_and(|ab| unknown_is_excluded(ab, &Ability::Levitate));
         if !lev_excluded {
             clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Levitate });
         }
@@ -5218,7 +5158,7 @@ fn pass2_ground_immune_clause(
         // Eelevate ability (custom ability with Levitate effect).
         let eel_excluded = tm_abilities
             .as_ref()
-            .map_or(false, |ab| unknown_is_excluded(ab, &Ability::Eelevate));
+            .is_some_and(|ab| unknown_is_excluded(ab, &Ability::Eelevate));
         if !eel_excluded {
             clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Eelevate });
         }
@@ -5226,7 +5166,7 @@ fn pass2_ground_immune_clause(
         // Earth Eater ability (absorbs Ground-type moves).
         let ee_excluded = tm_abilities
             .as_ref()
-            .map_or(false, |ab| unknown_is_excluded(ab, &Ability::EarthEater));
+            .is_some_and(|ab| unknown_is_excluded(ab, &Ability::EarthEater));
         if !ee_excluded {
             clause.push(Statement::HasAbility {
                 mon_idx: target_idx,
@@ -5496,8 +5436,7 @@ fn pass3_damage_to_stats(
 fn analytic_fired(ctx: &BattleContext, user_slot: &FieldSlot) -> bool {
     ctx.analytic_last_movers
         .get(ctx.turn_segment)
-        .and_then(|o| o.as_ref())
-        .map_or(false, |last| last == user_slot)
+        .and_then(|o| o.as_ref()) == Some(user_slot)
 }
 
 /// Returns `true` for moves whose base power depends on one or both mons' Speed stats.
@@ -5987,26 +5926,22 @@ fn apply_unconditional_tightening(
     global_stat_hi: Option<u16>,
 ) {
     if let Some(mon) = get_mon_mut_by_idx(state, mon_idx) {
-        if let Some(lo) = global_bsv_lo {
-            if lo > mon.min_pre_nature_stat[si] {
+        if let Some(lo) = global_bsv_lo
+            && lo > mon.min_pre_nature_stat[si] {
                 mon.min_pre_nature_stat[si] = lo;
             }
-        }
-        if let Some(hi) = global_bsv_hi {
-            if hi < mon.max_pre_nature_stat[si] {
+        if let Some(hi) = global_bsv_hi
+            && hi < mon.max_pre_nature_stat[si] {
                 mon.max_pre_nature_stat[si] = hi;
             }
-        }
-        if let Some(lo) = global_stat_lo {
-            if lo > mon.min_stats[si] {
+        if let Some(lo) = global_stat_lo
+            && lo > mon.min_stats[si] {
                 mon.min_stats[si] = lo;
             }
-        }
-        if let Some(hi) = global_stat_hi {
-            if hi < mon.max_stats[si] {
+        if let Some(hi) = global_stat_hi
+            && hi < mon.max_stats[si] {
                 mon.max_stats[si] = hi;
             }
-        }
     }
 }
 
@@ -6046,16 +5981,16 @@ fn emit_nature_conditional_bounds(
         let not_kappa_guards: Vec<Statement> = match (cr.is_boost, cr.is_nerf) {
             (true, _) => vec![Statement::Not(Box::new(Statement::NatureBoostsStat {
                 mon_idx,
-                stat: stat.clone(),
+                stat: *stat,
             }))],
             (_, true) => vec![Statement::Not(Box::new(Statement::NatureNerfsStat {
                 mon_idx,
-                stat: stat.clone(),
+                stat: *stat,
             }))],
             // neutral: exclude the class when the nature is definitely a booster or nerf
             (false, false) => vec![
-                Statement::NatureBoostsStat { mon_idx, stat: stat.clone() },
-                Statement::NatureNerfsStat  { mon_idx, stat: stat.clone() },
+                Statement::NatureBoostsStat { mon_idx, stat: *stat },
+                Statement::NatureNerfsStat  { mon_idx, stat: *stat },
             ],
         };
 
@@ -6082,30 +6017,28 @@ fn emit_nature_conditional_bounds(
         // ordinary turns. Pushing the clause instead lets BCP's existing fixpoint correctly
         // force the bound only once `not_kappa_guards` is independently proven false (i.e.
         // this class is confirmed), the same safe path the gear-escape branch already used.
-        if let Some(lo) = cr.bsv_lo_neutral {
-            if lo > current_pre_min {
+        if let Some(lo) = cr.bsv_lo_neutral
+            && lo > current_pre_min {
                 let mut clause = not_kappa_guards.clone();
                 clause.push(Statement::EVIVStatGE {
                     mon_idx,
-                    stat: stat.clone(),
+                    stat: *stat,
                     value: lo,
                 });
                 clause.extend(gear_literals.clone());
                 state.predicates.push(clause);
             }
-        }
-        if let Some(hi) = cr.bsv_hi_neutral {
-            if hi < current_pre_max {
+        if let Some(hi) = cr.bsv_hi_neutral
+            && hi < current_pre_max {
                 let mut clause = not_kappa_guards.clone();
                 clause.push(Statement::EVIVStatLE {
                     mon_idx,
-                    stat: stat.clone(),
+                    stat: *stat,
                     value: hi,
                 });
                 clause.extend(gear_literals.clone());
                 state.predicates.push(clause);
             }
-        }
     }
 }
 
@@ -6614,8 +6547,8 @@ fn find_feasible_bsv_range_b(
             &battle,
             &atk_ps,
             &target_ps,
-            user_slot.clone(),
-            target_slot.clone(),
+            *user_slot,
+            *target_slot,
             move_data,
             *oracle_config,
             targets_mult,
@@ -6660,8 +6593,8 @@ fn find_feasible_bsv_range_b(
     bracketed_feasible_bsv_range(
         bsv_lo,
         bsv_hi,
-        |b| roll_band(b).1.map_or(false, |m| m >= exact_damage),
-        |b| roll_band(b).0.map_or(false, |m| m <= exact_damage),
+        |b| roll_band(b).1.is_some_and(|m| m >= exact_damage),
+        |b| roll_band(b).0.is_some_and(|m| m <= exact_damage),
         can_produce,
     )
 }
@@ -6750,7 +6683,7 @@ fn find_feasible_bsv_range_a(
         }
         calculate_damage_outcomes_for_target_with_options(
             &battle, atk_ps, &def_ps,
-            user_slot.clone(), target_slot.clone(),
+            *user_slot, *target_slot,
             move_data, oracle_config, targets_mult, 1.0, bp_override, None,
         )
     };
@@ -6784,8 +6717,8 @@ fn find_feasible_bsv_range_a(
     bracketed_feasible_bsv_range(
         bsv_lo,
         bsv_hi,
-        |b| roll_band(b).0.map_or(false, |m| m <= d_hi),
-        |b| roll_band(b).1.map_or(false, |m| m >= d_lo),
+        |b| roll_band(b).0.is_some_and(|m| m <= d_hi),
+        |b| roll_band(b).1.is_some_and(|m| m >= d_lo),
         can_produce,
     )
 }
@@ -7140,16 +7073,19 @@ fn mon_is_p2(state: &UnknownBattleState, mon_idx: usize) -> bool {
     p2_active.contains(&mon_idx) || p2_back.contains(&mon_idx)
 }
 
+/// `(item, abilities, known_types)` snapshot returned by [`snapshot_item_ability_type`].
+type ItemAbilityTypeSnapshot = (
+    Option<Unknown<Item>>,
+    Option<Unknown<Ability>>,
+    Option<Vec<PokemonType>>,
+);
+
 /// Extract the core item/ability/type snapshot from a target mon into owned values.
 /// Callers need owned copies to avoid borrow conflicts when later mutating `state`.
 fn snapshot_item_ability_type(
     state: &UnknownBattleState,
     mon_idx: usize,
-) -> (
-    Option<Unknown<Item>>,
-    Option<Unknown<Ability>>,
-    Option<Vec<PokemonType>>,
-) {
+) -> ItemAbilityTypeSnapshot {
     let tm = get_mon_by_idx(state, mon_idx);
     let tm_item = tm.map(|m| m.item.clone());
     let tm_abilities = tm.map(|m| m.possible_abilities.clone());
@@ -7443,8 +7379,8 @@ fn pass4_speed_from_order(
         // handler uses, directly to `state`, so later Movers in this scan see the
         // correct value. Idempotent: the real walk applies the identical overwrite
         // again later for real, to the same target values.
-        if let EventKind::MegaEvolution { slot, into } | EventKind::FormeChange { slot, into, .. } = &event.kind {
-            if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+        if let EventKind::MegaEvolution { slot, into } | EventKind::FormeChange { slot, into, .. } = &event.kind
+            && let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let (Some(mon), Some(data)) = (get_mon_mut_by_idx(state, idx), dex.get(into)) {
                     mon.possible_species = Unknown::Known(into.clone());
                     recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
@@ -7463,7 +7399,6 @@ fn pass4_speed_from_order(
                         .any(|lit| statement_stale_after_species_reveal(lit, idx))
                 });
             }
-        }
         if let EventKind::MoveUsed {
             user, move_used, ..
         } = &event.kind
@@ -7480,7 +7415,7 @@ fn pass4_speed_from_order(
                 });
                 let s_para = *paralyzed.entry(idx).or_insert_with(|| {
                     get_mon_by_idx(seed_state, idx)
-                        .map_or(false, |m| matches!(m.status, Some(Status::Paralysis)))
+                        .is_some_and(|m| matches!(m.status, Some(Status::Paralysis)))
                 });
                 tailwind.entry(user.player).or_insert(false);
                 let p1_tw = *tailwind.get(&Player::P1).unwrap_or(&false);
@@ -7601,7 +7536,7 @@ fn pass4_speed_from_order(
 
         // (3) Stall on the slow mon: Stall forces the holder to always go last
         //     within its priority bracket regardless of speed.
-        if slow_mon.map_or(false, |m| {
+        if slow_mon.is_some_and(|m| {
             !unknown_is_excluded(&m.possible_abilities, &Ability::Stall)
         }) {
             clause.push(Statement::HasAbility {
@@ -7612,7 +7547,7 @@ fn pass4_speed_from_order(
 
         // (4) Choice Scarf on the fast mon: ×1.5 effective speed means the natural
         //     SpeedComparison predicate is too strong (over-narrows) without this escape.
-        if fast_mon.map_or(false, |m| !unknown_is_excluded(&m.item, &Item::ChoiceScarf)) {
+        if fast_mon.is_some_and(|m| !unknown_is_excluded(&m.item, &Item::ChoiceScarf)) {
             clause.push(Statement::HasItem {
                 mon_idx: fast_idx,
                 item: Item::ChoiceScarf,
@@ -7866,16 +7801,14 @@ pub fn pass5_back_solve(
             mon.max_evs[0] = 252;
             return pass5_back_solve(mon, config, dex);
         }
-        if let Some(lo) = min_ev {
-            if lo > mon.min_evs[0] {
+        if let Some(lo) = min_ev
+            && lo > mon.min_evs[0] {
                 mon.min_evs[0] = lo;
             }
-        }
-        if let Some(hi) = max_ev {
-            if hi < mon.max_evs[0] {
+        if let Some(hi) = max_ev
+            && hi < mon.max_evs[0] {
                 mon.max_evs[0] = hi;
             }
-        }
     }
 
     // ── Non-HP stats (stat_i = 1..=5) ────────────────────────────────────────
@@ -7951,16 +7884,14 @@ pub fn pass5_back_solve(
             );
         }
 
-        if let Some(lo) = global_min_ev {
-            if lo > mon.min_evs[stat_i] {
+        if let Some(lo) = global_min_ev
+            && lo > mon.min_evs[stat_i] {
                 mon.min_evs[stat_i] = lo;
             }
-        }
-        if let Some(hi) = global_max_ev {
-            if hi < mon.max_evs[stat_i] {
+        if let Some(hi) = global_max_ev
+            && hi < mon.max_evs[stat_i] {
                 mon.max_evs[stat_i] = hi;
             }
-        }
     }
 
     // Eliminate natures that were impossible for any stat.
@@ -7984,7 +7915,6 @@ pub fn pass5_back_solve(
     // Sound: only ever tightens max_evs; never raises min_evs.
     // Invariant: Σ_i evs[i] ≤ cap  →  evs[i] ≤ cap − Σ_{j≠i} min_evs[j].
     if let Some(cap) = config.ev_total_cap {
-        let cap = cap as u16;
         let min_ev_sum: u16 = (0..6).map(|i| mon.min_evs[i] as u16).sum();
         let ev_lattice = if config.use_stat_points { Some(ev_candidates) } else { None };
 

@@ -588,6 +588,7 @@ pub enum Item {
 }
 
 impl Item {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let normalize = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect::<String>();
         let normalized = normalize(s);

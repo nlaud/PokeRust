@@ -417,13 +417,10 @@ pub(crate) fn protect_blocks_move(
     if side_conditions
         .iter()
         .any(|c| matches!(c, SideCondition::QuickGuard))
-    {
-        if let Some(attacker) = get_pokemon_at_slot(state, attacker_slot) {
-            if effective_move_priority(state, attacker, move_data) > 0 {
+        && let Some(attacker) = get_pokemon_at_slot(state, attacker_slot)
+            && effective_move_priority(state, attacker, move_data) > 0 {
                 return Some(ProtectKind::QuickGuard);
             }
-        }
-    }
     if is_spread
         && side_conditions
             .iter()
@@ -514,6 +511,7 @@ pub fn stage_multiplier(stage: i8) -> f64 {
 }
 
 /// Apply a conditional ×multiplier to `val` when `stat_check` matches and `condition` is true.
+#[allow(clippy::too_many_arguments)]
 fn apply_ability_stat_boost(
     state: &BattleState,
     mon: &PokemonState,
@@ -559,9 +557,7 @@ pub fn effective_stat(
 
     let base_stat = mon.stats[stat_index] as f64;
     let boost = mon.boosts[boost_index];
-    let applied_stage = if boost > 0 && ignore_positive {
-        0
-    } else if boost < 0 && ignore_negative {
+    let applied_stage = if (boost > 0 && ignore_positive) || (boost < 0 && ignore_negative) {
         0
     } else {
         boost
@@ -678,16 +674,16 @@ pub fn effective_stat(
             val
         };
 
-    let val = if item_is_active(state, mon)
+    
+
+    if item_is_active(state, mon)
         && mon.item == Item::ChoiceSpecs
         && stat == PokemonStat::SpA
     {
         val * 1.5
     } else {
         val
-    };
-
-    val
+    }
 }
 
 /// Foul Play attack stat (non-crit): target's base Atk × target's stage multiplier,
@@ -751,12 +747,12 @@ fn foul_play_attack_stat_inner(
         1.5,
         val,
     );
-    let val = if item_is_active(state, attacker) && attacker.item == Item::ChoiceBand {
+    
+    if item_is_active(state, attacker) && attacker.item == Item::ChoiceBand {
         val * 1.5
     } else {
         val
-    };
-    val
+    }
 }
 
 pub fn pokemon_has_type(mon: &PokemonState, pokemon_type: &PokemonType) -> bool {
@@ -1170,9 +1166,7 @@ fn screen_damage_multiplier(
         .iter()
         .any(|condition| matches!(condition, SideCondition::AuroraVeil));
 
-    if is_physical && (has_reflect || has_aurora_veil) {
-        0.5
-    } else if is_special && (has_light_screen || has_aurora_veil) {
+    if (is_physical && (has_reflect || has_aurora_veil)) || (is_special && (has_light_screen || has_aurora_veil)) {
         0.5
     } else {
         1.0
@@ -1230,7 +1224,7 @@ fn collect_active_slots(
     };
     mons.iter()
         .enumerate()
-        .filter(|(idx, mon)| !mon.fainted && exclude.map_or(true, |ex| *idx as u8 != ex))
+        .filter(|(idx, mon)| !mon.fainted && (exclude != Some(*idx as u8)))
         .map(|(idx, _)| FieldSlot {
             player,
             slot_index: idx as u8,
@@ -1996,7 +1990,7 @@ fn effective_base_power(
         // Note: these are technically Attack-stat multipliers in-game; applying them here as
         // a BP multiplier yields the same final damage and keeps all condition-based BP
         // boosts in one coherent block.
-        let at_low_hp = attacker.hp.saturating_mul(3) <= attacker.stats[0].max(1) as u16;
+        let at_low_hp = attacker.hp.saturating_mul(3) <= attacker.stats[0].max(1);
         if at_low_hp {
             let eff_type = effective_move_type(state, attacker, move_data);
             let pinch_mult = match (&attacker.ability, &eff_type) {
@@ -2395,6 +2389,7 @@ fn resist_berry_type(item: &Item) -> Option<PokemonType> {
 /// Whether the target's held berry should halve the incoming hit.
 /// - Chilan Berry: any Normal-type hit (Struggle is unimplemented; when added, exclude it here).
 /// - All other resist berries: only when the move is super-effective (`effectiveness > 1.0`).
+///
 /// Caller must gate on `!items_are_suppressed`.
 pub(crate) fn resist_berry_triggers(
     target: &PokemonState,
@@ -2498,6 +2493,7 @@ pub(crate) fn base_damage_formula(level: u8, bp: f64, attack: f64, defense: f64)
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Calculate damage outcomes for a single target. Returns Vec of (damage, is_crit, probability).
+#[allow(clippy::too_many_arguments)]
 pub fn calculate_damage_outcomes_for_target(
     _state: &BattleState,
     attacker: &PokemonState,
@@ -2524,6 +2520,7 @@ pub fn calculate_damage_outcomes_for_target(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     _state: &BattleState,
     attacker: &PokemonState,
@@ -4034,7 +4031,7 @@ pub fn items_are_suppressed(state: &BattleState) -> bool {
 /// Neutralizing Gas, which re-enables the item).
 pub fn item_is_active(state: &BattleState, mon: &PokemonState) -> bool {
     !items_are_suppressed(state)
-        && !(mon.ability == Ability::Klutz && !pokemon_ability_is_suppressed(state, mon))
+        && (mon.ability != Ability::Klutz || pokemon_ability_is_suppressed(state, mon))
 }
 
 /// Mon-level Klutz check for call sites that only have the `PokemonState` (no
@@ -4187,11 +4184,10 @@ pub(crate) fn process_item_loss_events(
         // HP diff → per-turn damage flag (occupant must be unchanged).
         let hp_dropped = get_pokemon_at_slot(state, *slot)
             .is_some_and(|m| m.species == *prev_species && m.hp < *prev_hp);
-        if hp_dropped {
-            if let Some(m) = get_pokemon_at_slot_mut(state, *slot) {
+        if hp_dropped
+            && let Some(m) = get_pokemon_at_slot_mut(state, *slot) {
                 m.damaged_this_turn = true;
             }
-        }
 
         if *prev_item == Item::None {
             continue;
@@ -4639,7 +4635,7 @@ pub(crate) fn apply_fling_effect(
     }
 
     // Shield Dust blocks the remaining (secondary-style) riders.
-    let shield_dust = get_pokemon_at_slot(state, target_slot).map_or(false, |m| {
+    let shield_dust = get_pokemon_at_slot(state, target_slot).is_some_and(|m| {
         !pokemon_ability_is_suppressed(state, m) && m.ability == Ability::ShieldDust
     });
     if shield_dust {
@@ -5041,13 +5037,13 @@ fn weather_is_snow_for(state: &BattleState, mon: &PokemonState) -> bool {
 }
 
 pub(crate) fn is_confused(mon: &PokemonState) -> bool {
-    mon.volatiles
-        .iter()
-        .any(|volatile_status| match volatile_status {
-            VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _) => true,
-            VolatileStatusState::MoveStatus(VolatileStatus::Confusion, _) => true,
-            _ => false,
-        })
+    mon.volatiles.iter().any(|volatile_status| {
+        matches!(
+            volatile_status,
+            VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _)
+                | VolatileStatusState::MoveStatus(VolatileStatus::Confusion, _)
+        )
+    })
 }
 
 pub fn confusion_turns_remaining(mon: &PokemonState) -> Option<u16> {
@@ -5126,7 +5122,7 @@ fn round_div_half_down(numerator: i32, denominator: i32) -> i32 {
     if r * 2 > denominator { q + 1 } else { q }
 }
 
-fn user_active_mons<'a>(state: &'a BattleState, player: Player) -> &'a Vec<PokemonState> {
+fn user_active_mons(state: &BattleState, player: Player) -> &Vec<PokemonState> {
     match player {
         Player::P1 => &state.p1_active_mons,
         Player::P2 => &state.p2_active_mons,
@@ -5371,11 +5367,10 @@ pub fn accuracy_hit_probability(
             | VolatileStatusState::TurnStatus(VolatileStatus::LockedOn(id), _) => Some(*id),
             _ => None,
         });
-        if let Some(locked_id) = locked_target_id {
-            if locked_id == target.mon_id {
+        if let Some(locked_id) = locked_target_id
+            && locked_id == target.mon_id {
                 return 1.0;
             }
-        }
     }
 
     // One-hit KO moves use a level-based accuracy that ignores accuracy/evasion stages
@@ -5691,10 +5686,10 @@ fn compare_slot_speed_order_impl(
     }
 }
 
-pub fn get_pokemon_at_slot<'a>(
-    state: &'a BattleState,
+pub fn get_pokemon_at_slot(
+    state: &BattleState,
     slot: FieldSlot,
-) -> Option<&'a PokemonState> {
+) -> Option<&PokemonState> {
     let mons = match slot.player {
         Player::P1 => &state.p1_active_mons,
         Player::P2 => &state.p2_active_mons,
@@ -5808,8 +5803,8 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
     };
 
     // ── 1. Sticky Web — −1 Speed, grounded only ─────────────────────────────────────────────
-    if grounded {
-        if let Some(SideCondition::StickyWeb(setter_id)) = conditions
+    if grounded
+        && let Some(SideCondition::StickyWeb(setter_id)) = conditions
             .iter()
             .find(|sc| matches!(sc, SideCondition::StickyWeb(_)))
         {
@@ -5845,8 +5840,7 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
                 apply_opponent_stat_drop(state, slot, slot, speed_drop, items_suppressed, true);
             }
         }
-    }
-    if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) {
+    if get_pokemon_at_slot(state, slot).is_none_or(|m| m.fainted) {
         return;
     }
 
@@ -5864,13 +5858,13 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
         }
         finish_hazard_chip(state, slot, max_hp);
     }
-    if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) {
+    if get_pokemon_at_slot(state, slot).is_none_or(|m| m.fainted) {
         return;
     }
 
     // ── 3. Spikes — flat fraction by layer count, grounded only ─────────────────────────────
-    if grounded && !magic_guard {
-        if let Some(SideCondition::Spikes(layers)) = conditions
+    if grounded && !magic_guard
+        && let Some(SideCondition::Spikes(layers)) = conditions
             .iter()
             .find(|sc| matches!(sc, SideCondition::Spikes(_)))
         {
@@ -5887,14 +5881,13 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
             }
             finish_hazard_chip(state, slot, max_hp);
         }
-    }
-    if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) {
+    if get_pokemon_at_slot(state, slot).is_none_or(|m| m.fainted) {
         return;
     }
 
     // ── 4. Toxic Spikes — poison, or absorbed by a grounded Poison-type ─────────────────────
-    if grounded {
-        if let Some(SideCondition::ToxicSpikes(layers)) = conditions
+    if grounded
+        && let Some(SideCondition::ToxicSpikes(layers)) = conditions
             .iter()
             .find(|sc| matches!(sc, SideCondition::ToxicSpikes(_)))
         {
@@ -5925,7 +5918,6 @@ fn apply_entry_hazards(state: &mut BattleState, slot: FieldSlot) {
                 }
             }
         }
-    }
 }
 
 /// Returns the Showdown `onSwitchInPriority` for an ability.
@@ -6000,11 +5992,10 @@ pub fn compute_illusion_disguise(state: &BattleState, slot: FieldSlot) -> Option
 /// - When `slot.player == observer`, the observer sees their own mon — report the true species.
 /// - Otherwise (opponent's mon), report the disguise species if Illusion is active.
 pub fn observed_species(mon: &PokemonState, slot: FieldSlot, observer: Player) -> Species {
-    if slot.player != observer {
-        if let Some(ref disguise) = mon.illusion_disguise {
+    if slot.player != observer
+        && let Some(ref disguise) = mon.illusion_disguise {
             return disguise.clone();
         }
-    }
     mon.species.clone()
 }
 
@@ -6045,11 +6036,10 @@ pub fn process_pokemon_send_out(
     // skip their effect on the entry turn.  Faint replacements arrive when turn_started == true
     // (the replacement "mini-turn" flag), so we leave the flag false in that case — they should
     // receive Speed Boost normally on their first end_turn.
-    if !is_replacement_turn {
-        if let Some(mon_mut) = get_pokemon_at_slot_mut(state, slot) {
+    if !is_replacement_turn
+        && let Some(mon_mut) = get_pokemon_at_slot_mut(state, slot) {
             mon_mut.entered_this_turn = true;
         }
-    }
     // Always mark the Pokémon as on their first turn on field (for Fake Out / First Impression).
     // Unlike `entered_this_turn`, this applies to faint-replacements too.
     // Whenever an EOT will still run BEFORE the Pokémon gets to act — U-turn/Volt Switch
@@ -6068,7 +6058,7 @@ pub fn process_pokemon_send_out(
     // Entry hazards resolve before the switch-in ability. A Pokémon that faints to hazards (e.g.
     // Stealth Rock) never gets to trigger its entry ability (Intimidate, weather setters, …).
     apply_entry_hazards(state, slot);
-    if get_pokemon_at_slot(state, slot).map_or(true, |m| m.fainted) {
+    if get_pokemon_at_slot(state, slot).is_none_or(|m| m.fainted) {
         return;
     }
 
@@ -6268,7 +6258,7 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
         for target in collect_active_slots(state, opposing_player, None) {
             // InnerFocus / OwnTempo / Oblivious / Scrappy grant immunity to Intimidate.
             // Intimidate is ability-sourced (not a move), so Mold Breaker does not apply.
-            let immune = get_pokemon_at_slot(state, target).map_or(false, |m| {
+            let immune = get_pokemon_at_slot(state, target).is_some_and(|m| {
                 !pokemon_ability_is_suppressed(state, m)
                     && matches!(
                         m.ability,
@@ -6283,7 +6273,7 @@ fn apply_entry_ability_target_effects(state: &mut BattleState, slot: FieldSlot, 
             }
             // Guard Dog: immune to the Intimidate drop and instead gains +1 Attack.
             // Intimidate is ability-sourced, so Mold Breaker does not apply (see comment above).
-            let guard_dog = get_pokemon_at_slot(state, target).map_or(false, |m| {
+            let guard_dog = get_pokemon_at_slot(state, target).is_some_and(|m| {
                 !pokemon_ability_is_suppressed(state, m) && m.ability == Ability::GuardDog
             });
             if guard_dog {
@@ -6575,7 +6565,7 @@ fn apply_send_out_only_ability_effects(
             let threat_found = collect_active_slots(state, opp_player, None)
                 .into_iter()
                 .any(|opp_slot| {
-                    get_pokemon_at_slot(state, opp_slot).map_or(false, |foe| {
+                    get_pokemon_at_slot(state, opp_slot).is_some_and(|foe| {
                         foe.moves.iter().any(|mv_opt| {
                             let Some(mv_name) = mv_opt else { return false; };
                             let Some(md) = move_dex.get(mv_name) else { return false; };
@@ -6965,7 +6955,7 @@ pub fn update_mimicry_forms(state: &mut BattleState) {
     slots.extend(collect_active_slots(state, Player::P2, None));
 
     for slot in slots {
-        let has_mimicry = get_pokemon_at_slot(state, slot).map_or(false, |m| {
+        let has_mimicry = get_pokemon_at_slot(state, slot).is_some_and(|m| {
             !m.fainted && !pokemon_ability_is_suppressed(state, m) && m.ability == Ability::Mimicry
         });
         if !has_mimicry {
@@ -6974,7 +6964,7 @@ pub fn update_mimicry_forms(state: &mut BattleState) {
 
         if let Some(t) = &new_type {
             // Terrain is active: store original types (if not already stored) and overwrite.
-            let changed = get_pokemon_at_slot(state, slot).map_or(false, |m| {
+            let changed = get_pokemon_at_slot(state, slot).is_some_and(|m| {
                 m.types.len() != 1 || m.types[0] != *t
             });
             if let Some(mon) = get_pokemon_at_slot_mut(state, slot) {
@@ -7083,16 +7073,14 @@ fn on_gravity_activated(state: &mut BattleState) {
         .chain(state.p2_active_mons.iter_mut())
     {
         mon.volatiles.retain(|v| {
-            if let VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(m), _) = v {
-                if gravity_interrupted.contains(m) {
+            if let VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(m), _) = v
+                && gravity_interrupted.contains(m) {
                     return false;
                 }
-            }
-            if let VolatileStatusState::Charging(m, _) = v {
-                if gravity_interrupted.contains(m) {
+            if let VolatileStatusState::Charging(m, _) = v
+                && gravity_interrupted.contains(m) {
                     return false;
                 }
-            }
             if matches!(
                 v,
                 VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, _)
@@ -8882,7 +8870,7 @@ fn apply_binding_chip_damage(
             .iter()
             .chain(state.p2_active_mons.iter())
             .find(|m| m.mon_id == src_id)
-            .map_or(false, |trapper| {
+            .is_some_and(|trapper| {
                 !items_suppressed
                     && !klutz_disables_item(trapper)
                     && trapper.item == Item::BindingBand
@@ -9184,7 +9172,7 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
             // Speed Boost: +1 Speed every turn, but not on the turn the Pokémon switched in.
             Ability::SpeedBoost => {
                 for (bs, _) in result.iter_mut() {
-                    let skip = get_pokemon_at_slot(bs, *slot).map_or(true, |m| m.fainted || m.entered_this_turn);
+                    let skip = get_pokemon_at_slot(bs, *slot).is_none_or(|m| m.fainted || m.entered_this_turn);
                     if skip {
                         continue;
                     }
@@ -9403,23 +9391,21 @@ fn apply_late_eot_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(BattleSta
                 match pending {
                     Some((_, false)) => {
                         for (bs, _) in result.iter_mut() {
-                            if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
-                                if let Some((_, ref mut armed)) = mon.cud_chew_pending {
+                            if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot)
+                                && let Some((_, ref mut armed)) = mon.cud_chew_pending {
                                     *armed = true;
                                 }
-                            }
                         }
                     }
                     Some((berry, true)) => {
                         for (bs, _) in result.iter_mut() {
                             let env = berry_env(bs, *slot);
-                            if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
-                                if !mon.fainted {
+                            if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot)
+                                && !mon.fainted {
                                     mon.cud_chew_pending = None;
                                     apply_berry_effect(mon, &berry, &env);
                                     on_berry_eaten(mon, &berry, &env);
                                 }
-                            }
                         }
                     }
                     None => {}
@@ -9854,7 +9840,7 @@ pub(crate) fn apply_opponent_stat_drop(
         None => return,
     };
     let source_breaks_mold =
-        get_pokemon_at_slot(state, source_slot).map_or(false, |a| attacker_breaks_mold(state, a));
+        get_pokemon_at_slot(state, source_slot).is_some_and(|a| attacker_breaks_mold(state, a));
 
     // ── 0. Contrary / Simple pre-processing ────────────────────────────────────────────────
     // Contrary inverts all opponent-sourced stat changes; Simple doubles them.
@@ -9954,13 +9940,13 @@ pub(crate) fn apply_opponent_stat_drop(
     let last_lowered_idx = reaction.as_ref().and_then(|_| (0..7).rev().find(|&i| delta[i] < 0));
 
     // Emit one BoostChanged per stat that actually changed (NLL: mon borrow ended above).
-    for i in 0..7 {
-        if delta[i] == 0 {
+    for (i, &d) in delta.iter().enumerate() {
+        if d == 0 {
             continue;
         }
         if Some(i) == last_lowered_idx {
             let (boost_idx, ability) = reaction.clone().unwrap();
-            with_reactions(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: delta[i] }, |state| {
+            with_reactions(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: d }, |state| {
                 let mut boost = [0i8; 7];
                 boost[boost_idx] = 2 * stats_lowered;
                 // Self-boost from Defiant/Competitive — use the non-deferring path (no White
@@ -9968,7 +9954,7 @@ pub(crate) fn apply_opponent_stat_drop(
                 apply_reaction_self_boost(state, target_slot, ability, &boost);
             });
         } else {
-            emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: delta[i] });
+            emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: d });
         }
     }
 
@@ -10096,7 +10082,7 @@ fn apply_effect_to_target(
     // Extract attacker ability and Mold Breaker status before taking a mutable borrow.
     let attacker_ability = get_pokemon_at_slot(state, attacker_slot).map(|a| a.ability.clone());
     let attacker_mold_break =
-        get_pokemon_at_slot(state, attacker_slot).map_or(false, |a| attacker_breaks_mold(state, a));
+        get_pokemon_at_slot(state, attacker_slot).is_some_and(|a| attacker_breaks_mold(state, a));
     // Snapshot target ability and suppression before the mutable borrow.
     let (target_ability, target_ability_suppressed) = get_pokemon_at_slot(state, target_slot)
         .map(|m| (m.ability.clone(), pokemon_ability_is_suppressed(state, m)))
@@ -10119,7 +10105,7 @@ fn apply_effect_to_target(
         !attacker_mold_break && side_has_veil(state, target_slot.player, Ability::AromaVeil);
     // Snapshot target type for Flower Veil (Grass-only protection) before the mutable borrow.
     let target_is_grass = get_pokemon_at_slot(state, target_slot)
-        .map_or(false, |mon| pokemon_has_type(mon, &PokemonType::Grass));
+        .is_some_and(|mon| pokemon_has_type(mon, &PokemonType::Grass));
     // Safeguard: blocks status and confusion from opponents (unless attacker has Infiltrator).
     let safeguard_on_target_side = match target_slot.player {
         Player::P1 => &state.p1_side_conditions,
@@ -10127,11 +10113,11 @@ fn apply_effect_to_target(
     }
     .iter()
     .any(|c| matches!(c, SideCondition::SafeGuard));
-    let attacker_has_infiltrator = get_pokemon_at_slot(state, attacker_slot).map_or(false, |a| {
+    let attacker_has_infiltrator = get_pokemon_at_slot(state, attacker_slot).is_some_and(|a| {
         !pokemon_ability_is_suppressed(state, a) && a.ability == Ability::Infiltrator
     });
     // Light Clay: extend screen/veil duration from 5 to 8 turns.
-    let attacker_has_light_clay = get_pokemon_at_slot(state, attacker_slot).map_or(false, |a| {
+    let attacker_has_light_clay = get_pokemon_at_slot(state, attacker_slot).is_some_and(|a| {
         item_is_active(state, a) && a.item == Item::LightClay
     });
 
@@ -10325,9 +10311,9 @@ fn apply_effect_to_target(
             // Steadfast's +1 Spe boost is still game-visible; emit it flat (not nested under
             // any attacker-attributed event, since the boost is on the defender).
             // Mental Herb never cures Flinch, but route those events the same way defensively.
-            for i in 0..7 {
-                if steadfast_boost_delta[i] != 0 {
-                    emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: steadfast_boost_delta[i] });
+            for (i, &d) in steadfast_boost_delta.iter().enumerate() {
+                if d != 0 {
+                    emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: d });
                 }
             }
             for mv in &target_mental_herb_cures {
@@ -10340,9 +10326,9 @@ fn apply_effect_to_target(
             // For all other volatiles, Steadfast's Speed boost and Mental Herb cures nest
             // under VolatileStart (the volatile application caused them both).
             with_reactions(state, EventKind::VolatileStart { target: target_slot, volatile: v }, |bs| {
-                for i in 0..7 {
-                    if steadfast_boost_delta[i] != 0 {
-                        emit(bs, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: steadfast_boost_delta[i] });
+                for (i, &d) in steadfast_boost_delta.iter().enumerate() {
+                    if d != 0 {
+                        emit(bs, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: d });
                     }
                 }
                 for mv in &target_mental_herb_cures {
@@ -10355,9 +10341,9 @@ fn apply_effect_to_target(
         }
     } else if steadfast_boost_delta != [0i8; 7] {
         // Steadfast boost without newly-started flinch (shouldn't happen, but guard anyway).
-        for i in 0..7 {
-            if steadfast_boost_delta[i] != 0 {
-                emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: steadfast_boost_delta[i] });
+        for (i, &d) in steadfast_boost_delta.iter().enumerate() {
+            if d != 0 {
+                emit(state, EventKind::BoostChanged { target: target_slot, boost_idx: i, stages: d });
             }
         }
     }
@@ -10373,7 +10359,7 @@ fn apply_effect_to_target(
     if let Some(synch_status) = synchronize_status_to_bounce {
         // Verify the status actually landed (was not blocked by type immunity etc.)
         let status_landed = get_pokemon_at_slot(state, target_slot)
-            .map_or(false, |t| matches!(&t.status, Some(s) if std::mem::discriminant(s) == std::mem::discriminant(&synch_status)));
+            .is_some_and(|t| matches!(&t.status, Some(s) if std::mem::discriminant(s) == std::mem::discriminant(&synch_status)));
         if status_landed {
             // Apply the same status to the source, going through type/ability checks.
             let synch_effect = HitEffect {
@@ -10421,8 +10407,8 @@ fn apply_effect_to_target(
         }
     }
 
-    if let Some(side_condition) = &effect.side_condition {
-        if !(matches!(side_condition, SideCondition::AuroraVeil) && !weather_is_snow(state)) {
+    if let Some(side_condition) = &effect.side_condition
+        && (!matches!(side_condition, SideCondition::AuroraVeil) || weather_is_snow(state)) {
             // Sticky Web records the `mon_id` of its setter so Mirror Armor can later reflect the
             // Speed drop back to that specific Pokémon (and to nobody if it has left the field).
             let to_add = match side_condition {
@@ -10460,7 +10446,6 @@ fn apply_effect_to_target(
             };
             add_side_condition(state, destination, to_add, duration);
         }
-    }
 
     // Whole-field effects (weather / terrain / pseudo-weather like Trick Room) belong to the
     // field, not to any one target. For MoveTarget::All moves the per-target loop calls this
@@ -10535,9 +10520,9 @@ fn apply_effect_to_attacker(state: &mut BattleState, attacker_slot: FieldSlot, e
             });
         }
     }
-    for i in 0..7 {
-        if self_boost_delta[i] != 0 {
-            emit(state, EventKind::BoostChanged { target: attacker_slot, boost_idx: i, stages: self_boost_delta[i] });
+    for (i, &d) in self_boost_delta.iter().enumerate() {
+        if d != 0 {
+            emit(state, EventKind::BoostChanged { target: attacker_slot, boost_idx: i, stages: d });
         }
     }
     // Berry-cure events (status/confusion cleared by a held berry).
@@ -10549,10 +10534,10 @@ fn apply_effect_to_attacker(state: &mut BattleState, attacker_slot: FieldSlot, e
         mirror_opportunist_raises(state, attacker_slot, &effect.boosts);
     }
 
-    if let Some(side_condition) = &effect.side_condition {
-        if !(matches!(side_condition, SideCondition::AuroraVeil) && !weather_is_snow(state)) {
+    if let Some(side_condition) = &effect.side_condition
+        && (!matches!(side_condition, SideCondition::AuroraVeil) || weather_is_snow(state)) {
             let attacker_has_light_clay = get_pokemon_at_slot(state, attacker_slot)
-                .map_or(false, |a| {
+                .is_some_and(|a| {
                     item_is_active(state, a) && a.item == Item::LightClay
                 });
             let duration = {
@@ -10576,7 +10561,6 @@ fn apply_effect_to_attacker(state: &mut BattleState, attacker_slot: FieldSlot, e
                 duration,
             );
         }
-    }
 
     apply_weather_effects(state, effect, attacker_slot);
     apply_terrain_effects(state, effect);
@@ -10729,13 +10713,12 @@ fn apply_healing_move(
         emit(bs, EventKind::StatusInflicted { target: attacker_slot, status: Status::Sleep(0) });
     }
     let post_hp = get_pokemon_at_slot(bs, attacker_slot).map(|m| m.hp).unwrap_or(0);
-    if post_hp > pre_hp {
-        if let Some(observer) = bs.event_observer {
+    if post_hp > pre_hp
+        && let Some(observer) = bs.event_observer {
             let new_hp = observed_hp(bs, attacker_slot, observer);
             let max_hp = get_pokemon_at_slot(bs, attacker_slot).map(|m| m.stats[0].max(1)).unwrap_or(1);
             emit(bs, EventKind::Healed { target: attacker_slot, new_hp, max_hp });
         }
-    }
     true
 }
 
@@ -10892,8 +10875,8 @@ pub fn apply_kings_rock_flinch(
     }
 
     // Check that the attacker holds King's Rock and its item is active (Magic Room / Klutz).
-    let eligible = branches.first().map_or(false, |(bs, _)| {
-        get_pokemon_at_slot(bs, attacker_slot).map_or(false, |m| {
+    let eligible = branches.first().is_some_and(|(bs, _)| {
+        get_pokemon_at_slot(bs, attacker_slot).is_some_and(|m| {
             item_is_active(bs, m) && (m.item == Item::KingsRock || m.item == Item::RazorFang)
         })
     });
@@ -10902,11 +10885,11 @@ pub fn apply_kings_rock_flinch(
     }
 
     // Shield Dust / Covert Cloak on the target blocks King's Rock flinch.
-    let blocked_by_shield_dust = branches.first().map_or(false, |(bs, _)| {
+    let blocked_by_shield_dust = branches.first().is_some_and(|(bs, _)| {
         let attacker_breaks =
-            get_pokemon_at_slot(bs, attacker_slot).map_or(false, |a| attacker_breaks_mold(bs, a));
+            get_pokemon_at_slot(bs, attacker_slot).is_some_and(|a| attacker_breaks_mold(bs, a));
         !attacker_breaks
-            && get_pokemon_at_slot(bs, target_slot).map_or(false, |m| {
+            && get_pokemon_at_slot(bs, target_slot).is_some_and(|m| {
                 !pokemon_ability_is_suppressed(bs, m) && m.ability == Ability::ShieldDust
             })
     });
@@ -10960,8 +10943,8 @@ pub fn apply_stench_flinch(
         return branches;
     }
 
-    let eligible = branches.first().map_or(false, |(bs, _)| {
-        get_pokemon_at_slot(bs, attacker_slot).map_or(false, |m| {
+    let eligible = branches.first().is_some_and(|(bs, _)| {
+        get_pokemon_at_slot(bs, attacker_slot).is_some_and(|m| {
             !pokemon_ability_is_suppressed(bs, m) && m.ability == Ability::Stench
         })
     });
@@ -10970,11 +10953,11 @@ pub fn apply_stench_flinch(
     }
 
     // Shield Dust on the target blocks Stench flinch (same as King's Rock).
-    let blocked_by_shield_dust = branches.first().map_or(false, |(bs, _)| {
+    let blocked_by_shield_dust = branches.first().is_some_and(|(bs, _)| {
         let attacker_breaks =
-            get_pokemon_at_slot(bs, attacker_slot).map_or(false, |a| attacker_breaks_mold(bs, a));
+            get_pokemon_at_slot(bs, attacker_slot).is_some_and(|a| attacker_breaks_mold(bs, a));
         !attacker_breaks
-            && get_pokemon_at_slot(bs, target_slot).map_or(false, |m| {
+            && get_pokemon_at_slot(bs, target_slot).is_some_and(|m| {
                 !pokemon_ability_is_suppressed(bs, m) && m.ability == Ability::ShieldDust
             })
     });
@@ -11460,7 +11443,7 @@ pub(crate) fn encore_immune_move(
     if matches!(mv, PokemonMove::Struggle | PokemonMove::Mimic) {
         return true;
     }
-    move_dex.get(mv).map_or(false, |d| {
+    move_dex.get(mv).is_some_and(|d| {
         move_has_flag(d, &crate::state::dex_data::MoveFlag::FailEncore)
     })
 }
@@ -11724,7 +11707,7 @@ pub fn apply_contact_hit_reactions(
     let contact_punish = {
         let first_bs = &branches[0].0;
         get_pokemon_at_slot(first_bs, attacker_slot)
-            .map_or(false, |atk| contact_effects_apply(first_bs, atk, move_data))
+            .is_some_and(|atk| contact_effects_apply(first_bs, atk, move_data))
     };
     // Sheer Force: when the attacker's move is boosted by Sheer Force, a specific set of
     // after-hit effects is skipped. Of the reactions handled here, only Pickpocket is in that
@@ -11732,7 +11715,7 @@ pub fn apply_contact_hit_reactions(
     // explicitly NOT negated). Life Orb recoil and Shell Bell are handled at their own sites.
     let attacker_sheer_force_boosted = {
         let first_bs = &branches[0].0;
-        get_pokemon_at_slot(first_bs, attacker_slot).map_or(false, |atk| {
+        get_pokemon_at_slot(first_bs, attacker_slot).is_some_and(|atk| {
             !pokemon_ability_is_suppressed(first_bs, atk)
                 && atk.ability == Ability::SheerForce
                 && move_has_sheer_force_secondary(move_data)
@@ -11782,7 +11765,7 @@ pub fn apply_contact_hit_reactions(
         let helmet_active = {
             let first_bs = &branches[0].0;
             get_pokemon_at_slot(first_bs, holder_slot)
-                .map_or(false, |m| item_is_active(first_bs, m) && m.item == Item::RockyHelmet)
+                .is_some_and(|m| item_is_active(first_bs, m) && m.item == Item::RockyHelmet)
         };
         if contact_punish && helmet_active {
             branches
@@ -11905,7 +11888,7 @@ pub fn apply_contact_hit_reactions(
             let attacker_immune = {
                 let first_bs = &branches[0].0;
                 get_pokemon_at_slot(first_bs, attacker_slot)
-                    .map_or(true, |atk| is_immune_to_powder(first_bs, atk, None))
+                    .is_none_or(|atk| is_immune_to_powder(first_bs, atk, None))
             };
             if attacker_immune {
                 return branches;
@@ -12349,7 +12332,9 @@ pub(crate) fn try_absorb_move(
 
     // Every absorb is announced in-game ("X's Volt Absorb restored its HP!" etc.), so
     // each arm reveals the ability and emits its visible effect — previously all silent.
-    let absorbs = match (&move_type, &target_ability) {
+    
+
+    match (&move_type, &target_ability) {
         (PokemonType::Electric, Ability::VoltAbsorb)
         | (PokemonType::Water, Ability::WaterAbsorb)
         | (PokemonType::Water, Ability::DrySkin)
@@ -12403,8 +12388,8 @@ pub(crate) fn try_absorb_move(
             with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::FlashFire }, |state| {
                 emit(state, EventKind::Immune { target: target_slot });
                 let mut started = false;
-                if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
-                    if !has_status_volatile(mon, &VolatileStatus::FlashFire) {
+                if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot)
+                    && !has_status_volatile(mon, &VolatileStatus::FlashFire) {
                         mon.volatiles
                             .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
                                 VolatileStatus::FlashFire,
@@ -12412,7 +12397,6 @@ pub(crate) fn try_absorb_move(
                             ));
                         started = true;
                     }
-                }
                 if started {
                     emit(state, EventKind::VolatileStart {
                         target: target_slot,
@@ -12423,9 +12407,7 @@ pub(crate) fn try_absorb_move(
             true
         }
         _ => false,
-    };
-
-    absorbs
+    }
 }
 
 /// Emit `BoostChanged` for each nonzero entry of an applied boost delta
@@ -12464,7 +12446,9 @@ pub(crate) fn try_drawin_negate(
 
     let move_type = effective_move_type(state, attacker, move_data);
 
-    let negated = match (&move_type, &target_ability) {
+    
+
+    match (&move_type, &target_ability) {
         (PokemonType::Electric, Ability::LightningRod)
         | (PokemonType::Water, Ability::StormDrain) => {
             // "X took the attack!" + the Sp. Atk boost are announced in-game; nest the
@@ -12480,9 +12464,7 @@ pub(crate) fn try_drawin_negate(
             true
         }
         _ => false,
-    };
-
-    negated
+    }
 }
 
 /// Apply the binding (partial-trapping) volatile to `target_slot` with duration branching.
@@ -12499,10 +12481,10 @@ fn apply_binding_trap(
     let mut new_branches = Vec::with_capacity(branches.len() * 2);
     for (bs, prob) in branches {
         // Skip if already bound (cannot stack) or protected by a Substitute.
-        let already_bound = get_pokemon_at_slot(&bs, target_slot).map_or(false, |m| {
+        let already_bound = get_pokemon_at_slot(&bs, target_slot).is_some_and(|m| {
             has_status_volatile(m, &VolatileStatus::PartiallyTrapped(0))
         });
-        let has_sub = get_pokemon_at_slot(&bs, target_slot).map_or(false, |m| {
+        let has_sub = get_pokemon_at_slot(&bs, target_slot).is_some_and(|m| {
             has_status_volatile(m, &VolatileStatus::Substitute(0))
         });
         if already_bound || has_sub {
@@ -12516,7 +12498,7 @@ fn apply_binding_trap(
             .iter()
             .chain(bs.p2_active_mons.iter())
             .find(|m| m.mon_id == attacker_mon_id)
-            .map_or(false, |trapper| {
+            .is_some_and(|trapper| {
                 item_is_active(&bs, trapper) && trapper.item == Item::GripClaw
             });
 
@@ -12569,22 +12551,21 @@ fn apply_trapping_move(
                 .unwrap_or(u8::MAX);
             // Ghost targets are fully immune to pure-trapping moves.
             let target_is_ghost = get_pokemon_at_slot(bs, target_slot)
-                .map_or(false, |m| pokemon_has_type(m, &PokemonType::Ghost));
+                .is_some_and(|m| pokemon_has_type(m, &PokemonType::Ghost));
             // Substitute blocks the trapping effect.
-            let target_has_sub = get_pokemon_at_slot(bs, target_slot).map_or(false, |m| {
+            let target_has_sub = get_pokemon_at_slot(bs, target_slot).is_some_and(|m| {
                 has_status_volatile(m, &VolatileStatus::Substitute(0))
             });
             if target_is_ghost || target_has_sub {
                 return;
             }
-            if let Some(mon) = get_pokemon_at_slot_mut(bs, target_slot) {
-                if !has_status_volatile(mon, &VolatileStatus::Trapped(0)) {
+            if let Some(mon) = get_pokemon_at_slot_mut(bs, target_slot)
+                && !has_status_volatile(mon, &VolatileStatus::Trapped(0)) {
                     mon.volatiles.push(VolatileStatusState::TurnStatus(
                         VolatileStatus::Trapped(attacker_mon_id),
                         0,
                     ));
                 }
-            }
         }
         _ => {}
     }
@@ -12622,14 +12603,14 @@ pub fn apply_secondary_effects(
     // All three fail conditions must be checked here (not just in apply_post_damage_move_effects)
     // so that the HP cost and Substitute are never applied when the move fails.
     let shed_tail_failed = if move_data.self_switch == SelfSwitchType::ShedTail {
-        let failed = branches.first().map_or(true, |(bs, _)| {
+        let failed = branches.first().is_none_or(|(bs, _)| {
             // No healthy bench → move fails entirely (no HP cost, no sub, no switch).
             let no_bench = match attacker_slot.player {
                 Player::P1 => bs.p1_back_mons.iter().all(|m| m.fainted),
                 Player::P2 => bs.p2_back_mons.iter().all(|m| m.fainted),
             };
             no_bench
-                || get_pokemon_at_slot(bs, attacker_slot).map_or(true, |m| {
+                || get_pokemon_at_slot(bs, attacker_slot).is_none_or(|m| {
                     let max_hp = m.stats[0].max(1);
                     m.volatiles.iter().any(|v| {
                         matches!(
@@ -12646,7 +12627,7 @@ pub fn apply_secondary_effects(
                 let mut post = (0u16, 1u16);
                 if let Some(m) = get_pokemon_at_slot_mut(bs, attacker_slot) {
                     let max_hp = m.stats[0].max(1);
-                    let cost = (max_hp + 1) / 2;
+                    let cost = max_hp.div_ceil(2);
                     take_damage(m, cost, attacker_env, as_);
                     post = (m.hp, max_hp);
                 }
@@ -12669,9 +12650,9 @@ pub fn apply_secondary_effects(
     // self_secondaries) are intentionally NOT blocked; those are applied further below.
     // Mold Breaker bypasses Shield Dust.
     let attacker_breaks =
-        get_pokemon_at_slot(state, attacker_slot).map_or(false, |a| attacker_breaks_mold(state, a));
+        get_pokemon_at_slot(state, attacker_slot).is_some_and(|a| attacker_breaks_mold(state, a));
     let target_has_shield_dust = !attacker_breaks
-        && get_pokemon_at_slot(state, target_slot).map_or(false, |mon| {
+        && get_pokemon_at_slot(state, target_slot).is_some_and(|mon| {
             !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::ShieldDust
         });
 
@@ -12679,7 +12660,7 @@ pub fn apply_secondary_effects(
     // eligible target secondaries, those secondaries are suppressed in exchange for the BP
     // boost already applied in base_power_for_move. Self-effects (self_boost, self_secondaries)
     // are NOT suppressed.
-    let attacker_has_sheer_force = get_pokemon_at_slot(state, attacker_slot).map_or(false, |mon| {
+    let attacker_has_sheer_force = get_pokemon_at_slot(state, attacker_slot).is_some_and(|mon| {
         !pokemon_ability_is_suppressed(state, mon) && mon.ability == Ability::SheerForce
     }) && move_has_sheer_force_secondary(move_data);
 
@@ -12815,7 +12796,7 @@ pub fn apply_secondary_effects(
     // contact_effects_apply). Poison/Steel target immunity is enforced downstream in
     // apply_status_to_pokemon.
     if !target_has_shield_dust {
-        let poison_touch_contact = get_pokemon_at_slot(state, attacker_slot).map_or(false, |atk| {
+        let poison_touch_contact = get_pokemon_at_slot(state, attacker_slot).is_some_and(|atk| {
             !pokemon_ability_is_suppressed(state, atk)
                 && atk.ability == Ability::PoisonTouch
                 && contact_effects_apply(state, atk, move_data)
@@ -12838,14 +12819,13 @@ pub fn apply_secondary_effects(
     // (bypasssub) means the cure can happen through a Substitute as well.
     if move_data.name == PokemonMove::SparklingAria {
         for (bs, _) in branches.iter_mut() {
-            if let Some(tgt) = get_pokemon_at_slot_mut(bs, target_slot) {
-                if has_status_volatile(tgt, &VolatileStatus::SparklingAria) {
+            if let Some(tgt) = get_pokemon_at_slot_mut(bs, target_slot)
+                && has_status_volatile(tgt, &VolatileStatus::SparklingAria) {
                     remove_status_volatile(tgt, &VolatileStatus::SparklingAria);
                     if matches!(tgt.status, Some(Status::Burn)) {
                         tgt.status = None;
                     }
                 }
-            }
         }
     }
 
@@ -12928,8 +12908,8 @@ pub fn apply_secondary_effects(
     if move_data.name == PokemonMove::SaltCure {
         for (bs, _) in branches.iter_mut() {
             let state_snapshot = bs.clone();
-            if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot) {
-                if !target_mon.fainted {
+            if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot)
+                && !target_mon.fainted {
                     // SaltCure is not a mental volatile, so the Mental Herb return is always empty.
                     let _ = apply_volatile_to_pokemon(
                         &state_snapshot,
@@ -12938,7 +12918,6 @@ pub fn apply_secondary_effects(
                         false,
                     );
                 }
-            }
         }
     }
 
@@ -12953,11 +12932,10 @@ pub fn apply_secondary_effects(
                 let had_nonzero = get_pokemon_at_slot(bs, target_slot)
                     .map(|m| m.boosts.iter().any(|&b| b != 0))
                     .unwrap_or(false);
-                if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot) {
-                    if !target_mon.fainted {
+                if let Some(target_mon) = get_pokemon_at_slot_mut(bs, target_slot)
+                    && !target_mon.fainted {
                         target_mon.boosts = [0; 7];
                     }
-                }
                 if had_nonzero {
                     emit(bs, crate::information::information::EventKind::BoostsCleared { target: target_slot });
                 }
@@ -13082,7 +13060,7 @@ pub fn check_and_apply_redirection(
     }
 
     // Stalwart and Propeller Tail: ignore all target-redirecting effects (moves and abilities).
-    let attacker_ignores_redirection = get_pokemon_at_slot(state, user_slot).map_or(false, |a| {
+    let attacker_ignores_redirection = get_pokemon_at_slot(state, user_slot).is_some_and(|a| {
         !pokemon_ability_is_suppressed(state, a)
             && matches!(a.ability, Ability::Stalwart | Ability::PropellerTail)
     });
@@ -13134,8 +13112,8 @@ pub fn check_and_apply_redirection(
             continue;
         }
 
-        if has_status_volatile(mon, &VolatileStatus::RagePowder) {
-            if !attacker_immune_to_powder {
+        if has_status_volatile(mon, &VolatileStatus::RagePowder)
+            && !attacker_immune_to_powder {
                 redirectors.push((
                     FieldSlot {
                         player: opposing_player,
@@ -13144,7 +13122,6 @@ pub fn check_and_apply_redirection(
                     mon,
                 ));
             }
-        }
     }
 
     // FollowMe/RagePowder take priority over ability-based redirection.
@@ -13165,8 +13142,8 @@ pub fn check_and_apply_redirection(
     // --- Priority 2: Lightning Rod (Electric) / Storm Drain (Water) ---
     // These draw single-target moves of the matching type toward the ability holder.
     // Mold Breaker / Turboblaze / Teravolt bypass the redirection entirely.
-    if let Some(md) = move_data {
-        if let Some(attacker) = get_pokemon_at_slot(state, user_slot) {
+    if let Some(md) = move_data
+        && let Some(attacker) = get_pokemon_at_slot(state, user_slot) {
             // Mold Breaker suppresses Lightning Rod / Storm Drain on the redirector.
             if attacker_breaks_mold(state, attacker) {
                 return target_slots;
@@ -13211,15 +13188,14 @@ pub fn check_and_apply_redirection(
                 }
             }
         }
-    }
 
     target_slots
 }
 
-pub(crate) fn get_pokemon_at_slot_mut<'a>(
-    state: &'a mut BattleState,
+pub(crate) fn get_pokemon_at_slot_mut(
+    state: &mut BattleState,
     slot: FieldSlot,
-) -> Option<&'a mut PokemonState> {
+) -> Option<&mut PokemonState> {
     let mons = match slot.player {
         Player::P1 => &mut state.p1_active_mons,
         Player::P2 => &mut state.p2_active_mons,

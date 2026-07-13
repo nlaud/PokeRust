@@ -1078,7 +1078,7 @@ fn test_s26_transform_reverts_moves_on_switch_out() {
         .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Ditto)))
         .expect("the transformed Ditto must revert to Ditto on switch-out");
     assert!(
-        !ditto.known_moves.iter().any(|m| *m == Some(PokemonMove::Earthquake)),
+        !ditto.known_moves.contains(&Some(PokemonMove::Earthquake)),
         "a move copied while transformed must not persist after the revert"
     );
     assert!(ditto.pre_transform.is_none(), "pre_transform must clear on revert");
@@ -4692,7 +4692,7 @@ fn test_s6_freeze_in_sun_emits_no_clause() {
     };
     let has_freeze_preventer_clause = result.predicates.iter().any(|clause| {
         // Skip clauses that are pass3 I1 predicates (they contain EVIVStat* literals).
-        if clause.iter().any(|s| is_stat_literal(s)) {
+        if clause.iter().any(&is_stat_literal) {
             return false;
         }
         clause.iter().any(|s| matches!(
@@ -7520,7 +7520,7 @@ mod roundtrip_soundness {
         );
 
         let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
-            Player::P1, &[p1a.clone()], &[p2a.clone()], pd, 1, 1, 50,
+            Player::P1, std::slice::from_ref(&p1a), std::slice::from_ref(&p2a), pd, 1, 1, 50,
             crate::information::unknowns::InformationMode::OpenTeamSheet, true,
         );
         let UnknownMatchState::TeamPreview(preview) = preview else {
@@ -7611,7 +7611,7 @@ mod roundtrip_soundness {
         );
 
         let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
-            Player::P2, &[p2a.clone()], &[p1a.clone()], pd, 1, 1, 50,
+            Player::P2, std::slice::from_ref(&p2a), std::slice::from_ref(&p1a), pd, 1, 1, 50,
             crate::information::unknowns::InformationMode::OpenTeamSheet, true,
         );
         let UnknownMatchState::TeamPreview(preview) = preview else {
@@ -7717,7 +7717,7 @@ mod roundtrip_soundness {
         );
 
         let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
-            Player::P1, &[p1a.clone()], &[p2a.clone()], pd, 1, 1, 50,
+            Player::P1, std::slice::from_ref(&p1a), std::slice::from_ref(&p2a), pd, 1, 1, 50,
             crate::information::unknowns::InformationMode::OpenTeamSheet, true,
         );
         let UnknownMatchState::TeamPreview(preview) = preview else {
@@ -8443,7 +8443,7 @@ mod roundtrip_soundness {
         );
         // Garchomp's move (Splash was P1's; the copy takes P1's move set).
         assert!(
-            t.known_moves.iter().any(|m| *m == Some(PokemonMove::Splash)),
+            t.known_moves.contains(&Some(PokemonMove::Splash)),
             "transformed mon must copy the source's moves"
         );
     }
