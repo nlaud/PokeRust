@@ -291,6 +291,36 @@ pub fn get_mon_mut_by_idx(
     None
 }
 
+/// Render every `mon_idx` in this state alongside its segment tag and current
+/// `possible_species`, e.g. `0:p1_active=Known(Tyranitar) 1:p1_active=Known(Lycanroc)
+/// 2:p2_active=Known(Charizard) …`. Purely a debugging aid for
+/// `inference_contradiction!` call sites: a clause that names a `mon_idx` whose
+/// legend entry is an unexpected species (or the wrong side) is the signature of
+/// an S1 index-shift bug — see the `mon_idx` header comment above. Not used for
+/// any inference logic itself.
+pub(super) fn mon_idx_legend(state: &UnknownBattleState) -> String {
+    let segs: [(&str, &[UnknownPokemonState]); 6] = [
+        ("p1_active", &state.p1_active_mons),
+        ("p2_active", &state.p2_active_mons),
+        ("p1_known_back", &state.p1_known_back_mons),
+        ("p1_possible_back", &state.p1_possible_back_mons),
+        ("p2_known_back", &state.p2_known_back_mons),
+        ("p2_possible_back", &state.p2_possible_back_mons),
+    ];
+    let mut out = String::new();
+    let mut idx = 0;
+    for (tag, seg) in segs {
+        for mon in seg {
+            if idx > 0 {
+                out.push(' ');
+            }
+            out.push_str(&format!("{idx}:{tag}={:?}", mon.possible_species));
+            idx += 1;
+        }
+    }
+    out
+}
+
 // ── Unknown<T> manipulation helpers ───────────────────────────────────────────
 
 /// Add `val` to the exclusion list.  Contradiction if already `Known` to `val`.
@@ -2313,8 +2343,10 @@ fn resolve_item_clauses_on_item_change(
             inference_contradiction!(
                 idx,
                 "clause has no explanation left after resolving item literals against \
-                 the outgoing item {:?}",
-                outgoing
+                 the outgoing item {:?}: {:?}\nmon_idx legend: {}",
+                outgoing,
+                clause,
+                mon_idx_legend(state)
             );
         }
         if pruned.len() != state.predicates[i].len() {

@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import ConfirmDialog from '../../components/common/ConfirmDialog'
-import Fade from '../../components/common/Fade'
 import { useBattle } from '../../store/battleStore'
 import Arena from './Arena'
 import BattleLogSidebar from './BattleLogSidebar'
@@ -8,7 +7,7 @@ import ControlPanel from './ControlPanel'
 import TeamInfoSidebar from './TeamInfoSidebar'
 
 export default function BattleScreen() {
-  const { view, currentPlayer, error, clearError, leave } = useBattle()
+  const { view, error, clearError, leave } = useBattle()
   const [confirmLeave, setConfirmLeave] = useState(false)
   if (!view) return null
 
@@ -24,11 +23,7 @@ export default function BattleScreen() {
 
       <div className="relative order-1 flex min-h-[440px] min-w-0 flex-1 flex-col lg:order-none">
         {inBattle ? (
-          // Keyed on currentPlayer so the battlefield crossfades instead of
-          // snapping when the hotseat wizard flips whose perspective is shown.
-          <Fade fadeKey={currentPlayer} className="flex flex-1">
-            <Arena />
-          </Fade>
+          <Arena />
         ) : (
           <div className="flex flex-1 items-start justify-center rounded-card bg-gradient-to-b from-sky-100 to-emerald-100 pt-10 dark:from-slate-800 dark:to-slate-700">
             {view.phase === 'teamPreview' && (
@@ -68,9 +63,7 @@ export default function BattleScreen() {
       </div>
 
       <div className="order-3 lg:order-none lg:contents">
-        <Fade fadeKey={currentPlayer}>
-          <TeamInfoSidebar />
-        </Fade>
+        <TeamInfoSidebar />
       </div>
 
       {confirmLeave && (

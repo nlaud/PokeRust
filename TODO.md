@@ -1,6 +1,7 @@
 # TODO
 ### Fixes
-- [P2 belief] [inference contradiction] context="bcp" event=post-walk turn=[Switch(SwitchState { slot: P1_1, species: Corviknight, level: 50, hp: Percent(100), status: None, tera_type: None, disguise_species: None, max_hp: 201 }), MoveUsed { user: P2_0, move_used: Protect, targets: [] }, MoveUsed { user: P2_1, move_used: Protect, targets: [] }, MoveUsed { user: P1_0, move_used: Protect, targets: [] }, EndOfTurn] — unsatisfiable clause (all literals false). Happens when switching in corviknight against all other pokemon switching?
+- [P2 belief] [inference contradiction] context="bcp" event=post-walk turn=[Switch(SwitchState { slot: P1_1, species: Corviknight, level: 50, hp: Percent(100), status: None, tera_type: None, disguise_species: None, max_hp: 201 }), MoveUsed { user: P2_0, move_used: Protect, targets: [] }, MoveUsed { user: P2_1, move_used: Protect, targets: [] }, MoveUsed { user: P1_0, move_used: Protect, targets: [] }, EndOfTurn] — unsatisfiable clause (all literals false). Happens when player 1 switches their second lead pokemon out for some reason? Doesn't always show up though so I don't really know? I think the lead send out clauses could use a deeper look in general as well.
+  - Also for the future, errors like these should also display the clause that is impossible.
 - We need to rework how zoroark works with the inference engine from the ground up (when information mode is not perfect information). 
   - When a team has zoroark, all pokemon should be treated as if they could be zoroark. While they should be displayed as the original pokemon on the FE, their actual stats/moves/item should be treated as if they could be zoroark (It it should be displayed as if the possible moves are A Or B, where A is the original move and B is the zoroark move, at least in a teamsheet mode when you know the moves of each of your opponents mons), the same should be true for items, abiltiies, natures, and stat spreads should encompass both the original and zoroark stats (this should update once zoroark is found and the pokemon is either revealed to be zoroark or not). 
   - Prior to zoroark being revealed it should be listed as possibly in the back (as well as all pokemon being possibly in the back, unless there are two of that pokemon in the front, since this means both the original and zoroark are in the front). The types of pokemon should be displayed as their original types on the frontend, and the inference engine should handle both cases of zoroark and the original at all times, keeping the learnset based deduction and stuff.
@@ -13,6 +14,7 @@
 - Predicates tab goes away when the battle ends, it should tsay
 - Paused state of the video should persist between playlists
 - Quick fix of all the compiler warnings.
+- Add a test that just does the simulator + inference engine for both players, with random teams from the teamsheets and just clicking random moves until one player wins (do this like 25 times). And make sure this can run consistently and pass, since there shouldn't be anything impossible happening.
 ### New features
 - Add inference to the README, link all the READMEs to the main project README.
 - Frontend features

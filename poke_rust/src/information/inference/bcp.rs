@@ -52,7 +52,12 @@ pub(super) fn run_bcp(
                 .collect();
 
             if still_live.is_empty() {
-                inference_contradiction!("bcp", "unsatisfiable clause (all literals false)");
+                inference_contradiction!(
+                    "bcp",
+                    "unsatisfiable clause (all literals false): {:?}\nmon_idx legend: {}",
+                    state.predicates[i],
+                    super::mon_idx_legend(state)
+                );
             }
 
             // Clause already satisfied by a known-true literal — drop it.
@@ -147,37 +152,51 @@ pub(super) fn propagate_collected(
         // Raise fast's min Spe: base_spe(fast) >= ceil(base_spe(slow)*slow_mult / fast_mult)
         let slow_min = super::get_mon_by_idx(state, slow_idx).map_or(0u64, |m| m.minStats[5] as u64);
         let new_fast_min = div_ceil(slow_min * slow_mult as u64, fast_mult as u64) as u16;
-        if let Some(mon) = super::get_mon_mut_by_idx(state, fast_idx) {
-            if new_fast_min > mon.minStats[5] {
-                if new_fast_min > mon.maxStats[5] {
+        // Read both bounds first (immutable borrow) so the panic-message legend below
+        // never needs to coexist with a live mutable borrow of `state`.
+        if let Some((fast_min, fast_max)) =
+            super::get_mon_by_idx(state, fast_idx).map(|m| (m.minStats[5], m.maxStats[5]))
+        {
+            if new_fast_min > fast_min {
+                if new_fast_min > fast_max {
                     inference_contradiction!(
                         fast_idx,
-                        "SpeedComparison raises min({}) above max({})",
+                        "SpeedComparison raises min({}) above max({}) for mon_idx {}\nmon_idx legend: {}",
                         new_fast_min,
-                        mon.maxStats[5]
+                        fast_max,
+                        fast_idx,
+                        super::mon_idx_legend(state)
                     );
                 }
-                mon.minStats[5] = new_fast_min;
+                if let Some(mon) = super::get_mon_mut_by_idx(state, fast_idx) {
+                    mon.minStats[5] = new_fast_min;
+                }
                 changed = true;
             }
         }
 
         // Lower slow's max Spe: base_spe(slow) <= floor(base_spe(fast)*fast_mult / slow_mult)
-        let fast_max =
+        let fast_max_for_slow =
             super::get_mon_by_idx(state, fast_idx).map_or(u64::MAX / 2, |m| m.maxStats[5] as u64);
-        let new_slow_max = (fast_max.saturating_mul(fast_mult as u64) / slow_mult as u64)
+        let new_slow_max = (fast_max_for_slow.saturating_mul(fast_mult as u64) / slow_mult as u64)
             .min(u16::MAX as u64) as u16;
-        if let Some(mon) = super::get_mon_mut_by_idx(state, slow_idx) {
-            if new_slow_max < mon.maxStats[5] {
-                if new_slow_max < mon.minStats[5] {
+        if let Some((slow_min_bound, slow_max_bound)) =
+            super::get_mon_by_idx(state, slow_idx).map(|m| (m.minStats[5], m.maxStats[5]))
+        {
+            if new_slow_max < slow_max_bound {
+                if new_slow_max < slow_min_bound {
                     inference_contradiction!(
                         slow_idx,
-                        "SpeedComparison lowers max({}) below min({})",
+                        "SpeedComparison lowers max({}) below min({}) for mon_idx {}\nmon_idx legend: {}",
                         new_slow_max,
-                        mon.minStats[5]
+                        slow_min_bound,
+                        slow_idx,
+                        super::mon_idx_legend(state)
                     );
                 }
-                mon.maxStats[5] = new_slow_max;
+                if let Some(mon) = super::get_mon_mut_by_idx(state, slow_idx) {
+                    mon.maxStats[5] = new_slow_max;
+                }
                 changed = true;
             }
         }
