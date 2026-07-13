@@ -7582,6 +7582,106 @@ mod roundtrip_soundness {
         );
     }
 
+    /// S37 companion regression: `bench_outgoing_mon` used to clone the slot's current
+    /// occupant onto the bench UNCONDITIONALLY, before `pass1_switch` ran — relying on
+    /// `pass1_switch` to consume the matching bench entry once it placed the incoming
+    /// mon into the active slot. But at the team-preview→battle transition, P1's own
+    /// lead-reveal `SimultaneousSwitch` hits the S37 guard in `pass1_switch` (the
+    /// incoming species already matches the slot's occupant, since `into_battle_state`
+    /// pre-placed the lead there) and returns EARLY, never reaching the bench-removal.
+    /// The clone `bench_outgoing_mon` had already pushed was left orphaned in
+    /// `p1_known_back_mons` — duplicating one physical Pokémon across both the active
+    /// slot and the bench. `teammate_indices`/`enforce_unique_item` then see two
+    /// distinct "teammates" both holding the lead's item, and a later `ItemRevealed`
+    /// re-confirming that item on the (real) active mon panics excluding it from the
+    /// duplicate, which is already `Known` to the same item (a false item-clause
+    /// contradiction — this exact shape was reported with a Leftovers Corviknight).
+    #[test]
+    fn test_s37_own_lead_not_duplicated_onto_bench() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1a = build_pokemon_state(
+            Species::Corviknight, pd, md, Some(50),
+            Some([Some(PokemonMove::BraveBird), None, None, None]),
+            None, Some(Ability::Pressure), Some(Nature::Impish), Some(Item::Leftovers),
+            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+        );
+        let p2a = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::BodySlam), None, None, None]),
+            None, Some(Ability::ThickFat), Some(Nature::Impish), Some(Item::None),
+            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+        );
+
+        let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P1, &[p1a.clone()], &[p2a.clone()], pd, 1, 1, 50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet, true,
+        );
+        let UnknownMatchState::TeamPreview(preview) = preview else {
+            panic!("expected TeamPreview")
+        };
+        // 1 active, 0 back — the whole roster for this test is the single lead.
+        let fog = preview.into_battle_state(Player::P1, &[0], &[], &[0], &[]);
+
+        let events = vec![InformationEvent {
+            kind: crate::information::information::EventKind::SimultaneousSwitch {
+                switches: vec![
+                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                        slot: super::p1(0),
+                        species: Species::Corviknight,
+                        level: 50,
+                        hp: crate::information::unknowns::PokemonHP::Number(p1a.hp),
+                        status: None,
+                        tera_type: None,
+                    },
+                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                        slot: super::p2(0),
+                        species: Species::Snorlax,
+                        level: 50,
+                        hp: crate::information::unknowns::PokemonHP::Percent(100),
+                        status: None,
+                        tera_type: None,
+                    },
+                ],
+            },
+            reactions: vec![],
+        }];
+
+        let result = apply_information(
+            UnknownMatchState::Battle(fog), &events, true, pd, md, &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+        let UnknownMatchState::Battle(b) = result else {
+            panic!("expected Battle state")
+        };
+
+        assert!(
+            b.p1_known_back_mons.is_empty(),
+            "P1's lead must not be duplicated onto the bench during the team-preview \
+             transition; got {:?}", b.p1_known_back_mons
+        );
+
+        // Regression proper: a later ItemRevealed re-confirming the lead's own item
+        // must not panic. Before the fix, the orphaned bench duplicate (also
+        // Known(Leftovers)) collided with this exclusion under item clause.
+        let item_reveal = vec![InformationEvent {
+            kind: crate::information::information::EventKind::ItemRevealed {
+                slot: super::p1(0),
+                item: Item::Leftovers,
+            },
+            reactions: vec![],
+        }];
+        let result2 = apply_information(
+            UnknownMatchState::Battle(b), &item_reveal, true, pd, md, &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+        let UnknownMatchState::Battle(b2) = result2 else {
+            panic!("expected Battle state")
+        };
+        assert_eq!(b2.p1_active_mons[0].item, Unknown::Known(Item::Leftovers));
+    }
+
     // ── Scenario A: Voluntary switch — C1 tera-leak regression ───────────────
 
     /// P2 voluntarily switches from Snorlax → Garchomp.  Garchomp has tera_type=Fire

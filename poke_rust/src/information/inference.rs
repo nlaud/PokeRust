@@ -295,11 +295,11 @@ pub fn get_mon_mut_by_idx(
 
 /// Add `val` to the exclusion list.  Contradiction if already `Known` to `val`.
 /// Removes `val` from a `Possibly` set; collapses to `Known` if one remains.
-fn unknown_exclude<T: PartialEq + Clone>(u: &mut Unknown<T>, val: &T, ctx: &str) {
+fn unknown_exclude<T: PartialEq + Clone + std::fmt::Debug>(u: &mut Unknown<T>, val: &T, ctx: &str) {
     match u {
         Unknown::Known(v) => {
             if v == val {
-                inference_contradiction!(ctx, "exclude({:?}) conflicts with Known value", ctx);
+                inference_contradiction!(ctx, "exclude({:?}) conflicts with Known value", val);
             }
         }
         Unknown::Not(excluded) => {
@@ -2135,7 +2135,7 @@ fn pass1_apply_switch_event(
             apply_switch_out_reset(state, &sw.slot);
             // B1: preserve the outgoing mon to the bench so its state (HP, move reveals,
             // ability/item narrowing) survives for future re-entry inference.
-            bench_outgoing_mon(state, &sw.slot);
+            bench_outgoing_mon(state, &sw.slot, &sw.species);
             pass1_switch(state, sw, ctx);
             pass1_ability_absence_inference(state, &[sw.slot.clone()], &event.reactions, ctx);
         }
@@ -2145,7 +2145,7 @@ fn pass1_apply_switch_event(
                 purge_mon_scoped_knowledge(state, &sw.slot);
                 apply_switch_out_reset(state, &sw.slot);
                 // B1: preserve each outgoing mon before any pass1_switch replaces its slot.
-                bench_outgoing_mon(state, &sw.slot);
+                bench_outgoing_mon(state, &sw.slot, &sw.species);
             }
             for sw in switches {
                 pass1_switch(state, sw, ctx);
@@ -2332,8 +2332,31 @@ fn resolve_item_clauses_on_item_change(
 /// Mons with `Unknown::Known` species go to the `known_back_mons` list so that
 /// `pass1_switch` can find them by species on re-entry.  Unknown-species mons go to
 /// `possible_back_mons`.
-fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot) {
+///
+/// S37 companion: no-ops when `incoming_species` already matches the slot's current
+/// occupant on P1's side — the one-time team-preview→battle transition where
+/// `into_battle_state` pre-places P1's own lead directly into `p1_active_mons` and the
+/// battle-phase lead-reveal `SimultaneousSwitch` then re-announces that same mon.
+/// `pass1_switch`'s S37 guard (below) detects this and returns early, keeping the
+/// existing active entry rather than consuming a bench match — so if this function
+/// benched the mon anyway, the clone it just pushed would never be removed, leaving
+/// the same physical Pokémon duplicated across `p1_active_mons` and `p1_known_back_mons`
+/// (seen in practice as a false item-clause contradiction: the duplicate collides with
+/// its own already-`Known` item). A genuine mid-battle P1 switch always changes who's
+/// active, so this condition can only fire at that one-time reveal — no real switch-out
+/// is ever skipped. Mirrors `purge_mon_scoped_knowledge`'s own "nothing actually left"
+/// self-guard just above.
+fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming_species: &Species) {
     let slot_i = slot.slot_index as usize;
+    if slot.player == Player::P1 {
+        if state
+            .p1_active_mons
+            .get(slot_i)
+            .is_some_and(|m| unknown_is_known_as(&m.possible_species, incoming_species))
+        {
+            return;
+        }
+    }
     // Clone in a temporary scope to avoid simultaneous mutable borrows.
     let maybe_benched: Option<UnknownPokemonState> = {
         let actives = match slot.player {
