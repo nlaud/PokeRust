@@ -24,9 +24,7 @@ mod tests {
         has_sky_drop_move_volatile,
         has_sky_drop_turn_volatile,
         hit_probability,
-        is_permutation,
         move_dex,
-        normalize_battle_outcomes,
         outcomes_permutation,
         pokemon_dex,
         repeat_hit_distribution,
@@ -11768,7 +11766,7 @@ mod tests {
     // -------------------------------------------------------------------------
     mod self_switch {
         use super::*;
-        use crate::state::battle::{AttackCommand, SwitchCommand};
+        use crate::state::battle::SwitchCommand;
         use crate::state::dex_data::SelfSwitchType;
         use crate::simulator::get_possible_commands_for_active_slot;
 
@@ -14661,8 +14659,8 @@ mod tests {
         // reacts with +2 → net P1.Atk = +1, P2.Atk = 0.
         #[test]
         fn mirror_armor_bounce_triggers_source_defiant() {
-            let p1 = mon(Ability::Defiant, PokemonMove::Splash);
-            let p2 = mon(Ability::MirrorArmor, PokemonMove::Splash);
+            let _p1 = mon(Ability::Defiant, PokemonMove::Splash);
+            let _p2 = mon(Ability::MirrorArmor, PokemonMove::Splash);
             // P1 enters with Defiant (no Intimidate here: we just set up the Intimidate
             // separately to avoid needing two abilities).  Instead use a move-based drop.
             // Simplest: use Growl from P2 to trigger Defiant on P1 via Mirror Armor reflection.
@@ -14749,7 +14747,7 @@ mod tests {
     // ════════════════════════════════════════════════════════════════════
     mod damage_reaction_abilities {
         use super::*;
-        use crate::state::battle::AttackCommand;
+        
 
         fn make_mon(species: Species, ability: Ability, first_move: PokemonMove) -> PokemonState {
             let pdex = pokemon_dex();
@@ -16200,7 +16198,7 @@ mod contact_reactive_abilities {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::state::dex_data::{VolatileStatus, Weather};
-    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{build_pokemon_state, PokemonState};
     use crate::simulator::get_possible_commands_for_active_slot;
     use crate::simulator::helpers as simulator_helpers;
     use crate::tests::simuilator_test_helpers::{
@@ -17173,7 +17171,7 @@ mod priority_abilities {
         let pdex = pokemon_dex();
         let mdex = move_dex();
 
-        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+        let p1 = make_mon(Species::Snorlax, Ability::Prankster,
             [Some(PokemonMove::ThunderWave), None, None, None], None);
         // Keep p1 at full HP (high enough to survive a Tackle from P2)
         let p1_initial_hp = p1.hp;
@@ -17205,7 +17203,7 @@ mod priority_abilities {
     fn prankster_does_not_boost_damaging_moves() {
         // Slow Prankster Snorlax uses Tackle (NOT a status move) vs fast Electrode.
         // Tackle gets NO priority boost → P2 (faster) always goes first → P1 always damaged.
-        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+        let p1 = make_mon(Species::Snorlax, Ability::Prankster,
             [Some(PokemonMove::Tackle), None, None, None], None);
         let p1_initial_hp = p1.hp;
 
@@ -17228,7 +17226,7 @@ mod priority_abilities {
         // Prankster Thunder Wave fires first (+1 priority) but the target is Dark-type —
         // Dark-types are immune to Prankster-boosted status moves (Gen VII+).
         // P2 is never paralyzed → P2's Tackle always lands → P1 always damaged.
-        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+        let p1 = make_mon(Species::Snorlax, Ability::Prankster,
             [Some(PokemonMove::ThunderWave), None, None, None], None);
         let p1_initial_hp = p1.hp;
 
@@ -17255,7 +17253,7 @@ mod priority_abilities {
         let pdex = pokemon_dex();
         let mdex = move_dex();
 
-        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+        let p1 = make_mon(Species::Snorlax, Ability::Prankster,
             [Some(PokemonMove::ThunderWave), None, None, None], None);
         let p1_initial_hp = p1.hp;
 
@@ -17406,7 +17404,7 @@ mod priority_abilities {
         // P1 slow Prankster uses Growl (status → effective priority +1 via Prankster).
         // P2 has Queenly Majesty → the boosted status move is blocked (effective priority > 0).
         // Result: P2's Defense is NOT lowered in any branch.
-        let mut p1 = make_mon(Species::Snorlax, Ability::Prankster,
+        let p1 = make_mon(Species::Snorlax, Ability::Prankster,
             [Some(PokemonMove::Growl), None, None, None], None);
         // Slow, so without Prankster Growl priority 0 → P2 goes first anyway (doesn't matter here)
         let p2 = make_mon(Species::Snorlax, Ability::QueenlyMajesty,
@@ -22755,7 +22753,7 @@ mod stat_manipulation {
         p1.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::PowerTrick, 0));
         let p1_bench = mon(Species::Clefable, PokemonMove::Splash);
         let p2 = mon(Species::Snorlax, PokemonMove::Splash);
-        let mut state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
+        let state = battle_state_from_lists(vec![p1], vec![p1_bench], vec![p2], vec![]);
         let outcomes = run_single_turn(
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
@@ -23673,7 +23671,7 @@ mod rampaging_moves {
         use crate::data::species::Species;
         use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
         use crate::state::battle::{BattleCommand, AttackCommand};
-        use crate::simulator;
+        
 
         let pdex = pokemon_dex();
         let mdex = move_dex();
@@ -25079,7 +25077,7 @@ mod ability_manipulation_moves {
 mod turn_order_and_delayed_moves {
     use crate::state::battle::{Action, BattleState, FieldSlot, MatchState, MoveAction, Player, PlayerCommand};
     use crate::data::ability::Ability;
-    use crate::data::item::Item;
+    
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::state::dex_data::SlotCondition;
@@ -25392,7 +25390,7 @@ mod turn_order_and_delayed_moves {
 
 // ── Side and field condition moves ────────────────────────────────────────────────────────────
 mod side_and_field_condition_moves {
-    use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
@@ -25948,7 +25946,7 @@ mod two_turn_charging_moves {
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::state::dex_data::{Status, VolatileStatus};
-    use crate::state::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
+    use crate::state::pokemon::{build_pokemon_state, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, extract_battle_state, move_dex, pokemon_dex, run_single_turn,
         simple_attack,
@@ -26178,7 +26176,7 @@ mod two_turn_charging_moves {
 
 #[cfg(test)]
 mod conditional_damage_moves {
-    use crate::state::battle::{BattleState, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{BattleState, MatchState, Player};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
@@ -26988,7 +26986,7 @@ mod turn_state_moves {
         let mut p1 = mon(Species::Snorlax, PokemonMove::Spite);
         p1.stats[5] = 200; // fast — acts before p2
 
-        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash);
+        let p2 = mon(Species::Snorlax, PokemonMove::Splash);
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let initial_pp = state.p2_active_mons[0].move_pp[0]; // read from actual state
@@ -27106,17 +27104,17 @@ mod first_turn_on_field_mid_turn_entry {
 
 #[cfg(test)]
 mod new_moves_session {
-    use crate::state::battle::{BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::state::dex_data::{PokemonType, PseudoWeather, Status, Terrain, VolatileStatus};
     use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
-    use crate::simulator::helpers as simulator_helpers;
+    
     use crate::tests::simuilator_test_helpers::{
         assert_distribution_close, battle_state_from_lists, damage_distribution,
-        extract_battle_state, hit_probability, move_dex, outcomes_permutation,
+        extract_battle_state, hit_probability, move_dex,
         pokemon_dex, run_single_turn, simple_attack,
     };
 
@@ -27636,7 +27634,7 @@ mod new_moves_session {
         let p1 = mon(Species::Incineroar, PokemonMove::DarkestLariat, Ability::None);
         let mut p2_boosted = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
         p2_boosted.boosts[1] = 6; // +6 Def
-        let mut p2_neutral = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        let p2_neutral = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
 
         let state_boosted = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_boosted], vec![]);
         let state_neutral  = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_neutral], vec![]);
@@ -27788,7 +27786,7 @@ mod new_moves_session {
         let mut p1 = mon(Species::Smeargle, PokemonMove::Acupressure, Ability::None);
         p1.boosts = [6, 6, 6, 6, 6, 6, 6];
         let p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
-        let initial_hp = p2.hp;
+        let _initial_hp = p2.hp;
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         let outcomes = run_single_turn(
             &MatchState::BattleState(state),
@@ -27970,7 +27968,7 @@ mod new_moves_session {
         p2.stats[5] = 200; // faster, moves first
 
         let initial_p1_hp = p1.hp;
-        let initial_p2_hp = p2.hp;
+        let _initial_p2_hp = p2.hp;
 
         // Turn 1: P1 uses Splash (slot 1), P2 uses Tackle (slot 0).
         // P2 acts first due to speed → Tackle sets last_move_on_field. P1 Splash is a no-op.
@@ -28024,7 +28022,7 @@ mod new_moves_session {
         }
 
         // Turn 2: P1 uses Copycat (slot 0) — should copy Tackle from last turn and damage P2.
-        let p1b_hp_after_t1 = if let MatchState::BattleState(ref bs) = turn1_b_state {
+        let _p1b_hp_after_t1 = if let MatchState::BattleState(ref bs) = turn1_b_state {
             bs.p1_active_mons[0].hp
         } else { panic!("expected battle state"); };
 
@@ -28718,7 +28716,7 @@ mod new_ability_tests {
         battle_state_from_lists, damage_distribution, extract_battle_state, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
-    use crate::simulator;
+    
 
     fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
         build_pokemon_state(
@@ -28816,10 +28814,10 @@ mod new_ability_tests {
 
     #[test]
     fn sand_force_grants_sandstorm_chip_immunity() {
-        let mut p1 = mon(Species::Garchomp, PokemonMove::Splash, Ability::SandForce);
+        let p1 = mon(Species::Garchomp, PokemonMove::Splash, Ability::SandForce);
         // Garchomp is Dragon/Ground; dragon isn't sand-immune by type, but SandForce is.
         let initial_hp = p1.hp;
-        let mut p2 = mon(Species::Tyranitar, PokemonMove::Splash, Ability::None); // Rock type, immune naturally
+        let p2 = mon(Species::Tyranitar, PokemonMove::Splash, Ability::None); // Rock type, immune naturally
         let mut state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
         state.weather = Some(Weather::Sandstorm);
 
@@ -29083,7 +29081,7 @@ mod new_ability_tests {
     fn sturdy_blocks_ohko_moves() {
         let mut p1 = mon(Species::Donphan, PokemonMove::Fissure, Ability::None);
         p1.stats[5] = 200;
-        let mut p2 = mon(Species::Shuckle, PokemonMove::Splash, Ability::Sturdy);
+        let p2 = mon(Species::Shuckle, PokemonMove::Splash, Ability::Sturdy);
         let initial_hp = p2.hp;
 
         let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
@@ -29269,7 +29267,7 @@ mod new_ability_tests {
 
 // ── Cross-cutting ability tests ──────────────────────────────────────────────
 mod abilities_cross_cutting {
-    use crate::state::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
@@ -29280,7 +29278,7 @@ mod abilities_cross_cutting {
         battle_state_from_lists, damage_distribution,
         move_dex, pokemon_dex, run_single_turn, simple_attack,
     };
-    use crate::simulator;
+    
 
     fn mon(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
         build_pokemon_state(
@@ -29305,15 +29303,6 @@ mod abilities_cross_cutting {
             &MatchState::BattleState(state),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            move_dex(), pokemon_dex(),
-        )
-    }
-
-    fn run_state_p2_first(state: BattleState) -> Vec<(MatchState, f64)> {
-        run_single_turn(
-            &MatchState::BattleState(state),
-            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
-            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
             move_dex(), pokemon_dex(),
         )
     }
@@ -29782,13 +29771,13 @@ mod new_abilities_batch {
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::state::dex_data::{PokemonType, SideCondition, Terrain, VolatileStatus, Weather};
+    use crate::state::dex_data::{PokemonType, SideCondition, Terrain, VolatileStatus};
     use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
-        battle_state_from_lists, damage_distribution, move_dex, pokemon_dex,
+        battle_state_from_lists, move_dex, pokemon_dex,
         run_single_turn, simple_attack,
     };
-    use crate::simulator::helpers as simulator_helpers;
+    
 
     fn mon_with_move(species: Species, mv: PokemonMove, ability: Ability) -> PokemonState {
         build_pokemon_state(
@@ -29803,17 +29792,6 @@ mod new_abilities_batch {
         outcomes.iter().map(|(s, p)| {
             let taken = match s {
                 MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p2_active_mons[0].hp),
-                MatchState::GameOverState { .. } => initial_hp,
-                _ => 0,
-            };
-            taken as f64 * p
-        }).sum()
-    }
-
-    fn avg_damage_to_p1(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
-        outcomes.iter().map(|(s, p)| {
-            let taken = match s {
-                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p1_active_mons[0].hp),
                 MatchState::GameOverState { .. } => initial_hp,
                 _ => 0,
             };
@@ -30167,7 +30145,7 @@ mod new_abilities_batch {
 
     #[test]
     fn mimicry_changes_type_to_electric_on_send_in_under_electric_terrain() {
-        let mut holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Mimicry);
+        let holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::Mimicry);
         let original_types = holder.types.clone();
         let foe = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::None);
         let mut state = battle_state_from_lists(vec![holder.clone()], vec![], vec![foe], vec![]);
@@ -30343,7 +30321,7 @@ mod new_abilities_batch {
         let mut holder = mon_with_move(Species::Snorlax, PokemonMove::Splash, Ability::ToxicDebris);
         holder.hp = 10000;
         holder.stats[0] = 10000;
-        let init_hp = holder.stats[0];
+        let _init_hp = holder.stats[0];
 
         let state1 = battle_state_from_lists(
             vec![attacker.clone()], vec![], vec![holder.clone()], vec![],
@@ -30921,13 +30899,13 @@ mod todo_refactor_mechanic_tests {
 // Doubles faint redirection + spread multiplier guard
 // ─────────────────────────────────────────────────────────────────────────────
 mod doubles_faint_redirection {
-    use crate::state::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{AttackCommand, BattleCommand, FieldSlot, MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
-    use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex, run_single_turn};
-    use crate::simulator;
+    use crate::tests::simuilator_test_helpers::{battle_state_from_lists, move_dex, pokemon_dex};
+    
 
     fn mon(species: Species, mv: PokemonMove) -> PokemonState {
         let pdex = pokemon_dex();
@@ -31138,7 +31116,7 @@ mod season2_items_and_abilities {
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn, simple_attack,
         extract_battle_state,
     };
-    use crate::simulator;
+    
     use crate::simulator::helpers as simulator_helpers;
 
     fn mon(species: Species, mv: PokemonMove, ability: Ability, item: Option<Item>) -> PokemonState {
@@ -31154,17 +31132,6 @@ mod season2_items_and_abilities {
         outcomes.iter().map(|(s, p)| {
             let taken = match s {
                 MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p2_active_mons[0].hp),
-                MatchState::GameOverState { .. } => initial_hp,
-                _ => 0,
-            };
-            taken as f64 * p
-        }).sum()
-    }
-
-    fn avg_damage_p1(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
-        outcomes.iter().map(|(s, p)| {
-            let taken = match s {
-                MatchState::BattleState(bs) => initial_hp.saturating_sub(bs.p1_active_mons[0].hp),
                 MatchState::GameOverState { .. } => initial_hp,
                 _ => 0,
             };
@@ -31303,7 +31270,7 @@ mod season2_items_and_abilities {
         let snorlax_hp = target.stats[0];
 
         let base = mon(Species::Gengar, PokemonMove::Psychic, Ability::None, None);
-        let max_hp_base = base.stats[0];
+        let _max_hp_base = base.stats[0];
         let outcomes_base = run_single_turn(
             &MatchState::BattleState(battle_state_from_lists(vec![base], vec![], vec![target.clone()], vec![])),
             &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
@@ -31644,8 +31611,8 @@ mod season2_items_and_abilities {
 
     #[test]
     fn iron_ball_halves_speed() {
-        let pdex = pokemon_dex();
-        let mdex = move_dex();
+        let _pdex = pokemon_dex();
+        let _mdex = move_dex();
         let base = mon(Species::Raticate, PokemonMove::Splash, Ability::None, None);
         let iron = mon(Species::Raticate, PokemonMove::Splash, Ability::None, Some(Item::IronBall));
         let state = battle_state_from_lists(vec![base.clone()], vec![], vec![base.clone()], vec![]);
@@ -32359,9 +32326,9 @@ mod new_moves {
 
 // ── Rollout / Ice Ball / Defense Curl ────────────────────────────────────────
 mod rollout {
-    use crate::state::battle::{BattleCommand, AttackCommand, MatchState, Player, PlayerCommand};
+    use crate::state::battle::{MatchState, Player, PlayerCommand};
     use crate::data::ability::Ability;
-    use crate::data::item::Item;
+    
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::state::dex_data::VolatileStatus;
@@ -34153,15 +34120,16 @@ mod event_round_trip {
         let events = branches.remove(0).1.expect("observer set — events must be Some");
         let mv = find_move_used(&events, p1s0())
             .expect("MoveUsed for P1 slot 0 must be present");
+        // Immune is nested as a reaction UNDER the AbilityRevealed (the ability is the
+        // cause, immunity is its consequence — see EventKind::Immune's doc comment),
+        // not a flat sibling — so find the reveal itself and check its own reactions.
+        let reveal = mv.reactions.iter().find(|e| matches!(&e.kind,
+            EventKind::AbilityRevealed { slot, ability: Ability::WaterAbsorb } if *slot == p2s0()))
+            .unwrap_or_else(|| panic!("Water Absorb must be revealed when it absorbs;\nreactions = {:#?}", mv.reactions));
         assert!(
-            any_kind(&mv.reactions, |k| matches!(k,
-                EventKind::AbilityRevealed { slot, ability: Ability::WaterAbsorb } if *slot == p2s0())),
-            "Water Absorb must be revealed when it absorbs;\nreactions = {:#?}", mv.reactions
-        );
-        assert!(
-            any_kind(&mv.reactions, |k| matches!(k,
+            any_kind(&reveal.reactions, |k| matches!(k,
                 EventKind::Immune { target } if *target == p2s0())),
-            "the absorb must emit Immune;\nreactions = {:#?}", mv.reactions
+            "the absorb must emit Immune nested under the AbilityRevealed reveal;\nreveal.reactions = {:#?}", reveal.reactions
         );
     }
 
@@ -35681,7 +35649,7 @@ mod playtest_fix_batch {
     use crate::information::information::{EventKind, InformationEvent};
     use crate::state::battle::{FieldSlot, MatchState, Player, PlayerCommand};
     use crate::state::dex_data::VolatileStatus;
-    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState, VolatileStatusState};
+    use crate::state::pokemon::{build_pokemon_state, Nature, VolatileStatusState};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn_with_events_opts,
         simple_attack,

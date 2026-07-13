@@ -129,7 +129,7 @@ function renderEvent(event: EventNode, depth: number, resolver: NameResolver, ou
       line(`A critical hit on ${resolver.name(event.target)}!`, 'warning')
       break
     case 'immune':
-      line(`${resolver.name(event.target)} is immune!`, 'muted')
+      line(`It doesn't affect ${resolver.name(event.target)}…`, 'muted')
       break
     case 'missed':
       line(`The attack missed ${resolver.name(event.target)}!`, 'muted')

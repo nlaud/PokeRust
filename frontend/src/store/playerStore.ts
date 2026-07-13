@@ -171,7 +171,15 @@ export const usePlayer = create<PlayerStore>((set, get) => ({
   },
 
   skip: () => {
-    ytPlayer(get().activeTrack)?.nextVideo?.()
+    const yt = ytPlayer(get().activeTrack)
+    yt?.nextVideo?.()
+    // `nextVideo` itself starts playback, which would silently un-pause a user
+    // who had explicitly paused — cue the fresh track but immediately re-pause it
+    // so `playing: false` survives a manual skip the same way it must survive a
+    // crossfade (see `crossfadeTo` below).
+    if (!get().playing) {
+      yt?.pauseVideo?.()
+    }
   },
 
   unlock: () => {
@@ -221,6 +229,14 @@ export const usePlayer = create<PlayerStore>((set, get) => ({
       targetYt.nextVideo()
     } else {
       targetYt?.playVideo?.()
+    }
+    // `nextVideo`/`playVideo` above unconditionally start playback — if the user
+    // had explicitly paused (`playing: false`), immediately re-pause the freshly
+    // cued target so the paused state survives the track change instead of being
+    // silently overridden. The track still jumps to a new song either way; it's
+    // just paused on arrival rather than resuming mid-crossfade.
+    if (!get().playing) {
+      targetYt?.pauseVideo?.()
     }
     // Flip immediately: the visible video should match the incoming music as it
     // fades in, not wait until the fade completes.

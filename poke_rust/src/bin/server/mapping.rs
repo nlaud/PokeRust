@@ -184,10 +184,10 @@ pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
 /// mode, so those stay ground truth.
 fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> PokemonView {
     view.nature = describe_unknown(&unk.possible_natures);
-    view.stats = unk.minStats;
-    view.stats_max = unk.maxStats;
-    view.evs = unk.minEvs;
-    view.evs_max = unk.maxEvs;
+    view.stats = unk.min_stats;
+    view.stats_max = unk.max_stats;
+    view.evs = unk.min_evs;
+    view.evs_max = unk.max_evs;
     // A real player only ever sees the opponent's HP as a rounded percent, never the
     // exact value — replace the true `mon.hp` set by `pokemon_view` with the belief's
     // own observed representation (never compute a fake-precise number back out of a
@@ -260,12 +260,12 @@ fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState, fallback_id: u8) ->
         fainted: unk.fainted,
         status: unk.status.as_ref().map(status_dto),
         volatiles: unk.volatiles.iter().map(volatile_dto).collect(),
-        stats: unk.minStats,
-        stats_max: unk.maxStats,
+        stats: unk.min_stats,
+        stats_max: unk.max_stats,
         boosts: [0; 7],
         nature: describe_unknown(&unk.possible_natures),
-        evs: unk.minEvs,
-        evs_max: unk.maxEvs,
+        evs: unk.min_evs,
+        evs_max: unk.max_evs,
         item: None,
         ability: describe_unknown(&unk.possible_abilities),
         moves: Vec::new(),
@@ -530,6 +530,13 @@ pub fn battle_view(
             view.p1 = Some(side_view(final_state, Player::P1, belief, perspective));
             view.p2 = Some(side_view(final_state, Player::P2, belief, perspective));
             view.field = Some(field_view(final_state));
+            // Mirror the BattleState arm: the belief is still tracked (session.rs
+            // never clears belief_p1/belief_p2 at game over), so the Predicates tab's
+            // final deductions should stay visible instead of vanishing the instant
+            // the match ends.
+            view.belief = belief_battle_state(belief).map(|fog| BeliefView {
+                clauses: fog.predicates.iter().map(|clause| describe_clause(clause, fog)).collect(),
+            });
         }
     }
 

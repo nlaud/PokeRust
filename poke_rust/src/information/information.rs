@@ -241,8 +241,12 @@ pub enum EventKind {
     /// The preceding hit scored a critical hit.
     Crit { target: FieldSlot },
 
-    /// The target was completely immune to the move. A nested [`AbilityRevealed`] or
-    /// [`TypeChanged`] may explain *why*.
+    /// The target was completely immune to the move. When the cause is hidden
+    /// information (an ability or item), this event is nested as a reaction *under*
+    /// an enclosing [`AbilityRevealed`]/[`ItemRevealed`] — the reveal is the cause,
+    /// Immune is its consequence, matching [`MoveFailed`]'s convention. A bare
+    /// top-level Immune with no enclosing reveal means plain type-chart immunity
+    /// (already-public typing) with nothing further to explain.
     Immune { target: FieldSlot },
 
     /// The move missed its target.

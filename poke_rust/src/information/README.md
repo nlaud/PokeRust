@@ -173,8 +173,8 @@ possible_species, possible_types, item, possible_natures,
 possible_abilities, possible_original_abilities, possible_weight_hg,
 possible_tera_type, possible_genders, mega_species, mega_ability : Unknown<T>
 
-minEvs / maxEvs, minIvs / maxIvs           : [u8; 6]   per-stat bounds
-minStats / maxStats                        : [u16; 6]  derived stat bounds
+min_evs / max_evs, min_ivs / max_ivs           : [u8; 6]   per-stat bounds
+min_stats / max_stats                        : [u16; 6]  derived stat bounds
 min_pre_nature_stat / max_pre_nature_stat  : [u16; 6]  pre-nature BSV bounds
 ```
 
@@ -246,8 +246,8 @@ they compare two Pokémon or relate a Pokémon to a hypothetical move rather
 than pinning one field — so BCP never "forces" them into a concrete value the
 way it does `HasItem`/`HasAbility`/etc.; it only ever satisfies or prunes the
 clause they sit in. `propagate_speed_comparisons` is the code that turns a
-*unit* `SpeedComparison` clause into an actual tightening of `minStats[5]`/
-`maxStats[5]`.
+*unit* `SpeedComparison` clause into an actual tightening of `min_stats[5]`/
+`max_stats[5]`.
 
 ### `mon_idx`: a flat index across every roster
 
@@ -541,8 +541,8 @@ speed, and enforcing it anyway can force a mon's minimum speed above its own
 species maximum):
 
 ```
-fast_min × fast_mult ≥ slow_min × slow_mult  ⟹  fast.minStats[5]  ≥ ceil(slow.minStats[5] × slow_mult / fast_mult)
-fast_max × fast_mult ≥ slow_max × slow_mult  ⟹  slow.maxStats[5]  ≤ floor(fast.maxStats[5] × fast_mult / slow_mult)
+fast_min × fast_mult ≥ slow_min × slow_mult  ⟹  fast.min_stats[5]  ≥ ceil(slow.min_stats[5] × slow_mult / fast_mult)
+fast_max × fast_mult ≥ slow_max × slow_mult  ⟹  slow.max_stats[5]  ≤ floor(fast.max_stats[5] × fast_mult / slow_mult)
 ```
 
 ### Pass 5 — Back-Solve EV / IV / Nature
@@ -550,18 +550,18 @@ fast_max × fast_mult ≥ slow_max × slow_mult  ⟹  slow.maxStats[5]  ≤ floo
 **Where:** `pass5_back_solve`, run per Pokémon with a `Known` species, after
 the event walk.
 
-Given the `minStats`/`maxStats` (and, for non-HP stats, `min_pre_nature_stat`/
+Given the `min_stats`/`max_stats` (and, for non-HP stats, `min_pre_nature_stat`/
 `max_pre_nature_stat`) tightened by the earlier passes, this pass inverts the
 stat formula to constrain EV, IV, and nature directly.
 
-**HP** has no nature term: enumerate `iv ∈ [minIvs[0], maxIvs[0]]` (or just
+**HP** has no nature term: enumerate `iv ∈ [min_ivs[0], max_ivs[0]]` (or just
 `{31}` under `force_max_ivs`) and `ev` over the legal lattice, keep pairs whose
-`calc_hp` falls inside `[minStats[0], maxStats[0]]`, and tighten `minEvs[0]`/
-`maxEvs[0]` to the surviving range.
+`calc_hp` falls inside `[min_stats[0], max_stats[0]]`, and tighten `min_evs[0]`/
+`max_evs[0]` to the surviving range.
 
 **Non-HP stats** iterate over every still-possible nature. For each nature's
 modifier `m ∈ {0.9, 1.0, 1.1}`, a `(iv, ev)` pair survives if both the final
-stat (`floor(BSV × m)`) falls in `[minStats[i], maxStats[i]]` *and* the BSV
+stat (`floor(BSV × m)`) falls in `[min_stats[i], max_stats[i]]` *and* the BSV
 itself falls in `[min_pre_nature_stat[i], max_pre_nature_stat[i]]`. A nature
 that has no surviving pair for any stat it touches is excluded outright. The
 global EV range per stat is the union across all surviving natures.

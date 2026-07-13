@@ -16,7 +16,7 @@ const EFFECT_COLORS: Record<string, string> = {
   'Trick Room': 'bg-indigo-500/70 text-white',
   Gravity: 'bg-slate-500/70 text-white',
   Reflect: 'bg-violet-400/70 text-white',
-  'Light Screen': 'bg-amber-300/70 text-amber-950',
+  'Light Screen': 'bg-violet-400/70 text-white',
   'Aurora Veil': 'bg-sky-300/70 text-sky-950',
   'Stealth Rock': 'bg-stone-500/70 text-white',
   Tailwind: 'bg-teal-500/70 text-white',

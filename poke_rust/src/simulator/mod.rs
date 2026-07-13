@@ -682,9 +682,9 @@ fn apply_single_hit_branch(
     if let Some(atk) = attacker_for_absorb {
         let mut branch_state_absorb = branch_state.clone();
         if simulator_helpers::try_absorb_move(&mut branch_state_absorb, target_slot, &atk, move_data, items_suppressed) {
-            // Ability absorbed the move — emit Immune (the ability reveal follows naturally
-            // from the ability activating inside try_absorb_move).
-            simulator_helpers::emit(&mut branch_state_absorb, EventKind::Immune { target: target_slot });
+            // Ability absorbed the move — `try_absorb_move` itself nests the Immune event
+            // (and the heal/boost/volatile it grants) as a reaction under the ability's own
+            // AbilityRevealed, so nothing further to emit here.
             outcomes.push((branch_state_absorb, branch_probability));
             return outcomes;
         }
@@ -1124,6 +1124,12 @@ fn apply_single_hit_branch(
         let immune_zero_damage = eff_damage == 0
             && matches!(move_data.category, crate::state::dex_data::MoveCategory::Physical | crate::state::dex_data::MoveCategory::Special);
         if immune_zero_damage {
+            // Reached here only once every ability/item immunity gate above has already
+            // been ruled out (Bulletproof, Soundproof, Overcoat, type-absorption, etc. all
+            // `continue` earlier), so a 0x-effectiveness hit landing here is pure type-chart
+            // immunity (Normal/Fighting → Ghost, Electric → Ground with no Volt Absorb, …) —
+            // no ability to reveal, just the flat, publicly-known typing.
+            simulator_helpers::emit(&mut bs, EventKind::Immune { target: target_slot });
             outcomes.push((bs, branch_probability * endure_prob));
         } else {
             let sec_branches = simulator_helpers::apply_secondary_effects(&bs, attack_slot, target_slot, move_data);
@@ -4958,6 +4964,35 @@ fn possible_damage_outcomes_for_move(
                 && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
                 && matches!(target.ability, Ability::Levitate | Ability::Eelevate);
             if !mold_breaks_levitate {
+                // `pokemon_is_grounded` collapses several distinct ungrounding causes into
+                // one bool, so attribute the specific one here: an ability or item cause is
+                // hidden information and gets nested under its own reveal (Immune becomes a
+                // reaction, matching the priority-blocker pattern above); Flying-type and the
+                // Magnet Rise / Telekinesis volatiles are already public (typing, or a
+                // VolatileStart already logged when they were applied), so those stay a flat
+                // Immune with no reveal.
+                let ability_cause = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+                    && matches!(target.ability, Ability::Levitate | Ability::Eelevate);
+                let item_cause = !ability_cause
+                    && matches!(target.item, Item::AirBalloon)
+                    && simulator_helpers::item_is_active(&next_state, &target);
+                if ability_cause {
+                    simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
+                        slot: *target_slot,
+                        ability: target.ability.clone(),
+                    }, |ns| {
+                        simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
+                    });
+                } else if item_cause {
+                    simulator_helpers::with_reactions(&mut next_state, EventKind::ItemRevealed {
+                        slot: *target_slot,
+                        item: target.item.clone(),
+                    }, |ns| {
+                        simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
+                    });
+                } else {
+                    simulator_helpers::emit(&mut next_state, EventKind::Immune { target: *target_slot });
+                }
                 outcomes_for_target.push((0, false, false, 1.0));
                 per_target_outcomes.push((*target_slot, outcomes_for_target));
                 continue;
@@ -4972,6 +5007,12 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Bulletproof
         {
+            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
+                slot: *target_slot,
+                ability: Ability::Bulletproof,
+            }, |ns| {
+                simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
+            });
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -4986,6 +5027,12 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Soundproof
         {
+            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
+                slot: *target_slot,
+                ability: Ability::Soundproof,
+            }, |ns| {
+                simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
+            });
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5013,6 +5060,12 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::GoodasGold
         {
+            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
+                slot: *target_slot,
+                ability: Ability::GoodasGold,
+            }, |ns| {
+                simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
+            });
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5025,6 +5078,34 @@ fn possible_damage_outcomes_for_move(
         if simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Powder)
             && simulator_helpers::is_immune_to_powder(&next_state, &target, Some(&attacker))
         {
+            // `is_immune_to_powder` collapses type/ability/item causes into one bool
+            // (checked in this same priority order) — attribute the actual cause so
+            // only the hidden ones (ability, item) get a reveal; Grass-typing is
+            // already public and stays a flat Immune.
+            let mold_breaks_overcoat = simulator_helpers::attacker_breaks_mold(&next_state, &attacker);
+            let ability_cause = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+                && !mold_breaks_overcoat
+                && target.ability == Ability::Overcoat;
+            let item_cause = !ability_cause
+                && matches!(target.item, Item::SafetyGoggles)
+                && simulator_helpers::item_is_active(&next_state, &target);
+            if ability_cause {
+                simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
+                    slot: *target_slot,
+                    ability: Ability::Overcoat,
+                }, |ns| {
+                    simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
+                });
+            } else if item_cause {
+                simulator_helpers::with_reactions(&mut next_state, EventKind::ItemRevealed {
+                    slot: *target_slot,
+                    item: Item::SafetyGoggles,
+                }, |ns| {
+                    simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
+                });
+            } else {
+                simulator_helpers::emit(&mut next_state, EventKind::Immune { target: *target_slot });
+            }
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5042,6 +5123,12 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Telepathy
         {
+            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
+                slot: *target_slot,
+                ability: Ability::Telepathy,
+            }, |ns| {
+                simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
+            });
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;

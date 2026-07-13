@@ -115,17 +115,17 @@ pub struct UnknownPokemonState {
     pub ally_switch_counter: u8,
 
     pub possible_natures: Unknown<Nature>,
-    pub minEvs: [u8; 6],
-    pub maxEvs: [u8; 6],
-    pub minIvs: [u8; 6],
-    pub maxIvs: [u8; 6],
+    pub min_evs: [u8; 6],
+    pub max_evs: [u8; 6],
+    pub min_ivs: [u8; 6],
+    pub max_ivs: [u8; 6],
 
-    pub minStats: PokemonStatsTable,
-    pub maxStats: PokemonStatsTable,
+    pub min_stats: PokemonStatsTable,
+    pub max_stats: PokemonStatsTable,
 
     /// Pre-nature base stat value bounds: `calc_stat(base, iv, ev, level, 1.0)` before ×0.9/1.0/1.1.
     /// Tightened by Pass 3 (damage→stat inversion). Used by Pass 5 + Pass 6 `EVIVStatGE`/`EVIVStatLE`.
-    /// Index matches `minStats`/`maxStats`: 0=HP, 1=Atk, 2=Def, 3=SpA, 4=SpD, 5=Spe.
+    /// Index matches `min_stats`/`max_stats`: 0=HP, 1=Atk, 2=Def, 3=SpA, 4=SpD, 5=Spe.
     pub min_pre_nature_stat: PokemonStatsTable,
     pub max_pre_nature_stat: PokemonStatsTable,
 
@@ -592,12 +592,12 @@ impl UnknownPokemonState {
             stall_counter: mon.stall_counter,
             ally_switch_counter: mon.ally_switch_counter,
             possible_natures: Unknown::Known(mon.nature),
-            minEvs: mon.evs,
-            maxEvs: mon.evs,
-            minIvs: mon.ivs,
-            maxIvs: mon.ivs,
-            minStats: mon.stats,
-            maxStats: mon.stats,
+            min_evs: mon.evs,
+            max_evs: mon.evs,
+            min_ivs: mon.ivs,
+            max_ivs: mon.ivs,
+            min_stats: mon.stats,
+            max_stats: mon.stats,
             // EVIVStatGE/LE predicates are only ever emitted for *opponent* mons, so these
             // bounds are never used to constrain own mons — a maximally wide range is fine.
             min_pre_nature_stat: [0u16; 6],
@@ -732,12 +732,12 @@ impl UnknownPokemonState {
             stall_counter: 0,
             ally_switch_counter: 0,
             possible_natures: Unknown::Not(Vec::new()),
-            minEvs: [0; 6],
-            maxEvs: [252; 6],
-            minIvs: [0; 6],
-            maxIvs: [31; 6],
-            minStats: min_stats,
-            maxStats: max_stats,
+            min_evs: [0; 6],
+            max_evs: [252; 6],
+            min_ivs: [0; 6],
+            max_ivs: [31; 6],
+            min_stats: min_stats,
+            max_stats: max_stats,
             min_pre_nature_stat: min_pre_nature,
             max_pre_nature_stat: max_pre_nature,
             boosts: [0; 7],
@@ -806,10 +806,10 @@ impl UnknownPokemonState {
         let mut unk = Self::from_opponent_species(mon.species.clone(), dex, level);
         let min_iv: u8 = if force_max_ivs { 31 } else { 0 };
         if force_max_ivs {
-            unk.minIvs = [31; 6];
+            unk.min_ivs = [31; 6];
             if let Some(data) = dex.get(&mon.species) {
                 let b = data.base_stats;
-                unk.minStats = [
+                unk.min_stats = [
                     calc_hp(b[0], min_iv, 0, level),
                     calc_stat(b[1], min_iv, 0, level, 0.9),
                     calc_stat(b[2], min_iv, 0, level, 0.9),
@@ -857,7 +857,7 @@ impl UnknownPokemonState {
             // (not the independent 0.9/1.1 worst-case `from_opponent_species` used
             // when the nature was still unknown) — only EV/IV remain uncertain.
             let mods = crate::state::pokemon::nature_stat_modifiers(&mon.nature);
-            unk.minStats = [
+            unk.min_stats = [
                 calc_hp(base[0], min_iv, 0, level),
                 calc_stat(base[1], min_iv, 0, level, mods[0]),
                 calc_stat(base[2], min_iv, 0, level, mods[1]),
@@ -865,7 +865,7 @@ impl UnknownPokemonState {
                 calc_stat(base[4], min_iv, 0, level, mods[3]),
                 calc_stat(base[5], min_iv, 0, level, mods[4]),
             ];
-            unk.maxStats = [
+            unk.max_stats = [
                 calc_hp(base[0], 31, 252, level),
                 calc_stat(base[1], 31, 252, level, mods[0]),
                 calc_stat(base[2], 31, 252, level, mods[1]),

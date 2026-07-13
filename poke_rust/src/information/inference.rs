@@ -71,7 +71,7 @@ pub struct InferenceConfig {
     /// `possible_species`. Empty map disables this narrowing (default for tests).
     pub learnset_dex: HashMap<Species, HashSet<PokemonMove>>,
     /// Total EV budget across all six stats. When `Some(n)`, Pass 5 applies
-    /// cross-stat tightening: `maxEvs[i] ≤ n − Σ_{j≠i} minEvs[j]`. Standard
+    /// cross-stat tightening: `max_evs[i] ≤ n − Σ_{j≠i} min_evs[j]`. Standard
     /// competitive value is 510. `None` disables the cap check.
     pub ev_total_cap: Option<u16>,
 }
@@ -799,7 +799,7 @@ fn process_team_preview_event(
 
 /// Run `pass5_back_solve` on every mon in `state` whose species is fully known.
 /// This is a pure information-gain step: it converts tightened `min/max_pre_nature_stat`
-/// bounds into narrower `minEvs/maxEvs` and excluded natures.  Safe to call multiple
+/// bounds into narrower `min_evs/max_evs` and excluded natures.  Safe to call multiple
 /// times — bounds are monotone so it always converges.
 fn run_pass5_all_mons(
     state: &mut UnknownBattleState,
@@ -808,7 +808,7 @@ fn run_pass5_all_mons(
 ) {
     let total = mons_count_battle(state);
     for idx in 0..total {
-        // S38: skip mons whose EVs are ALREADY fully pinned (`minEvs == maxEvs` on
+        // S38: skip mons whose EVs are ALREADY fully pinned (`min_evs == max_evs` on
         // every stat) — this is exactly the invariant `from_known_pokemon` establishes
         // for the observer's own (P1) mons, where the true EV is already ground truth
         // and there's nothing to back-solve. Running pass5 anyway is not just wasted
@@ -819,14 +819,14 @@ fn run_pass5_all_mons(
         // team-preview transition, then the turn the mon Mega Evolves). Since pass5's
         // writes are monotone-tightening only, intersecting two genuinely different
         // (base-stat-dependent) EV ranges for the SAME real EV can produce an inverted
-        // `minEvs > maxEvs` window even though nothing about the mon's real build ever
+        // `min_evs > max_evs` window even though nothing about the mon's real build ever
         // changed — corrupting the exact value `from_known_pokemon` already had right,
         // and eventually crashing pass5's own "every candidate nature is infeasible"
-        // soundness assertion on a LATER stat lookup once `minStats`/`maxStats` get
+        // soundness assertion on a LATER stat lookup once `min_stats`/`max_stats` get
         // rebuilt from these EVs. A mon this fully known has no business being
         // re-derived by a back-solve meant for opponents in the first place.
         let already_pinned = get_mon_by_idx(state, idx)
-            .map(|m| (0..6).all(|si| m.minEvs[si] == m.maxEvs[si]))
+            .map(|m| (0..6).all(|si| m.min_evs[si] == m.max_evs[si]))
             .unwrap_or(false);
         if already_pinned {
             continue;
@@ -875,7 +875,7 @@ fn apply_information_battle(
     let seed_state = state.clone();
 
     // ── Pass 4 (first): speed ordering → Spe bounds ─────────────────────────
-    // Run BEFORE the event walk so that speed bounds (minStats[5]/maxStats[5])
+    // Run BEFORE the event walk so that speed bounds (min_stats[5]/max_stats[5])
     // are already tightened when Pass 3 calls the damage oracle for Gyro Ball
     // and Electro Ball, which compute BP from effective speeds.
     pass4_speed_from_order(state, &seed_state, events, dex, move_dex, ability_dex);
@@ -1564,9 +1564,9 @@ fn pass1_apply_event(
                 // predicate whose numeric content was derived against the OLD base
                 // stats (SpeedComparison, EVIVStatGE/LE, nature-direction, threatening-
                 // move clauses) is stale the instant `recompute_stat_bounds_for_species_change`
-                // above remaps `minStats`/`maxStats` to the new table — a persisted
-                // pre-mega SpeedComparison capping `maxStats[5]` below the freshly
-                // widened `minStats[5]` is exactly the "SpeedComparison raises min above
+                // above remaps `min_stats`/`max_stats` to the new table — a persisted
+                // pre-mega SpeedComparison capping `max_stats[5]` below the freshly
+                // widened `min_stats[5]` is exactly the "SpeedComparison raises min above
                 // max" contradiction this purge prevents. Same purge as S30's
                 // `IllusionEnded` handler (`statement_stale_after_species_reveal`);
                 // dropping a predicate only widens the fog, so this is sound.
@@ -1986,15 +1986,15 @@ fn pass1_apply_event(
                         mon.possible_abilities = new_abilities;
                         mon.possible_weight_hg = Unknown::Known(data.weight);
                     }
-                    // Everything Pass 3/5 had narrowed (minStats/maxStats,
-                    // min_pre_nature_stat/max_pre_nature_stat, minIvs/maxIvs, and
-                    // minEvs/maxEvs) was back-solved against the DISGUISE species' base
+                    // Everything Pass 3/5 had narrowed (min_stats/max_stats,
+                    // min_pre_nature_stat/max_pre_nature_stat, min_ivs/max_ivs, and
+                    // min_evs/max_evs) was back-solved against the DISGUISE species' base
                     // stat table, which describes a completely different Pokemon than the
                     // one now revealed — those bounds carry no information about the true
                     // mon and must not survive the reveal. Leaving them in place produced
                     // a real contradiction: a small-base-HP mon (e.g. Zoroark, base 60)
                     // revealed from behind a large-base-HP disguise (e.g. Snorlax, base
-                    // 160) left `minStats[0]/maxStats[0]` pinned to Snorlax's achievable-HP
+                    // 160) left `min_stats[0]/max_stats[0]` pinned to Snorlax's achievable-HP
                     // window, which no Zoroark IV/EV combination can reach — pass5-hp's
                     // "no IV/EV can produce observed HP bounds" contradiction. Reset to the
                     // true species' theoretical worst/best case (same computation a
@@ -2004,8 +2004,8 @@ fn pass1_apply_event(
                     // narrowing already learned about the physical mon's nature remains
                     // valid post-reveal.
                     recompute_stats_for_iv_mode(mon, actual_species, ctx.dex, ctx.config);
-                    mon.minEvs = [0; 6];
-                    mon.maxEvs = [252; 6];
+                    mon.min_evs = [0; 6];
+                    mon.max_evs = [252; 6];
                 }
                 // Persisted CNF clauses referencing this slot accumulated while it
                 // displayed the disguise. Two kinds:
@@ -2014,7 +2014,7 @@ fn pass1_apply_event(
                 //    from the DISGUISE species' base stats/movepool — stale for the
                 //    same reason `Transformed` purges them (see below). Left in place,
                 //    BCP's `force_literal` could re-tighten `min_pre_nature_stat`/
-                //    `max_pre_nature_stat` (or minStats/maxStats) right back to a
+                //    `max_pre_nature_stat` (or min_stats/max_stats) right back to a
                 //    disguise-derived value on the next fixpoint pass, undoing the
                 //    reset above and reintroducing the "no IV/EV can produce observed
                 //    HP bounds" contradiction.
@@ -2105,8 +2105,8 @@ fn pass1_apply_event(
                         // Stats and their EV/IV/nature back-solve inputs come from the
                         // source for the five non-HP stats; HP (index 0) is NOT copied.
                         for i in 1..6 {
-                            mon.minStats[i] = src.minStats[i];
-                            mon.maxStats[i] = src.maxStats[i];
+                            mon.min_stats[i] = src.min_stats[i];
+                            mon.max_stats[i] = src.max_stats[i];
                             mon.min_pre_nature_stat[i] = src.min_pre_nature_stat[i];
                             mon.max_pre_nature_stat[i] = src.max_pre_nature_stat[i];
                         }
@@ -2170,16 +2170,37 @@ fn pass1_apply_switch_event(
             pass1_ability_absence_inference(state, &[sw.slot.clone()], &event.reactions, ctx);
         }
         EventKind::SimultaneousSwitch { switches } => {
-            for sw in switches {
+            // The concrete simulator emits `switches` in GLOBAL cross-side effective-
+            // speed order (`process_sendouts_in_speed_order_branching`,
+            // simulator/mod.rs), NOT slot-index order — a side's own faster lead can
+            // appear before its slower teammate even though it occupies a HIGHER
+            // slot_index. `pass1_switch`'s active-slot placement
+            // (`if slot_i < actives.len() {overwrite} else {push}`) silently assumes
+            // ascending slot-index processing per side: processing the higher slot
+            // first pushes it to the WRONG array position (since the Vec is still
+            // short), and the lower slot processed next then overwrites that
+            // position — silently destroying the first mon with no bench record at
+            // all. This was the root cause of a live BCP soundness panic (a stale
+            // `SpeedComparison` baked in against the wrong, shifted `mon_idx` once
+            // the roster later grew back to its correct length). Sort a per-event
+            // copy by slot_index so both placement-sensitive loops below always see
+            // ascending order, regardless of the event's real (speed-encoded) order.
+            let mut switches_by_slot: Vec<&SwitchState> = switches.iter().collect();
+            switches_by_slot.sort_by_key(|sw| sw.slot.slot_index);
+
+            for sw in &switches_by_slot {
                 // S18: see the single-switch arm above.
                 purge_mon_scoped_knowledge(state, &sw.slot);
                 apply_switch_out_reset(state, &sw.slot);
                 // B1: preserve each outgoing mon before any pass1_switch replaces its slot.
                 bench_outgoing_mon(state, &sw.slot, &sw.species);
             }
-            for sw in switches {
+            for sw in &switches_by_slot {
                 pass1_switch(state, sw, ctx);
             }
+            // Ability-absence inference cares about the REAL activation order (e.g.
+            // Unnerve vs Sand Stream) — keep the original (speed-encoded) event
+            // order here, unlike the two placement loops above.
             let slots: Vec<FieldSlot> = switches.iter().map(|sw| sw.slot.clone()).collect();
             pass1_ability_absence_inference(state, &slots, &event.reactions, ctx);
         }
@@ -2365,29 +2386,36 @@ fn resolve_item_clauses_on_item_change(
 /// `pass1_switch` can find them by species on re-entry.  Unknown-species mons go to
 /// `possible_back_mons`.
 ///
-/// S37 companion: no-ops when `incoming_species` already matches the slot's current
-/// occupant on P1's side — the one-time team-preview→battle transition where
-/// `into_battle_state` pre-places P1's own lead directly into `p1_active_mons` and the
-/// battle-phase lead-reveal `SimultaneousSwitch` then re-announces that same mon.
-/// `pass1_switch`'s S37 guard (below) detects this and returns early, keeping the
-/// existing active entry rather than consuming a bench match — so if this function
-/// benched the mon anyway, the clone it just pushed would never be removed, leaving
-/// the same physical Pokémon duplicated across `p1_active_mons` and `p1_known_back_mons`
-/// (seen in practice as a false item-clause contradiction: the duplicate collides with
-/// its own already-`Known` item). A genuine mid-battle P1 switch always changes who's
-/// active, so this condition can only fire at that one-time reveal — no real switch-out
-/// is ever skipped. Mirrors `purge_mon_scoped_knowledge`'s own "nothing actually left"
-/// self-guard just above.
+/// S37 companion (generalized — was hardcoded to P1's side, fixed alongside
+/// `pass1_switch`'s own S37 guard): no-ops when `incoming_species` already
+/// matches the slot's current occupant on WHICHEVER side is the viewer's own —
+/// the one-time team-preview→battle transition where `into_battle_state`
+/// pre-places the viewer's own lead directly into that side's `*_active_mons`
+/// and the battle-phase lead-reveal `SimultaneousSwitch` then re-announces that
+/// same mon. `pass1_switch`'s S37 guard (below) detects this and returns early,
+/// keeping the existing active entry rather than consuming a bench match — so if
+/// this function benched the mon anyway, the clone it just pushed would never be
+/// removed, leaving the same physical Pokémon duplicated across `*_active_mons`
+/// and `*_known_back_mons` (seen in practice as a false item-clause
+/// contradiction: the duplicate collides with its own already-`Known` item).
+/// Since this function is hardcoded per-player, the two guards must agree on
+/// which side is "already placed" for the SAME transition — hardcoding both to
+/// P1 only worked for a P1 belief; for a P2 belief it's P2's side that's
+/// pre-placed, and leaving this one P1-only would silently re-introduce the
+/// orphaned-duplicate bug on P2's side instead. A genuine mid-battle switch
+/// always changes who's active, so this condition can only fire at the one-time
+/// reveal, regardless of player — no real switch-out is ever skipped. Mirrors
+/// `purge_mon_scoped_knowledge`'s own "nothing actually left" self-guard just
+/// above.
 fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming_species: &Species) {
     let slot_i = slot.slot_index as usize;
-    if slot.player == Player::P1 {
-        if state
-            .p1_active_mons
-            .get(slot_i)
-            .is_some_and(|m| unknown_is_known_as(&m.possible_species, incoming_species))
-        {
-            return;
-        }
+    let already_placed = match slot.player {
+        Player::P1 => state.p1_active_mons.get(slot_i),
+        Player::P2 => state.p2_active_mons.get(slot_i),
+    }
+    .is_some_and(|m| unknown_is_known_as(&m.possible_species, incoming_species));
+    if already_placed {
+        return;
     }
     // Clone in a temporary scope to avoid simultaneous mutable borrows.
     let maybe_benched: Option<UnknownPokemonState> = {
@@ -2442,29 +2470,40 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     let slot_i = sw.slot.slot_index as usize;
     let species = &sw.species;
 
-    // S37: the team-preview→battle transition (`into_battle_state`) already places
-    // P1's leads directly into `p1_active_mons` with their full `Known` nature/EV/IV
-    // data from `from_known_pokemon` — P1's own side is never actually "found in the
-    // back and moved to active" the way this function's normal (P2, or a genuine
-    // mid-battle switch) logic assumes. Since `p1_known_back_mons`/`p1_possible_back_mons`
-    // only ever hold P1's BENCHED mons, a lead's SimultaneousSwitch reveal at battle
-    // start never matches anything there, and this function fell through to its
-    // "completely new mon" branch — REBUILDING P1's own, fully-known lead as a
-    // wide-uncertain `from_opponent_species` mon (nature `Not([])`, EVs `[0,252]`)
-    // and overwriting the correct entry `into_battle_state` had already placed.
-    // A genuine mid-battle P1 switch always changes who's active, so the incoming
-    // species can never already match the slot's CURRENT occupant except at this
-    // one-time reveal — detect that case and just apply the transient switch fields
-    // (HP/status/etc.) to the existing, already-correct entry instead of discarding it.
-    if *player == Player::P1 {
-        if let Some(existing) = state.p1_active_mons.get(slot_i) {
-            if unknown_is_known_as(&existing.possible_species, species) {
-                if let Some(mon) = state.p1_active_mons.get_mut(slot_i) {
-                    apply_switch_state_to_mon(mon, sw, ctx.config);
-                }
-                return;
-            }
+    // S37 (generalized — was hardcoded to Player::P1, fixed alongside the
+    // SimultaneousSwitch ordering bug above): the team-preview→battle transition
+    // (`into_battle_state`) already places the VIEWER's OWN leads directly into
+    // that side's `*_active_mons` with their full `Known` nature/EV/IV data from
+    // `from_known_pokemon` — that side is never actually "found in the back and
+    // moved to active" the way this function's normal (opponent, or a genuine
+    // mid-battle switch) logic assumes. Whichever side that is (P1's belief pre-
+    // places P1; P2's belief pre-places P2 — `pass1_switch` has no "viewer" of
+    // its own to check, so detect it structurally instead), a lead's
+    // SimultaneousSwitch reveal at battle start never matches anything in that
+    // side's known_back/possible_back, and this function fell through to its
+    // "completely new mon" branch — REBUILDING the viewer's own, fully-known lead
+    // as a wide-uncertain `from_opponent_species` mon (nature `Not([])`, EVs
+    // `[0,252]`) and overwriting the correct entry `into_battle_state` had
+    // already placed. A genuine mid-battle switch always changes who's active,
+    // so the incoming species can never already match the slot's CURRENT
+    // occupant except at this one-time reveal — regardless of which player it
+    // is — so detect that case and just apply the transient switch fields
+    // (HP/status/etc.) to the existing, already-correct entry instead of
+    // discarding it.
+    let already_placed = match player {
+        Player::P1 => state.p1_active_mons.get(slot_i),
+        Player::P2 => state.p2_active_mons.get(slot_i),
+    }
+    .is_some_and(|existing| unknown_is_known_as(&existing.possible_species, species));
+    if already_placed {
+        let actives = match player {
+            Player::P1 => &mut state.p1_active_mons,
+            Player::P2 => &mut state.p2_active_mons,
+        };
+        if let Some(mon) = actives.get_mut(slot_i) {
+            apply_switch_state_to_mon(mon, sw, ctx.config);
         }
+        return;
     }
 
     // S29: if an Illusion disguise is possible on this side (a Zoroark forme sits
@@ -2574,7 +2613,7 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     }
 }
 
-/// Recompute `minStats`/`maxStats` and pin IVs according to `config.force_max_ivs`.
+/// Recompute `min_stats`/`max_stats` and pin IVs according to `config.force_max_ivs`.
 ///
 /// When `force_max_ivs = true`: IVs are pinned to [31;6], min stats use EV=0 and nature×0.9,
 ///   max stats use EV=252 and nature×1.1.
@@ -2592,17 +2631,17 @@ fn recompute_stats_for_iv_mode(
 ) {
     let force_max = config.force_max_ivs;
     if force_max {
-        mon.minIvs = [31; 6];
-        mon.maxIvs = [31; 6];
+        mon.min_ivs = [31; 6];
+        mon.max_ivs = [31; 6];
     } else {
-        mon.minIvs = [0; 6];
-        mon.maxIvs = [31; 6];
+        mon.min_ivs = [0; 6];
+        mon.max_ivs = [31; 6];
     }
     if let Some(data) = dex.get(species) {
         let b = data.base_stats;
         let lv = config.level;
         let min_iv: u8 = if force_max { 31 } else { 0 };
-        mon.minStats = [
+        mon.min_stats = [
             calc_hp(b[0], min_iv, 0, lv),
             calc_stat(b[1], min_iv, 0, lv, 0.9),
             calc_stat(b[2], min_iv, 0, lv, 0.9),
@@ -2610,7 +2649,7 @@ fn recompute_stats_for_iv_mode(
             calc_stat(b[4], min_iv, 0, lv, 0.9),
             calc_stat(b[5], min_iv, 0, lv, 0.9),
         ];
-        mon.maxStats = [
+        mon.max_stats = [
             calc_hp(b[0], 31, 252, lv),
             calc_stat(b[1], 31, 252, lv, 1.1),
             calc_stat(b[2], 31, 252, lv, 1.1),
@@ -2654,10 +2693,10 @@ fn recompute_stat_bounds_for_species_change(
     level: u8,
 ) {
     // HP: no nature modifier.
-    mon.min_pre_nature_stat[0] = calc_hp(new_base[0], mon.minIvs[0], mon.minEvs[0], level);
-    mon.max_pre_nature_stat[0] = calc_hp(new_base[0], mon.maxIvs[0], mon.maxEvs[0], level);
-    mon.minStats[0] = mon.min_pre_nature_stat[0];
-    mon.maxStats[0] = mon.max_pre_nature_stat[0];
+    mon.min_pre_nature_stat[0] = calc_hp(new_base[0], mon.min_ivs[0], mon.min_evs[0], level);
+    mon.max_pre_nature_stat[0] = calc_hp(new_base[0], mon.max_ivs[0], mon.max_evs[0], level);
+    mon.min_stats[0] = mon.min_pre_nature_stat[0];
+    mon.max_stats[0] = mon.max_pre_nature_stat[0];
 
     const STATS: [PokemonStat; 5] = [
         PokemonStat::Atk,
@@ -2668,8 +2707,8 @@ fn recompute_stat_bounds_for_species_change(
     ];
     for (i, stat) in STATS.iter().enumerate() {
         let si = i + 1;
-        let bsv_lo = calc_stat(new_base[si], mon.minIvs[si], mon.minEvs[si], level, 1.0);
-        let bsv_hi = calc_stat(new_base[si], mon.maxIvs[si], mon.maxEvs[si], level, 1.0);
+        let bsv_lo = calc_stat(new_base[si], mon.min_ivs[si], mon.min_evs[si], level, 1.0);
+        let bsv_hi = calc_stat(new_base[si], mon.max_ivs[si], mon.max_evs[si], level, 1.0);
         mon.min_pre_nature_stat[si] = bsv_lo;
         mon.max_pre_nature_stat[si] = bsv_hi;
 
@@ -2680,8 +2719,8 @@ fn recompute_stat_bounds_for_species_change(
             (f32::MAX, f32::MIN),
             |(mn, mx), &(m, _, _)| (mn.min(m), mx.max(m)),
         );
-        mon.minStats[si] = (bsv_lo as f64 * min_mod as f64).floor() as u16;
-        mon.maxStats[si] = (bsv_hi as f64 * max_mod as f64).floor() as u16;
+        mon.min_stats[si] = (bsv_lo as f64 * min_mod as f64).floor() as u16;
+        mon.max_stats[si] = (bsv_hi as f64 * max_mod as f64).floor() as u16;
     }
 }
 
@@ -2706,8 +2745,8 @@ fn apply_switch_state_to_mon(
     // IV range is set by recompute_stats_for_iv_mode; apply_switch_state_to_mon only
     // enforces the flag for mons that arrive from back (already built without force_max).
     if config.force_max_ivs {
-        mon.minIvs = [31; 6];
-        mon.maxIvs = [31; 6];
+        mon.min_ivs = [31; 6];
+        mon.max_ivs = [31; 6];
     }
 }
 
@@ -5768,7 +5807,7 @@ pub(crate) fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Abili
 
 /// Enumerate the distinct max-HP values the defender could have, given the
 /// known species base stat, the defender's current IV/EV constraints, and the
-/// current `[minStats[0], maxStats[0]]` window.
+/// current `[min_stats[0], max_stats[0]]` window.
 ///
 /// **Soundness rationale (S-B fix):** Direction A samples the defender's possible
 /// max-HP values to back-solve the defensive BSV from a percent-HP observation.
@@ -5786,16 +5825,16 @@ fn achievable_defender_hp_values(
     config: &InferenceConfig,
     mon: &UnknownPokemonState,
 ) -> Vec<u16> {
-    let hp_lo = mon.minStats[0];
-    let hp_hi = mon.maxStats[0];
-    let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.minIvs[0] };
-    let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.maxIvs[0] };
+    let hp_lo = mon.min_stats[0];
+    let hp_hi = mon.max_stats[0];
+    let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.min_ivs[0] };
+    let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.max_ivs[0] };
 
     let mut vals: Vec<u16> = Vec::with_capacity(33);
     for iv in iv_lo..=iv_hi {
         for &ev in &EV_LATTICE {
             // Also respect the EV bounds tracked on the mon.
-            if ev < mon.minEvs[0] || ev > mon.maxEvs[0] {
+            if ev < mon.min_evs[0] || ev > mon.max_evs[0] {
                 continue;
             }
             let hp = calc_hp(base_hp, iv, ev, level);
@@ -5805,7 +5844,7 @@ fn achievable_defender_hp_values(
         }
     }
     if vals.is_empty() {
-        // Fallback: should not happen if minStats/maxStats are consistent, but
+        // Fallback: should not happen if min_stats/max_stats are consistent, but
         // be sound by including both endpoints.
         vals.push(hp_lo);
         if hp_hi != hp_lo {
@@ -5959,13 +5998,13 @@ fn apply_unconditional_tightening(
             }
         }
         if let Some(lo) = global_stat_lo {
-            if lo > mon.minStats[si] {
-                mon.minStats[si] = lo;
+            if lo > mon.min_stats[si] {
+                mon.min_stats[si] = lo;
             }
         }
         if let Some(hi) = global_stat_hi {
-            if hi < mon.maxStats[si] {
-                mon.maxStats[si] = hi;
+            if hi < mon.max_stats[si] {
+                mon.max_stats[si] = hi;
             }
         }
     }
@@ -6226,7 +6265,7 @@ fn pass3_direction_b(
     // also varies over its current [min, max] range. We scan both endpoints (sound
     // because BP is monotone in the speed ratio — all intermediate BPs are covered).
     let attacker_speed_range: Option<(u16, u16)> = if speed_dep_bp {
-        Some((attacker_unk.minStats[5], attacker_unk.maxStats[5]))
+        Some((attacker_unk.min_stats[5], attacker_unk.max_stats[5]))
     } else {
         None
     };
@@ -6238,7 +6277,7 @@ fn pass3_direction_b(
     // enumerate each as its own oracle hypothesis (`None` = keep the snapshot HP
     // as-is, i.e. the non-pinch sentinel path; `Some(hp)` = override with a Number
     // strictly inside the gate — Number passes through materialize untouched, and
-    // `make_atk` leaves stats[0] at minStats[0], which is what the override is
+    // `make_atk` leaves stats[0] at min_stats[0], which is what the override is
     // computed against). Thresholds are widened by 1% on each side of the exact
     // 33.33% bucket edge so display-rounding jitter can never drop a possible
     // hypothesis (extra variants only widen the union — sound).
@@ -6246,7 +6285,7 @@ fn pass3_direction_b(
         // Exact HP (or full HP): the gate is already evaluated correctly.
         PokemonHP::Number(_) | PokemonHP::Percent(100) => vec![None],
         PokemonHP::Percent(p) => {
-            let pinch_hp = PokemonHP::Number((attacker_unk.minStats[0] / 4).max(1));
+            let pinch_hp = PokemonHP::Number((attacker_unk.min_stats[0] / 4).max(1));
             if *p <= 31 {
                 vec![Some(pinch_hp)] // certainly at ≤1/3: pinch abilities are live
             } else if *p <= 34 {
@@ -6516,7 +6555,7 @@ fn find_feasible_bsv_range_b(
     use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
 
     // Materialize target with known stats (target is our own mon — stats exact).
-    let target_stats = target_unk.minStats; // min == max for known mons
+    let target_stats = target_unk.min_stats; // min == max for known mons
     let target_ps = materialize_pokemon(
         target_unk,
         target_stats,
@@ -6530,7 +6569,7 @@ fn find_feasible_bsv_range_b(
     let speed_endpoints: Vec<u16> = match attacker_speed_range {
         Some((lo, hi)) if lo != hi => vec![lo, hi],
         Some((lo, _)) => vec![lo],
-        None => vec![attacker_unk.minStats[5]],
+        None => vec![attacker_unk.min_stats[5]],
     };
 
     // Build the attacker PS with a specific BSV and optional speed override.
@@ -6539,7 +6578,7 @@ fn find_feasible_bsv_range_b(
     // passed-in attacker_unk, so no additional mutation is needed.
     let atk_unk_base = attacker_unk.clone();
     let make_atk = |bsv: u16, spe_override: u16| -> crate::state::pokemon::PokemonState {
-        let mut stats = atk_unk_base.minStats; // fill non-inferred stats with current min
+        let mut stats = atk_unk_base.min_stats; // fill non-inferred stats with current min
         if si == 0 {
             stats[0] = bsv; // HP: no nature
         } else {
@@ -6685,7 +6724,7 @@ fn find_feasible_bsv_range_a(
             Item::Eviolite => 1.5,
             _ => 1.0,
         };
-        let mut def_stats = defender_unk.minStats;
+        let mut def_stats = defender_unk.min_stats;
         def_stats[0] = hp_cand;
         if si == 0 {
             def_stats[0] = bsv;
@@ -6784,7 +6823,7 @@ fn pass3_direction_a(
 
     // S11 soundness fix: Direction A materializes the attacker from its CURRENT
     // stat/item/ability fields as if they were the exact truth (`atk_stats =
-    // attacker_unk.minStats`, `neutral_item`/`neutral_ability`) — sound only for the
+    // attacker_unk.min_stats`, `neutral_item`/`neutral_ability`) — sound only for the
     // observer's own fully-`Known` Pokémon. Direction A fires whenever the target's
     // HP is `Percent`, which in doubles also covers an opponent mon hitting its OWN
     // ally with a spread move (the ally's HP is `Percent` too, since it belongs to
@@ -6847,8 +6886,8 @@ fn pass3_direction_a(
     }
 
     // HP bounds for the defender.
-    let hp_lo = defender_unk.minStats[0];
-    let hp_hi = defender_unk.maxStats[0];
+    let hp_lo = defender_unk.min_stats[0];
+    let hp_hi = defender_unk.max_stats[0];
 
     // Nature classes for the defensive stat.
     let nature_classes = possible_nature_classes(&defender_unk.possible_natures, def_stat, si);
@@ -6875,7 +6914,7 @@ fn pass3_direction_a(
     let mut global_stat_hi: Option<u16> = None;
 
     // Attacker is OUR known mon; use its actual known stats.
-    let atk_stats = attacker_unk.minStats;
+    let atk_stats = attacker_unk.min_stats;
     let atk_item = neutral_item(&attacker_unk);
     // Analytic correction: ×1.3 only when the attacker (our own mon = user_slot)
     // moves LAST this turn. When it did not fire, substitute Ability::None so the
@@ -6896,11 +6935,11 @@ fn pass3_direction_a(
     // the opponent, so the *target/defender's* speed is the unknown that affects BP).
     // BP is monotone in the speed ratio, so scanning only the lo/hi endpoints is sound.
     let defender_speed_endpoints: Vec<u16> = if speed_dep_bp {
-        let lo = defender_unk.minStats[5];
-        let hi = defender_unk.maxStats[5];
+        let lo = defender_unk.min_stats[5];
+        let hi = defender_unk.max_stats[5];
         if lo == hi { vec![lo] } else { vec![lo, hi] }
     } else {
-        vec![defender_unk.minStats[5]]
+        vec![defender_unk.min_stats[5]]
     };
 
     // S1 soundness fix: union over defender's possible (item, ability) pairs so we
@@ -7600,7 +7639,7 @@ fn pass4_speed_from_order(
             let custap_possible = match &fast_m.hp {
                 PokemonHP::Percent(p) => *p <= 25,
                 PokemonHP::Number(n) => {
-                    let max_hp = fast_m.maxStats[0].max(1) as u32;
+                    let max_hp = fast_m.max_stats[0].max(1) as u32;
                     (*n as u32).saturating_mul(100) / max_hp <= 25
                 }
             };
@@ -7740,7 +7779,7 @@ fn compute_speed_multipliers(
 
 // ── Pass 5: Back-solve EV / IV / nature from stat bounds ──────────────────────
 
-/// Tighten `minEvs`/`maxEvs`/`possible_natures` from current `minStats`/`maxStats`.
+/// Tighten `min_evs`/`max_evs`/`possible_natures` from current `min_stats`/`max_stats`.
 pub fn pass5_back_solve(
     mon: &mut UnknownPokemonState,
     config: &InferenceConfig,
@@ -7778,10 +7817,10 @@ pub fn pass5_back_solve(
 
     // ── HP (stat_i = 0, no nature modifier) ──────────────────────────────────
     {
-        let s_min = mon.minStats[0];
-        let s_max = mon.maxStats[0];
-        let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.minIvs[0] };
-        let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.maxIvs[0] };
+        let s_min = mon.min_stats[0];
+        let s_max = mon.max_stats[0];
+        let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.min_ivs[0] };
+        let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.max_ivs[0] };
         let mut min_ev: Option<u8> = None;
         let mut max_ev: Option<u8> = None;
         let mut any = false;
@@ -7796,15 +7835,15 @@ pub fn pass5_back_solve(
             }
         }
         if !any {
-            // S33: `minStats[0]`/`maxStats[0]` are ONLY ever written by
+            // S33: `min_stats[0]`/`max_stats[0]` are ONLY ever written by
             // `recompute_stats_for_iv_mode` (full reset against a species) and
             // `recompute_stat_bounds_for_species_change` (re-derived from the mon's
-            // CURRENT minEvs[0]/minIvs[0], hence always reachable by construction —
+            // CURRENT min_evs[0]/min_ivs[0], hence always reachable by construction —
             // see its doc comment). No damage/percent observation narrows this window
             // (`update_mon_hp` only ever touches the display field `mon.hp`, never
-            // `minStats`), and `Statement::EVIVStatGE/LE` can never target HP (there is
+            // `min_stats`), and `Statement::EVIVStatGE/LE` can never target HP (there is
             // no `PokemonStat::Hp` variant — see `stat_to_stats_idx`). So an unreachable
-            // window here can ONLY mean `minStats[0]/maxStats[0]` were computed against
+            // window here can ONLY mean `min_stats[0]/max_stats[0]` were computed against
             // a species/context a later resolution (elsewhere in the same fixpoint)
             // superseded WITHOUT going through one of those two reset paths — the same
             // desync class S30 found and fixed for the one call site then known
@@ -7819,22 +7858,22 @@ pub fn pass5_back_solve(
             // window claimed to have.
             let lo = calc_hp(base[0], iv_lo, 0, level);
             let hi = calc_hp(base[0], iv_hi, 252, level);
-            mon.minStats[0] = lo;
-            mon.maxStats[0] = hi;
+            mon.min_stats[0] = lo;
+            mon.max_stats[0] = hi;
             mon.min_pre_nature_stat[0] = lo;
             mon.max_pre_nature_stat[0] = hi;
-            mon.minEvs[0] = 0;
-            mon.maxEvs[0] = 252;
+            mon.min_evs[0] = 0;
+            mon.max_evs[0] = 252;
             return pass5_back_solve(mon, config, dex);
         }
         if let Some(lo) = min_ev {
-            if lo > mon.minEvs[0] {
-                mon.minEvs[0] = lo;
+            if lo > mon.min_evs[0] {
+                mon.min_evs[0] = lo;
             }
         }
         if let Some(hi) = max_ev {
-            if hi < mon.maxEvs[0] {
-                mon.maxEvs[0] = hi;
+            if hi < mon.max_evs[0] {
+                mon.max_evs[0] = hi;
             }
         }
     }
@@ -7843,12 +7882,12 @@ pub fn pass5_back_solve(
     let mut impossible_natures: Vec<bool> = vec![false; candidate_natures.len()];
 
     for stat_i in 1usize..=5 {
-        let s_min = mon.minStats[stat_i];
-        let s_max = mon.maxStats[stat_i];
+        let s_min = mon.min_stats[stat_i];
+        let s_max = mon.max_stats[stat_i];
         let iv_range = if config.force_max_ivs {
             31..=31u8
         } else {
-            mon.minIvs[stat_i]..=mon.maxIvs[stat_i]
+            mon.min_ivs[stat_i]..=mon.max_ivs[stat_i]
         };
         let mut global_min_ev: Option<u8> = None;
         let mut global_max_ev: Option<u8> = None;
@@ -7913,13 +7952,13 @@ pub fn pass5_back_solve(
         }
 
         if let Some(lo) = global_min_ev {
-            if lo > mon.minEvs[stat_i] {
-                mon.minEvs[stat_i] = lo;
+            if lo > mon.min_evs[stat_i] {
+                mon.min_evs[stat_i] = lo;
             }
         }
         if let Some(hi) = global_max_ev {
-            if hi < mon.maxEvs[stat_i] {
-                mon.maxEvs[stat_i] = hi;
+            if hi < mon.max_evs[stat_i] {
+                mon.max_evs[stat_i] = hi;
             }
         }
     }
@@ -7942,22 +7981,22 @@ pub fn pass5_back_solve(
 
     // ── Global EV total-cap cross-stat tightening ─────────────────────────────
     // Applies only when a cap is configured (default 510 for Pokémon Champions).
-    // Sound: only ever tightens maxEvs; never raises minEvs.
-    // Invariant: Σ_i evs[i] ≤ cap  →  evs[i] ≤ cap − Σ_{j≠i} minEvs[j].
+    // Sound: only ever tightens max_evs; never raises min_evs.
+    // Invariant: Σ_i evs[i] ≤ cap  →  evs[i] ≤ cap − Σ_{j≠i} min_evs[j].
     if let Some(cap) = config.ev_total_cap {
         let cap = cap as u16;
-        let min_ev_sum: u16 = (0..6).map(|i| mon.minEvs[i] as u16).sum();
+        let min_ev_sum: u16 = (0..6).map(|i| mon.min_evs[i] as u16).sum();
         let ev_lattice = if config.use_stat_points { Some(ev_candidates) } else { None };
 
         for stat_i in 0..6 {
-            let other_min_sum = min_ev_sum - mon.minEvs[stat_i] as u16;
+            let other_min_sum = min_ev_sum - mon.min_evs[stat_i] as u16;
             if other_min_sum >= cap {
                 // All other stats already use the full cap — this stat can't have any EVs.
-                mon.maxEvs[stat_i] = 0;
+                mon.max_evs[stat_i] = 0;
                 continue;
             }
             let budget = cap - other_min_sum; // max EVs allowed in stat_i
-            if budget < mon.maxEvs[stat_i] as u16 {
+            if budget < mon.max_evs[stat_i] as u16 {
                 // Round down to the nearest valid lattice value.
                 let capped_max = if let Some(lattice) = ev_lattice {
                     lattice
@@ -7969,8 +8008,8 @@ pub fn pass5_back_solve(
                 } else {
                     budget.min(252) as u8
                 };
-                if capped_max < mon.maxEvs[stat_i] {
-                    mon.maxEvs[stat_i] = capped_max;
+                if capped_max < mon.max_evs[stat_i] {
+                    mon.max_evs[stat_i] = capped_max;
                 }
             }
         }

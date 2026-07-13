@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { PokemonView } from '../../api/types'
 import Sprite from '../../components/common/Sprite'
 import { hpDisplayText, hpFraction } from '../../lib/hp'
@@ -52,7 +52,7 @@ function splitItemList(text: string): { parts: string[]; sep: string } {
  * dump a long list inline. */
 function ItemText({ item }: { item: string | null }) {
   const [expanded, setExpanded] = useState(false)
-  if (item == null) return <>—</>
+  if (item == null) return <>None</>
 
   const { parts, sep } = splitItemList(item)
   if (parts.length <= 3) return <>{item}</>
@@ -293,7 +293,17 @@ type Tab = 'p1' | 'p2' | 'predicates'
 
 export default function TeamInfoSidebar() {
   const view = useBattle((s) => s.view)
-  const [tab, setTab] = useState<Tab>('p1')
+  const currentPlayer = useBattle((s) => s.currentPlayer)
+  // Default (and re-default) to whichever tab is NOT the player we're currently
+  // watching from — i.e. the opposing team — so the hotseat handoff always opens
+  // on the newly-active player's view of their opponent, not a stale manual pick.
+  const opponentTab: Tab = currentPlayer === 'p1' ? 'p2' : 'p1'
+  const [tab, setTab] = useState<Tab>(opponentTab)
+  // Only re-trigger when the watched perspective actually changes — a manual
+  // tab click within the same perspective must not be clobbered.
+  useEffect(() => {
+    setTab(opponentTab)
+  }, [opponentTab])
   // Expansion is keyed by player + monId at the sidebar level, so a mon stays
   // expanded when flipping between "Player 1" and "Player 2" and back.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -324,6 +334,17 @@ export default function TeamInfoSidebar() {
   const active = side?.active ?? []
   const back = side?.back ?? previewMons
   const possibleBack = side?.possibleBack ?? []
+  // Real hidden-slot count (not the possibleBack candidate-species count): how many
+  // of this side's brought mons we simply haven't seen yet. Decreases as mons are
+  // revealed and hits 0 once every brought mon has been seen (even if some brought
+  // species are still ambiguous within `possibleBack`).
+  const hiddenBack = Math.max(0, (view?.broughtPerSide ?? 0) - (active.length + back.length))
+  // Fainted mons get pulled out of the active/back lists into their own section
+  // below "Possibly in the back" — grouping them together (rather than leaving them
+  // dimmed in place) surfaces their revealed info in one predictable spot.
+  const fainted = [...active, ...back].filter((mon) => mon.fainted)
+  const liveActive = active.filter((mon) => !mon.fainted)
+  const liveBack = back.filter((mon) => !mon.fainted)
 
   // Keyed by section + list index, not just `mon.monId`: bench mons whose identity
   // hasn't narrowed yet can share a fallback id (or, historically, all shared the
@@ -396,14 +417,22 @@ export default function TeamInfoSidebar() {
             {!side && previewMons.length === 0 && (
               <p className="p-2 text-xs text-ink-muted">No team data yet.</p>
             )}
-            {active.map((mon, i) => row(mon, true, 'active', i))}
-            {back.map((mon, i) => row(mon, false, 'back', i))}
-            {possibleBack.length > 0 && (
+            {liveActive.map((mon, i) => row(mon, true, 'active', i))}
+            {liveBack.map((mon, i) => row(mon, false, 'back', i))}
+            {hiddenBack > 0 && (
               <>
                 <p className="px-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
-                  Possibly in the back
+                  Possibly in the back ({hiddenBack})
                 </p>
                 {possibleBack.map((mon, i) => row(mon, false, 'possible', i, true))}
+              </>
+            )}
+            {fainted.length > 0 && (
+              <>
+                <p className="px-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
+                  Fainted
+                </p>
+                {fainted.map((mon, i) => row(mon, false, 'fainted', i))}
               </>
             )}
           </>

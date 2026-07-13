@@ -8631,7 +8631,6 @@ fn apply_future_move_damage(
                 continue;
             }
             // Check Dark-type immunity (Future Sight only; Doom Desire is Steel)
-            let attack_type = effective_move_type(&state, target, move_data);
             let effectiveness = {
                 // Uses move_data's fixed type directly (Psychic for FS, Steel for DD) rather than
                 // the attacker's, since the attacker is gone by the time this fires.
@@ -12365,8 +12364,10 @@ pub(crate) fn try_absorb_move(
                 }
             }
             // Reveal unconditionally (the ability absorbing the move is itself observable
-            // even if the heal is a no-op at full HP); nest the heal underneath it.
+            // even if the heal is a no-op at full HP); nest Immune and the heal underneath it
+            // — the target took no damage AND may have healed, both because of this ability.
             with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: target_ability.clone() }, |state| {
+                emit(state, EventKind::Immune { target: target_slot });
                 if let (Some(observer), Some((hp, max))) = (state.event_observer, healed_to) {
                     let new_hp = observed_hp_value(observer, target_slot.player, hp, max);
                     emit(state, EventKind::Healed { target: target_slot, new_hp, max_hp: max });
@@ -12376,6 +12377,7 @@ pub(crate) fn try_absorb_move(
         }
         (PokemonType::Grass, Ability::SapSipper) => {
             with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::SapSipper }, |state| {
+                emit(state, EventKind::Immune { target: target_slot });
                 let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
                     apply_stat_boosts_to_pokemon(mon, &[1, 0, 0, 0, 0, 0, 0], items_suppressed, false)
                 } else {
@@ -12387,6 +12389,7 @@ pub(crate) fn try_absorb_move(
         }
         (PokemonType::Electric, Ability::MotorDrive) => {
             with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::MotorDrive }, |state| {
+                emit(state, EventKind::Immune { target: target_slot });
                 let delta = if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
                     apply_stat_boosts_to_pokemon(mon, &[0, 0, 0, 0, 1, 0, 0], items_suppressed, false)
                 } else {
@@ -12398,6 +12401,7 @@ pub(crate) fn try_absorb_move(
         }
         (PokemonType::Fire, Ability::FlashFire) => {
             with_reactions(state, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::FlashFire }, |state| {
+                emit(state, EventKind::Immune { target: target_slot });
                 let mut started = false;
                 if let Some(mon) = get_pokemon_at_slot_mut(state, target_slot) {
                     if !has_status_volatile(mon, &VolatileStatus::FlashFire) {

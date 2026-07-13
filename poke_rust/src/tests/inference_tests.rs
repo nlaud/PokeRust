@@ -884,8 +884,8 @@ fn test_no_speed_comparison_different_priority() {
 #[test]
 fn test_s18_speed_comparison_purged_on_switch() {
     let mut p1_mon = unknown_mon_species(Species::Garchomp);
-    p1_mon.minStats[5] = 150;
-    p1_mon.maxStats[5] = 150;
+    p1_mon.min_stats[5] = 150;
+    p1_mon.max_stats[5] = 150;
 
     let p2_mon = unknown_mon_species(Species::Snorlax);
     let mut state = battle_1v1(p1_mon, p2_mon);
@@ -897,7 +897,7 @@ fn test_s18_speed_comparison_purged_on_switch() {
         slow_mult: 1,
     }]);
 
-    let fresh_min = unknown_mon_species(Species::Aggron).minStats[5];
+    let fresh_min = unknown_mon_species(Species::Aggron).min_stats[5];
     let result = apply(
         state,
         vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
@@ -913,7 +913,7 @@ fn test_s18_speed_comparison_purged_on_switch() {
     let incoming = &result.p2_active_mons[0];
     assert!(matches!(&incoming.possible_species, Unknown::Known(s) if *s == Species::Aggron));
     assert_eq!(
-        incoming.minStats[5], fresh_min,
+        incoming.min_stats[5], fresh_min,
         "the previous occupant's SpeedComparison must not constrain the switch-in"
     );
     // The Snorlax-scoped clause must be gone from the store.
@@ -1388,12 +1388,12 @@ fn test_s17_conditional_speed_comparison_not_propagated() {
 
     // P1: our mon with exactly-known Spe = 150.
     let mut p1_mon = unknown_mon_species(Species::Garchomp);
-    p1_mon.minStats[5] = 150;
-    p1_mon.maxStats[5] = 150;
+    p1_mon.min_stats[5] = 150;
+    p1_mon.max_stats[5] = 150;
 
     // P2: item completely unknown → Quick Claw is a live escape.
     let p2_mon = unknown_mon_species(Species::Snorlax);
-    let p2_min_before = p2_mon.minStats[5];
+    let p2_min_before = p2_mon.min_stats[5];
 
     let state = battle_1v1(p1_mon, p2_mon);
     // P2 moves first (Quick Claw proc), P1 second — same priority bracket.
@@ -1409,7 +1409,7 @@ fn test_s17_conditional_speed_comparison_not_propagated() {
 
     let p2_after = &result.p2_active_mons[0];
     assert_eq!(
-        p2_after.minStats[5], p2_min_before,
+        p2_after.min_stats[5], p2_min_before,
         "conditional SpeedComparison (live QuickClaw escape) must not raise the slow \
          mon's min Spe"
     );
@@ -1432,8 +1432,8 @@ fn test_s17_unit_speed_comparison_still_propagates() {
     move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
 
     let mut p1_mon = unknown_mon_species(Species::Garchomp);
-    p1_mon.minStats[5] = 100;
-    p1_mon.maxStats[5] = 100;
+    p1_mon.min_stats[5] = 100;
+    p1_mon.max_stats[5] = 100;
 
     // Exclude every possible escape on both sides → the emitted clause is unit.
     let mut p2_mon = unknown_mon_species(Species::Snorlax);
@@ -1451,8 +1451,8 @@ fn test_s17_unit_speed_comparison_still_propagates() {
     state.p1_active_mons[0].item = Unknown::Not(vec![
         Item::IronBall, Item::LaggingTail, Item::FullIncense,
     ]);
-    state.p1_active_mons[0].minStats[5] = 100;
-    state.p1_active_mons[0].maxStats[5] = 100;
+    state.p1_active_mons[0].min_stats[5] = 100;
+    state.p1_active_mons[0].max_stats[5] = 100;
 
     let result = apply_ex(
         state,
@@ -1465,9 +1465,9 @@ fn test_s17_unit_speed_comparison_still_propagates() {
     );
 
     assert!(
-        result.p2_active_mons[0].minStats[5] >= 100,
+        result.p2_active_mons[0].min_stats[5] >= 100,
         "unit SpeedComparison must still raise the fast mon's min Spe (got {})",
-        result.p2_active_mons[0].minStats[5]
+        result.p2_active_mons[0].min_stats[5]
     );
 }
 
@@ -1488,8 +1488,8 @@ fn test_s17_unit_speed_comparison_still_propagates() {
 ///
 /// P2b (fast) is pinned to an exact known speed (60) so the tightening effect on
 /// P2a's (slow) max Spe bound is directly observable: with the paralysis factor
-/// correctly applied, `slow.maxStats[5] <= floor(60*8/4) = 120`. Without it (the
-/// pre-fix bug, using the neutral 1:1 ratio), `slow.maxStats[5] <= floor(60*4/4)
+/// correctly applied, `slow.max_stats[5] <= floor(60*8/4) = 120`. Without it (the
+/// pre-fix bug, using the neutral 1:1 ratio), `slow.max_stats[5] <= floor(60*4/4)
 /// = 60` — an unsound over-tightening that excludes any true Spe in (60, 120].
 #[test]
 fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
@@ -1518,13 +1518,13 @@ fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
     let mut p2a = unknown_mon_species(Species::Snorlax);
     p2a.possible_abilities = Unknown::Not(vec![Ability::QuickFeet, Ability::Stall]);
     p2a.item = Unknown::Not(vec![Item::IronBall, Item::LaggingTail, Item::FullIncense]);
-    let natural_max_spe = p2a.maxStats[5];
+    let natural_max_spe = p2a.max_stats[5];
 
     let mut p2b = unknown_mon_species(Species::Snorlax);
     p2b.possible_abilities = Unknown::Not(vec![Ability::QuickFeet, Ability::QuickDraw]);
     p2b.item = Unknown::Not(vec![Item::QuickClaw, Item::ChoiceScarf]);
-    p2b.minStats[5] = 60;
-    p2b.maxStats[5] = 60;
+    p2b.min_stats[5] = 60;
+    p2b.max_stats[5] = 60;
     p2b.min_pre_nature_stat[5] = 60;
     p2b.max_pre_nature_stat[5] = 60;
 
@@ -1564,7 +1564,7 @@ fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
     let p2a_after = get_mon_by_idx(&result, p2a_idx_before).unwrap();
     let expected_max = natural_max_spe.min(120);
     assert_eq!(
-        p2a_after.maxStats[5], expected_max,
+        p2a_after.max_stats[5], expected_max,
         "P2a's max Spe bound must reflect the paralysis-adjusted tightening \
          (floor(60*8/4) = 120, capped by its natural max {natural_max_spe}) = \
          {expected_max}. A bound of 60 here means Pass 4 used the stale (unparalyzed, \
@@ -1579,14 +1579,14 @@ fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
 fn test_speed_comparison_tightens_spe_bounds() {
     // Force a SpeedComparison directly into predicates and run BCP.
     // fast_idx=0 (P1 slot 0), slow_idx=1 (P2 slot 0), fast_mult=1, slow_mult=1.
-    // If slow's minStats[5] = 100, fast's minStats[5] should be raised to ≥ 100.
+    // If slow's min_stats[5] = 100, fast's min_stats[5] should be raised to ≥ 100.
     let mut p1_mon = unknown_mon_species(Species::Pikachu);
-    p1_mon.minStats[5] = 50;
-    p1_mon.maxStats[5] = 200;
+    p1_mon.min_stats[5] = 50;
+    p1_mon.max_stats[5] = 200;
 
     let mut p2_mon = unknown_mon_species(Species::Snorlax);
-    p2_mon.minStats[5] = 100;
-    p2_mon.maxStats[5] = 150;
+    p2_mon.min_stats[5] = 100;
+    p2_mon.max_stats[5] = 150;
 
     // Manually build the battle state with a SpeedComparison predicate.
     let mut state = battle_1v1(p1_mon, p2_mon);
@@ -1599,11 +1599,11 @@ fn test_speed_comparison_tightens_spe_bounds() {
     }]);
 
     let result = apply(state, vec![]);
-    // fast's minStats[5] should be raised to ≥ slow's minStats[5] = 100.
+    // fast's min_stats[5] should be raised to ≥ slow's min_stats[5] = 100.
     assert!(
-        result.p1_active_mons[0].minStats[5] >= 100,
+        result.p1_active_mons[0].min_stats[5] >= 100,
         "SpeedComparison must raise fast mon's min Spe to ≥ slow mon's min ({})",
-        result.p1_active_mons[0].minStats[5]
+        result.p1_active_mons[0].min_stats[5]
     );
 }
 
@@ -1612,12 +1612,12 @@ fn test_speed_comparison_tightens_spe_bounds() {
 #[test]
 fn test_speed_comparison_lowers_slow_max_spe() {
     let mut p1_mon = unknown_mon_species(Species::Pikachu);
-    p1_mon.minStats[5] = 50;
-    p1_mon.maxStats[5] = 120;
+    p1_mon.min_stats[5] = 50;
+    p1_mon.max_stats[5] = 120;
 
     let mut p2_mon = unknown_mon_species(Species::Snorlax);
-    p2_mon.minStats[5] = 40;
-    p2_mon.maxStats[5] = 200;
+    p2_mon.min_stats[5] = 40;
+    p2_mon.max_stats[5] = 200;
 
     let mut state = battle_1v1(p1_mon, p2_mon);
     state.predicates.push(vec![Statement::SpeedComparison {
@@ -1629,9 +1629,9 @@ fn test_speed_comparison_lowers_slow_max_spe() {
 
     let result = apply(state, vec![]);
     assert!(
-        result.p2_active_mons[0].maxStats[5] <= 120,
+        result.p2_active_mons[0].max_stats[5] <= 120,
         "SpeedComparison must lower slow mon's max Spe to ≤ fast mon's max ({})",
-        result.p2_active_mons[0].maxStats[5]
+        result.p2_active_mons[0].max_stats[5]
     );
 }
 
@@ -2098,8 +2098,8 @@ fn known_p1_normal() -> UnknownPokemonState {
     // so the out-of-range HP=500 does not trigger a contradiction.
     let mut mon = unknown_mon_species(Species::Snorlax);
     mon.hp               = PokemonHP::Number(500);
-    mon.minStats         = [500, 35, 100, 55, 125, 55];
-    mon.maxStats         = [500, 35, 100, 55, 125, 55];
+    mon.min_stats         = [500, 35, 100, 55, 125, 55];
+    mon.max_stats         = [500, 35, 100, 55, 125, 55];
     mon.item             = Unknown::Known(Item::None);
     mon.possible_abilities = Unknown::Known(Ability::None);
     mon.possible_types   = Unknown::Known(vec![PokemonType::Normal]);
@@ -2726,11 +2726,11 @@ fn test_s32_own_turn_trick_room_not_retroactive_to_pre_cast_pairing() {
 }
 
 /// S33 regression: `pass5_back_solve`'s HP contradiction ("no IV/EV can produce
-/// observed HP bounds") must self-heal rather than panic when `minStats[0]`/
-/// `maxStats[0]` is left unreachable by the mon's current species/EV/IV window —
+/// observed HP bounds") must self-heal rather than panic when `min_stats[0]`/
+/// `max_stats[0]` is left unreachable by the mon's current species/EV/IV window —
 /// the same class of stale-bound desync S30 fixed for its one known trigger
 /// (`HasSpecies` forced mid-BCP after `widen_item_for_illusion`). A code audit found
-/// no OTHER call site can legitimately narrow `minStats[0]`/`maxStats[0]` from an
+/// no OTHER call site can legitimately narrow `min_stats[0]`/`max_stats[0]` from an
 /// observation (percent/damage updates only ever touch the display field `mon.hp`;
 /// `Statement::EVIVStatGE/LE` can never target HP — there is no `PokemonStat::Hp`
 /// variant), so as a defense-in-depth measure this directly corrupts the HP window
@@ -2744,35 +2744,35 @@ fn test_s33_pass5_hp_self_heals_instead_of_panicking() {
     mon.possible_species = Unknown::Known(Species::Charizard);
     // Simulate a stale HP window left over from some other context — unreachable by
     // any Charizard IV/EV combination at level 50.
-    mon.minStats[0] = 9000;
-    mon.maxStats[0] = 9001;
+    mon.min_stats[0] = 9000;
+    mon.max_stats[0] = 9001;
     // Also simulate a stale, too-narrow EV bound from a prior (now-invalidated) pass5
     // call, to confirm the self-heal resets it rather than leaving it stuck.
-    mon.minEvs[0] = 200;
-    mon.maxEvs[0] = 210;
+    mon.min_evs[0] = 200;
+    mon.max_evs[0] = 210;
 
     let config = InferenceConfig::default();
     pass5_back_solve(&mut mon, &config, pd); // must not panic
 
     assert!(
-        mon.minStats[0] <= mon.maxStats[0],
+        mon.min_stats[0] <= mon.max_stats[0],
         "healed HP window must be non-empty: [{}, {}]",
-        mon.minStats[0], mon.maxStats[0]
+        mon.min_stats[0], mon.max_stats[0]
     );
-    assert_eq!(mon.minEvs[0], 0, "healed window must widen EVs back to the full range");
-    assert_eq!(mon.maxEvs[0], 252, "healed window must widen EVs back to the full range");
+    assert_eq!(mon.min_evs[0], 0, "healed window must widen EVs back to the full range");
+    assert_eq!(mon.max_evs[0], 252, "healed window must widen EVs back to the full range");
 
     // Soundness: the real Charizard's achievable HP range (base HP, level 50) must lie
     // within the healed window at both IV extremes.
     let base_hp = pd.get(&Species::Charizard).unwrap().base_stats[0];
-    let iv_lo = if config.force_max_ivs { 31 } else { mon.minIvs[0] };
-    let iv_hi = if config.force_max_ivs { 31 } else { mon.maxIvs[0] };
+    let iv_lo = if config.force_max_ivs { 31 } else { mon.min_ivs[0] };
+    let iv_hi = if config.force_max_ivs { 31 } else { mon.max_ivs[0] };
     let real_lo = crate::state::pokemon::calc_hp(base_hp, iv_lo, 0, 50);
     let real_hi = crate::state::pokemon::calc_hp(base_hp, iv_hi, 252, 50);
     assert!(
-        mon.minStats[0] <= real_lo && real_hi <= mon.maxStats[0],
+        mon.min_stats[0] <= real_lo && real_hi <= mon.max_stats[0],
         "healed window [{}, {}] must contain the true achievable HP range [{}, {}]",
-        mon.minStats[0], mon.maxStats[0], real_lo, real_hi
+        mon.min_stats[0], mon.max_stats[0], real_lo, real_hi
     );
 }
 
@@ -3261,7 +3261,7 @@ fn test_learnset_keeps_species_when_no_data() {
 ///
 /// Scenario: Garchomp with Atk=175 (implies minEV≈196) and Def=130 (implies minEV≈116).
 /// Budget for remaining stats: 510 − 196 − 116 = 198. EV_LATTICE max ≤ 198 is 196.
-/// So maxEvs for SpA/SpD/Spe should each be ≤ 196 after the cap is applied.
+/// So max_evs for SpA/SpD/Spe should each be ≤ 196 after the cap is applied.
 #[test]
 fn test_ev_cap_tightens_remaining_stats() {
     use crate::state::pokemon::Nature;
@@ -3271,15 +3271,15 @@ fn test_ev_cap_tightens_remaining_stats() {
 
     // Pin Atk (stat 1) to exactly 175: requires EV≈196 (31 IVs, neutral, lv50 Garchomp base=130).
     // calc_stat(130, 31, 196, 50, 1.0) = floor((260+31+49)*0.5+5) = floor(175) = 175.
-    mon.minStats[1] = 175;
-    mon.maxStats[1] = 175;
+    mon.min_stats[1] = 175;
+    mon.max_stats[1] = 175;
     mon.min_pre_nature_stat[1] = 175;
     mon.max_pre_nature_stat[1] = 175;
 
     // Pin Def (stat 2) to exactly 130: requires EV≈116 (31 IVs, neutral, lv50 Garchomp base=95).
     // calc_stat(95, 31, 116, 50, 1.0) = floor((190+31+29)*0.5+5) = floor(130) = 130.
-    mon.minStats[2] = 130;
-    mon.maxStats[2] = 130;
+    mon.min_stats[2] = 130;
+    mon.max_stats[2] = 130;
     mon.min_pre_nature_stat[2] = 130;
     mon.max_pre_nature_stat[2] = 130;
 
@@ -3296,31 +3296,31 @@ fn test_ev_cap_tightens_remaining_stats() {
     pass5_back_solve(&mut mon, &config, &garchomp_dex());
 
     // Atk and Def EVs should be pinned near their expected values.
-    assert_eq!(mon.minEvs[1], 196, "Atk minEV must be 196 for stat=175");
-    assert_eq!(mon.maxEvs[1], 196, "Atk maxEV must be 196 for stat=175");
-    assert!(mon.minEvs[2] <= 116, "Def minEV must be ≤ 116 for stat≥130");
+    assert_eq!(mon.min_evs[1], 196, "Atk minEV must be 196 for stat=175");
+    assert_eq!(mon.max_evs[1], 196, "Atk maxEV must be 196 for stat=175");
+    assert!(mon.min_evs[2] <= 116, "Def minEV must be ≤ 116 for stat≥130");
 
     // After cap (budget = 510 - 196 - 116 - 0..= 198), other stats must have maxEV ≤ 196.
     // (Nearest EV_LATTICE value ≤ 198 is 196.)
     assert!(
-        mon.maxEvs[3] <= 196,
+        mon.max_evs[3] <= 196,
         "SpA maxEV must be capped to ≤ 196 by the total-EV cap (got {})",
-        mon.maxEvs[3]
+        mon.max_evs[3]
     );
     assert!(
-        mon.maxEvs[4] <= 196,
+        mon.max_evs[4] <= 196,
         "SpD maxEV must be capped to ≤ 196 by the total-EV cap (got {})",
-        mon.maxEvs[4]
+        mon.max_evs[4]
     );
     assert!(
-        mon.maxEvs[5] <= 196,
+        mon.max_evs[5] <= 196,
         "Spe maxEV must be capped to ≤ 196 by the total-EV cap (got {})",
-        mon.maxEvs[5]
+        mon.max_evs[5]
     );
 
     // Soundness check: min ≤ max for all stats.
     for i in 0..6 {
-        assert!(mon.minEvs[i] <= mon.maxEvs[i], "EV bounds inverted for stat {}", i);
+        assert!(mon.min_evs[i] <= mon.max_evs[i], "EV bounds inverted for stat {}", i);
     }
 }
 
@@ -3345,10 +3345,10 @@ fn test_ev_cap_no_tightening_when_evs_low() {
 
     pass5_back_solve(&mut mon, &config, &garchomp_dex());
 
-    // When minEvs are all 0, budget per stat = 510 - 0 = 510 ≥ 252 → no cap tightening.
+    // When min_evs are all 0, budget per stat = 510 - 0 = 510 ≥ 252 → no cap tightening.
     for i in 0..6 {
-        assert!(mon.maxEvs[i] <= 252, "maxEV must never exceed 252 (got {} for stat {})", mon.maxEvs[i], i);
-        assert!(mon.minEvs[i] <= mon.maxEvs[i], "EV bounds inverted for stat {}", i);
+        assert!(mon.max_evs[i] <= 252, "maxEV must never exceed 252 (got {} for stat {})", mon.max_evs[i], i);
+        assert!(mon.min_evs[i] <= mon.max_evs[i], "EV bounds inverted for stat {}", i);
     }
 }
 
@@ -4002,10 +4002,10 @@ fn test_mega_evolution_real_species_change_does_not_panic() {
 /// Regression (TODO.md "SpeedComparison raises min above max" / Mega Evolution): a
 /// `SpeedComparison` predicate persisted from BEFORE a Mega Evolution — capping the
 /// mega'd mon's max Spe against its PRE-mega base stat — must not survive the mega.
-/// `recompute_stat_bounds_for_species_change` remaps `minStats`/`maxStats` to the new
+/// `recompute_stat_bounds_for_species_change` remaps `min_stats`/`max_stats` to the new
 /// (here, much faster) base-stat table, and if the stale clause is left in
 /// `state.predicates`, the tail BCP/Pass-4 re-run re-derives the OLD cap against the
-/// freshly-raised `minStats[5]` and contradiction-panics. The `MegaEvolution` handler
+/// freshly-raised `min_stats[5]` and contradiction-panics. The `MegaEvolution` handler
 /// must purge species-derived predicates (`statement_stale_after_species_reveal`, same
 /// mechanism as S30's `IllusionEnded` purge) so this never fires.
 #[test]
@@ -4014,8 +4014,8 @@ fn test_mega_evolution_purges_stale_speed_comparison() {
 
     // P1: fixed, known Spe = 100 — the "fast" reference mon.
     let mut p1_mon = unknown_mon_species(Species::Garchomp);
-    p1_mon.minStats[5] = 100;
-    p1_mon.maxStats[5] = 100;
+    p1_mon.min_stats[5] = 100;
+    p1_mon.max_stats[5] = 100;
 
     // P2: about to Mega Evolve into something MUCH faster than its current bounds allow.
     let p2_mon = unknown_mon_species(Species::Garchomp);
@@ -4037,7 +4037,7 @@ fn test_mega_evolution_purges_stale_speed_comparison() {
         species: Species::GarchompMega,
         types: vec![PokemonType::Dragon, PokemonType::Ground],
         // Base Spe 150 (vs. Garchomp's real 102) — deliberately exaggerated so the
-        // post-mega minStats[5] floor is guaranteed to exceed the stale 100 cap.
+        // post-mega min_stats[5] floor is guaranteed to exceed the stale 100 cap.
         base_stats: [108, 170, 115, 120, 95, 150],
         weight: 950,
         primary_ability: Some(Ability::SandForce),
@@ -4059,16 +4059,16 @@ fn test_mega_evolution_purges_stale_speed_comparison() {
 
     let mon = &result.p2_active_mons[0];
     assert!(
-        mon.minStats[5] <= mon.maxStats[5],
+        mon.min_stats[5] <= mon.max_stats[5],
         "post-mega Spe bounds must stay consistent: min={} max={}",
-        mon.minStats[5], mon.maxStats[5]
+        mon.min_stats[5], mon.max_stats[5]
     );
     // The stale pre-mega cap must be gone — max Spe should reflect the new, much
     // faster base stat, not stay pinned at the old 100 cap.
     assert!(
-        mon.maxStats[5] > 100,
-        "the stale pre-mega SpeedComparison cap must be purged; maxStats[5] = {}",
-        mon.maxStats[5]
+        mon.max_stats[5] > 100,
+        "the stale pre-mega SpeedComparison cap must be purged; max_stats[5] = {}",
+        mon.max_stats[5]
     );
     assert!(
         !result.predicates.iter().any(|clause| clause.iter().any(|lit| matches!(
@@ -4104,8 +4104,8 @@ fn test_s41_mega_evolution_uses_post_mega_speed_for_same_turn_move_order() {
 
     // P1 idx 0: fully known, fixed Spe = 150 — between the pre- and post-mega values below.
     let mut p1_other = unknown_mon_species(Species::Snorlax); // not in dex; pass5 skips it
-    p1_other.minStats[5] = 150;
-    p1_other.maxStats[5] = 150;
+    p1_other.min_stats[5] = 150;
+    p1_other.max_stats[5] = 150;
     p1_other.item = Unknown::Known(Item::None);
     p1_other.possible_abilities = Unknown::Known(Ability::None);
 
@@ -4113,16 +4113,16 @@ fn test_s41_mega_evolution_uses_post_mega_speed_for_same_turn_move_order() {
     // low), post-mega base Spe 120 (chosen high), same EV/IV/nature/level either side.
     let mut tyranitar = unknown_mon_species(Species::Tyranitar);
     tyranitar.possible_natures = Unknown::Known(Nature::Hardy); // neutral on every stat
-    tyranitar.minIvs = [31; 6];
-    tyranitar.maxIvs = [31; 6];
-    tyranitar.minEvs = [0, 0, 0, 0, 0, 252];
-    tyranitar.maxEvs = [0, 0, 0, 0, 0, 252];
+    tyranitar.min_ivs = [31; 6];
+    tyranitar.max_ivs = [31; 6];
+    tyranitar.min_evs = [0, 0, 0, 0, 0, 252];
+    tyranitar.max_evs = [0, 0, 0, 0, 0, 252];
     tyranitar.item = Unknown::Known(Item::Tyranitarite);
     tyranitar.possible_abilities = Unknown::Known(Ability::SandStream);
     tyranitar.possible_original_abilities = Unknown::Known(Ability::SandStream);
     // Pre-mega Spe (base 80, iv 31, ev 252, lvl 50, neutral): calc_stat gives 132.
-    tyranitar.minStats[5] = 132;
-    tyranitar.maxStats[5] = 132;
+    tyranitar.min_stats[5] = 132;
+    tyranitar.max_stats[5] = 132;
     tyranitar.min_pre_nature_stat = [0; 6];
     tyranitar.max_pre_nature_stat = [u16::MAX; 6];
 
@@ -4183,14 +4183,14 @@ fn test_s41_mega_evolution_uses_post_mega_speed_for_same_turn_move_order() {
 
     let mon = &result.p1_active_mons[1];
     assert!(
-        mon.minStats[5] <= mon.maxStats[5],
+        mon.min_stats[5] <= mon.max_stats[5],
         "post-mega Spe bounds must stay consistent: min={} max={}",
-        mon.minStats[5], mon.maxStats[5]
+        mon.min_stats[5], mon.max_stats[5]
     );
     // Post-mega Spe (base 120, iv 31, ev 252, lvl 50, neutral) = 172 — must not be
     // corrupted down toward the pre-mega 132 by a stale pre-mega SpeedComparison.
     assert_eq!(
-        (mon.minStats[5], mon.maxStats[5]),
+        (mon.min_stats[5], mon.max_stats[5]),
         (172, 172),
         "own mon's post-mega Speed must stay exactly known at its real post-mega value"
     );
@@ -4410,9 +4410,9 @@ fn test_pass3_dir_a_assault_vest_defender_does_not_exclude_true_bsv() {
     // Snorlax is NOT in garchomp_dex() → pass5 skips validation (out-of-range stats ok).
     let mut p1_mon = unknown_mon_species(Species::Snorlax);
     p1_mon.hp = PokemonHP::Number(500);
-    // Lock every stat to 100; the oracle reads minStats[3] for SpA.
-    p1_mon.minStats = [500, 100, 100, 100, 100, 100];
-    p1_mon.maxStats = [500, 100, 100, 100, 100, 100];
+    // Lock every stat to 100; the oracle reads min_stats[3] for SpA.
+    p1_mon.min_stats = [500, 100, 100, 100, 100, 100];
+    p1_mon.max_stats = [500, 100, 100, 100, 100, 100];
     p1_mon.item               = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
@@ -4424,8 +4424,8 @@ fn test_pass3_dir_a_assault_vest_defender_does_not_exclude_true_bsv() {
     p2_mon.hp                    = PokemonHP::Percent(100);
     p2_mon.min_pre_nature_stat[4] = 50;   // force scan to start below the true threshold
     p2_mon.max_pre_nature_stat[4] = 200;
-    p2_mon.minStats[0]            = 200;  // fix max-HP to 200 for deterministic % → HP conversion
-    p2_mon.maxStats[0]            = 200;
+    p2_mon.min_stats[0]            = 200;  // fix max-HP to 200 for deterministic % → HP conversion
+    p2_mon.max_stats[0]            = 200;
     p2_mon.possible_natures      = Unknown::Known(Nature::Hardy); // neutral → BSV == final stat
     p2_mon.possible_abilities    = Unknown::Known(Ability::None); // no ability reduction
     p2_mon.item                  = Unknown::Not(vec![]);          // AV not excluded
@@ -4789,8 +4789,8 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
     // P1: our known mon with SpA = 100, no item/ability multipliers.
     let mut p1_mon = unknown_mon_species(Species::Snorlax);
     p1_mon.hp = PokemonHP::Number(500);
-    p1_mon.minStats = [500, 100, 100, 100, 100, 100];
-    p1_mon.maxStats = [500, 100, 100, 100, 100, 100];
+    p1_mon.min_stats = [500, 100, 100, 100, 100, 100];
+    p1_mon.max_stats = [500, 100, 100, 100, 100, 100];
     p1_mon.item               = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
@@ -4802,8 +4802,8 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
     p2_mon.hp                     = PokemonHP::Percent(100);
     p2_mon.min_pre_nature_stat[4] = 50;
     p2_mon.max_pre_nature_stat[4] = 200;
-    p2_mon.minStats[0]            = 200;
-    p2_mon.maxStats[0]            = 200;
+    p2_mon.min_stats[0]            = 200;
+    p2_mon.max_stats[0]            = 200;
     p2_mon.possible_natures       = Unknown::Known(Nature::Hardy); // neutral
     p2_mon.possible_abilities     = Unknown::Known(Ability::None);
     p2_mon.item                   = Unknown::Not(vec![]);          // AV not excluded
@@ -4947,8 +4947,8 @@ fn test_e1_binary_search_direction_b_preserves_precision() {
     // Use exact known stats so the defender is a fully-determined target.
     let mut p1_mon = unknown_mon_species(Species::Snorlax);
     p1_mon.hp = PokemonHP::Number(200);
-    p1_mon.minStats = [200, 110, 65, 65, 110, 30]; // approximate Snorlax level-50 stats
-    p1_mon.maxStats = [200, 110, 65, 65, 110, 30];
+    p1_mon.min_stats = [200, 110, 65, 65, 110, 30]; // approximate Snorlax level-50 stats
+    p1_mon.max_stats = [200, 110, 65, 65, 110, 30];
     p1_mon.item               = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
@@ -5377,8 +5377,8 @@ fn test_pass3_dir_a_ev_lattice_hp_does_not_exclude_true_bsv() {
     // Attacker: SpA=300, no item/ability so oracle uses raw stats.
     let mut p1_mon = unknown_mon_species(Species::Snorlax);
     p1_mon.hp = PokemonHP::Number(500);
-    p1_mon.minStats = [500, 100, 100, 300, 100, 100]; // SpA = 300
-    p1_mon.maxStats = [500, 100, 100, 300, 100, 100];
+    p1_mon.min_stats = [500, 100, 100, 300, 100, 100]; // SpA = 300
+    p1_mon.max_stats = [500, 100, 100, 300, 100, 100];
     p1_mon.item = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
@@ -5391,13 +5391,13 @@ fn test_pass3_dir_a_ev_lattice_hp_does_not_exclude_true_bsv() {
     );
     p2_mon.hp = PokemonHP::Percent(100);
     // Pin HP to the 4-value lattice window [183, 186].
-    p2_mon.minStats[0] = 183;
-    p2_mon.maxStats[0] = 186;
+    p2_mon.min_stats[0] = 183;
+    p2_mon.max_stats[0] = 186;
     // Widen the SpD BSV search space to include 121 as the boundary.
     p2_mon.min_pre_nature_stat[4] = 50;
     p2_mon.max_pre_nature_stat[4] = 200;
-    p2_mon.minStats[4] = 50;
-    p2_mon.maxStats[4] = 200;
+    p2_mon.min_stats[4] = 50;
+    p2_mon.max_stats[4] = 200;
     p2_mon.possible_natures = Unknown::Known(Nature::Hardy); // neutral: BSV == final stat
     p2_mon.possible_abilities = Unknown::Known(Ability::None);
     p2_mon.item = Unknown::Known(Item::None);
@@ -5715,9 +5715,9 @@ fn test_ib_pass5_reruns_after_bcp_narrows_nature_via_pre_nature_stat() {
         UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     // Narrow the observed Atk range.  With max IVs, neutral Atk at ev=44 is 156 and
     // at ev=36 is 155; +Atk at ev=36 gives 170 (within range) and at ev=44 gives 171
-    // (just outside maxStats=170).
-    mon.minStats[1] = 150;
-    mon.maxStats[1] = 170;
+    // (just outside max_stats=170).
+    mon.min_stats[1] = 150;
+    mon.max_stats[1] = 170;
 
     // In battle_with_p2 with no p1 mons, p2 active slot 0 → mon_idx=0.
     let mut state = battle_with_p2(vec![mon]);
@@ -5737,12 +5737,12 @@ fn test_ib_pass5_reruns_after_bcp_narrows_nature_via_pre_nature_stat() {
 
     let p2_mon = &result.p2_active_mons[0];
 
-    // +Atk natures must be excluded: at BSV≥156 their stat always exceeds maxStats=170.
+    // +Atk natures must be excluded: at BSV≥156 their stat always exceeds max_stats=170.
     for atk_nature in [Nature::Lonely, Nature::Adamant, Nature::Naughty, Nature::Brave] {
         assert!(
             unknown_is_excluded(&p2_mon.possible_natures, &atk_nature),
             "{atk_nature:?} (+Atk ×1.1) must be excluded after second pass5 uses \
-             min_pre_nature_stat[Atk]=156 (BSV=156 → stat=171 > maxStats=170)"
+             min_pre_nature_stat[Atk]=156 (BSV=156 → stat=171 > max_stats=170)"
         );
     }
 
@@ -7110,8 +7110,8 @@ fn test_c2_analytic_first_mover_does_not_exclude_true_stat() {
     // P1: observer's own mon — exact Number HP, known Def.
     let mut mon_p1 = unknown_mon();
     mon_p1.hp = PokemonHP::Number(p1_hp);
-    mon_p1.minStats[0] = p1_hp; mon_p1.maxStats[0] = p1_hp;
-    mon_p1.minStats[2] = p1_def; mon_p1.maxStats[2] = p1_def;
+    mon_p1.min_stats[0] = p1_hp; mon_p1.max_stats[0] = p1_hp;
+    mon_p1.min_stats[2] = p1_def; mon_p1.max_stats[2] = p1_def;
 
     // P2: Garchomp with Analytic, pre-nature Atk stat tightened to exactly 150
     // (corresponds to 31 IVs, 0 EVs, neutral nature at level 50).
@@ -7120,8 +7120,8 @@ fn test_c2_analytic_first_mover_does_not_exclude_true_stat() {
     mon_p2.possible_abilities = Unknown::Known(Ability::Analytic);
     mon_p2.min_pre_nature_stat[1] = true_atk_bsv;
     mon_p2.max_pre_nature_stat[1] = true_atk_bsv;
-    mon_p2.minStats[1] = true_atk_bsv;
-    mon_p2.maxStats[1] = true_atk_bsv;
+    mon_p2.min_stats[1] = true_atk_bsv;
+    mon_p2.max_stats[1] = true_atk_bsv;
 
     // Damage 24 = Tackle max roll (100%) at Atk=150, Def=115, level=50, ×1.0.
     // Base: floor(floor(22*40*150/115)/50)+2 = floor(floor(1147)/50)+2 = 22+2 = 24.
@@ -7408,7 +7408,7 @@ mod roundtrip_soundness {
     /// the damage roll) crash found in production-realistic "Open Team Sheet" gameplay.
     ///
     /// S34: `from_opponent_open_sheet`/`from_opponent_species` always seeded the min
-    /// side of `min_pre_nature_stat`/`minStats` at IV 0, with no way to know the format
+    /// side of `min_pre_nature_stat`/`min_stats` at IV 0, with no way to know the format
     /// pins opponent IVs to 31 (`force_max_ivs`) — leaving a "phantom" IV-0-consistent
     /// region that Direction B's damage back-solve could narrow into, but `pass5_back_solve`
     /// (which correctly restricts its own search to IV 31 per `config.force_max_ivs`)
@@ -7492,11 +7492,11 @@ mod roundtrip_soundness {
     /// fall through to building a brand-new `from_opponent_species`-style mon —
     /// DISCARDING the correct, fully-known entry `into_battle_state` had already placed
     /// and replacing it with a wide-uncertain one (`possible_natures = Not([])`,
-    /// `minEvs`/`maxEvs` widened to `[0, 252]`). This corrupted P1's OWN belief on
+    /// `min_evs`/`max_evs` widened to `[0, 252]`). This corrupted P1's OWN belief on
     /// every real battle that goes through the actual server flow — the earlier
     /// `test_s34_s35_*` test above didn't catch it because it built the fog state
     /// directly, bypassing `into_battle_state` entirely. Once a mon later Mega Evolves
-    /// (`recompute_stat_bounds_for_species_change` re-derives `minStats`/`maxStats`
+    /// (`recompute_stat_bounds_for_species_change` re-derives `min_stats`/`max_stats`
     /// from the now-wrongly-wide nature/EV window), this produced a visibly WIDE stat
     /// range for a mon that should be a single exact value, feeding wrong data into
     /// Direction A/B and eventually an "every candidate nature is infeasible" pass5
@@ -7569,16 +7569,118 @@ mod roundtrip_soundness {
              transition; got {:?}", p1_mon.possible_natures
         );
         assert_eq!(
-            p1_mon.minEvs, p1a.evs,
+            p1_mon.min_evs, p1a.evs,
             "P1's own lead must keep its exact EVs, not widen to [0,252]; got {:?}",
-            p1_mon.minEvs
+            p1_mon.min_evs
         );
-        assert_eq!(p1_mon.maxEvs, p1a.evs);
+        assert_eq!(p1_mon.max_evs, p1a.evs);
         assert_eq!(
-            p1_mon.minStats[1], p1_mon.maxStats[1],
+            p1_mon.min_stats[1], p1_mon.max_stats[1],
             "P1's own lead's Atk must stay collapsed to a single exact value \
              ([{}, {}]), not a range",
-            p1_mon.minStats[1], p1_mon.maxStats[1]
+            p1_mon.min_stats[1], p1_mon.max_stats[1]
+        );
+    }
+
+    /// S37 (generalized) regression: the guard in `pass1_switch` that detects "this
+    /// lead was already pre-placed by `into_battle_state`, don't rebuild it" used to
+    /// be hardcoded to `Player::P1` — correct for a P1 belief (where P1 is the
+    /// viewer, pre-placed fully known), but silently wrong for a P2 belief, where
+    /// it's P2's OWN leads that are pre-placed. Before the fix, this exact test
+    /// (mirroring `test_s37_p1_own_lead_stays_known_through_team_preview_transition`
+    /// but for `viewer = Player::P2`) would fail: P2's own Tyranitar would fall
+    /// through to the "completely new mon" branch and get rebuilt as a
+    /// wide-uncertain `from_opponent_species` mon, discarding the real nature/EV
+    /// knowledge the engine already had about the player's own team.
+    #[test]
+    fn test_s37_p2_own_lead_stays_known_through_team_preview_transition() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p2a = build_pokemon_state(
+            Species::Tyranitar, pd, md, Some(50),
+            Some([Some(PokemonMove::RockSlide), None, None, None]),
+            None, Some(Ability::SandStream), Some(Nature::Adamant), Some(Item::Tyranitarite),
+            None, Some([26, 252, 0, 0, 0, 0]), None, true,
+        );
+        let p1a = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::BodySlam), None, None, None]),
+            None, Some(Ability::ThickFat), Some(Nature::Impish), Some(Item::None),
+            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+        );
+
+        let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P2, &[p2a.clone()], &[p1a.clone()], pd, 1, 1, 50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet, true,
+        );
+        let UnknownMatchState::TeamPreview(preview) = preview else {
+            panic!("expected TeamPreview")
+        };
+        let fog = preview.into_battle_state(Player::P2, &[], &[], &[0], &[]);
+
+        // The exact event shape the real server emits for this transition: both
+        // leads sent out simultaneously.
+        let events = vec![InformationEvent {
+            kind: crate::information::information::EventKind::SimultaneousSwitch {
+                switches: vec![
+                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                        slot: super::p1(0),
+                        species: Species::Snorlax,
+                        level: 50,
+                        hp: crate::information::unknowns::PokemonHP::Percent(100),
+                        status: None,
+                        tera_type: None,
+                    },
+                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                        slot: super::p2(0),
+                        species: Species::Tyranitar,
+                        level: 50,
+                        hp: crate::information::unknowns::PokemonHP::Number(p2a.hp),
+                        status: None,
+                        tera_type: None,
+                    },
+                ],
+            },
+            reactions: vec![],
+        }];
+
+        let result = apply_information(
+            UnknownMatchState::Battle(fog), &events, true, pd, md, &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+        let UnknownMatchState::Battle(b) = result else {
+            panic!("expected Battle state")
+        };
+        let p2_mon = &b.p2_active_mons[0];
+
+        assert_eq!(
+            p2_mon.possible_natures, Unknown::Known(Nature::Adamant),
+            "P2's own lead must keep its Known nature through the team-preview \
+             transition; got {:?}", p2_mon.possible_natures
+        );
+        assert_eq!(
+            p2_mon.min_evs, p2a.evs,
+            "P2's own lead must keep its exact EVs, not widen to [0,252]; got {:?}",
+            p2_mon.min_evs
+        );
+        assert_eq!(p2_mon.max_evs, p2a.evs);
+        assert_eq!(
+            p2_mon.min_stats[1], p2_mon.max_stats[1],
+            "P2's own lead's Atk must stay collapsed to a single exact value \
+             ([{}, {}]), not a range",
+            p2_mon.min_stats[1], p2_mon.max_stats[1]
+        );
+        // `bench_outgoing_mon`'s companion guard must also be generalized to P2 —
+        // otherwise it would still clone P2's own lead onto the bench (since ITS
+        // guard wouldn't fire), and `pass1_switch`'s S37 shortcut returning early
+        // (without consuming a bench match) would leave that clone orphaned in
+        // `p2_known_back_mons`, duplicating the same physical Pokémon across both
+        // lists (mirrors `test_s37_own_lead_not_duplicated_onto_bench` for P1).
+        assert!(
+            b.p2_known_back_mons.is_empty(),
+            "P2's own lead must not be duplicated onto the bench during the \
+             team-preview transition; got {:?}", b.p2_known_back_mons
         );
     }
 
@@ -7831,8 +7933,8 @@ mod roundtrip_soundness {
     /// union, so the resulting marginal Def bound provably still contains the truth
     /// regardless of which HP hypothesis is real — investigated and confirmed sound
     /// by inspection AND empirically here. If a future change to Pass 3/Pass 5/
-    /// `ev_total_cap` breaks that coupling, this fails with either `minEvs[2] > 0`
-    /// (wrongly excluding the true Def EV) or `maxEvs[0] < 252` (wrongly excluding
+    /// `ev_total_cap` breaks that coupling, this fails with either `min_evs[2] > 0`
+    /// (wrongly excluding the true Def EV) or `max_evs[0] < 252` (wrongly excluding
     /// the true HP EV).
     #[test]
     fn roundtrip_b1_p1_attacks_p2_hp_ev_vs_def_ev_soundness() {
@@ -7872,15 +7974,15 @@ mod roundtrip_soundness {
 
         let p2_fog = &result.p2_active_mons[0];
         assert!(
-            p2_fog.minEvs[0] <= true_hp_ev && true_hp_ev <= p2_fog.maxEvs[0],
+            p2_fog.min_evs[0] <= true_hp_ev && true_hp_ev <= p2_fog.max_evs[0],
             "soundness: true HP EV ({true_hp_ev}) must lie within inferred range \
-             [{}, {}]", p2_fog.minEvs[0], p2_fog.maxEvs[0]
+             [{}, {}]", p2_fog.min_evs[0], p2_fog.max_evs[0]
         );
         assert!(
-            p2_fog.minEvs[2] <= true_def_ev && true_def_ev <= p2_fog.maxEvs[2],
+            p2_fog.min_evs[2] <= true_def_ev && true_def_ev <= p2_fog.max_evs[2],
             "soundness: true Def EV ({true_def_ev}) must lie within inferred range \
              [{}, {}] — HP EV bound was [{}, {}]",
-            p2_fog.minEvs[2], p2_fog.maxEvs[2], p2_fog.minEvs[0], p2_fog.maxEvs[0]
+            p2_fog.min_evs[2], p2_fog.max_evs[2], p2_fog.min_evs[0], p2_fog.max_evs[0]
         );
     }
 
@@ -7963,15 +8065,15 @@ mod roundtrip_soundness {
 
         let p2_fog = &result.p2_active_mons[0];
         assert!(
-            p2_fog.minEvs[0] <= true_hp_ev && true_hp_ev <= p2_fog.maxEvs[0],
+            p2_fog.min_evs[0] <= true_hp_ev && true_hp_ev <= p2_fog.max_evs[0],
             "soundness (2 hits): true HP EV ({true_hp_ev}) must lie within inferred \
-             range [{}, {}]", p2_fog.minEvs[0], p2_fog.maxEvs[0]
+             range [{}, {}]", p2_fog.min_evs[0], p2_fog.max_evs[0]
         );
         assert!(
-            p2_fog.minEvs[2] <= true_def_ev && true_def_ev <= p2_fog.maxEvs[2],
+            p2_fog.min_evs[2] <= true_def_ev && true_def_ev <= p2_fog.max_evs[2],
             "soundness (2 hits): true Def EV ({true_def_ev}) must lie within inferred \
              range [{}, {}] — HP EV bound was [{}, {}]",
-            p2_fog.minEvs[2], p2_fog.maxEvs[2], p2_fog.minEvs[0], p2_fog.maxEvs[0]
+            p2_fog.min_evs[2], p2_fog.max_evs[2], p2_fog.min_evs[0], p2_fog.max_evs[0]
         );
     }
 
@@ -8023,18 +8125,18 @@ mod roundtrip_soundness {
 
         assert_eq!(m.possible_species, Unknown::Known(Species::Zoroark));
         assert!(
-            m.minStats[0] <= m.maxStats[0],
+            m.min_stats[0] <= m.max_stats[0],
             "HP window must be non-empty after reconciliation: [{}, {}]",
-            m.minStats[0], m.maxStats[0]
+            m.min_stats[0], m.max_stats[0]
         );
         // The window must be Zoroark-consistent: a real Zoroark (base HP 60, 31 IV,
         // any EV) must lie within it. force_max_ivs default → 31 IV; 0 EV gives the
         // theoretical minimum.
         let real_zoroark_hp = calc_hp(60, 31, 0, 50);
         assert!(
-            m.minStats[0] <= real_zoroark_hp && real_zoroark_hp <= m.maxStats[0],
+            m.min_stats[0] <= real_zoroark_hp && real_zoroark_hp <= m.max_stats[0],
             "reconciled HP window [{}, {}] must contain a real Zoroark HP ({})",
-            m.minStats[0], m.maxStats[0], real_zoroark_hp
+            m.min_stats[0], m.max_stats[0], real_zoroark_hp
         );
     }
 
@@ -8103,7 +8205,7 @@ mod roundtrip_soundness {
     /// moves second.  Pass 4 emits a SpeedComparison constraint and propagates it.
     ///
     /// Soundness assertion: true Spe BSV (50) must lie within
-    /// `[minStats[5], maxStats[5]]` after Pass 4's bound propagation.
+    /// `[min_stats[5], max_stats[5]]` after Pass 4's bound propagation.
     #[test]
     fn roundtrip_d_speed_order_spe_stat_soundness() {
         let pd = pokemon_dex();
@@ -8140,10 +8242,10 @@ mod roundtrip_soundness {
         let p2_fog = &result.p2_active_mons[0];
         // Pass 4 propagates speed bounds through SpeedComparison predicates.
         assert!(
-            p2_fog.minStats[5] <= true_spe_bsv && true_spe_bsv <= p2_fog.maxStats[5],
+            p2_fog.min_stats[5] <= true_spe_bsv && true_spe_bsv <= p2_fog.max_stats[5],
             "soundness (Pass 4): true Spe BSV ({true_spe_bsv}) must lie within \
              inferred Spe range [{}, {}]",
-            p2_fog.minStats[5], p2_fog.maxStats[5]
+            p2_fog.min_stats[5], p2_fog.max_stats[5]
         );
         assert!(
             !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::Immunity),
@@ -8336,7 +8438,7 @@ mod roundtrip_soundness {
         assert!(t.pre_transform.is_some(), "pre_transform snapshot must be saved");
         // Copy source is our own Known mon → copied Atk is exact.
         assert_eq!(
-            (t.minStats[1], t.maxStats[1]), (true_atk, true_atk),
+            (t.min_stats[1], t.max_stats[1]), (true_atk, true_atk),
             "copied Atk must be exact (source is the observer's Known Garchomp)"
         );
         // Garchomp's move (Splash was P1's; the copy takes P1's move set).
@@ -8763,6 +8865,417 @@ mod roundtrip_soundness {
             "the Dark bounce round-trip must pin Prankster; got {:?}",
             result.p2_active_mons[0].possible_abilities
         );
+    }
+
+    // ── User report: BCP contradiction after a lead switch-out in doubles ────────
+    //
+    // Reported crash: lead Tyranitar + Lycanroc vs Charizard + Aerodactyl (P2's
+    // belief), P1 switches Lycanroc (slot P1_1) out for Corviknight while every
+    // other mon just Protects — `run_bcp` panics with "unsatisfiable clause (all
+    // literals false)". Reported as intermittent, so this drives BOTH the
+    // team-preview→battle transition (turn 0 — real lead sendout, so Tyranitar's
+    // Sand Stream and its end-of-turn sand chip on Charizard are genuinely present,
+    // not hand-waved away) and the switch turn (turn 1) through the REAL simulator
+    // (`crate::simulator::simulate_turn`), branching over every outcome of both so
+    // an RNG-dependent trigger can't hide in an unchecked branch. P2's fog belief is
+    // built the same way the real server does (`session.rs::resolve_turn`'s
+    // documented two-step flow, mirrored by `test_s37_*` above): team preview
+    // (species-only for the non-viewer side) then replaying the transition's own
+    // event log, extended here to doubles.
+    #[test]
+    fn test_lead_switchout_doubles_bcp_no_contradiction() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1_text = "\
+Tyranitar @ Leftovers
+Ability: Sand Stream
+Level: 50
+EVs: 252 HP / 252 Atk / 4 SpD
+Adamant Nature
+- Rock Slide
+- Protect
+
+Lycanroc @ Life Orb
+Ability: Sand Rush
+Level: 50
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Accelerock
+- Protect
+
+Corviknight @ Leftovers
+Ability: Pressure
+Level: 50
+EVs: 252 HP / 252 Def / 4 SpD
+Impish Nature
+- Brave Bird
+- Protect
+";
+        let p2_text = "\
+Charizard @ Choice Specs
+Ability: Blaze
+Level: 50
+EVs: 4 Def / 252 SpA / 252 Spe
+Timid Nature
+- Flamethrower
+- Protect
+
+Aerodactyl @ Focus Sash
+Ability: Pressure
+Level: 50
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Rock Slide
+- Protect
+";
+
+        let preview = crate::simulator::team_preview_state_from_team_strings(
+            p1_text, p2_text, pd, md, 2, 3, false,
+        );
+
+        let p1_tp_cmd = PlayerCommand::TeamPreview(crate::state::battle::TeamPreviewCommand {
+            active_indices: vec![0, 1],
+            back_indices: vec![2],
+        });
+        let p2_tp_cmd = PlayerCommand::TeamPreview(crate::state::battle::TeamPreviewCommand {
+            active_indices: vec![0, 1],
+            back_indices: vec![],
+        });
+
+        // ── Turn 0: real team-preview → battle transition. Per the engine's own
+        // documented behaviour, team-preview resolution runs its own end-of-turn
+        // before turn 1 — so Sand Stream's Sandstorm and its chip on Charizard are
+        // already baked into these branches, not something this test has to fake.
+        let turn0_branches = crate::simulator::simulate_turn(
+            &MatchState::TeamPreviewState(preview.clone()), &p1_tp_cmd, &p2_tp_cmd,
+            md, pd, false, 16, Some(Player::P2),
+        );
+        assert!(!turn0_branches.is_empty());
+
+        let opponent_species: Vec<Species> =
+            preview.p1_mons.iter().map(|m| m.species.clone()).collect();
+        let my_team = preview.p2_mons.clone();
+
+        let mut checked = 0;
+        for (turn0_state, turn0_events_opt, _prob) in turn0_branches {
+            if !matches!(&turn0_state, MatchState::BattleState(_)) {
+                continue;
+            }
+            let Some(turn0_events) = turn0_events_opt else { continue };
+
+            // P2's fog-of-war belief, seeded the same way `session.rs` does:
+            // species-only team preview, then the real transition's own event log.
+            let fog_preview = UnknownMatchState::team_preview_from_perspective(
+                Player::P2, &my_team, &opponent_species, pd, 2, 3, 50,
+            );
+            let UnknownMatchState::TeamPreview(fog_preview) = fog_preview else {
+                panic!("expected TeamPreview")
+            };
+            let fog = fog_preview.into_battle_state(Player::P2, &[], &[], &[0, 1], &[]);
+            let fog_after_leads = apply_roundtrip(fog, turn0_events);
+
+            // ── Turn 1 (the crash turn): P1 switches Lycanroc (slot 1) out for
+            // Corviknight (party_index 0, its only bench mon); everyone else Protects.
+            let p1_cmd = PlayerCommand::Battle(vec![
+                BattleCommand::Attack(crate::state::battle::AttackCommand {
+                    move_slot: 1, target: None, terastallize: false, mega_evolve: false,
+                }),
+                BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+            ]);
+            let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1, 1]));
+
+            let turn1_branches = crate::simulator::simulate_turn(
+                &turn0_state, &p1_cmd, &p2_cmd, md, pd, false, 16, Some(Player::P2),
+            );
+            for (_s, events_opt, _p) in turn1_branches {
+                let Some(events) = events_opt else { continue };
+                checked += 1;
+                // Must not panic — this is the actual regression under test.
+                let _ = apply_roundtrip(fog_after_leads.clone(), events);
+            }
+        }
+        assert!(checked > 0, "expected at least one branch to be exercised");
+    }
+
+    // ── Live-triggered follow-up: switch-out + SAME-TURN Mega Evolution ──────────
+    //
+    // The plain switch-out above (no Mega Evolution) never crashed — the user's live
+    // repro added one missing ingredient: P1 also Mega Evolves a DIFFERENT active mon
+    // in the SAME turn as the switch. Real crash trace (P2's belief):
+    //   turn=[Switch(P1_1 -> Sinistcha), MegaEvolution(P1_0 -> TyranitarMega),
+    //         MoveUsed(P2_0, Protect), MoveUsed(P2_1, Protect), MoveUsed(P1_0, Protect),
+    //         EndOfTurn]
+    //   — unsatisfiable clause: [SpeedComparison { fast_idx: 1, slow_idx: 2, .. }]
+    //   legend: 0:p1_active=TyranitarMega 1:p1_active=Sinistcha(NEW) 2:p2_active=Aerodactyl
+    //           3:p2_active=Charizard 4..6:p1_possible_back(Corviknight,Raichu,Hydreigon)
+    //           7..8:p2_known_back(Sylveon,Ariados)
+    // Note p1_known_back is EMPTY — whatever occupied P1_1 before the switch (the mon
+    // the surviving `fast_idx:1` clause is really about) isn't accounted for anywhere
+    // in the post-switch roster, which is the real tell. Reproduces the same shape:
+    // an earlier real turn establishes a persisted `SpeedComparison` for the P1_1
+    // occupant (Lycanroc) against a P2 mon, then the crash turn switches Lycanroc out
+    // for a bench mon WHILE Tyranitar (a different active slot) Mega Evolves.
+    #[test]
+    fn test_switchout_same_turn_mega_evolution_bcp_no_contradiction() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1_text = "\
+Tyranitar @ Tyranitarite
+Ability: Sand Stream
+Level: 50
+EVs: 252 HP / 252 Atk / 4 SpD
+Adamant Nature
+- Rock Slide
+- Protect
+
+Lycanroc @ Life Orb
+Ability: Sand Rush
+Level: 50
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Accelerock
+- Protect
+
+Corviknight @ Leftovers
+Ability: Pressure
+Level: 50
+EVs: 252 HP / 252 Def / 4 SpD
+Impish Nature
+- Brave Bird
+- Protect
+";
+        let p2_text = "\
+Charizard @ Choice Specs
+Ability: Blaze
+Level: 50
+EVs: 4 Def / 252 SpA / 252 Spe
+Timid Nature
+- Flamethrower
+- Protect
+
+Aerodactyl @ Focus Sash
+Ability: Pressure
+Level: 50
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Rock Slide
+- Protect
+";
+
+        let preview = crate::simulator::team_preview_state_from_team_strings(
+            p1_text, p2_text, pd, md, 2, 3, false,
+        );
+
+        let p1_tp_cmd = PlayerCommand::TeamPreview(crate::state::battle::TeamPreviewCommand {
+            active_indices: vec![0, 1],
+            back_indices: vec![2],
+        });
+        let p2_tp_cmd = PlayerCommand::TeamPreview(crate::state::battle::TeamPreviewCommand {
+            active_indices: vec![0, 1],
+            back_indices: vec![],
+        });
+
+        let turn0_branches = crate::simulator::simulate_turn(
+            &MatchState::TeamPreviewState(preview.clone()), &p1_tp_cmd, &p2_tp_cmd,
+            md, pd, false, 16, Some(Player::P2),
+        );
+        assert!(!turn0_branches.is_empty());
+
+        let opponent_species: Vec<Species> =
+            preview.p1_mons.iter().map(|m| m.species.clone()).collect();
+        let my_team = preview.p2_mons.clone();
+
+        let mut checked = 0;
+        for (turn0_state, turn0_events_opt, _prob) in turn0_branches {
+            if !matches!(&turn0_state, MatchState::BattleState(_)) {
+                continue;
+            }
+            let Some(turn0_events) = turn0_events_opt else { continue };
+
+            let fog_preview = UnknownMatchState::team_preview_from_perspective(
+                Player::P2, &my_team, &opponent_species, pd, 2, 3, 50,
+            );
+            let UnknownMatchState::TeamPreview(fog_preview) = fog_preview else {
+                panic!("expected TeamPreview")
+            };
+            let fog = fog_preview.into_battle_state(Player::P2, &[], &[], &[0, 1], &[]);
+            let fog_after_leads = apply_roundtrip(fog, turn0_events);
+
+            // ── Turn 1: everyone Protects — a real attack turn (no switch, no mega)
+            // that lets Pass 4 observe move order among all four actives and (if the
+            // resolved order makes it informative) persist a `SpeedComparison` tying
+            // Lycanroc's (idx 1) hidden Spe bounds to a P2 mon's known Spe.
+            let turn1_p1_cmd = PlayerCommand::Battle(vec![
+                BattleCommand::Attack(crate::state::battle::AttackCommand {
+                    move_slot: 1, target: None, terastallize: false, mega_evolve: false,
+                }),
+                BattleCommand::Attack(crate::state::battle::AttackCommand {
+                    move_slot: 1, target: None, terastallize: false, mega_evolve: false,
+                }),
+            ]);
+            let turn1_p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1, 1]));
+            let turn1_branches = crate::simulator::simulate_turn(
+                &turn0_state, &turn1_p1_cmd, &turn1_p2_cmd, md, pd, false, 16, Some(Player::P2),
+            );
+
+            for (turn1_state, turn1_events_opt, _p) in turn1_branches {
+                if !matches!(&turn1_state, MatchState::BattleState(_)) {
+                    continue;
+                }
+                let Some(turn1_events) = turn1_events_opt else { continue };
+                let fog_after_turn1 = apply_roundtrip(fog_after_leads.clone(), turn1_events);
+
+                // ── Turn 2 (the crash turn): P1 switches Lycanroc (slot 1) out for
+                // Corviknight AND Mega Evolves Tyranitar (slot 0) in the SAME turn;
+                // everyone else Protects — matching the live crash trace exactly.
+                let turn2_p1_cmd = PlayerCommand::Battle(vec![
+                    BattleCommand::Attack(crate::state::battle::AttackCommand {
+                        move_slot: 1, target: None, terastallize: false, mega_evolve: true,
+                    }),
+                    BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+                ]);
+                let turn2_p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1, 1]));
+                let turn2_branches = crate::simulator::simulate_turn(
+                    &turn1_state, &turn2_p1_cmd, &turn2_p2_cmd, md, pd, false, 16, Some(Player::P2),
+                );
+                for (_s2, turn2_events_opt, _p2) in turn2_branches {
+                    let Some(turn2_events) = turn2_events_opt else { continue };
+                    checked += 1;
+                    // Must not panic — this is the actual regression under test.
+                    let _ = apply_roundtrip(fog_after_turn1.clone(), turn2_events);
+                }
+            }
+        }
+        assert!(checked > 0, "expected at least one branch to be exercised");
+    }
+
+    // ── Corrected timing: the switch+mega turn is the VERY FIRST real turn ───────
+    //
+    // The user confirmed the crash turn had ZERO turns between the team-preview
+    // lead-out and the switch+Mega turn — the test above inserted an extra combat
+    // turn to *establish* the SpeedComparison first, which doesn't match. Since
+    // `Statement::SpeedComparison` is constructed in exactly one place in the whole
+    // engine (`pass4_speed_from_order`'s `windows(2)` loop, driven only by
+    // `MoveUsed` events), and the outgoing P1_1 mon never has a `MoveUsed` event on
+    // the crash turn itself, a stale clause referencing it is only possible if the
+    // very first `apply_information` call (the team-preview transition) already
+    // produces one — which requires investigating whether Sand Rush activating the
+    // instant Sand Stream sets Sandstorm (both fire during this same lead-out) folds
+    // into a same-turn Mega Evolution + switch. Real crash trace for context:
+    //   P2 sent out Aerodactyl, P1 sent out Lycanroc, P2 sent out Charizard,
+    //   P1 sent out Tyranitar, Aerodactyl's Unnerve!, Tyranitar's Sand Stream!
+    //   The weather became Sandstorm! -- then immediately the crash turn:
+    //   Switch(P1_1->Sinistcha), MegaEvolution(P1_0->TyranitarMega), 3xProtect, EndOfTurn.
+    #[test]
+    fn test_switchout_same_turn_mega_evolution_on_first_real_turn_no_contradiction() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1_text = "\
+Tyranitar @ Tyranitarite
+Ability: Sand Stream
+Level: 50
+EVs: 252 HP / 252 Atk / 4 SpD
+Adamant Nature
+- Rock Slide
+- Protect
+
+Lycanroc @ Life Orb
+Ability: Sand Rush
+Level: 50
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Accelerock
+- Protect
+
+Corviknight @ Leftovers
+Ability: Pressure
+Level: 50
+EVs: 252 HP / 252 Def / 4 SpD
+Impish Nature
+- Brave Bird
+- Protect
+";
+        let p2_text = "\
+Charizard @ Choice Specs
+Ability: Blaze
+Level: 50
+EVs: 4 Def / 252 SpA / 252 Spe
+Timid Nature
+- Flamethrower
+- Protect
+
+Aerodactyl @ Focus Sash
+Ability: Unnerve
+Level: 50
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Rock Slide
+- Protect
+";
+
+        let preview = crate::simulator::team_preview_state_from_team_strings(
+            p1_text, p2_text, pd, md, 2, 3, false,
+        );
+
+        let p1_tp_cmd = PlayerCommand::TeamPreview(crate::state::battle::TeamPreviewCommand {
+            active_indices: vec![0, 1],
+            back_indices: vec![2],
+        });
+        let p2_tp_cmd = PlayerCommand::TeamPreview(crate::state::battle::TeamPreviewCommand {
+            active_indices: vec![0, 1],
+            back_indices: vec![],
+        });
+
+        let turn0_branches = crate::simulator::simulate_turn(
+            &MatchState::TeamPreviewState(preview.clone()), &p1_tp_cmd, &p2_tp_cmd,
+            md, pd, false, 16, Some(Player::P2),
+        );
+        assert!(!turn0_branches.is_empty());
+
+        let opponent_species: Vec<Species> =
+            preview.p1_mons.iter().map(|m| m.species.clone()).collect();
+        let my_team = preview.p2_mons.clone();
+
+        let mut checked = 0;
+        for (turn0_state, turn0_events_opt, _prob) in turn0_branches {
+            if !matches!(&turn0_state, MatchState::BattleState(_)) {
+                continue;
+            }
+            let Some(turn0_events) = turn0_events_opt else { continue };
+
+            let fog_preview = UnknownMatchState::team_preview_from_perspective(
+                Player::P2, &my_team, &opponent_species, pd, 2, 3, 50,
+            );
+            let UnknownMatchState::TeamPreview(fog_preview) = fog_preview else {
+                panic!("expected TeamPreview")
+            };
+            let fog = fog_preview.into_battle_state(Player::P2, &[], &[], &[0, 1], &[]);
+            let fog_after_leads = apply_roundtrip(fog, turn0_events);
+
+            // ── The crash turn, run as the VERY FIRST real turn (no combat turn in
+            // between): P1 switches Lycanroc (slot 1) out for Corviknight AND Mega
+            // Evolves Tyranitar (slot 0) in the SAME turn; everyone else Protects.
+            let turn1_p1_cmd = PlayerCommand::Battle(vec![
+                BattleCommand::Attack(crate::state::battle::AttackCommand {
+                    move_slot: 1, target: None, terastallize: false, mega_evolve: true,
+                }),
+                BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+            ]);
+            let turn1_p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1, 1]));
+            let turn1_branches = crate::simulator::simulate_turn(
+                &turn0_state, &turn1_p1_cmd, &turn1_p2_cmd, md, pd, false, 16, Some(Player::P2),
+            );
+            for (_s, turn1_events_opt, _p) in turn1_branches {
+                let Some(turn1_events) = turn1_events_opt else { continue };
+                checked += 1;
+                // Must not panic — this is the actual regression under test.
+                let _ = apply_roundtrip(fog_after_leads.clone(), turn1_events);
+            }
+        }
+        assert!(checked > 0, "expected at least one branch to be exercised");
     }
 }
 
@@ -10177,6 +10690,153 @@ fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
     );
 }
 
+// ── Regression: SimultaneousSwitch send-out order must not corrupt active-slot
+// placement ───────────────────────────────────────────────────────────────────
+//
+// The concrete simulator emits the initial lead send-out `SimultaneousSwitch` in
+// GLOBAL cross-side effective-speed order (`process_sendouts_in_speed_order_branching`,
+// simulator/mod.rs) — NOT slot-index order. A side's own faster lead can appear in
+// the `switches` list before its slower teammate even though it occupies a HIGHER
+// slot_index. `pass1_switch`'s active-slot placement (`if slot_i < actives.len()
+// {overwrite} else {push}`) silently assumed ascending slot-index processing per
+// side: processing the higher slot first pushed it to array position 0 (since the
+// Vec was still empty), and the lower slot processed next then overwrote that
+// position — silently destroying the first mon with no bench record at all. This
+// left `p1_active_mons` permanently one entry short, desyncing every P2 `mon_idx`
+// computation (`p1_active_mons.len() + slot_i`) until something eventually grew
+// the Vec back — the real-world trigger for a live BCP soundness panic (a
+// `SpeedComparison` clause baked in against the wrong, since-shifted index).
+// Reproduces the live crash's exact shape: P1's slot-1 lead (Lycanroc) listed
+// BEFORE its slot-0 lead (Tyranitar) in the SimultaneousSwitch.
+#[test]
+fn test_simultaneous_switch_placement_survives_out_of_slot_order() {
+    let p2_team = vec![
+        crate::state::pokemon::build_pokemon_state(
+            Species::Charizard, &HashMap::new(), &HashMap::new(), Some(50),
+            None, None, None, None, None, None, None, None, true,
+        ),
+        crate::state::pokemon::build_pokemon_state(
+            Species::Aerodactyl, &HashMap::new(), &HashMap::new(), Some(50),
+            None, None, None, None, None, None, None, None, true,
+        ),
+    ];
+    let opponent_species = vec![Species::Tyranitar, Species::Lycanroc];
+
+    let preview = UnknownMatchState::team_preview_from_perspective(
+        Player::P2, &p2_team, &opponent_species, &HashMap::new(), 2, 2, 50,
+    );
+    let UnknownMatchState::TeamPreview(preview) = preview else {
+        panic!("expected TeamPreview")
+    };
+    let fog = preview.into_battle_state(Player::P2, &[], &[], &[0, 1], &[]);
+
+    // The bug-triggering order: P1's slot-1 lead (faster, Lycanroc) listed BEFORE
+    // its slot-0 lead (slower, Tyranitar) — exactly what the concrete simulator's
+    // global speed sort produces when the higher-slot mon is faster.
+    let events = vec![event(EventKind::SimultaneousSwitch {
+        switches: vec![
+            SwitchState { disguise_species: None, max_hp: 0,
+                slot: p1(1), species: Species::Lycanroc, level: 50,
+                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            },
+            SwitchState { disguise_species: None, max_hp: 0,
+                slot: p1(0), species: Species::Tyranitar, level: 50,
+                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            },
+        ],
+    })];
+
+    let result = apply_information(
+        UnknownMatchState::Battle(fog), &events, true, &HashMap::new(), &HashMap::new(),
+        &HashMap::new(), &InferenceConfig::default(),
+    );
+    let UnknownMatchState::Battle(b) = result else {
+        panic!("expected Battle state")
+    };
+
+    assert_eq!(
+        b.p1_active_mons.len(), 2,
+        "both P1 leads must survive the transition regardless of send-out order; got {:?}",
+        b.p1_active_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(&b.p1_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Tyranitar),
+        "slot 0 must be Tyranitar; got {:?}", b.p1_active_mons[0].possible_species
+    );
+    assert!(
+        matches!(&b.p1_active_mons[1].possible_species, Unknown::Known(s) if *s == Species::Lycanroc),
+        "slot 1 must be Lycanroc, not silently destroyed by the out-of-order switch; got {:?}",
+        b.p1_active_mons[1].possible_species
+    );
+}
+
+// ── Live-crash isolation: does the switch purge actually drop a stale         ────
+// SpeedComparison tied to the outgoing mon's mon_idx, with a same-turn Mega Evolution
+// on a DIFFERENT slot in the mix? Direct construction from the live crash's own
+// mon_idx legend (0:Tyranitar 1:X(->Sinistcha) 2:Aerodactyl 3:Charizard
+// 4-6:p1_possible_back 7-8:p2_known_back), skipping the real simulator so the purge
+// mechanics can be checked in total isolation.
+#[test]
+fn test_switch_purges_stale_speed_comparison_with_same_turn_mega_evolution() {
+    let mut state = battle_nvn(
+        vec![unknown_mon_species(Species::Tyranitar), unknown_mon_species(Species::Lycanroc)],
+        vec![unknown_mon_species(Species::Aerodactyl), unknown_mon_species(Species::Charizard)],
+    );
+    state.p1_possible_back_mons = vec![
+        unknown_mon_species(Species::Sinistcha),
+        unknown_mon_species(Species::Corviknight),
+        unknown_mon_species(Species::Raichu),
+        unknown_mon_species(Species::Hydreigon),
+    ];
+    state.p2_known_back_mons =
+        vec![unknown_mon_species(Species::Sylveon), unknown_mon_species(Species::Ariados)];
+
+    // Inject the exact stale clause from the live crash: idx 1 is the mon about to
+    // leave P1_1 (Lycanroc here), idx 2 is Aerodactyl.
+    state.predicates = vec![vec![Statement::SpeedComparison {
+        fast_idx: 1,
+        slow_idx: 2,
+        fast_mult: 4,
+        slow_mult: 4,
+    }]];
+
+    let events = vec![
+        event(EventKind::Switch(SwitchState {
+            disguise_species: None, max_hp: 0,
+            slot: p1(1), species: Species::Sinistcha, level: 50,
+            hp: PokemonHP::Percent(100), status: None, tera_type: None,
+        })),
+        event(EventKind::MegaEvolution { slot: p1(0), into: Species::TyranitarMega }),
+        event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Protect, targets: vec![] }),
+        event(EventKind::MoveUsed { user: p2(1), move_used: PokemonMove::Protect, targets: vec![] }),
+        event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Protect, targets: vec![] }),
+        event(EventKind::EndOfTurn),
+    ];
+    let result = apply(state, events);
+
+    assert!(
+        result.predicates.iter().all(|clause| {
+            !clause.iter().any(
+                |lit| matches!(lit, Statement::SpeedComparison { fast_idx, .. } if *fast_idx == 1),
+            )
+        }),
+        "stale SpeedComparison{{fast_idx:1}} clause survived the P1_1 switch \
+         (should have been purged by `purge_mon_scoped_knowledge`): {:?}",
+        result.predicates
+    );
+
+    // The outgoing mon (Lycanroc) must be preserved on the bench, not silently lost —
+    // the live crash's mon_idx legend showed an empty `p1_known_back`, which would
+    // mean the outgoing mon vanished from the roster entirely instead of landing here.
+    assert!(
+        result.p1_known_back_mons.iter().any(
+            |m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Lycanroc),
+        ),
+        "outgoing Lycanroc must be preserved in p1_known_back_mons after the switch; got {:?}",
+        result.p1_known_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+    );
+}
+
 // ── Information modes: describe.rs rendering, open-sheet reveal, team-preview →
 // battle conversion (bring-N-of-M known/possible-back split) ─────────────────────
 mod information_mode_tests {
@@ -10286,8 +10946,8 @@ mod information_mode_tests {
         );
         // Nature/EVs are NEVER on a sheet — must stay fully unknown / worst-case bounded.
         assert_eq!(unk.possible_natures, Unknown::Not(vec![]));
-        assert_eq!(unk.minEvs, [0; 6]);
-        assert_eq!(unk.maxEvs, [252; 6]);
+        assert_eq!(unk.min_evs, [0; 6]);
+        assert_eq!(unk.max_evs, [252; 6]);
     }
 
     #[test]
@@ -10304,16 +10964,16 @@ mod information_mode_tests {
         // 1.1 "best case" a fully-unknown nature assumes) — revealing it must strictly
         // lower the SpA ceiling.
         assert!(
-            unk.maxStats[3] < pre_reveal.maxStats[3],
+            unk.max_stats[3] < pre_reveal.max_stats[3],
             "revealing a SpA-nerfing nature must lower the SpA ceiling: {} !< {}",
-            unk.maxStats[3], pre_reveal.maxStats[3]
+            unk.max_stats[3], pre_reveal.max_stats[3]
         );
         // Jolly BOOSTS Speed (fixed 1.1 mod, not the independent 0.9 "worst case") —
         // revealing it must strictly raise the Speed floor.
         assert!(
-            unk.minStats[5] > pre_reveal.minStats[5],
+            unk.min_stats[5] > pre_reveal.min_stats[5],
             "revealing a Speed-boosting nature must raise the Speed floor: {} !> {}",
-            unk.minStats[5], pre_reveal.minStats[5]
+            unk.min_stats[5], pre_reveal.min_stats[5]
         );
     }
 

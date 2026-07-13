@@ -150,55 +150,53 @@ pub(super) fn propagate_collected(
     let mut changed = false;
     for &(fast_idx, slow_idx, fast_mult, slow_mult) in comparisons {
         // Raise fast's min Spe: base_spe(fast) >= ceil(base_spe(slow)*slow_mult / fast_mult)
-        let slow_min = super::get_mon_by_idx(state, slow_idx).map_or(0u64, |m| m.minStats[5] as u64);
+        let slow_min = super::get_mon_by_idx(state, slow_idx).map_or(0u64, |m| m.min_stats[5] as u64);
         let new_fast_min = div_ceil(slow_min * slow_mult as u64, fast_mult as u64) as u16;
         // Read both bounds first (immutable borrow) so the panic-message legend below
         // never needs to coexist with a live mutable borrow of `state`.
         if let Some((fast_min, fast_max)) =
-            super::get_mon_by_idx(state, fast_idx).map(|m| (m.minStats[5], m.maxStats[5]))
+            super::get_mon_by_idx(state, fast_idx).map(|m| (m.min_stats[5], m.max_stats[5]))
+            && new_fast_min > fast_min
         {
-            if new_fast_min > fast_min {
-                if new_fast_min > fast_max {
-                    inference_contradiction!(
-                        fast_idx,
-                        "SpeedComparison raises min({}) above max({}) for mon_idx {}\nmon_idx legend: {}",
-                        new_fast_min,
-                        fast_max,
-                        fast_idx,
-                        super::mon_idx_legend(state)
-                    );
-                }
-                if let Some(mon) = super::get_mon_mut_by_idx(state, fast_idx) {
-                    mon.minStats[5] = new_fast_min;
-                }
-                changed = true;
+            if new_fast_min > fast_max {
+                inference_contradiction!(
+                    fast_idx,
+                    "SpeedComparison raises min({}) above max({}) for mon_idx {}\nmon_idx legend: {}",
+                    new_fast_min,
+                    fast_max,
+                    fast_idx,
+                    super::mon_idx_legend(state)
+                );
             }
+            if let Some(mon) = super::get_mon_mut_by_idx(state, fast_idx) {
+                mon.min_stats[5] = new_fast_min;
+            }
+            changed = true;
         }
 
         // Lower slow's max Spe: base_spe(slow) <= floor(base_spe(fast)*fast_mult / slow_mult)
         let fast_max_for_slow =
-            super::get_mon_by_idx(state, fast_idx).map_or(u64::MAX / 2, |m| m.maxStats[5] as u64);
+            super::get_mon_by_idx(state, fast_idx).map_or(u64::MAX / 2, |m| m.max_stats[5] as u64);
         let new_slow_max = (fast_max_for_slow.saturating_mul(fast_mult as u64) / slow_mult as u64)
             .min(u16::MAX as u64) as u16;
         if let Some((slow_min_bound, slow_max_bound)) =
-            super::get_mon_by_idx(state, slow_idx).map(|m| (m.minStats[5], m.maxStats[5]))
+            super::get_mon_by_idx(state, slow_idx).map(|m| (m.min_stats[5], m.max_stats[5]))
+            && new_slow_max < slow_max_bound
         {
-            if new_slow_max < slow_max_bound {
-                if new_slow_max < slow_min_bound {
-                    inference_contradiction!(
-                        slow_idx,
-                        "SpeedComparison lowers max({}) below min({}) for mon_idx {}\nmon_idx legend: {}",
-                        new_slow_max,
-                        slow_min_bound,
-                        slow_idx,
-                        super::mon_idx_legend(state)
-                    );
-                }
-                if let Some(mon) = super::get_mon_mut_by_idx(state, slow_idx) {
-                    mon.maxStats[5] = new_slow_max;
-                }
-                changed = true;
+            if new_slow_max < slow_min_bound {
+                inference_contradiction!(
+                    slow_idx,
+                    "SpeedComparison lowers max({}) below min({}) for mon_idx {}\nmon_idx legend: {}",
+                    new_slow_max,
+                    slow_min_bound,
+                    slow_idx,
+                    super::mon_idx_legend(state)
+                );
             }
+            if let Some(mon) = super::get_mon_mut_by_idx(state, slow_idx) {
+                mon.max_stats[5] = new_slow_max;
+            }
+            changed = true;
         }
     }
     changed
@@ -378,9 +376,9 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
             .map_or(false, |m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] > *value),
         Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
             let fast_max =
-                super::get_mon_by_idx(state, *fast_idx).map_or(999u64, |m| m.maxStats[5] as u64);
+                super::get_mon_by_idx(state, *fast_idx).map_or(999u64, |m| m.max_stats[5] as u64);
             let slow_min =
-                super::get_mon_by_idx(state, *slow_idx).map_or(0u64, |m| m.minStats[5] as u64);
+                super::get_mon_by_idx(state, *slow_idx).map_or(0u64, |m| m.min_stats[5] as u64);
             fast_max * (*fast_mult as u64) < slow_min * (*slow_mult as u64)
         }
         // Turn-count literals are false-confirmed only while the effect is live and the timer
@@ -429,9 +427,9 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
             .map_or(false, |m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] <= *value),
         Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
             let fast_min =
-                super::get_mon_by_idx(state, *fast_idx).map_or(0u64, |m| m.minStats[5] as u64);
+                super::get_mon_by_idx(state, *fast_idx).map_or(0u64, |m| m.min_stats[5] as u64);
             let slow_max =
-                super::get_mon_by_idx(state, *slow_idx).map_or(999u64, |m| m.maxStats[5] as u64);
+                super::get_mon_by_idx(state, *slow_idx).map_or(999u64, |m| m.max_stats[5] as u64);
             fast_min * (*fast_mult as u64) >= slow_max * (*slow_mult as u64)
         }
         Statement::NatureBoostsStat { mon_idx, stat } => {
@@ -519,8 +517,8 @@ fn force_literal(
                 super::unknown_set_known(&mut mon.possible_species, species.clone(), &format!("bcp#{mon_idx}"));
                 // S30: `HasSpecies` literals only ever come from `widen_item_for_illusion`,
                 // so forcing one here means BCP just resolved an Illusion disguise
-                // ambiguity mid-fixpoint. Every stat bound narrowed so far (minStats/
-                // maxStats, min/max_pre_nature_stat, minIvs/maxIvs, minEvs/maxEvs) was
+                // ambiguity mid-fixpoint. Every stat bound narrowed so far (min_stats/
+                // max_stats, min/max_pre_nature_stat, min_ivs/max_ivs, min_evs/max_evs) was
                 // computed against whichever species was on display at the time — not
                 // necessarily the one just confirmed — the same desync `IllusionEnded`'s
                 // handler resets for. Left in place, `pass5_back_solve` can see an HP (or
@@ -529,8 +527,8 @@ fn force_literal(
                 // reset the stat window against the confirmed species and widen EVs back
                 // to the full lattice range, rather than remapping the stale bounds.
                 super::recompute_stats_for_iv_mode(mon, species, dex, config);
-                mon.minEvs = [0; 6];
-                mon.maxEvs = [252; 6];
+                mon.min_evs = [0; 6];
+                mon.max_evs = [252; 6];
             }
         }
         Statement::EVIVStatGE { mon_idx, stat, value } => {
