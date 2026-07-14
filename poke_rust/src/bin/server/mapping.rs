@@ -345,14 +345,24 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
     // attempted there).
     let fog = if player != perspective { belief_battle_state(belief) } else { None };
 
-    let (active_views, back_views, possible_back_views) = match fog {
+    let (active_views, back_views, possible_back_views, fainted_views) = match fog {
         Some(fog) => {
             // Belief fields are physically bound — read the SAME `player` this
             // function is rendering, not a constant `p2_*` (see this function's doc
             // comment).
-            let (fog_active, fog_known_back, fog_possible_back) = match player {
-                Player::P1 => (&fog.p1_active_mons, &fog.p1_known_back_mons, &fog.p1_possible_back_mons),
-                Player::P2 => (&fog.p2_active_mons, &fog.p2_known_back_mons, &fog.p2_possible_back_mons),
+            let (fog_active, fog_known_back, fog_possible_back, fog_fainted) = match player {
+                Player::P1 => (
+                    &fog.p1_active_mons,
+                    &fog.p1_known_back_mons,
+                    &fog.p1_possible_back_mons,
+                    &fog.p1_fainted_mons,
+                ),
+                Player::P2 => (
+                    &fog.p2_active_mons,
+                    &fog.p2_known_back_mons,
+                    &fog.p2_possible_back_mons,
+                    &fog.p2_fainted_mons,
+                ),
             };
             let active_views: Vec<PokemonView> = active
                 .iter()
@@ -380,11 +390,19 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
                 .enumerate()
                 .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 150 + i as u8))
                 .collect();
-            (active_views, back_views, possible_back_views)
+            // Fallback id base 200+: apart from the 100+/150+ bases above so a
+            // fainted-mon row can never collide with a known/possible-back row.
+            let fainted_views: Vec<PokemonView> = fog_fainted
+                .iter()
+                .enumerate()
+                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 200 + i as u8))
+                .collect();
+            (active_views, back_views, possible_back_views, fainted_views)
         }
         None => (
             active.iter().map(pokemon_view).collect(),
             back.iter().map(pokemon_view).collect(),
+            Vec::new(),
             Vec::new(),
         ),
     };
@@ -393,6 +411,7 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
         active: active_views,
         back: back_views,
         possible_back: possible_back_views,
+        fainted: fainted_views,
         can_tera,
         can_mega,
         side_conditions: conditions
@@ -988,5 +1007,66 @@ mod tests {
             vec!["Charizard"],
             "P1's possibleBack under P2's perspective must list P1's own bench (Charizard), not P2's roster"
         );
+    }
+
+    /// Regression: a fainted-then-replaced opponent mon recorded in the belief's
+    /// `p{1,2}_fainted_mons` bucket (see `UnknownBattleState` and the fix to
+    /// `bench_outgoing_mon` in `inference.rs`) must be forwarded into
+    /// `SideView.fainted`, not dropped by the mapping layer. This is the DTO-layer
+    /// half of the fix; `inference_tests.rs` covers the engine populating the
+    /// bucket in the first place.
+    #[test]
+    fn side_view_forwards_belief_fainted_bucket() {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+        );
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand { active_indices: vec![0], back_indices: vec![] };
+        let p2_tp = p1_tp.clone();
+        let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
+        let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
+
+        // Real ground-truth BattleState, exactly as the server produces it.
+        let (next_state, _events, _prob) = simulator::sample_turn(
+            &MatchState::TeamPreviewState(preview.clone()),
+            &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1, None,
+        );
+        let MatchState::BattleState(battle_state) = next_state else {
+            panic!("expected BattleState")
+        };
+
+        // P1's belief about P2 — battle-phase, then hand-seed a fainted opponent
+        // mon into the (otherwise untouched) fainted bucket. How the bucket gets
+        // populated during a real battle is covered by the inference-engine
+        // regression test; this test only exercises the belief -> DTO forwarding.
+        let UnknownMatchState::TeamPreview(tp_belief_p1) =
+            poke_rust::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+                Player::P1, &preview.p1_mons, &preview.p2_mons, &pokemon_dex, 1, 1, 50,
+                InformationMode::OpenTeamSheet, true,
+            )
+        else {
+            panic!("expected TeamPreview");
+        };
+        let mut battle_belief_p1 = tp_belief_p1.into_battle_state(
+            Player::P1,
+            &p1_tp.active_indices, &p1_tp.back_indices,
+            &p2_tp.active_indices, &p2_tp.back_indices,
+        );
+        let mut fainted_mon = UnknownPokemonState::from_opponent_species(
+            poke_rust::data::species::Species::Snorlax, &pokemon_dex, 50,
+        );
+        fainted_mon.fainted = true;
+        battle_belief_p1.p2_fainted_mons.push(fainted_mon);
+        let belief_p1 = UnknownMatchState::Battle(battle_belief_p1);
+
+        // Mask P2 (the opponent) from P1's perspective — the exact call the server
+        // makes to render the opponent's sidebar under fog-of-war.
+        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1);
+
+        assert_eq!(view.fainted.len(), 1, "belief's p2_fainted_mons must surface as SideView.fainted");
+        assert_eq!(view.fainted[0].species, "Snorlax");
+        assert!(view.fainted[0].fainted, "forwarded fainted-bucket entry must keep fainted: true");
     }
 }

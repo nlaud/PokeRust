@@ -208,6 +208,19 @@ pub struct UnknownBattleState {
     pub p2_known_back_mons: Vec<UnknownPokemonState>,
     pub p1_possible_back_mons: Vec<UnknownPokemonState>,
     pub p2_possible_back_mons: Vec<UnknownPokemonState>,
+    /// Opponent mons that fainted and were then replaced (the outgoing entry at
+    /// the moment of replacement — see `bench_outgoing_mon`). Deliberately kept
+    /// OUTSIDE the `mon_idx` flat-index space (the 6 segments enumerated in
+    /// `get_mon_by_idx`/`get_mon_mut_by_idx`/`mon_idx_legend`): a fainted mon has
+    /// its scoped predicates purged on switch-out, so nothing ever references it
+    /// by `mon_idx` again, and it must also be excluded from "could this be a
+    /// hidden back mon" reasoning (`combined_back` and friends). This bucket
+    /// exists purely so the belief retains the knowledge accumulated about the
+    /// mon (species, revealed moves/item/ability) for display — a fainted-and-
+    /// replaced opponent used to be silently discarded with no record it ever
+    /// existed.
+    pub p1_fainted_mons: Vec<UnknownPokemonState>,
+    pub p2_fainted_mons: Vec<UnknownPokemonState>,
 
     pub turn_number: u16,
 
@@ -496,6 +509,8 @@ impl UnknownTeamPreviewState {
             p2_known_back_mons,
             p1_possible_back_mons,
             p2_possible_back_mons,
+            p1_fainted_mons: Vec::new(),
+            p2_fainted_mons: Vec::new(),
 
             turn_number: 0,
             turn_started: false,

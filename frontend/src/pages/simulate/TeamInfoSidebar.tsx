@@ -334,15 +334,26 @@ export default function TeamInfoSidebar() {
   const active = side?.active ?? []
   const back = side?.back ?? previewMons
   const possibleBack = side?.possibleBack ?? []
+  // Opponent mons that fainted and were then replaced: the fog belief tracks these
+  // in their own bucket (rather than dropping them — see `SideView.fainted`'s doc
+  // comment) so their revealed info survives the switch that benched them.
+  const faintedBack = side?.fainted ?? []
   // Real hidden-slot count (not the possibleBack candidate-species count): how many
   // of this side's brought mons we simply haven't seen yet. Decreases as mons are
   // revealed and hits 0 once every brought mon has been seen (even if some brought
-  // species are still ambiguous within `possibleBack`).
-  const hiddenBack = Math.max(0, (view?.broughtPerSide ?? 0) - (active.length + back.length))
-  // Fainted mons get pulled out of the active/back lists into their own section
-  // below "Possibly in the back" — grouping them together (rather than leaving them
-  // dimmed in place) surfaces their revealed info in one predictable spot.
-  const fainted = [...active, ...back].filter((mon) => mon.fainted)
+  // species are still ambiguous within `possibleBack`). `faintedBack` mons are
+  // already-seen brought mons too, so they count toward "seen" the same as
+  // `active`/`back`.
+  const hiddenBack = Math.max(
+    0,
+    (view?.broughtPerSide ?? 0) - (active.length + back.length + faintedBack.length),
+  )
+  // Fainted mons get pulled out of the active/back/faintedBack lists into their own
+  // section below "Possibly in the back" — grouping them together (rather than
+  // leaving them dimmed in place) surfaces their revealed info in one predictable
+  // spot. The three source lists are disjoint (a mon lives in exactly one bucket at
+  // a time), so this can't double-count.
+  const fainted = [...active, ...back, ...faintedBack].filter((mon) => mon.fainted)
   const liveActive = active.filter((mon) => !mon.fainted)
   const liveBack = back.filter((mon) => !mon.fainted)
 
@@ -424,7 +435,9 @@ export default function TeamInfoSidebar() {
                 <p className="px-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
                   Possibly in the back ({hiddenBack})
                 </p>
-                {possibleBack.map((mon, i) => row(mon, false, 'possible', i, true))}
+                {possibleBack
+                  .filter((mon) => !mon.fainted)
+                  .map((mon, i) => row(mon, false, 'possible', i, true))}
               </>
             )}
             {fainted.length > 0 && (

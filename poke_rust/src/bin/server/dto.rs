@@ -115,6 +115,14 @@ pub struct SideView {
     /// and for any side under Perfect Information (no belief tracked).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub possible_back: Vec<PokemonView>,
+    /// Opponent mons that fainted and were then replaced — the fog belief keeps
+    /// their accumulated knowledge (species, revealed moves/item/ability) in a
+    /// dedicated bucket instead of discarding it (see
+    /// `UnknownBattleState::p1/p2_fainted_mons`). Always empty for P1 and for any
+    /// side under Perfect Information, where a fainted mon's knowledge already
+    /// rides in `active`/`back` with `fainted: true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fainted: Vec<PokemonView>,
     pub can_tera: bool,
     pub can_mega: bool,
     pub side_conditions: Vec<NamedTurnsDto>,

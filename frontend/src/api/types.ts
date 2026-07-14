@@ -82,6 +82,11 @@ export interface SideView {
    * format gap) — rendered grayed-out. Always empty for P1 and under Perfect
    * Information. */
   possibleBack?: PokemonView[]
+  /** Opponent mons that fainted and were then replaced — the fog belief keeps their
+   * accumulated knowledge (species, revealed moves/item/ability) here instead of
+   * discarding it. Always empty for P1 and under Perfect Information, where a
+   * fainted mon's knowledge already rides in `active`/`back` with `fainted: true`. */
+  fainted?: PokemonView[]
   canTera: boolean
   canMega: boolean
   sideConditions: NamedTurns[]

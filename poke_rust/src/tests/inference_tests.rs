@@ -115,6 +115,8 @@ fn battle_nvn(
         p2_known_back_mons:    vec![],
         p1_possible_back_mons: vec![],
         p2_possible_back_mons: vec![],
+        p1_fainted_mons: vec![],
+        p2_fainted_mons: vec![],
         turn_number:   1,
         turn_started:  false,
         turn_ended:    false,
@@ -581,6 +583,72 @@ fn test_switch_from_known_back_to_active() {
     );
     assert_eq!(result.p2_active_mons[0].hp, PokemonHP::Percent(80));
     assert!(result.p2_known_back_mons.is_empty(), "back should be empty after switch-in");
+}
+
+/// Regression: a fainted-then-replaced opponent mon must land in `p2_fainted_mons`
+/// (with its accumulated knowledge intact — here, a revealed move) rather than
+/// being silently discarded. Before the fix, `bench_outgoing_mon` filtered out
+/// `fainted` outgoing mons entirely (`filter(|m| !m.fainted)`) instead of routing
+/// them anywhere, so the belief retained no record the mon ever existed once its
+/// slot was overwritten by the replacement — it showed up in neither "back" nor
+/// "fainted" in the UI.
+#[test]
+fn test_fainted_opponent_routed_to_fainted_bucket_on_replacement() {
+    let mut p2_mon = unknown_mon_species(Species::Charizard);
+    // Simulate knowledge accumulated earlier in the battle (a revealed move) that
+    // must survive the faint + replacement, not be lost with the discarded mon.
+    p2_mon.known_moves[0] = Some(PokemonMove::Flamethrower);
+    let state = battle_1v1(unknown_mon_species(Species::Garchomp), p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+
+    let result = apply_ex(
+        state,
+        vec![
+            // P1 KOs P2's Charizard.
+            event_with(
+                EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Tackle, targets: vec![p2(0)] },
+                vec![
+                    event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(0) }),
+                    event(EventKind::Faint { slot: p2(0) }),
+                ],
+            ),
+            // P2 sends out a replacement into the now-empty slot.
+            event(EventKind::Switch(SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p2(0),
+                species: Species::Blastoise,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
+            })),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert_eq!(result.p2_fainted_mons.len(), 1, "fainted Charizard should be retained in the fainted bucket");
+    let fainted = &result.p2_fainted_mons[0];
+    assert!(
+        matches!(&fainted.possible_species, Unknown::Known(s) if *s == Species::Charizard),
+        "fainted bucket should hold the fainted mon's species, got {:?}", fainted.possible_species
+    );
+    assert!(fainted.fainted, "fainted-bucket entry must still be marked fainted");
+    assert_eq!(
+        fainted.known_moves[0],
+        Some(PokemonMove::Flamethrower),
+        "knowledge revealed before the faint must survive into the fainted bucket"
+    );
+
+    assert!(
+        matches!(&result.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Blastoise),
+        "replacement should occupy the active slot"
+    );
+    assert!(result.p2_known_back_mons.is_empty(), "fainted mon must not also appear in known_back");
+    assert!(result.p2_possible_back_mons.is_empty(), "fainted mon must not also appear in possible_back");
 }
 
 // ── Pass 2: Life Orb exclusion ────────────────────────────────────────────────

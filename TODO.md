@@ -8,19 +8,10 @@
   - Remeber that we optimize for SOUNDNESS FIRST, so losing information is okay for the sake of soundness above all else
   - Tracking zoroark throughout the course of a battle is important and extremely difficult. I want this logic to be bulletproof, and I want the frontend to always display the information that player one would have, although when choosing moves for player 2 it should display information that player 2 would have. 
   - Also there is a bug with zoroark. While the moves should be unknown (A or B state) in the sidebar when you don't know if a pokemon is zoroark, when choosing moves it should still show the correct moves so selection goes properly.
-- Move immunity should have a message that shows up in the battle log instead of being silent.
-- Predicates tab goes away when the battle ends, it should tsay
-- Paused state of the video should persist between playlists
-- Quick fix of all the compiler warnings.
 - Add a test that just does the simulator + inference engine for both players, with random teams from the teamsheets and just clicking random moves until one player wins (do this like 25 times). And make sure this can run consistently and pass, since there shouldn't be anything impossible happening.
 ### New features
-- Add inference to the README, link all the READMEs to the main project README.
+- Link all the READMEs to the main project README.
 - Frontend features
-  - Cheeky crossfade between screens? (Also when starting a new battlke)
-  - Need to display the number of back mons in parentheses next to the possibly in the back text (should hide possible in the back if there are 0 in the back).
-  - Default tab for battle view should be the opposing team, switching to be the opposing team whenever the players' view that we are watching changes.
-  - No item should display as None not --
-  - Light screen and reflect should both be the color of current reflect
   - Display fainted mon information after possibly in the back (with information because it could be useful)
   - We need a favicon lul
 - Implement Closed Team Sheets information mode

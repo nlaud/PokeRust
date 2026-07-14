@@ -2388,10 +2388,24 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming
             Player::P1 => &state.p1_active_mons,
             Player::P2 => &state.p2_active_mons,
         };
-        actives.get(slot_i).filter(|m| !m.fainted).cloned()
+        actives.get(slot_i).cloned()
     };
     if let Some(benched) = maybe_benched {
-        if matches!(&benched.possible_species, Unknown::Known(_)) {
+        if benched.fainted {
+            // Route to the fainted bucket rather than dropping it: it's outside
+            // the `mon_idx` flat-index space and excluded from `combined_back`
+            // (see the field doc comment on `UnknownBattleState::p1/p2_fainted_mons`),
+            // so unlike the live-bench case there is no S29 double-count hazard —
+            // push it regardless of whether its species ever collapsed to `Known`.
+            // This preserves the knowledge accumulated about the mon (species,
+            // revealed moves/item/ability) for display instead of silently
+            // discarding it, which previously made fainted-then-replaced opponent
+            // mons vanish from both the "back" and "fainted" UI sections.
+            match slot.player {
+                Player::P1 => state.p1_fainted_mons.push(benched),
+                Player::P2 => state.p2_fainted_mons.push(benched),
+            }
+        } else if matches!(&benched.possible_species, Unknown::Known(_)) {
             match slot.player {
                 Player::P1 => state.p1_known_back_mons.push(benched),
                 Player::P2 => state.p2_known_back_mons.push(benched),
