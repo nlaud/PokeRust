@@ -17,7 +17,16 @@
 - Link all the READMEs to the main project README.
 - Frontend features
   - We need a favicon lul
-- Implement Closed Team Sheets information mode
+- [x] Implement Closed Team Sheets information mode: added `InformationMode::ClosedTeamSheet`,
+  reusing the engine's existing species-only fog primitive (`from_opponent_species` /
+  a new `team_preview_closed_sheet_from_perspective` constructor) that was previously
+  test-only. Wired end-to-end through `routes.rs`/`dto.rs` as `"closedSheet"` and made
+  it the new default (replacing `perfect`) in both the server DTO and the frontend
+  setup UI. `force_max_ivs` threads through via a `pin_min_ivs_to_max` helper factored
+  out of `from_opponent_open_sheet`, so closed-sheet stat bounds are tightened to IV 31
+  under the Champions competitive default same as open-sheet. Verified with 2 new Rust
+  regression tests (`mapping.rs`) plus a live Playwright E2E run against the real
+  server + dev frontend.
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)
 - Create a meta sampler from pikalytics, and then get the algorithm to understand that
   - [ ] Tracker page: needs a parser for lines of input -> action / reaction tree

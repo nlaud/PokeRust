@@ -236,10 +236,12 @@ export interface TurnLogEntry {
 
 // ── Requests / responses ────────────────────────────────────────────────────
 
-/** `'perfect'` (default) | `'openSheet'` | `'openSheetNatures'`. Selects the
- * fog-of-war starting baseline for P1's view of P2 — see `InformationMode` in the
- * Rust engine. */
-export type InformationMode = 'perfect' | 'openSheet' | 'openSheetNatures'
+/** `'closedSheet'` (default) | `'perfect'` | `'openSheet'` | `'openSheetNatures'`.
+ * Selects the fog-of-war starting baseline for P1's view of P2 — see
+ * `InformationMode` in the Rust engine. `closedSheet` is the traditional
+ * VGC/Champions competitive format: only the opponent's species are visible at
+ * team preview. */
+export type InformationMode = 'closedSheet' | 'perfect' | 'openSheet' | 'openSheetNatures'
 
 export interface CreateBattleRequest {
   p1Team: string

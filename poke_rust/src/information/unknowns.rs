@@ -31,6 +31,10 @@ pub enum PokemonHP {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InformationMode {
     PerfectInformation,
+    /// Only the opponent's species are visible at team preview (the traditional VGC/
+    /// Champions competitive format); moves/item/ability/nature/EVs/IVs/Tera type all
+    /// stay fully unknown until revealed through play.
+    ClosedTeamSheet,
     /// Species/ability/item/moves/Tera type revealed up front (like a real VGC open
     /// team sheet); nature/EVs/IVs/exact stats still hidden.
     OpenTeamSheet,
@@ -1000,6 +1004,42 @@ impl UnknownPokemonState {
 }
 
 impl UnknownPokemonState {
+    /// Tighten the min-side IV/stat bounds to reflect a format that pins opponent IVs
+    /// to 31 (Pokémon Champions competitive default, `InferenceConfig::force_max_ivs`).
+    ///
+    /// `from_opponent_species` always seeds the full `[0, 31]` IV lattice since it has
+    /// no visibility into the format's IV-pinning rule. When the format pins IVs, the
+    /// min-side stat/BSV bounds must be recomputed at IV 31, not IV 0 — otherwise the
+    /// stored window spans a "phantom" region (IV-0-achievable but never
+    /// IV-31-achievable) that `pass3_direction_b`'s damage back-solve can narrow into,
+    /// while `pass5_back_solve` (which correctly restricts its own search to IV 31 per
+    /// this same config flag) can never satisfy — producing "every candidate nature is
+    /// infeasible" contradictions on ordinary turns. See the `test_s34_*` regression
+    /// tests below. Shared by `from_opponent_open_sheet` and
+    /// `team_preview_closed_sheet_from_perspective`.
+    fn pin_min_ivs_to_max(&mut self, species: &Species, dex: &HashMap<Species, PokemonData>, level: u8) {
+        self.min_ivs = [31; 6];
+        if let Some(data) = dex.get(species) {
+            let b = data.base_stats;
+            self.min_stats = [
+                calc_hp(b[0], 31, 0, level),
+                calc_stat(b[1], 31, 0, level, 0.9),
+                calc_stat(b[2], 31, 0, level, 0.9),
+                calc_stat(b[3], 31, 0, level, 0.9),
+                calc_stat(b[4], 31, 0, level, 0.9),
+                calc_stat(b[5], 31, 0, level, 0.9),
+            ];
+            self.min_pre_nature_stat = [
+                calc_hp(b[0], 31, 0, level),
+                calc_stat(b[1], 31, 0, level, 1.0),
+                calc_stat(b[2], 31, 0, level, 1.0),
+                calc_stat(b[3], 31, 0, level, 1.0),
+                calc_stat(b[4], 31, 0, level, 1.0),
+                calc_stat(b[5], 31, 0, level, 1.0),
+            ];
+        }
+    }
+
     /// Build an opponent's fog-of-war view from an **open team sheet** reveal.
     ///
     /// A sheet is submitted before battle and reveals species/ability/item/moves/Tera
@@ -1031,26 +1071,7 @@ impl UnknownPokemonState {
         let mut unk = Self::from_opponent_species(mon.species.clone(), dex, level);
         let min_iv: u8 = if force_max_ivs { 31 } else { 0 };
         if force_max_ivs {
-            unk.min_ivs = [31; 6];
-            if let Some(data) = dex.get(&mon.species) {
-                let b = data.base_stats;
-                unk.min_stats = [
-                    calc_hp(b[0], min_iv, 0, level),
-                    calc_stat(b[1], min_iv, 0, level, 0.9),
-                    calc_stat(b[2], min_iv, 0, level, 0.9),
-                    calc_stat(b[3], min_iv, 0, level, 0.9),
-                    calc_stat(b[4], min_iv, 0, level, 0.9),
-                    calc_stat(b[5], min_iv, 0, level, 0.9),
-                ];
-                unk.min_pre_nature_stat = [
-                    calc_hp(b[0], min_iv, 0, level),
-                    calc_stat(b[1], min_iv, 0, level, 1.0),
-                    calc_stat(b[2], min_iv, 0, level, 1.0),
-                    calc_stat(b[3], min_iv, 0, level, 1.0),
-                    calc_stat(b[4], min_iv, 0, level, 1.0),
-                    calc_stat(b[5], min_iv, 0, level, 1.0),
-                ];
-            }
+            unk.pin_min_ivs_to_max(&mon.species, dex, level);
         }
 
         unk.possible_abilities = Unknown::Known(mon.ability.clone());
@@ -1175,6 +1196,62 @@ impl UnknownMatchState {
             .iter()
             .map(|mon| {
                 UnknownPokemonState::from_opponent_open_sheet(mon, dex, level, reveal_nature, force_max_ivs)
+            })
+            .collect();
+
+        let (p1_mons, p2_mons) = match viewer {
+            Player::P1 => (my_mons, opp_mons),
+            Player::P2 => (opp_mons, my_mons),
+        };
+
+        UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
+            active_per_side,
+            brought_per_side,
+            p1_mons,
+            p2_mons,
+        })
+    }
+
+    /// Build a **closed team sheet** team-preview fog-of-war state: the opponent's
+    /// species are visible (as shown on the team-preview screen) but nothing else —
+    /// moves/item/ability/nature/EVs/IVs/Tera type all stay at the same sound
+    /// worst/best-case bounds `from_opponent_species` computes for a fully-unknown
+    /// mon. This is the traditional VGC/Champions competitive format, as opposed to
+    /// `team_preview_open_sheet_from_perspective`'s early reveal.
+    ///
+    /// Takes the opponent's **actual** parsed team (not just species), mirroring
+    /// `team_preview_open_sheet_from_perspective`'s signature, so callers with a
+    /// ground-truth `TeamPreviewState` (e.g. `routes.rs`) can pass `&preview.p2_mons`
+    /// directly without re-deriving a species list — only `mon.species` is read.
+    ///
+    /// When `force_max_ivs` is set (Pokémon Champions competitive default), the
+    /// opponent's min-side IV/stat bounds are tightened to IV 31 via
+    /// `pin_min_ivs_to_max` — see that function's doc comment (S34) for why the
+    /// untightened `[0, 31]` bounds `from_opponent_species` assumes would otherwise
+    /// produce inference contradictions under a format that guarantees IV 31.
+    #[allow(clippy::too_many_arguments)]
+    pub fn team_preview_closed_sheet_from_perspective(
+        viewer: Player,
+        my_team: &[PokemonState],
+        opponent_team: &[PokemonState],
+        dex: &HashMap<Species, PokemonData>,
+        active_per_side: u8,
+        brought_per_side: u8,
+        level: u8,
+        force_max_ivs: bool,
+    ) -> UnknownMatchState {
+        let my_mons: Vec<UnknownPokemonState> = my_team
+            .iter()
+            .map(UnknownPokemonState::from_known_pokemon)
+            .collect();
+        let opp_mons: Vec<UnknownPokemonState> = opponent_team
+            .iter()
+            .map(|mon| {
+                let mut unk = UnknownPokemonState::from_opponent_species(mon.species.clone(), dex, level);
+                if force_max_ivs {
+                    unk.pin_min_ivs_to_max(&mon.species, dex, level);
+                }
+                unk
             })
             .collect();
 

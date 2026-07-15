@@ -480,8 +480,10 @@ pub struct CreateBattleRequest {
     pub force_max_ivs: bool,
     #[serde(default = "default_damage_rolls")]
     pub damage_rolls: u8,
-    /// `"perfect"` (default) | `"openSheet"` | `"openSheetNatures"`. Selects the
-    /// fog-of-war starting baseline for P1's view of P2 — see `InformationMode`.
+    /// `"closedSheet"` (default) | `"perfect"` | `"openSheet"` | `"openSheetNatures"`.
+    /// Selects the fog-of-war starting baseline for P1's view of P2 — see
+    /// `InformationMode`. `closedSheet` is the traditional VGC/Champions competitive
+    /// format: only the opponent's species are visible at team preview.
     #[serde(default = "default_info_mode")]
     pub information_mode: String,
 }
@@ -495,7 +497,7 @@ fn default_damage_rolls() -> u8 {
 }
 
 fn default_info_mode() -> String {
-    "perfect".to_string()
+    "closedSheet".to_string()
 }
 
 #[derive(Serialize)]

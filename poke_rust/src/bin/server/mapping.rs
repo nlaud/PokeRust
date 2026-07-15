@@ -1139,4 +1139,103 @@ mod tests {
         assert_eq!(view.fainted[0].species, "Snorlax");
         assert!(view.fainted[0].fainted, "forwarded fainted-bucket entry must keep fainted: true");
     }
+
+    /// Closed Team Sheet mode (the traditional VGC/Champions competitive format):
+    /// at team preview only the opponent's species should be visible — item,
+    /// ability, and all 4 moves must render as the standard "unknown" placeholders,
+    /// unlike Open Team Sheet mode's immediate reveal (see the companion test above).
+    #[test]
+    fn preview_view_closed_sheet_masks_item_ability_moves_but_shows_species() {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+        );
+
+        let belief_p2 = poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
+            Player::P2,
+            &preview.p2_mons,
+            &preview.p1_mons,
+            &pokemon_dex,
+            1,
+            1,
+            50,
+            true,
+        );
+
+        let view = preview_view(&preview, Some(&belief_p2), Player::P2);
+
+        let p1_mon = &view.p1_mons[0];
+        assert_eq!(p1_mon.species, "Aerodactyl", "species must still be visible at team preview");
+        assert_eq!(
+            p1_mon.item.as_deref(),
+            Some("Unknown"),
+            "closedSheet mode must not reveal item at preview"
+        );
+        // `from_opponent_species` narrows ability to the species' small dex candidate
+        // set (Aerodactyl: Rock Head/Pressure/Unnerve) rather than a blanket "Unknown"
+        // — that's real bounded uncertainty, not full opacity. The assertion that
+        // matters for closedSheet is that the TRUE single ability isn't singled out,
+        // unlike openSheet's exact "Unnerve" reveal (see the companion test above).
+        assert_ne!(
+            p1_mon.ability, "Unnerve",
+            "closedSheet mode must not single out the true ability the way openSheet does"
+        );
+        assert!(
+            p1_mon.ability.contains("Unnerve"),
+            "the true ability must still be among the candidate set: {}",
+            p1_mon.ability
+        );
+        let move_names: Vec<&str> = p1_mon.moves.iter().flatten().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            move_names,
+            vec!["???", "???", "???", "???"],
+            "closedSheet mode must not reveal any moves at preview"
+        );
+
+        // Sanity: physical P2's own tab (the belief's own viewer) stays fully known
+        // ground truth, unmasked, exactly as under any other information mode.
+        let p2_mon = &view.p2_mons[0];
+        assert_eq!(p2_mon.species, "Dragonite");
+        assert_eq!(p2_mon.item.as_deref(), Some("Choice Band"));
+        assert_eq!(p2_mon.ability, "Multiscale");
+    }
+
+    /// S34-style regression for the closed-sheet path specifically: with
+    /// `force_max_ivs` set, the opponent's min-stat bound must be tightened to IV 31
+    /// (via `pin_min_ivs_to_max`), not left at the untightened IV-0 floor
+    /// `from_opponent_species` assumes by default. Compares the two directly rather
+    /// than hardcoding an expected stat value, so the assertion doesn't depend on
+    /// `calc_stat`'s formula.
+    #[test]
+    fn closed_sheet_force_max_ivs_tightens_min_stat_bound() {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+        );
+
+        let belief_pinned = poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
+            Player::P2, &preview.p2_mons, &preview.p1_mons, &pokemon_dex, 1, 1, 50, true,
+        );
+        let belief_unpinned = poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
+            Player::P2, &preview.p2_mons, &preview.p1_mons, &pokemon_dex, 1, 1, 50, false,
+        );
+
+        let view_pinned = preview_view(&preview, Some(&belief_pinned), Player::P2);
+        let view_unpinned = preview_view(&preview, Some(&belief_unpinned), Player::P2);
+
+        let stats_pinned = view_pinned.p1_mons[0].stats;
+        let stats_unpinned = view_unpinned.p1_mons[0].stats;
+        assert!(
+            stats_pinned.iter().zip(stats_unpinned.iter()).all(|(p, u)| p >= u),
+            "force_max_ivs must never lower a min-stat bound: pinned {stats_pinned:?} vs unpinned {stats_unpinned:?}"
+        );
+        assert!(
+            stats_pinned.iter().zip(stats_unpinned.iter()).any(|(p, u)| p > u),
+            "force_max_ivs must strictly tighten at least one min-stat bound (IV 31 floor vs IV 0 floor): pinned {stats_pinned:?} vs unpinned {stats_unpinned:?}"
+        );
+    }
 }

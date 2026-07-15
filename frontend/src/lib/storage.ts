@@ -105,7 +105,7 @@ export interface BattleSetup {
   formatId: string
   team1Id: string
   team2Id: string
-  informationMode?: 'perfect' | 'openSheet' | 'openSheetNatures'
+  informationMode?: 'closedSheet' | 'perfect' | 'openSheet' | 'openSheetNatures'
 }
 
 const SETUP_KEY = 'pokerust.battleSetup.v1'

@@ -5,6 +5,7 @@ import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetu
 import { useBattle } from '../../store/battleStore'
 
 const INFO_MODE_OPTIONS: { value: InformationMode; label: string }[] = [
+  { value: 'closedSheet', label: 'Closed Team Sheet' },
   { value: 'perfect', label: 'Perfect Information' },
   { value: 'openSheet', label: 'Open Team Sheet' },
   { value: 'openSheetNatures', label: 'Open Team Sheet + Natures' },
@@ -28,7 +29,7 @@ export default function SetupPanel() {
   const [team1Id, setTeam1Id] = useState(savedTeam1?.id ?? teams[0]?.id ?? '')
   const [team2Id, setTeam2Id] = useState(savedTeam2?.id ?? teams[1]?.id ?? teams[0]?.id ?? '')
   const [informationMode, setInformationMode] = useState<InformationMode>(
-    saved?.informationMode ?? 'perfect',
+    saved?.informationMode ?? 'closedSheet',
   )
 
   useEffect(() => {
