@@ -195,6 +195,29 @@ pub struct UnknownPokemonState {
     /// move (from any source, including allies). Reset on switch-out or faint (Champions rules);
     /// never reset at end-of-turn while the mon remains on field.
     pub times_hit: u16,
+
+    /// Zoroark/Illusion parallel hypothesis: "the restrictions on this physical mon IF it is
+    /// actually a disguised Illusion-forme (Zoroark line)". `None` when this mon cannot be an
+    /// unrevealed Illusion user (Illusion already resolved, no Illusion mon possible on this
+    /// side, or this mon's shown species already IS the Illusion forme). When `Some`, every
+    /// inference pass that constrains this mon (Pass 1 reveals, Pass 2 presence/absence, Pass 3
+    /// damage→stats, Pass 4 speed, Pass 5 back-solve, Pass 6 BCP) is mirrored onto the boxed
+    /// sub-state under the assumption "this physical slot is the Zoroark", via
+    /// `apply_with_illusion_mirroring` (`information::inference`):
+    ///
+    ///   - primary OK, sub-state contradicts  ⇒ not Zoroark, drop this field (`None`).
+    ///   - primary contradicts, sub-state OK  ⇒ IS Zoroark, promote the sub-state to replace
+    ///     this mon's own fields (see `promote_illusion_to_primary`), then clear this field.
+    ///   - both contradict                    ⇒ genuine impossibility (panics as usual).
+    ///
+    /// Conditional constraints accumulated here are valid ONLY under "this physical mon is the
+    /// Zoroark" and must never leak to a different physical mon (see the isolation rule in
+    /// `information::inference`'s Zoroark lifecycle docs): a switch-out retains this field
+    /// (bench pairs it with the same physical entry), and a switch-in only ever seeds a BRAND
+    /// NEW mon's copy from the side's unconditional Zoroark baseline, never from another slot's
+    /// accumulated sub-state. Always `None` on the sub-state itself (no nesting — a disguised
+    /// Zoroark's hypothetical self cannot itself be hypothetically disguised).
+    pub possible_illusion_state: Option<Box<UnknownPokemonState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +244,22 @@ pub struct UnknownBattleState {
     /// existed.
     pub p1_fainted_mons: Vec<UnknownPokemonState>,
     pub p2_fainted_mons: Vec<UnknownPokemonState>,
+
+    /// Number of this side's REAL roster members that are an Illusion-capable
+    /// forme (Zoroark line) whose physical identity/location has not yet been
+    /// positively pinned down. Almost always 0 or 1 (Species Clause permits at
+    /// most one). Seeded once, at the team-preview→battle transition, from the
+    /// true roster (`into_battle_state`) — team preview always reveals true
+    /// species, so this is never itself uncertain. While `> 0`, every OTHER mon
+    /// on this side that isn't itself confirmed to BE that Illusion forme may
+    /// carry a `possible_illusion_state` hypothesis (see that field's doc
+    /// comment on `UnknownPokemonState`). Decremented by `resolve_zoroark_globally`
+    /// each time a hypothesis is positively resolved (promotion, `IllusionEnded`,
+    /// or the Illusion forme itself entering undisguised); at 0, every remaining
+    /// `possible_illusion_state` on the side is dropped — Zoroark's location(s)
+    /// are now fully accounted for.
+    pub p1_unresolved_zoroark_count: u8,
+    pub p2_unresolved_zoroark_count: u8,
 
     pub turn_number: u16,
 
@@ -328,13 +367,6 @@ pub enum Statement {
     HasAbility {
         mon_idx: usize,
         ability: Ability,
-    },
-    /// Used to tie an Illusion candidate's item to which physical identity it turns
-    /// out to be: `(¬HasSpecies{Zoroark} ∨ HasItem{z1} ∨ …)` and
-    /// `(HasSpecies{Zoroark} ∨ HasItem{c1} ∨ …)` — see `bcp::widen_item_for_illusion`.
-    HasSpecies {
-        mon_idx: usize,
-        species: Species,
     },
     /// The active weather lasts exactly `turns` more end-of-turns. Emitted as a clause
     /// pair tying the setter's extension rock to the duration; the `turns` payload is
@@ -499,7 +531,7 @@ impl UnknownTeamPreviewState {
 
         let total_roster = self.p1_mons.len().max(self.p2_mons.len()) as u8;
 
-        UnknownBattleState {
+        let mut result = UnknownBattleState {
             active_per_side: self.active_per_side,
             back_mons_per_side: total_roster.saturating_sub(self.active_per_side),
 
@@ -511,6 +543,11 @@ impl UnknownTeamPreviewState {
             p2_possible_back_mons,
             p1_fainted_mons: Vec::new(),
             p2_fainted_mons: Vec::new(),
+
+            // Computed below by `seed_illusion_hypotheses`, which scans each side's
+            // freshly-populated `possible_back` roster for Illusion-capable formes.
+            p1_unresolved_zoroark_count: 0,
+            p2_unresolved_zoroark_count: 0,
 
             turn_number: 0,
             turn_started: false,
@@ -545,8 +582,146 @@ impl UnknownTeamPreviewState {
             round_used_this_turn: false,
 
             predicates: Vec::new(),
+        };
+
+        // Seed the Zoroark parallel-hypothesis on whichever side(s) just got dumped
+        // into `possible_back` wholesale (see the big comment above) — the viewer's
+        // own side's `possible_back` is always empty at this point (its mons are
+        // fully known and placed directly into active/known_back instead), so this
+        // is a harmless no-op there: a player always knows their own team's true
+        // identity and never carries a hypothesis about themselves.
+        seed_illusion_hypotheses(&mut result, Player::P1);
+        seed_illusion_hypotheses(&mut result, Player::P2);
+
+        result
+    }
+}
+
+/// Species capable of the Illusion ability (used to disguise as another party
+/// member) — the whole Zorua/Zoroark line, both regional formes. Team preview
+/// always reveals TRUE species (Illusion only disguises appearance once a
+/// Pokémon is actually sent out mid-battle, never at preview), so membership in
+/// this set is never itself uncertain — it's exactly what lets the engine know,
+/// from turn 0, which physical roster slot the sub-state hypotheses are for.
+pub(crate) fn is_illusion_capable_species(species: &Species) -> bool {
+    matches!(
+        species,
+        Species::Zorua | Species::ZoruaHisui | Species::Zoroark | Species::ZoroarkHisui
+    )
+}
+
+/// Seed `possible_illusion_state` on every non-Illusion-forme entry in `side`'s
+/// freshly-populated `possible_back` roster, and set
+/// `p{side}_unresolved_zoroark_count` to the number of real Illusion-forme
+/// roster members found. No-op if the side has none (the common case) or if
+/// `possible_back` is empty (the viewer's own side).
+///
+/// Called exactly once, at the team-preview→battle transition
+/// (`into_battle_state`) — never again — because that is the only moment the
+/// WHOLE roster is dumped in at once as freshly-constructed entries with no
+/// battle history yet. Every later appearance of one of these physical mons
+/// (switching in, switching back out) carries its hypothesis along for free,
+/// since bench bookkeeping (`pass1_switch`/`bench_outgoing_mon` in
+/// `information::inference`) moves/clones the WHOLE `UnknownPokemonState` —
+/// nested `possible_illusion_state` included — rather than rebuilding entries
+/// from scratch.
+fn seed_illusion_hypotheses(state: &mut UnknownBattleState, side: Player) {
+    let roster: &[UnknownPokemonState] = match side {
+        Player::P1 => &state.p1_possible_back_mons,
+        Player::P2 => &state.p2_possible_back_mons,
+    };
+
+    let is_illusion_entry = |m: &UnknownPokemonState| {
+        matches!(&m.possible_species, Unknown::Known(s) if is_illusion_capable_species(s))
+    };
+
+    let count = roster.iter().filter(|m| is_illusion_entry(m)).count() as u8;
+    match side {
+        Player::P1 => state.p1_unresolved_zoroark_count = count,
+        Player::P2 => state.p2_unresolved_zoroark_count = count,
+    }
+    if count == 0 {
+        return;
+    }
+
+    // The template used to seed every OTHER mon's hypothesis. With Species Clause
+    // (at most one Illusion forme per team) this is unambiguous; if a format ever
+    // allowed more than one, the first is used as the template for all of them —
+    // a sound simplification (see the plan's multi-Zoroark note), not a precision
+    // loss any current format actually exercises.
+    let baseline = roster.iter().find(|m| is_illusion_entry(m)).cloned().expect(
+        "count > 0 implies at least one Illusion-forme entry exists in this roster",
+    );
+
+    let roster_mut: &mut Vec<UnknownPokemonState> = match side {
+        Player::P1 => &mut state.p1_possible_back_mons,
+        Player::P2 => &mut state.p2_possible_back_mons,
+    };
+    for mon in roster_mut.iter_mut() {
+        if !is_illusion_entry(mon) {
+            mon.possible_illusion_state =
+                Some(Box::new(seed_illusion_hypothesis_for(mon, &baseline)));
         }
     }
+}
+
+/// Build a fresh Zoroark hypothesis for `host` (a specific physical roster slot)
+/// from `baseline` (the side's real Illusion-forme roster entry): "the
+/// restrictions on this physical mon IF it is actually Zoroark, disguised as
+/// whatever `host`'s own species is."
+///
+/// Takes every IDENTITY field (species, types, ability, moves, item, nature,
+/// stat/EV/IV bounds, tera type, mega data, party-order id, …) from `baseline`
+/// — that's what's in question. Overwrites every PHYSICALLY-OBSERVABLE, per-slot
+/// field (HP, level, status, boosts, volatiles, fainted, is_tera/is_mega, every
+/// per-turn/once-per-battle flag, `times_hit`, …) with `host`'s own current
+/// value: those describe facts about THIS PHYSICAL MON as directly observed so
+/// far, true regardless of which identity hypothesis turns out to be correct —
+/// `baseline`'s own copies of those fields describe a DIFFERENT physical mon
+/// (wherever the real Zoroark's own tenure has taken it) and must never leak in
+/// (see the isolation rule in `information::inference`'s Zoroark lifecycle docs).
+/// Adding a new field to `UnknownPokemonState` later requires deciding which of
+/// these two categories it falls into and updating this function accordingly.
+pub(crate) fn seed_illusion_hypothesis_for(
+    host: &UnknownPokemonState,
+    baseline: &UnknownPokemonState,
+) -> UnknownPokemonState {
+    let mut sub = baseline.clone();
+    sub.fainted = host.fainted;
+    sub.level = host.level;
+    sub.hp = host.hp.clone();
+    sub.boosts = host.boosts;
+    sub.status = host.status.clone();
+    sub.volatiles = host.volatiles.clone();
+    sub.is_tera = host.is_tera;
+    sub.is_mega = host.is_mega;
+    sub.damaged_this_turn = host.damaged_this_turn;
+    sub.damaged_by_this_turn = host.damaged_by_this_turn.clone();
+    sub.last_physical_damage_taken = host.last_physical_damage_taken.clone();
+    sub.last_physical_attacker = host.last_physical_attacker;
+    sub.last_special_damage_taken = host.last_special_damage_taken.clone();
+    sub.last_special_attacker = host.last_special_attacker;
+    sub.last_damage_taken = host.last_damage_taken.clone();
+    sub.last_damage_attacker = host.last_damage_attacker;
+    sub.stats_raised_this_turn = host.stats_raised_this_turn;
+    sub.stats_lowered_this_turn = host.stats_lowered_this_turn;
+    sub.switched_in_this_turn = host.switched_in_this_turn;
+    sub.stall_counter = host.stall_counter;
+    sub.ally_switch_counter = host.ally_switch_counter;
+    sub.last_move_failed = host.last_move_failed;
+    sub.last_used_move = host.last_used_move.clone();
+    sub.consecutive_move_count = host.consecutive_move_count;
+    sub.used_moves_this_field = host.used_moves_this_field;
+    sub.one_time_ability_used = host.one_time_ability_used;
+    sub.ate_berry_this_battle = host.ate_berry_this_battle;
+    sub.first_move_on_field = host.first_move_on_field;
+    sub.first_turn_on_field_pending = host.first_turn_on_field_pending;
+    sub.entered_this_turn = host.entered_this_turn;
+    sub.pre_transform = host.pre_transform.clone();
+    sub.pre_mimicry_types = host.pre_mimicry_types.clone();
+    sub.times_hit = host.times_hit;
+    sub.possible_illusion_state = None; // no nesting — see the field's doc comment
+    sub
 }
 
 /// Fog-of-war analogue of `battle::MatchState`.  Tracks the game phase from a single
@@ -647,6 +822,8 @@ impl UnknownPokemonState {
                 .map(|p| Box::new(UnknownPokemonState::from_known_pokemon(p))),
             pre_mimicry_types: mon.pre_mimicry_types.clone(),
             times_hit: mon.times_hit,
+            // Your own mon's true identity is never in question.
+            possible_illusion_state: None,
         }
     }
 
@@ -786,6 +963,11 @@ impl UnknownPokemonState {
             pre_transform: None,
             pre_mimicry_types: None,
             times_hit: 0,
+            // Seeded separately by the Zoroark-lifecycle logic in `information::inference`
+            // (which knows whether this side has an unresolved Illusion mon and whether this
+            // physical slot is eligible) — never set here, since this constructor has no
+            // visibility into the rest of the roster.
+            possible_illusion_state: None,
         }
     }
 }

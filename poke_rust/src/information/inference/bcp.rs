@@ -10,17 +10,12 @@
 
 use std::collections::HashMap;
 
-use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::unknowns::{Statement, Unknown, UnknownBattleState};
-use crate::state::battle::{FieldSlot, Player};
+use crate::state::battle::Player;
 use crate::state::dex_data::{PokemonData, PokemonStat, SideCondition};
 use crate::state::pokemon::Nature;
-
-// ── Illusion-detection constant ────────────────────────────────────────────────
-
-const ILLUSION_FORMES: &[Species] = &[Species::Zoroark, Species::ZoroarkHisui];
 
 // ── Public interface (called from mod.rs orchestrator) ─────────────────────────
 
@@ -202,146 +197,6 @@ pub(super) fn propagate_collected(
     changed
 }
 
-/// `true` if any species in `species` is an Illusion forme (Zoroark line). Used by
-/// `pass1_switch` (S29) to decide whether an incoming "species" might be a disguise.
-pub(super) fn contains_illusion_forme(species: &[Species]) -> bool {
-    species.iter().any(|s| ILLUSION_FORMES.contains(s))
-}
-
-/// `true` if `species` is itself an Illusion forme.
-pub(super) fn is_illusion_forme(species: &Species) -> bool {
-    ILLUSION_FORMES.contains(species)
-}
-
-/// Widen `possible_species` to include Zoroark formes when the opponent's back
-/// contains one and the on-field species is unconfirmed.  Call after a Switch.
-///
-/// `possible_types` is documented as corresponding 1:1 with `possible_species`
-/// (`unknowns.rs`'s `UnknownPokemonState` field comment) but is left `Known` by every
-/// other caller since a normal opponent's typing is openly visible in a real battle
-/// (species → typing is public dex knowledge). A disguised Zoroark is the one case
-/// where that 1:1 correspondence must actually hold: the *shown* species' typing is
-/// what a real player sees, not the true one, so once `possible_species` widens to a
-/// disjunction, `possible_types` widens in lockstep to the matching per-candidate
-/// typing — otherwise the server DTO layer (`mask_pokemon_view`) would keep reporting
-/// the disguise's typing as `Known` and confidently correct even while the species
-/// underneath is genuinely unresolved.
-pub(super) fn maybe_widen_for_illusion(
-    state: &mut UnknownBattleState,
-    slot: &FieldSlot,
-    opponent_known_back_species: &[Species],
-    dex: &HashMap<Species, PokemonData>,
-) {
-    let has_zoroark = opponent_known_back_species
-        .iter()
-        .any(|s| ILLUSION_FORMES.contains(s));
-    if !has_zoroark {
-        return;
-    }
-    let Some(idx) = super::mon_idx_for_active_slot(state, slot) else {
-        return;
-    };
-    let Some(mon) = super::get_mon_mut_by_idx(state, idx) else {
-        return;
-    };
-    if let Unknown::Known(ref s) = mon.possible_species.clone()
-        && !ILLUSION_FORMES.contains(s) {
-            let mut candidates = vec![s.clone()];
-            for zf in ILLUSION_FORMES {
-                if opponent_known_back_species.contains(zf) {
-                    candidates.push(zf.clone());
-                }
-            }
-            if candidates.len() > 1 {
-                let type_candidates: Vec<Vec<crate::state::dex_data::PokemonType>> = candidates
-                    .iter()
-                    .filter_map(|s| dex.get(s).map(|d| d.types.clone()))
-                    .collect();
-                // Only widen types if every candidate resolved a dex entry — species
-                // with no dex data are already kept as species candidates elsewhere
-                // (absence of data isn't evidence of inability), but silently dropping
-                // a species' typing here would under-count the true type disjunction.
-                if type_candidates.len() == candidates.len() {
-                    mon.possible_types = Unknown::Possibly(type_candidates);
-                }
-                mon.possible_species = Unknown::Possibly(candidates);
-            }
-        }
-}
-
-/// Companion to `maybe_widen_for_illusion`, called only after that widening actually
-/// took effect (species is now `Possibly([shown, zoroark_forme, …])`). Ties the
-/// slot's item to whichever physical identity it turns out to be.
-///
-/// Bulbapedia (Illusion, Effect section): the disguise copies only the visible
-/// species/sprite — the held item is a real, mechanical property of the physical
-/// Pokémon underneath (a disguised Zoroark's item really is Zoroark's own item, not
-/// spoofed to match whichever mon it's impersonating). So if this slot is truly one
-/// of the benched Illusion-forme candidates, its item must be THAT candidate's own
-/// (separately tracked) item; if it's truly the shown/copied species, its item is
-/// that fresh mon's own (otherwise-unconstrained) item — two disjoint hypotheses,
-/// which is exactly what `Statement::HasSpecies` + `Statement::HasItem` clauses
-/// encode: BCP collapses the item the moment species resolves either way (via a
-/// learnset-narrowing collapse, or an `IllusionEnded` reveal).
-///
-/// `illusion_candidates` is `(species, current_item_bound)` for every benched
-/// Illusion-forme entry that `maybe_widen_for_illusion` folded into the species
-/// widening (S29: never consumed from the bench, so its own item knowledge is still
-/// sitting there untouched — read it directly).
-///
-/// Item-candidate sets that are still `Unknown::Not(excluded)` (near-unbounded —
-/// hundreds of items) are skipped for clause emission (see
-/// `super::unknown_bounded_candidates`) to avoid a near-tautological clause; the
-/// marginal `mon.item` is still correctly widened to the union either way, so this
-/// only trades away precision in that case, never soundness.
-pub(super) fn widen_item_for_illusion(
-    state: &mut UnknownBattleState,
-    slot: &FieldSlot,
-    illusion_candidates: &[(Species, Unknown<Item>)],
-) {
-    if illusion_candidates.is_empty() {
-        return;
-    }
-    let Some(idx) = super::mon_idx_for_active_slot(state, slot) else { return };
-    let Some(mon) = super::get_mon_mut_by_idx(state, idx) else { return };
-
-    // The "shown/copied species" branch's own item bound, as it stood before any
-    // widening below (this fresh switch-in entry's own, otherwise-unconstrained item).
-    let copied_bound = mon.item.clone();
-
-    // Marginal widening: sound regardless of whether any clause below can be
-    // materialized — the true item is possible under whichever branch is real, so
-    // the union always still contains it.
-    let mut merged = copied_bound.clone();
-    for (_, item_bound) in illusion_candidates {
-        merged = super::unknown_union(&merged, item_bound);
-    }
-    mon.item = merged;
-
-    // Per-candidate clause: (¬HasSpecies(candidate) ∨ HasItem(c1) ∨ HasItem(c2) ∨ …).
-    for (species, item_bound) in illusion_candidates {
-        if let Some(candidates) = super::unknown_bounded_candidates(item_bound) {
-            let mut clause = vec![Statement::Not(Box::new(Statement::HasSpecies {
-                mon_idx: idx,
-                species: species.clone(),
-            }))];
-            clause.extend(candidates.into_iter().map(|item| Statement::HasItem { mon_idx: idx, item }));
-            state.predicates.push(clause);
-        }
-    }
-    // Shown/copied branch: (HasSpecies(c1) ∨ HasSpecies(c2) ∨ … ∨ HasItem(shown_item1) ∨ …)
-    // — "if species is none of the Illusion candidates, item is one of the copied
-    // mon's own candidates." Valid CNF form of "¬(¬c1 ∧ ¬c2 ∧ …) ⇒ Q" = "c1∨c2∨…∨Q".
-    if let Some(candidates) = super::unknown_bounded_candidates(&copied_bound) {
-        let mut clause: Vec<Statement> = illusion_candidates
-            .iter()
-            .map(|(species, _)| Statement::HasSpecies { mon_idx: idx, species: species.clone() })
-            .collect();
-        clause.extend(candidates.into_iter().map(|item| Statement::HasItem { mon_idx: idx, item }));
-        state.predicates.push(clause);
-    }
-}
-
 // ── Private helpers ─────────────────────────────────────────────────────────────
 
 fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
@@ -353,8 +208,6 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
         }
         Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| super::unknown_is_excluded(&m.possible_abilities, ability)),
-        Statement::HasSpecies { mon_idx, species } => super::get_mon_by_idx(state, *mon_idx)
-            .is_some_and(|m| super::unknown_is_excluded(&m.possible_species, species)),
         Statement::NatureBoostsStat { mon_idx, stat } => {
             super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
                 boosting_natures_for_stat(stat)
@@ -418,8 +271,6 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
             .is_some_and(|m| super::unknown_is_known_as(&m.item, item)),
         Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| super::unknown_is_known_as(&m.possible_abilities, ability)),
-        Statement::HasSpecies { mon_idx, species } => super::get_mon_by_idx(state, *mon_idx)
-            .is_some_and(|m| super::unknown_is_known_as(&m.possible_species, species)),
         Statement::EVIVStatGE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] >= *value),
         Statement::EVIVStatLE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
@@ -509,25 +360,6 @@ fn force_literal(
                     ability.clone(),
                     &format!("bcp#{mon_idx}"),
                 );
-            }
-        }
-        Statement::HasSpecies { mon_idx, species } => {
-            if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
-                super::unknown_set_known(&mut mon.possible_species, species.clone(), &format!("bcp#{mon_idx}"));
-                // S30: `HasSpecies` literals only ever come from `widen_item_for_illusion`,
-                // so forcing one here means BCP just resolved an Illusion disguise
-                // ambiguity mid-fixpoint. Every stat bound narrowed so far (min_stats/
-                // max_stats, min/max_pre_nature_stat, min_ivs/max_ivs, min_evs/max_evs) was
-                // computed against whichever species was on display at the time — not
-                // necessarily the one just confirmed — the same desync `IllusionEnded`'s
-                // handler resets for. Left in place, `pass5_back_solve` can see an HP (or
-                // other stat) window no IV/EV of the confirmed species can reach: "no
-                // IV/EV can produce observed HP bounds". Mirror `IllusionEnded`: fully
-                // reset the stat window against the confirmed species and widen EVs back
-                // to the full lattice range, rather than remapping the stale bounds.
-                super::recompute_stats_for_iv_mode(mon, species, dex, config);
-                mon.min_evs = [0; 6];
-                mon.max_evs = [252; 6];
             }
         }
         Statement::EVIVStatGE { mon_idx, stat, value } => {

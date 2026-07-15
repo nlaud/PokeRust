@@ -117,6 +117,8 @@ fn battle_nvn(
         p2_possible_back_mons: vec![],
         p1_fainted_mons: vec![],
         p2_fainted_mons: vec![],
+        p1_unresolved_zoroark_count: 0,
+        p2_unresolved_zoroark_count: 0,
         turn_number:   1,
         turn_started:  false,
         turn_ended:    false,
@@ -1703,254 +1705,287 @@ fn test_speed_comparison_lowers_slow_max_spe() {
     );
 }
 
-/// `maybe_widen_for_illusion` (previously untested): when the switching side's back
-/// contains a Zoroark, the incoming mon's Known species must widen to a Possibly set
-/// including the Zoroark — the displayed species could be an Illusion disguise.
-#[test]
-fn test_switch_widens_species_for_possible_illusion() {
-    let garchomp_back =
-        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
-    let zoroark_back =
-        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
-    let mut state = battle_with_p2(vec![]);
-    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
-    state.p2_slot_conditions = vec![vec![]];
+// ── Zoroark parallel-hypothesis regression tests ────────────────────────────────
+//
+// These replace the old species-widening (`Possibly([shown, Zoroark])`) model's
+// tests. Under the current model `possible_species` always stays pinned (`Known`)
+// — the Zoroark ambiguity lives entirely in a separate, full `UnknownPokemonState`
+// hypothesis at `possible_illusion_state`. `seed_zoroark_hypothesis_on` below
+// mimics what `seed_illusion_hypotheses` (`unknowns.rs`) does at the real
+// team-preview→battle transition, so these tests can exercise `pass1_switch` /
+// `bench_outgoing_mon` / promotion directly without a full team-preview setup;
+// `test_zoroark_possibly_in_back_from_team_preview` below exercises the real
+// seeding path end-to-end.
 
-    let result = apply(
-        state,
-        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-            slot: p2(0),
-            species: Species::Garchomp,
-            level: 50,
-            hp: PokemonHP::Percent(100),
-            status: None,
-            tera_type: None,
-        }))],
-    );
-
-    match &result.p2_active_mons[0].possible_species {
-        Unknown::Possibly(v) => {
-            assert!(
-                v.contains(&Species::Garchomp) && v.contains(&Species::Zoroark),
-                "species must widen to include the possible Illusion user; got {v:?}"
-            );
-        }
-        other => panic!(
-            "with a Zoroark in the back the incoming species must be Possibly([...]); got {other:?}"
-        ),
-    }
+/// Attach a fresh Zoroark hypothesis to `host` from `zoroark`'s own tracked state,
+/// exactly as `unknowns::seed_illusion_hypothesis_for` would at team preview.
+fn seed_zoroark_hypothesis_on(host: &mut UnknownPokemonState, zoroark: &UnknownPokemonState) {
+    host.possible_illusion_state = Some(Box::new(
+        crate::information::unknowns::seed_illusion_hypothesis_for(host, zoroark),
+    ));
 }
 
-/// TODO.md fix: the item must be tied to the species via a conditional predicate —
-/// "if species is Zoroark it has Zoroark's item, otherwise the copied Pokémon's
-/// item" — not left showing the copied mon's assumed item unconditionally.
-///
-/// Sets the benched Zoroark's own item to a concrete `Known` value so the
-/// `HasSpecies`/`HasItem` clause pair is guaranteed to be emitted (bounded
-/// candidate sets only — see `unknown_bounded_candidates`), then drives the
-/// disguise through to a real `IllusionEnded` reveal and checks BCP resolves the
-/// item to Zoroark's own value, not the copied mon's.
-#[test]
-fn test_illusion_item_tied_to_species_via_predicate() {
-    let garchomp_back =
-        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
-    let mut zoroark_back =
-        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
-    zoroark_back.item = Unknown::Known(Item::Leftovers);
-    let mut state = battle_with_p2(vec![]);
-    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
-    state.p2_slot_conditions = vec![vec![]];
-
-    // "Garchomp" switches in — might really be the disguised Zoroark.
-    let after_switch = apply(
-        state,
-        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-            slot: p2(0),
-            species: Species::Garchomp,
-            level: 50,
-            hp: PokemonHP::Percent(100),
-            status: None,
-            tera_type: None,
-        }))],
-    );
-
-    // A HasSpecies clause referencing this slot's mon_idx must now exist — the tie
-    // was actually emitted, not silently skipped.
-    let mon_idx = mon_idx_for_active_slot(&after_switch, &p2(0)).unwrap();
-    let has_species_clause = after_switch.predicates.iter().any(|clause| {
-        clause.iter().any(|lit| {
-            matches!(lit, Statement::HasSpecies { mon_idx: idx, .. } if *idx == mon_idx)
-                || matches!(lit, Statement::Not(inner)
-                    if matches!(&**inner, Statement::HasSpecies { mon_idx: idx, .. } if *idx == mon_idx))
-        })
-    });
-    assert!(
-        has_species_clause,
-        "expected a HasSpecies clause tying item to the disguise hypothesis; \
-         predicates = {:?}",
-        after_switch.predicates
-    );
-    // Soundness in the meantime: Leftovers must not be excluded (it's the real
-    // Zoroark's item, one of the two live hypotheses).
-    assert!(
-        !unknown_is_excluded(&after_switch.p2_active_mons[0].item, &Item::Leftovers),
-        "Leftovers (Zoroark's real item) must remain a live candidate before \
-         resolution; item = {:?}",
-        after_switch.p2_active_mons[0].item
-    );
-
-    // The disguise breaks (e.g. it took a damaging hit) and reveals the true species.
-    let after_reveal = apply(
-        after_switch,
-        vec![event(EventKind::IllusionEnded { slot: p2(0), actual_species: Species::Zoroark })],
-    );
-
-    assert_eq!(
-        after_reveal.p2_active_mons[0].possible_species,
-        Unknown::Known(Species::Zoroark),
-        "species must resolve to Known(Zoroark) after IllusionEnded"
-    );
-    assert_eq!(
-        after_reveal.p2_active_mons[0].item,
-        Unknown::Known(Item::Leftovers),
-        "BCP must resolve item to Zoroark's own tracked item once species confirms \
-         Zoroark — got {:?}",
-        after_reveal.p2_active_mons[0].item
-    );
-}
-
-// ── Regression: S29 — Illusion disguise must not consume a scouted teammate ─────
-
-/// Regression: `combined_back` must scan `possible_back`, not just `known_back`.
-/// A Zoroark sitting in `possible_back` (species known from team preview, but never
-/// yet individually revealed-and-switched-out — the normal state for most of a
-/// team's bench for the first several turns, after the TODO.md fix making
-/// `into_battle_state` populate `possible_back` from turn 1) must still trigger
-/// Illusion widening for a DIFFERENT mon switching in. Before that fix landed,
-/// `pass1_switch`'s bench scan only checked `known_back`, so a same-turn-one
-/// Zoroark switch-in for anything else would have silently failed to widen.
-#[test]
-fn test_illusion_widens_from_possible_back_zoroark() {
-    let garchomp_back =
-        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+/// A benched Garchomp (pre-seeded with a Zoroark hypothesis) and the side's real
+/// benched Zoroark, ready to switch in.
+fn garchomp_with_zoroark_hypothesis_and_baseline() -> (UnknownPokemonState, UnknownPokemonState) {
     let zoroark_back =
         UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    let mut garchomp_back =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    seed_zoroark_hypothesis_on(&mut garchomp_back, &zoroark_back);
+    (garchomp_back, zoroark_back)
+}
+
+fn switch_in(species: Species, slot: FieldSlot) -> InformationEvent {
+    event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
+        slot,
+        species,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }))
+}
+
+/// Switching in a mon that carries a seeded Zoroark hypothesis must leave
+/// `possible_species` pinned to `Known` (never widen to `Possibly`) while the
+/// hypothesis rides along onto the active slot.
+#[test]
+fn test_zoroark_hypothesis_rides_onto_active_slot_species_stays_known() {
+    let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
     let mut state = battle_with_p2(vec![]);
-    // Zoroark sits in possible_back (never individually revealed), not known_back.
     state.p2_known_back_mons = vec![garchomp_back];
     state.p2_possible_back_mons = vec![zoroark_back];
     state.p2_slot_conditions = vec![vec![]];
+    state.p2_unresolved_zoroark_count = 1;
 
-    let result = apply(
-        state,
-        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-            slot: p2(0),
-            species: Species::Garchomp,
-            level: 50,
-            hp: PokemonHP::Percent(100),
-            status: None,
-            tera_type: None,
-        }))],
+    let result = apply(state, vec![switch_in(Species::Garchomp, p2(0))]);
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Garchomp),
+        "species must stay pinned to the shown species, never widen to Possibly"
     );
-
     assert!(
-        matches!(&result.p2_active_mons[0].possible_species,
-            Unknown::Possibly(v) if v.contains(&Species::Garchomp) && v.contains(&Species::Zoroark)),
-        "species must still widen to Possibly([Garchomp, Zoroark]) when the Zoroark \
-         candidate is sitting in possible_back rather than known_back; got {:?}",
-        result.p2_active_mons[0].possible_species
+        result.p2_active_mons[0].possible_illusion_state.is_some(),
+        "the seeded Zoroark hypothesis must carry onto the active slot"
     );
 }
 
-/// With a Zoroark on the opponent's known bench, a "Garchomp" switch-in might be the
-/// Zoroark in disguise. The real (previously scouted) Garchomp's benched entry must
-/// therefore survive — before the S29 fix `pass1_switch` matched by species and
-/// REMOVED it, moving the real teammate's accumulated fog into the active slot to be
-/// mutated by events that physically happen to the Zoroark (merging two mons).
+/// A move outside Zoroark's own learnset (but legal for the shown species) must
+/// drop the hypothesis — this mon is confirmed NOT Zoroark — while the primary
+/// identity is untouched.
 #[test]
-fn test_s29_illusion_switch_preserves_benched_teammate() {
-    let garchomp_back =
-        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
-    let zoroark_back =
-        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+fn test_zoroark_learnset_contradiction_drops_hypothesis() {
+    let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
     let mut state = battle_with_p2(vec![]);
-    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
+    state.p2_known_back_mons = vec![garchomp_back];
+    state.p2_possible_back_mons = vec![zoroark_back];
     state.p2_slot_conditions = vec![vec![]];
+    state.p2_unresolved_zoroark_count = 1;
+    let state = apply(state, vec![switch_in(Species::Garchomp, p2(0))]);
+    assert!(state.p2_active_mons[0].possible_illusion_state.is_some());
 
-    let result = apply(
+    let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    learnset_dex.insert(Species::Garchomp, [PokemonMove::Earthquake].into_iter().collect());
+    learnset_dex.insert(Species::Zoroark, [PokemonMove::DarkPulse].into_iter().collect());
+    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+
+    let result = apply_with_config(
         state,
-        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-            slot: p2(0),
-            species: Species::Garchomp,
-            level: 50,
-            hp: PokemonHP::Percent(100),
-            status: None,
-            tera_type: None,
-        }))],
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets: vec![p1(0)],
+        })],
+        HashMap::new(),
+        HashMap::new(),
+        config,
     );
 
-    // Active species is the ambiguous disguise set.
-    assert!(
-        matches!(&result.p2_active_mons[0].possible_species,
-            Unknown::Possibly(v) if v.contains(&Species::Garchomp) && v.contains(&Species::Zoroark)),
-        "active species must widen to Possibly([Garchomp, Zoroark])"
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Garchomp),
+        "primary identity is unaffected by the hypothesis rejection"
     );
-    // The real Garchomp's benched entry must NOT have been consumed.
-    let garchomp_still_benched = result
-        .p2_known_back_mons
-        .iter()
-        .any(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp)));
     assert!(
-        garchomp_still_benched,
-        "the scouted Garchomp must remain benched (not merged into the disguise); \
-         bench = {:?}",
-        result.p2_known_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+        result.p2_active_mons[0].possible_illusion_state.is_none(),
+        "a move outside Zoroark's learnset must drop the hypothesis"
     );
 }
 
-/// When the still-ambiguous disguise switches back out before its identity resolves,
-/// its `Possibly`-species entry must be DISCARDED — not benched. `pass1_switch`
-/// re-matches by `Known` species (so it could never be pulled back), and benching it
-/// beside the real teammate's surviving entry would double-count one physical mon in
-/// `teammate_indices` / item-clause propagation.
+/// A move outside the SHOWN species' own learnset, but legal for Zoroark, must
+/// PROMOTE the hypothesis: the mon is confirmed to secretly be Zoroark.
 #[test]
-fn test_s29_ambiguous_disguise_discarded_on_switch_out() {
-    let garchomp_back =
-        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
-    let zoroark_back =
-        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+fn test_zoroark_learnset_promotes_when_primary_impossible() {
+    let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
     let mut state = battle_with_p2(vec![]);
-    state.p2_known_back_mons = vec![garchomp_back, zoroark_back];
+    state.p2_known_back_mons = vec![garchomp_back];
+    state.p2_possible_back_mons = vec![zoroark_back];
     state.p2_slot_conditions = vec![vec![]];
+    state.p2_unresolved_zoroark_count = 1;
+    let state = apply(state, vec![switch_in(Species::Garchomp, p2(0))]);
+
+    let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    learnset_dex.insert(Species::Garchomp, [PokemonMove::Earthquake].into_iter().collect());
+    learnset_dex.insert(Species::Zoroark, [PokemonMove::DarkPulse].into_iter().collect());
+    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::DarkPulse,
+            targets: vec![p1(0)],
+        })],
+        HashMap::new(),
+        HashMap::new(),
+        config,
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "a move only Zoroark can know must promote the hypothesis to primary"
+    );
+    assert!(
+        result.p2_active_mons[0].possible_illusion_state.is_none(),
+        "promotion clears the (now-redundant) hypothesis slot"
+    );
+    // Side-wide bookkeeping: Zoroark is now positively located.
+    assert_eq!(
+        result.p2_unresolved_zoroark_count, 0,
+        "resolve_zoroark_globally must decrement the unresolved count on promotion"
+    );
+}
+
+/// Switch-out must PERSIST the hypothesis (bench it alongside the primary), not
+/// discard it — this reverses the old S29 discard-on-switch-out behavior, which
+/// is exactly the "information must persist even if it switches out" requirement.
+#[test]
+fn test_zoroark_switch_out_persists_hypothesis() {
+    let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back];
+    state.p2_possible_back_mons = vec![zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+    state.p2_unresolved_zoroark_count = 1;
 
     let result = apply(
         state,
         vec![
-            // "Garchomp" (possibly the Zoroark) switches in → ambiguous active entry.
-            event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-                slot: p2(0), species: Species::Garchomp, level: 50,
-                hp: PokemonHP::Percent(100), status: None, tera_type: None,
-            })),
-            // …then switches back out for Snorlax before the disguise ever broke.
-            event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-                slot: p2(0), species: Species::Snorlax, level: 50,
-                hp: PokemonHP::Percent(100), status: None, tera_type: None,
-            })),
+            switch_in(Species::Garchomp, p2(0)),
+            // Switches back out for Snorlax before the disguise ever resolves.
+            switch_in(Species::Snorlax, p2(0)),
         ],
     );
 
-    // The ambiguous entry was discarded, not pushed to possible_back.
-    assert!(
-        result.p2_possible_back_mons.is_empty(),
-        "the unresolved disguise must be discarded, not benched; possible_back = {:?}",
-        result.p2_possible_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+    let benched_garchomp = result
+        .p2_known_back_mons
+        .iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp)));
+    let benched_garchomp = benched_garchomp.expect(
+        "the real Garchomp must be benched (not discarded) after switching out",
     );
-    // The real Garchomp entry is still intact on the known bench.
     assert!(
-        result.p2_known_back_mons.iter().any(|m|
-            matches!(&m.possible_species, Unknown::Known(Species::Garchomp))),
-        "the scouted Garchomp entry must survive the ambiguous mon's switch-out"
+        benched_garchomp.possible_illusion_state.is_some(),
+        "the hypothesis must persist onto the benched entry, not be discarded"
     );
+}
+
+/// A mon that benches with a live hypothesis and later returns to the field must
+/// resume its OWN accumulated hypothesis (not a fresh, re-seeded one) — this is
+/// "own-hypothesis resume." Demonstrated by narrowing the hypothesis's item while
+/// active, benching it, bringing back a DIFFERENT mon, then switching the original
+/// back in and confirming the narrowed item survived the round trip.
+#[test]
+fn test_zoroark_own_hypothesis_resumes_on_return() {
+    let (mut garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
+    // Narrow the hypothesis's item bound before it's even switched in, to give the
+    // round trip something distinguishing to check for.
+    garchomp_back.possible_illusion_state.as_mut().unwrap().item = Unknown::Known(Item::Leftovers);
+    let mut snorlax_back = unknown_mon_species(Species::Snorlax);
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back, snorlax_back.clone()];
+    state.p2_possible_back_mons = vec![zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+    state.p2_unresolved_zoroark_count = 1;
+
+    let result = apply(
+        state,
+        vec![
+            switch_in(Species::Garchomp, p2(0)),
+            switch_in(Species::Snorlax, p2(0)), // Garchomp benches, hypothesis rides along
+            switch_in(Species::Garchomp, p2(0)), // Garchomp returns
+        ],
+    );
+
+    let hyp = result.p2_active_mons[0]
+        .possible_illusion_state
+        .as_ref()
+        .expect("the returning mon must still carry its own hypothesis");
+    assert_eq!(
+        hyp.item,
+        Unknown::Known(Item::Leftovers),
+        "the RESUMED hypothesis must be the same one narrowed before benching, \
+         not a fresh re-seeded copy"
+    );
+}
+
+/// `IllusionEnded` (a direct-damage disguise break) must promote the live
+/// hypothesis wholesale and restore the discarded primary identity ("Garchomp")
+/// to `possible_back` at a fresh baseline — it was never really on the field.
+#[test]
+fn test_zoroark_illusion_ended_promotes_and_restores_decoy() {
+    let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back];
+    state.p2_possible_back_mons = vec![zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+    state.p2_unresolved_zoroark_count = 1;
+    let state = apply(state, vec![switch_in(Species::Garchomp, p2(0))]);
+
+    let result = apply(
+        state,
+        vec![event(EventKind::IllusionEnded { slot: p2(0), actual_species: Species::Zoroark })],
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "IllusionEnded must promote the slot to the true (Zoroark) identity"
+    );
+    assert!(
+        result.p2_active_mons[0].possible_illusion_state.is_none(),
+        "promotion clears the hypothesis slot"
+    );
+    assert!(
+        combined_back_species(&result, &Player::P2).contains(&Species::Garchomp),
+        "the discarded decoy identity (Garchomp) must be restored to the bench — \
+         it was never actually on the field; bench species = {:?}",
+        combined_back_species(&result, &Player::P2)
+    );
+    assert_eq!(
+        result.p2_unresolved_zoroark_count, 0,
+        "the side's Zoroark is now positively located"
+    );
+}
+
+fn combined_back_species(state: &UnknownBattleState, player: &Player) -> Vec<Species> {
+    let (known, possible) = match player {
+        Player::P1 => (&state.p1_known_back_mons, &state.p1_possible_back_mons),
+        Player::P2 => (&state.p2_known_back_mons, &state.p2_possible_back_mons),
+    };
+    known
+        .iter()
+        .chain(possible.iter())
+        .filter_map(|m| match &m.possible_species {
+            Unknown::Known(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `KnowsThreateningMove` satisfaction (previously untested): once the constrained mon
@@ -2110,6 +2145,44 @@ fn garchomp_dex() -> HashMap<Species, PokemonData> {
     dex
 }
 
+/// `garchomp_dex()` plus a synthetic Zoroark entry (base Atk=60, Dark-type — no STAB
+/// on a Ground-type move, no shared typing with Garchomp) for Increment 2's
+/// hypothesis-mirroring tests. Deliberately low/round stats so the resulting BSV
+/// windows and damage math are hand-derivable, exactly like `garchomp_dex()`'s own
+/// Atk=130 was chosen for the same reason.
+fn garchomp_zoroark_dex() -> HashMap<Species, PokemonData> {
+    use crate::state::pokemon::PokemonGender;
+    let mut dex = garchomp_dex();
+    dex.insert(Species::Zoroark, PokemonData {
+        species:       Species::Zoroark,
+        types:         vec![PokemonType::Dark],
+        base_stats:    [60, 60, 60, 60, 60, 60], // HP Atk Def SpA SpD Spe
+        weight:        811, // 81.1 kg
+        primary_ability: Some(Ability::Illusion),
+        abilities:     vec![Ability::Illusion],
+        base_species:  None,
+        forme:         None,
+        required_item: None,
+        battle_only:   None,
+        default_gender: PokemonGender::Male,
+    });
+    dex
+}
+
+/// Zoroark hypothesis with *neutral* nature only, no item, no damage-boosting
+/// ability — the same simplification `neutral_no_item_garchomp` uses, so the
+/// resulting BSV bound is hand-computable. Attach to a host mon's
+/// `possible_illusion_state` via `seed_zoroark_hypothesis_on` or directly.
+fn neutral_no_item_zoroark() -> UnknownPokemonState {
+    use crate::state::pokemon::Nature;
+    let mut mon = UnknownPokemonState::from_opponent_species(Species::Zoroark, &garchomp_zoroark_dex(), 50);
+    mon.possible_natures   = Unknown::Known(Nature::Hardy); // neutral
+    mon.item               = Unknown::Known(Item::None);
+    mon.possible_abilities = Unknown::Known(Ability::Illusion); // not damage-boosting
+    mon.hp = PokemonHP::Percent(100);
+    mon
+}
+
 /// Ground-type physical move (used as Earthquake stand-in).
 fn ground_physical_move(name: PokemonMove, bp: u16) -> MoveData {
     MoveData {
@@ -2217,6 +2290,181 @@ fn run_direction_b(p2_mon: UnknownPokemonState, damage: u16) -> crate::informati
         garchomp_dex(),
         move_dex,
     )
+}
+
+// ── Increment 2: Pass 3 / Pass 5 hypothesis mirroring ────────────────────────────
+//
+// Uses `garchomp_zoroark_dex()` (base Atk 60, Dark-type -- no STAB on Earthquake,
+// no shared typing with Garchomp) so the resulting hypothesis BSV windows are
+// hand-derivable exactly like the existing neutral-locked Garchomp tests above.
+// Zoroark(Atk=60)'s pre-nature BSV range at level 50 is [65, 112] (same formula as
+// Garchomp's own [135,182], computed at base=60 instead of base=130); at neutral
+// nature, no item, no boosting ability (`neutral_no_item_zoroark`), its absolute
+// MAXIMUM possible Earthquake damage (no STAB, since it's Dark- not Ground-type)
+// is base(112)=floor(0.44*112)+2=51, roll=100% -> 51. Its absolute MINIMUM is
+// base(65)=30, roll=85% -> 25.
+
+fn run_direction_b_with_zoroark_hypothesis(
+    damage: u16,
+) -> crate::information::unknowns::UnknownBattleState {
+    let mut garchomp_shown = neutral_no_item_garchomp();
+    seed_zoroark_hypothesis_on(&mut garchomp_shown, &neutral_no_item_zoroark());
+
+    let our_mon = known_p1_normal();
+    let pre_hp = match our_mon.hp { PokemonHP::Number(n) => n, _ => panic!("expected Number") };
+    let new_hp = pre_hp.saturating_sub(damage);
+    let state = battle_1v1(our_mon, garchomp_shown);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+
+    apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+        )],
+        garchomp_zoroark_dex(),
+        move_dex,
+    )
+}
+
+/// damage=45 is unreachable at Zoroark's seeded minimum BSV=65 (max possible output
+/// there is 30, no STAB) but comfortably reachable at its maximum BSV=112 (range
+/// [43,51], rolls 89/90 give exactly 45) -- the hypothesis's min bound must rise
+/// strictly above 65, while the hypothesis itself survives (45 is within its
+/// achievable range at the high end).
+#[test]
+fn test_zoroark_pass3_direction_b_tightens_hypothesis() {
+    let result = run_direction_b_with_zoroark_hypothesis(45);
+    let hyp = result.p2_active_mons[0].possible_illusion_state.as_ref().expect(
+        "damage=45 is within Zoroark's achievable range at its high-BSV end -- \
+         the hypothesis must survive",
+    );
+    assert!(
+        hyp.min_pre_nature_stat[1] > 65,
+        "damage=45 is unreachable at Zoroark's seeded min BSV=65 (max output there \
+         is 30) -- the hypothesis's own min bound must have risen; got {}",
+        hyp.min_pre_nature_stat[1]
+    );
+
+    // Pass 5 synergy: EVs/IVs (or nature) back-solved from the now-tightened
+    // pre-nature stat window must also reflect SOME narrowing relative to the
+    // fully-uninformed default (`from_opponent_species`'s full [0,252] EV range),
+    // proving `run_pass5_all_mons`'s mirrored call actually engaged for this
+    // hypothesis too, not just Pass 3's direct field write.
+    assert!(
+        hyp.min_evs[1] > 0 || hyp.max_evs[1] < 252,
+        "Pass 5's mirrored back-solve must narrow the hypothesis's own Atk EV range \
+         from the tightened stat window; got [{}, {}]",
+        hyp.min_evs[1], hyp.max_evs[1]
+    );
+}
+
+/// damage=25 narrows Zoroark's search to the exact single point BSV=65 (its own
+/// seeded minimum, only reachable at roll=85%) -- a valid BSV-level window on its
+/// own, but Pass 5's EV/IV back-solve (empirically verified) finds NO valid
+/// EV/IV/nature combination lands exactly on that single point, panicking on the
+/// hypothesis specifically. Its own mirrored `apply_with_illusion_mirroring` call
+/// (Increment 2) catches this and drops the hypothesis -- proving the Pass3->Pass5
+/// synergy's OTHER direction (dropping a hypothesis, not just promoting one) also
+/// works. The primary (Garchomp, whose own window at this damage is unaffected --
+/// 25 is far below its own achievable range) is untouched.
+#[test]
+fn test_zoroark_pass3_direction_b_drops_hypothesis_when_infeasible() {
+    let result = run_direction_b_with_zoroark_hypothesis(25);
+    assert!(
+        result.p2_active_mons[0].possible_illusion_state.is_none(),
+        "damage=25 narrows Zoroark's own window to an EV/IV-lattice-infeasible \
+         single point -- the hypothesis must be dropped"
+    );
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Garchomp),
+        "primary identity must be unaffected by the hypothesis's own rejection"
+    );
+}
+
+/// damage=76 -- Garchomp's own absolute minimum possible Earthquake damage (base=61
+/// at BSV=135, roll=85%, with STAB) -- narrows the PRIMARY's own window to an
+/// EV/IV-lattice-infeasible point (empirically verified: Pass 5 panics "every
+/// candidate nature is infeasible" for the primary specifically), while being
+/// comfortably above Zoroark(Atk=60)'s own absolute max output (51) -- the
+/// hypothesis's search finds no combination at all for this damage (a pure
+/// "no new evidence" case) and survives completely untouched. `apply_with_illusion_
+/// mirroring`'s promotion path (primary contradicts, hypothesis doesn't) then fires:
+/// this is the Pass3->Pass5 synergy the plan describes -- Pass 3 itself never
+/// panics, so Pass 5's mirrored call is the only place this primary contradiction
+/// is ever discovered, and discovering it is exactly what triggers promotion.
+#[test]
+fn test_zoroark_pass3_pass5_promotion_synergy() {
+    let result = run_direction_b_with_zoroark_hypothesis(76);
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "damage=76 makes Garchomp's own stat window EV/IV-infeasible while leaving \
+         Zoroark's untouched (no evidence, comfortably above its max output) -- \
+         Pass 5's mirrored call must discover the primary's infeasibility and \
+         promote the hypothesis; got {:?}",
+        result.p2_active_mons[0].possible_species
+    );
+    assert!(
+        result.p2_active_mons[0].possible_illusion_state.is_none(),
+        "promotion clears the (now-redundant) hypothesis slot"
+    );
+}
+
+/// Direction A (we attack the disguised mon): a strong special hit taking the
+/// defender from 100% to 75% HP (empirically verified): narrows Garchomp's own SpD
+/// window to an EV/IV-lattice-infeasible point (Pass 5 panics "every candidate
+/// nature is infeasible" for the primary), while Zoroark(SpD=60)'s own search finds
+/// no combination for this same hit (no evidence, untouched) -- the same
+/// Pass3->Pass5 promotion synergy `test_zoroark_pass3_pass5_promotion_synergy`
+/// exercises for Direction B, here for Direction A's defensive-stat mirror instead.
+#[test]
+fn test_zoroark_pass3_direction_a_promotes_on_defender_infeasibility() {
+    let mut p1_mon = unknown_mon_species(Species::Snorlax);
+    p1_mon.hp = PokemonHP::Number(500);
+    p1_mon.min_stats = [500, 100, 100, 100, 100, 100];
+    p1_mon.max_stats = [500, 100, 100, 100, 100, 100];
+    p1_mon.item = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    let mut garchomp_shown = neutral_no_item_garchomp();
+    garchomp_shown.hp = PokemonHP::Percent(100);
+    seed_zoroark_hypothesis_on(&mut garchomp_shown, &neutral_no_item_zoroark());
+
+    let state = battle_1v1(p1_mon, garchomp_shown);
+
+    let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
+    psychic.category = MoveCategory::Special;
+    psychic.pokemon_type = PokemonType::Psychic;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Psychic, psychic);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Psychic, targets: vec![p2(0)] },
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(75) })],
+        )],
+        garchomp_zoroark_dex(),
+        move_dex,
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "this hit makes Garchomp's own SpD window EV/IV-infeasible while leaving \
+         Zoroark's untouched -- Pass 5's mirrored call must discover the primary's \
+         infeasibility and promote the hypothesis via Direction A's mirror; got {:?}",
+        result.p2_active_mons[0].possible_species
+    );
+    assert!(
+        result.p2_active_mons[0].possible_illusion_state.is_none(),
+        "promotion clears the (now-redundant) hypothesis slot"
+    );
 }
 
 // ── Direction B: upper-bound tightening ──────────────────────────────────────
@@ -8145,43 +8393,50 @@ mod roundtrip_soundness {
         );
     }
 
-    // ── Regression: BCP-forced species change must not leave a stale HP window ──
+    // ── Regression: promotion must never leave a stale disguise-derived HP window ──
     //
-    // `widen_item_for_illusion` emits `HasSpecies` CNF clauses; BCP's `force_literal`
-    // can resolve one to `Known(species)` mid-fixpoint (e.g. once the item-tie clause's
-    // other disjuncts are eliminated). Unlike `IllusionEnded` and Mega/forme changes,
-    // that path did NOT recompute the mon's stat window — so a slot displayed as (say)
-    // Snorlax (HP base 160) whose species BCP forces to Zoroark (HP base 60) was left
-    // with an HP window no Zoroark IV/EV can reach. `pass5_back_solve`'s "pass5-hp —
-    // no IV/EV can produce observed HP bounds" assertion then panicked, taking down
-    // the tokio worker (and, pre-Fix-4, the whole gateway).
-    //
-    // This drives the actual BCP path: a `Possibly([Snorlax, Zoroark])` species (as
-    // `widen_item_for_illusion` would leave it, stat window untouched) plus a unit
-    // `HasSpecies{Zoroark}` predicate clause — exactly what remains once BCP has
-    // eliminated every other disjunct in a real item-tie clause. Asserts BCP resolves
-    // it without panicking and lands a Zoroark-consistent, sound HP window.
+    // Under the parallel-hypothesis model, a hypothesis is tracked against its OWN
+    // species' base stats from the moment it's seeded (never the disguise's) — so
+    // promoting it (via `IllusionEnded`) can never inherit a stale, disguise-derived
+    // stat window the way the old `HasSpecies`-forced-mid-BCP path could (S30). This
+    // drives that scenario with the REAL dex (Snorlax base HP 160 vs. Zoroark base HP
+    // 60) end-to-end and asserts the resulting window is Zoroark-consistent.
     #[test]
-    fn test_s30_forced_species_stale_hp_window_no_pass5_panic() {
-        use crate::information::inference::mon_idx_for_active_slot;
+    fn test_zoroark_promotion_never_leaves_stale_disguise_hp_window() {
         use crate::state::pokemon::calc_hp;
         let pd = pokemon_dex();
 
-        // Displayed as Snorlax (big-HP window, per widen_item_for_illusion which
-        // widens `possible_species` only — it never touches stat bounds).
-        let mut desynced = UnknownPokemonState::from_opponent_species(Species::Snorlax, pd, 50);
-        desynced.possible_species =
-            Unknown::Possibly(vec![Species::Snorlax, Species::Zoroark]);
-        let mut state = super::battle_with_p2(vec![desynced]);
+        let zoroark_back = UnknownPokemonState::from_opponent_species(Species::Zoroark, pd, 50);
+        let mut snorlax_back = UnknownPokemonState::from_opponent_species(Species::Snorlax, pd, 50);
+        snorlax_back.possible_illusion_state = Some(Box::new(
+            crate::information::unknowns::seed_illusion_hypothesis_for(&snorlax_back, &zoroark_back),
+        ));
+        let mut state = super::battle_with_p2(vec![]);
+        state.p2_known_back_mons = vec![snorlax_back];
+        state.p2_possible_back_mons = vec![zoroark_back];
+        state.p2_slot_conditions = vec![vec![]];
+        state.p2_unresolved_zoroark_count = 1;
 
-        let mon_idx = mon_idx_for_active_slot(&state, &super::p2(0)).unwrap();
-        // Unit clause: BCP forces this on its very first pass.
-        state.predicates.push(vec![Statement::HasSpecies { mon_idx, species: Species::Zoroark }]);
-
-        // Reaching the asserts at all proves no panic.
-        let result = apply_information(
+        let after_switch = apply_information(
             UnknownMatchState::Battle(state),
-            &[],
+            &[super::switch_in(Species::Snorlax, super::p2(0))],
+            false,
+            pd,
+            &HashMap::new(),
+            &HashMap::new(),
+            &InferenceConfig::default(),
+        );
+        let UnknownMatchState::Battle(after_switch) = after_switch else {
+            panic!("expected battle state")
+        };
+
+        // The disguise breaks (direct-damage reveal): promote to the true identity.
+        let result = apply_information(
+            UnknownMatchState::Battle(after_switch),
+            &[super::event(super::EventKind::IllusionEnded {
+                slot: super::p2(0),
+                actual_species: Species::Zoroark,
+            })],
             false,
             pd,
             &HashMap::new(),
@@ -8194,16 +8449,16 @@ mod roundtrip_soundness {
         assert_eq!(m.possible_species, Unknown::Known(Species::Zoroark));
         assert!(
             m.min_stats[0] <= m.max_stats[0],
-            "HP window must be non-empty after reconciliation: [{}, {}]",
+            "HP window must be non-empty after promotion: [{}, {}]",
             m.min_stats[0], m.max_stats[0]
         );
         // The window must be Zoroark-consistent: a real Zoroark (base HP 60, 31 IV,
-        // any EV) must lie within it. force_max_ivs default → 31 IV; 0 EV gives the
-        // theoretical minimum.
+        // any EV) must lie within it, NOT Snorlax's (base HP 160) window.
         let real_zoroark_hp = calc_hp(60, 31, 0, 50);
         assert!(
             m.min_stats[0] <= real_zoroark_hp && real_zoroark_hp <= m.max_stats[0],
-            "reconciled HP window [{}, {}] must contain a real Zoroark HP ({})",
+            "promoted HP window [{}, {}] must contain a real Zoroark HP ({}) — a stale \
+             Snorlax-derived window would exclude it",
             m.min_stats[0], m.max_stats[0], real_zoroark_hp
         );
     }
@@ -11162,16 +11417,15 @@ mod information_mode_tests {
         );
     }
 
-    /// The actual TODO.md regression: a leading Pokémon whose DISPLAYED species could
-    /// be a Zoroark disguise (a Zoroark forme sits elsewhere in the team-preview
-    /// roster, not selected as this lead) must resolve to an ambiguous
-    /// `Possibly([shown, Zoroark])` species on `apply_information` — not the old
-    /// behavior of confidently placing whichever roster member `into_battle_state`
-    /// was told is "active." The benched Zoroark roster entry must also survive
-    /// untouched in `possible_back` (mirroring `pass1_switch`'s S29 treatment) — this
-    /// is the "Zoroark should show up as possibly in the back when led" bug.
+    /// The actual TODO.md regression, under the parallel-hypothesis model: a leading
+    /// Pokémon whose DISPLAYED species could be a Zoroark disguise (a Zoroark forme
+    /// sits elsewhere in the team-preview roster, not selected as this lead) must end
+    /// up carrying a live `possible_illusion_state` — `possible_species` itself stays
+    /// pinned to `Known`, per the new architecture. The benched Zoroark roster entry
+    /// must also survive untouched in `possible_back` — "Zoroark should show up as
+    /// possibly in the back when led."
     #[test]
-    fn test_disguised_lead_widens_to_possibly_zoroark_and_stays_in_possible_back() {
+    fn test_zoroark_possibly_in_back_from_team_preview() {
         let p2_mons: Vec<UnknownPokemonState> = [
             Species::Milotic, Species::Zoroark, Species::Corviknight,
         ]
@@ -11187,8 +11441,13 @@ mod information_mode_tests {
         // P2's TRUE physical lead is index 1 (Zoroark), but the event stream carries
         // the DISPLAYED species (Milotic) — exactly what
         // `battle_state_from_preview_branching`'s perspective-gated `species` field
-        // would produce for the observer.
+        // would produce for the observer. `into_battle_state` seeds every eligible
+        // roster entry with a Zoroark hypothesis up front (`seed_illusion_hypotheses`).
         let seeded = preview.into_battle_state(Player::P1, &[0], &[], &[1], &[0, 2]);
+        assert_eq!(
+            seeded.p2_unresolved_zoroark_count, 1,
+            "team preview must detect the one real Zoroark on P2's roster"
+        );
 
         let switch_events = vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
@@ -11204,15 +11463,17 @@ mod information_mode_tests {
         })];
         let result = apply_ex(seeded, switch_events, HashMap::new(), HashMap::new());
 
+        assert_eq!(
+            result.p2_active_mons[0].possible_species,
+            Unknown::Known(Species::Milotic),
+            "species stays pinned to the shown species, never Possibly"
+        );
         assert!(
-            matches!(&result.p2_active_mons[0].possible_species,
-                Unknown::Possibly(v) if v.contains(&Species::Milotic) && v.contains(&Species::Zoroark)),
-            "a leading disguise-eligible mon must widen to Possibly([Milotic, Zoroark]), got {:?}",
-            result.p2_active_mons[0].possible_species
+            result.p2_active_mons[0].possible_illusion_state.is_some(),
+            "a leading disguise-eligible mon must carry a live Zoroark hypothesis"
         );
         // Zoroark's own roster entry must still be present ("possibly in the back"),
-        // not consumed by the active-slot widening — S29's existing invariant, now
-        // also verified for the team-preview lead path.
+        // not consumed by the active-slot's hypothesis attachment.
         assert!(
             result.p2_possible_back_mons.iter().any(|m|
                 matches!(&m.possible_species, Unknown::Known(Species::Zoroark))),
@@ -11220,5 +11481,38 @@ mod information_mode_tests {
             result.p2_possible_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
         );
     }
-}
 
+    /// Doubles-only: if the same species ends up shown on two active slots at once,
+    /// Species Clause guarantees exactly one is real — the other must be this side's
+    /// Illusion forme in disguise. The newly-arrived duplicate slot must pick up a
+    /// hypothesis (sound, if imprecise: see `maybe_resolve_illusion_two_in_front`'s
+    /// doc comment on why this doesn't try to capture the full exclusive-or).
+    #[test]
+    fn test_zoroark_doubles_two_in_front_seeds_hypothesis() {
+        let zoroark_back =
+            UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+        let mut state = battle_nvn(
+            vec![unknown_mon_species(Species::Pikachu), unknown_mon_species(Species::Pikachu)],
+            vec![unknown_mon_species(Species::Garchomp)],
+        );
+        state.active_per_side = 2;
+        state.p2_active_mons.push(unknown_mon_species(Species::Snorlax));
+        state.p2_possible_back_mons = vec![zoroark_back];
+        state.p2_unresolved_zoroark_count = 1;
+        state.p2_slot_conditions = vec![vec![], vec![]];
+
+        // A SECOND Garchomp switches into slot 1 — Species Clause means the real
+        // Garchomp is already in slot 0, so this one must be the disguised Zoroark.
+        let result = apply(state, vec![switch_in(Species::Garchomp, p2(1))]);
+
+        assert_eq!(
+            result.p2_active_mons[1].possible_species,
+            Unknown::Known(Species::Garchomp),
+            "species stays pinned even for the duplicate-species slot"
+        );
+        assert!(
+            result.p2_active_mons[1].possible_illusion_state.is_some(),
+            "the newly-arrived duplicate-species slot must carry a Zoroark hypothesis"
+        );
+    }
+}

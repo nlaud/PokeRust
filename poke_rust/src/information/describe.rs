@@ -10,7 +10,8 @@
 use std::collections::HashSet;
 
 use crate::data::item::Item;
-use crate::information::inference::get_mon_by_idx;
+use crate::data::pokemon_move::PokemonMove;
+use crate::information::inference::{get_mon_by_idx, unknown_union};
 use crate::information::unknowns::{Statement, Unknown, UnknownBattleState};
 use crate::user::{humanize_identifier, move_name};
 
@@ -100,9 +101,6 @@ pub fn describe_statement(stmt: &Statement, battle: &UnknownBattleState) -> Stri
         Statement::HasAbility { mon_idx, ability } => {
             format!("{}'s ability is {}", mon_label(battle, *mon_idx), display_name(ability))
         }
-        Statement::HasSpecies { mon_idx, species } => {
-            format!("{}'s species is {}", mon_label(battle, *mon_idx), display_name(species))
-        }
         Statement::WeatherTurns { turns } => {
             format!("The weather lasts {} more turn(s)", turns)
         }
@@ -170,5 +168,50 @@ pub fn describe_move_slot(slot: Option<crate::data::pokemon_move::PokemonMove>) 
     match slot {
         Some(m) => move_name(&m),
         None => "???".to_string(),
+    }
+}
+
+/// Render an `Unknown<T>` field as the union of a primary value and a live Zoroark
+/// hypothesis's own value for the same field, when one exists — "A or B" when they
+/// differ, just "A" when they agree or the hypothesis has nothing more specific.
+/// `hypothesis` is `None` when the mon carries no live `possible_illusion_state`
+/// (the overwhelming majority of mons), in which case this is identical to
+/// `describe_unknown(primary)`.
+pub fn describe_unknown_union<T: std::fmt::Debug + PartialEq + Clone>(
+    primary: &Unknown<T>,
+    hypothesis: Option<&Unknown<T>>,
+) -> String {
+    match hypothesis {
+        Some(h) => describe_unknown(&unknown_union(primary, h)),
+        None => describe_unknown(primary),
+    }
+}
+
+/// Item variant of `describe_unknown_union` — see that function's doc comment.
+/// Unioning first, then describing, keeps the "shorter of possible/impossible
+/// phrasing" logic in `describe_unknown_item` as the single source of truth.
+pub fn describe_unknown_item_union(
+    primary: &Unknown<Item>,
+    hypothesis: Option<&Unknown<Item>>,
+    legal_items: Option<&HashSet<Item>>,
+) -> String {
+    match hypothesis {
+        Some(h) => describe_unknown_item(&unknown_union(primary, h), legal_items),
+        None => describe_unknown_item(primary, legal_items),
+    }
+}
+
+/// Render one move slot as a union across two hypotheses (primary + a live Zoroark
+/// sub-state, if any): "A or B" when both are revealed and differ, just "A" when
+/// only one is revealed or both agree, "???" when neither is revealed. Slot-index
+/// pairing between two different species' movesets is a display convenience, not a
+/// semantic correspondence — this is what lets a suspected Zoroark disguise show
+/// e.g. "Body Slam or Nasty Plot" per slot instead of always "???".
+pub fn describe_move_slot_union(primary: Option<PokemonMove>, hypothesis: Option<PokemonMove>) -> String {
+    match (primary, hypothesis) {
+        (Some(p), Some(h)) if p != h => format!("{} or {}", move_name(&p), move_name(&h)),
+        (Some(p), _) => move_name(&p),
+        (None, Some(h)) => move_name(&h),
+        (None, None) => "???".to_string(),
     }
 }

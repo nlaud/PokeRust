@@ -4,7 +4,8 @@
 use crate::dto::*;
 use poke_rust::data::item::Item;
 use poke_rust::information::describe::{
-    describe_clause, describe_move_slot, describe_unknown, describe_unknown_item,
+    describe_clause, describe_move_slot_union, describe_unknown, describe_unknown_item_union,
+    describe_unknown_union,
 };
 use poke_rust::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
 use poke_rust::information::unknowns::{
@@ -130,20 +131,27 @@ fn slot_condition_name(condition: &SlotCondition) -> String {
     }
 }
 
-pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
+/// `is_own_side`: `true` when rendering the mon for its OWNING player (they always
+/// see their own true identity, disguise or not — a player obviously knows their
+/// own Zoroark is Zoroark), `false` when rendering it for the OPPONENT (who only
+/// ever sees the physically-displayed appearance, i.e. the Illusion disguise when
+/// one is active). Getting this backwards was a real bug: `pokemon_view` used to
+/// apply the disguise unconditionally, so a player's own disguised Zoroark showed
+/// up to THEM as the disguise species instead of Zoroark.
+pub fn pokemon_view(mon: &PokemonState, is_own_side: bool) -> PokemonView {
     PokemonView {
         mon_id: mon.mon_id,
-        // A real player always sees the physically-displayed appearance — the
-        // Illusion disguise when one is active — never the true species underneath,
-        // regardless of information mode (this is a visual fact, not secret
-        // team-sheet info). `mon.types` still reflects the TRUE species since it
-        // drives damage calc; a fully faithful disguised-type display would need a
-        // dex lookup this function doesn't have, so it's left as a known gap.
-        species: mon
-            .illusion_disguise
-            .as_ref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| mon.species.to_string()),
+        // `mon.types` still reflects the TRUE species since it drives damage calc;
+        // a fully faithful disguised-type display would need a dex lookup this
+        // function doesn't have, so it's left as a known gap.
+        species: if is_own_side {
+            mon.species.to_string()
+        } else {
+            mon.illusion_disguise
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| mon.species.to_string())
+        },
         level: mon.level,
         gender: format!("{:?}", mon.gender),
         types: mon.types.iter().map(|t| format!("{:?}", t)).collect(),
@@ -183,38 +191,50 @@ pub fn pokemon_view(mon: &PokemonState) -> PokemonView {
 /// isTera/isMega are directly observable in a real battle regardless of information
 /// mode, so those stay ground truth.
 fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> PokemonView {
-    view.nature = describe_unknown(&unk.possible_natures);
-    view.stats = unk.min_stats;
-    view.stats_max = unk.max_stats;
-    view.evs = unk.min_evs;
-    view.evs_max = unk.max_evs;
+    // A live Zoroark hypothesis widens every hidden-attribute display (but never
+    // species/typing — those stay the shown/original identity; see this function's
+    // doc comment) to the union of the primary and the hypothesis. `hyp` is `None`
+    // for the overwhelming majority of mons (no suspected disguise), in which case
+    // every `_union` call below is identical to its non-union counterpart.
+    let hyp = unk.possible_illusion_state.as_deref();
+
+    view.nature = describe_unknown_union(&unk.possible_natures, hyp.map(|h| &h.possible_natures));
+    view.stats = merge_stats_min(&unk.min_stats, hyp.map(|h| &h.min_stats));
+    view.stats_max = merge_stats_max(&unk.max_stats, hyp.map(|h| &h.max_stats));
+    view.evs = merge_evs_min(&unk.min_evs, hyp.map(|h| &h.min_evs));
+    view.evs_max = merge_evs_max(&unk.max_evs, hyp.map(|h| &h.max_evs));
     // A real player only ever sees the opponent's HP as a rounded percent, never the
     // exact value — replace the true `mon.hp` set by `pokemon_view` with the belief's
     // own observed representation (never compute a fake-precise number back out of a
     // percent; that reintroduces the exact precision a real player never has).
     view.hp = observed_hp_dto(&unk.hp);
-    // Typing is public dex knowledge for a normal opponent (`possible_types` is
-    // already `Known` from `from_opponent_species`, so this is a no-op there), but for
-    // a suspected Illusion disguise `possible_types` widens to `Possibly` alongside
-    // `possible_species` (see `maybe_widen_for_illusion`) — mirror
-    // `bench_pokemon_view_from_belief`'s treatment so a disguised Zoroark's row shows
-    // unknown typing instead of the true species' `mon.types` `pokemon_view` set.
+    // Typing/species always stay the shown/original identity — a live hypothesis
+    // never widens these (see `possible_illusion_state`'s doc comment: species is
+    // always `Known` for the primary, and typing is public dex knowledge for
+    // whichever species is actually displayed).
     view.types = match &unk.possible_types {
         Unknown::Known(types) => types.iter().map(|t| format!("{:?}", t)).collect(),
         _ => Vec::new(),
     };
-    view.item = match &unk.item {
-        Unknown::Known(Item::None) => None,
+    view.item = match (&unk.item, hyp) {
+        (Unknown::Known(Item::None), None) => None,
         // `legal_items` (format banlists) isn't threaded to the server yet — see
         // `InferenceConfig` construction — so this always renders against the
         // unrestricted (~1,000-item) pool.
-        other => Some(describe_unknown_item(other, None)),
+        (primary, _) => Some(describe_unknown_item_union(
+            primary,
+            hyp.map(|h| &h.item),
+            None,
+        )),
     };
-    view.ability = describe_unknown(&unk.possible_abilities);
+    view.ability = describe_unknown_union(&unk.possible_abilities, hyp.map(|h| &h.possible_abilities));
     view.moves = (0..4)
         .map(|i| {
             Some(MoveViewDto {
-                name: describe_move_slot(unk.known_moves[i].clone()),
+                name: describe_move_slot_union(
+                    unk.known_moves[i].clone(),
+                    hyp.and_then(|h| h.known_moves[i].clone()),
+                ),
                 pp: unk.move_pp[i].max(0) as u8,
                 max_pp: unk.max_pp[i].max(0) as u8,
             })
@@ -223,11 +243,56 @@ fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> Pokemo
     // A pre-reveal Tera type is genuinely secret in a real battle too (the Tera
     // Orb icon only shows it once activated) — mask it until `is_tera` flips true.
     if !view.is_tera {
-        view.tera_type = describe_unknown(&unk.possible_tera_type);
+        view.tera_type =
+            describe_unknown_union(&unk.possible_tera_type, hyp.map(|h| &h.possible_tera_type));
     }
-    view.is_illusion_suspected =
-        matches!(&unk.possible_species, Unknown::Possibly(c) if c.len() > 1);
+    view.is_illusion_suspected = hyp.is_some();
     view
+}
+
+/// Element-wise minimum-of-minimums across a primary stat array and a live
+/// hypothesis's own array — the union's lower bound is the lower of the two
+/// hypotheses' lower bounds (whichever identity is real, the true value could be
+/// as low as the more permissive of the two).
+fn merge_stats_min(primary: &[u16; 6], hyp: Option<&[u16; 6]>) -> [u16; 6] {
+    let mut out = *primary;
+    if let Some(h) = hyp {
+        for i in 0..6 {
+            out[i] = out[i].min(h[i]);
+        }
+    }
+    out
+}
+
+/// Symmetric upper-bound companion to `merge_stats_min`.
+fn merge_stats_max(primary: &[u16; 6], hyp: Option<&[u16; 6]>) -> [u16; 6] {
+    let mut out = *primary;
+    if let Some(h) = hyp {
+        for i in 0..6 {
+            out[i] = out[i].max(h[i]);
+        }
+    }
+    out
+}
+
+fn merge_evs_min(primary: &[u8; 6], hyp: Option<&[u8; 6]>) -> [u8; 6] {
+    let mut out = *primary;
+    if let Some(h) = hyp {
+        for i in 0..6 {
+            out[i] = out[i].min(h[i]);
+        }
+    }
+    out
+}
+
+fn merge_evs_max(primary: &[u8; 6], hyp: Option<&[u8; 6]>) -> [u8; 6] {
+    let mut out = *primary;
+    if let Some(h) = hyp {
+        for i in 0..6 {
+            out[i] = out[i].max(h[i]);
+        }
+    }
+    out
 }
 
 /// Build a `PokemonView` for a benched Pokémon from the belief alone (no reliable
@@ -247,6 +312,7 @@ fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState, fallback_id: u8) ->
         Unknown::Known(id) => id,
         _ => fallback_id,
     };
+    let hyp = unk.possible_illusion_state.as_deref();
     let mut view = PokemonView {
         mon_id,
         species: describe_unknown(&unk.possible_species),
@@ -260,28 +326,31 @@ fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState, fallback_id: u8) ->
         fainted: unk.fainted,
         status: unk.status.as_ref().map(status_dto),
         volatiles: unk.volatiles.iter().map(volatile_dto).collect(),
-        stats: unk.min_stats,
-        stats_max: unk.max_stats,
+        stats: merge_stats_min(&unk.min_stats, hyp.map(|h| &h.min_stats)),
+        stats_max: merge_stats_max(&unk.max_stats, hyp.map(|h| &h.max_stats)),
         boosts: [0; 7],
-        nature: describe_unknown(&unk.possible_natures),
-        evs: unk.min_evs,
-        evs_max: unk.max_evs,
+        nature: describe_unknown_union(&unk.possible_natures, hyp.map(|h| &h.possible_natures)),
+        evs: merge_evs_min(&unk.min_evs, hyp.map(|h| &h.min_evs)),
+        evs_max: merge_evs_max(&unk.max_evs, hyp.map(|h| &h.max_evs)),
         item: None,
-        ability: describe_unknown(&unk.possible_abilities),
+        ability: describe_unknown_union(&unk.possible_abilities, hyp.map(|h| &h.possible_abilities)),
         moves: Vec::new(),
         is_tera: unk.is_tera,
-        tera_type: describe_unknown(&unk.possible_tera_type),
+        tera_type: describe_unknown_union(&unk.possible_tera_type, hyp.map(|h| &h.possible_tera_type)),
         is_mega: unk.is_mega,
-        is_illusion_suspected: false,
+        is_illusion_suspected: hyp.is_some(),
     };
-    view.item = match &unk.item {
-        Unknown::Known(Item::None) => None,
-        other => Some(describe_unknown_item(other, None)),
+    view.item = match (&unk.item, hyp) {
+        (Unknown::Known(Item::None), None) => None,
+        (primary, _) => Some(describe_unknown_item_union(primary, hyp.map(|h| &h.item), None)),
     };
     view.moves = (0..4)
         .map(|i| {
             Some(MoveViewDto {
-                name: describe_move_slot(unk.known_moves[i].clone()),
+                name: describe_move_slot_union(
+                    unk.known_moves[i].clone(),
+                    hyp.and_then(|h| h.known_moves[i].clone()),
+                ),
                 pp: unk.move_pp[i].max(0) as u8,
                 max_pp: unk.max_pp[i].max(0) as u8,
             })
@@ -368,7 +437,7 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
                 .iter()
                 .enumerate()
                 .map(|(i, mon)| {
-                    let base = pokemon_view(mon);
+                    let base = pokemon_view(mon, false); // fog is Some only when player != perspective
                     match fog_active.get(i) {
                         Some(unk) => mask_pokemon_view(base, unk),
                         None => base,
@@ -399,9 +468,10 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
                 .collect();
             (active_views, back_views, possible_back_views, fainted_views)
         }
+        // fog is None only when player == perspective — this IS the viewer's own side.
         None => (
-            active.iter().map(pokemon_view).collect(),
-            back.iter().map(pokemon_view).collect(),
+            active.iter().map(|m| pokemon_view(m, true)).collect(),
+            back.iter().map(|m| pokemon_view(m, true)).collect(),
             Vec::new(),
             Vec::new(),
         ),
@@ -479,7 +549,7 @@ fn preview_view(preview: &TeamPreviewState, belief: Option<&UnknownMatchState>, 
         mons.iter()
             .enumerate()
             .map(|(i, mon)| {
-                let base = pokemon_view(mon);
+                let base = pokemon_view(mon, is_own_side);
                 if is_own_side {
                     return base;
                 }

@@ -12,7 +12,6 @@
 ### New features
 - Link all the READMEs to the main project README.
 - Frontend features
-  - Display fainted mon information after possibly in the back (with information because it could be useful)
   - We need a favicon lul
 - Implement Closed Team Sheets information mode
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)

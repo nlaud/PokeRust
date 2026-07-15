@@ -28,6 +28,7 @@ use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
+use crate::information::unknowns;
 use crate::information::unknowns::{
     PokemonHP, Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
     UnknownTeamPreviewState,
@@ -145,6 +146,229 @@ macro_rules! inference_contradiction {
 }
 
 mod bcp;
+
+// ── Zoroark / Illusion parallel-hypothesis mirroring ──────────────────────────
+//
+// A mon that could secretly be a disguised Illusion user (Zoroark line) carries
+// a full second `UnknownPokemonState` in `possible_illusion_state` — see that
+// field's doc comment in `unknowns.rs` for the design. Every per-mon narrowing
+// operation that can panic via `inference_contradiction!` (reveal handling,
+// stat-bound tightening, etc.) is applied through `apply_with_illusion_mirroring`
+// instead of being called directly on the primary mon, so the SAME evidence is
+// replayed against the hypothesis:
+//   - hypothesis rejects the operation           → not Zoroark; drop it.
+//   - primary rejects, hypothesis accepts         → IS Zoroark; promote.
+//   - both accept                                 → keep both, unchanged.
+//   - both reject                                 → genuine contradiction; panics
+//                                                    exactly as it would without
+//                                                    any hypothesis in play.
+// This needs no changes to any existing function's signature or panic behavior —
+// every extracted `f` is reused verbatim for both the primary and the mirrored
+// call, so there is no way for the two hypotheses' logic to drift apart.
+
+/// Outcome of [`apply_with_illusion_mirroring`], telling the caller whether it
+/// needs to reconcile side-wide Zoroark bookkeeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IllusionMirrorOutcome {
+    /// No live hypothesis existed, or both the primary and the hypothesis
+    /// accepted the operation. Nothing further to do.
+    Unchanged,
+    /// A live hypothesis rejected the operation and was dropped
+    /// (`mon.possible_illusion_state` is now `None`). The primary was mutated
+    /// normally (it necessarily accepted, or this call would have panicked).
+    HypothesisRejected,
+    /// The primary rejected the operation but the hypothesis accepted it —
+    /// this mon has been resolved as Zoroark. `mon`'s fields now hold the
+    /// resolved identity and `possible_illusion_state` is `None`. The caller
+    /// **must** follow up with `resolve_zoroark_globally` for this mon's side.
+    Promoted,
+}
+
+/// Apply a fallible per-mon narrowing operation `f` to `mon`, mirroring it onto
+/// `mon.possible_illusion_state` (if live) per the four-way outcome above.
+///
+/// **Contract on `f`**: it must be the exact same operation already used for the
+/// primary elsewhere in the pipeline (never a re-derived/parallel implementation
+/// — that would let the two hypotheses drift apart), and it must only read
+/// state outside `mon` (dex/move data, other mons via an already-computed
+/// snapshot, etc.) — never mutate anything outside `mon` itself. Passes whose
+/// per-mon step also needs to emit shared state (e.g. CNF clauses referencing
+/// this mon's `mon_idx`) need a different wiring; this helper only covers the
+/// self-contained case (Pass 1 reveals, Pass 3/4/5 per-mon bound tightening).
+///
+/// Soundness note: a panic caught here mid-mutation of the sub-state (or, in
+/// the promotion-check branch, mid-mutation of the primary) is never observed
+/// in a half-narrowed condition — `sub` is a private owned value only written
+/// back to `mon.possible_illusion_state` on the success path, and the primary
+/// promotion-check reborrow only replaces `mon`'s content wholesale on success
+/// (via `promote_illusion_to_primary`) rather than leaving partial mutations.
+pub(super) fn apply_with_illusion_mirroring<F>(
+    mon: &mut UnknownPokemonState,
+    f: F,
+) -> IllusionMirrorOutcome
+where
+    F: Fn(&mut UnknownPokemonState),
+{
+    let Some(boxed_sub) = mon.possible_illusion_state.take() else {
+        f(mon);
+        return IllusionMirrorOutcome::Unchanged;
+    };
+
+    let mut sub = boxed_sub;
+    let sub_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut sub)));
+
+    match sub_result {
+        Err(_) => {
+            // Hypothesis infeasible under this evidence: this mon is not
+            // Zoroark. Drop the hypothesis; run the primary for real — if
+            // IT ALSO panics, that's a genuine, unresolvable contradiction
+            // and must propagate exactly as it would with no hypothesis.
+            f(mon);
+            IllusionMirrorOutcome::HypothesisRejected
+        }
+        Ok(()) => {
+            // Hypothesis still feasible. Try the primary too, but catch its
+            // panic here instead of letting it propagate: if the PRIMARY is
+            // the one that's infeasible, that IS "this mon is Zoroark" —
+            // not a genuine contradiction.
+            let primary_result = {
+                let reborrow: &mut UnknownPokemonState = mon;
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || f(reborrow)))
+            };
+            match primary_result {
+                Ok(()) => {
+                    mon.possible_illusion_state = Some(sub);
+                    IllusionMirrorOutcome::Unchanged
+                }
+                Err(_) => {
+                    promote_illusion_to_primary(mon, *sub);
+                    IllusionMirrorOutcome::Promoted
+                }
+            }
+        }
+    }
+}
+
+/// Mirror a non-fallible per-mon mutation (one that can never panic / contradict
+/// — a pure state transition like clearing per-turn flags on switch-out) onto
+/// `mon`'s live Zoroark sub-state, if any. Unlike `apply_with_illusion_mirroring`,
+/// no `catch_unwind` is needed since `f` can't fail; this just keeps the
+/// sub-state's own physically-observable fields in lockstep with the primary's,
+/// since both are meant to describe the same physical mon at the same moment.
+pub(super) fn mirror_infallible_on_illusion<F>(mon: &mut UnknownPokemonState, f: F)
+where
+    F: FnOnce(&mut UnknownPokemonState),
+{
+    if let Some(sub) = mon.possible_illusion_state.as_deref_mut() {
+        f(sub);
+    }
+}
+
+/// Called when a mon's own hypothesis (`possible_illusion_state`) has just been
+/// proven correct — the primary (shown-species) identity is infeasible, but
+/// "this physical mon is Zoroark" remains consistent with every observation so
+/// far. Replaces the mon's entire content with the resolved hypothesis (species,
+/// types, ability, moves, item, nature, stat/EV/IV bounds — every field the two
+/// hypotheses could have differed on). Physically-observable fields (HP, status,
+/// boosts, volatiles, `times_hit`, …) are identical between the two hypotheses
+/// by construction (both track the same real physical mon under the same event
+/// stream), so a wholesale replace is safe.
+///
+/// Does NOT touch side-wide bookkeeping (the `possible_back` Zoroark baseline
+/// entry, sibling mons' own `possible_illusion_state`, the unresolved-Zoroark
+/// count) — callers **must** follow up with `resolve_zoroark_globally`.
+pub(super) fn promote_illusion_to_primary(
+    mon: &mut UnknownPokemonState,
+    resolved: UnknownPokemonState,
+) {
+    *mon = resolved;
+    // Defensive; should already be `None` per the "no nesting" invariant.
+    mon.possible_illusion_state = None;
+}
+
+/// Every `UnknownPokemonState` belonging to `side` — active, known-back,
+/// possible-back, AND fainted — mutably, for side-wide Zoroark bookkeeping.
+/// (Unlike `combined_back`, which deliberately excludes fainted mons from
+/// "could this be a hidden bench mon" reasoning, this needs to reach a
+/// fainted mon's `possible_illusion_state` too: a hypothesis attached before
+/// it fainted must still be dropped once the side's Zoroark is resolved.)
+pub(super) fn side_mons_mut(
+    state: &mut UnknownBattleState,
+    side: Player,
+) -> impl Iterator<Item = &mut UnknownPokemonState> {
+    match side {
+        Player::P1 => state
+            .p1_active_mons
+            .iter_mut()
+            .chain(state.p1_known_back_mons.iter_mut())
+            .chain(state.p1_possible_back_mons.iter_mut())
+            .chain(state.p1_fainted_mons.iter_mut()),
+        Player::P2 => state
+            .p2_active_mons
+            .iter_mut()
+            .chain(state.p2_known_back_mons.iter_mut())
+            .chain(state.p2_possible_back_mons.iter_mut())
+            .chain(state.p2_fainted_mons.iter_mut()),
+    }
+}
+
+/// Called once a Pokémon's true identity has been positively pinned down as
+/// (or ruled out as) this side's Illusion forme — via `promote_illusion_to_primary`,
+/// an `IllusionEnded` reveal, the Illusion forme itself entering undisguised, or
+/// the doubles two-active-of-the-same-species case. Decrements
+/// `p{side}_unresolved_zoroark_count`; once it reaches 0 every remaining
+/// `possible_illusion_state` hypothesis on the side is now moot (Zoroark's
+/// location(s) are fully accounted for) and is dropped.
+///
+/// Does NOT remove the resolved mon's own bench entry from `possible_back`/
+/// `known_back` if it still has one elsewhere — callers that specifically
+/// resolved a mon FROM the bench (rather than from an active slot) are
+/// responsible for that removal themselves, since only they know which entry
+/// was consumed.
+pub(super) fn resolve_zoroark_globally(state: &mut UnknownBattleState, side: Player) {
+    let count = match side {
+        Player::P1 => &mut state.p1_unresolved_zoroark_count,
+        Player::P2 => &mut state.p2_unresolved_zoroark_count,
+    };
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+        for mon in side_mons_mut(state, side) {
+            mon.possible_illusion_state = None;
+        }
+    }
+}
+
+/// Companion to a promotion (e.g. via `IllusionEnded`): the mon's PRIMARY identity
+/// being discarded (e.g. "Snorlax") was never actually confirmed to be on the
+/// field at all — the active slot was secretly this side's Illusion forme in
+/// disguise the whole time. That means the real `discarded_species` must still be
+/// unaccounted for somewhere in the party. Restore it to `possible_back` at a
+/// fresh, unrevealed baseline: everything "observed" about the discarded identity
+/// while it looked active was actually the Illusion forme's behavior
+/// misattributed to it, so none of it is trustworthy information about the real
+/// mon. Sound, if imprecise (the cost of having briefly guessed wrong about which
+/// physical mon was on the field — never a soundness gap).
+///
+/// Callers must first confirm no matching bench entry already exists for
+/// `discarded_species` (see the `IllusionEnded` handler) — this function
+/// unconditionally pushes a new entry and would otherwise create a phantom
+/// duplicate roster member.
+pub(super) fn restore_discarded_primary_to_bench(
+    state: &mut UnknownBattleState,
+    side: Player,
+    discarded_species: Species,
+    dex: &HashMap<Species, PokemonData>,
+    config: &InferenceConfig,
+) {
+    let mut restored =
+        UnknownPokemonState::from_opponent_species(discarded_species.clone(), dex, config.level);
+    recompute_stats_for_iv_mode(&mut restored, &discarded_species, dex, config);
+    match side {
+        Player::P1 => state.p1_possible_back_mons.push(restored),
+        Player::P2 => state.p2_possible_back_mons.push(restored),
+    }
+}
 
 // ── mon_idx helpers ────────────────────────────────────────────────────────────
 //
@@ -402,8 +626,9 @@ fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
 /// was possible under `a` OR under `b`. Used when the same slot might really be one
 /// of two distinct physical identities (Illusion) and each identity's own bound needs
 /// folding into one marginal — never narrows past what either side alone allowed, so
-/// this can only ever widen, not exclude.
-fn unknown_union<T: PartialEq + Clone>(a: &Unknown<T>, b: &Unknown<T>) -> Unknown<T> {
+/// this can only ever widen, not exclude. `pub(crate)` so `describe.rs` can union a
+/// primary field with its live Zoroark hypothesis for display ("A or B" rendering).
+pub(crate) fn unknown_union<T: PartialEq + Clone>(a: &Unknown<T>, b: &Unknown<T>) -> Unknown<T> {
     match (a, b) {
         (Unknown::Known(x), Unknown::Known(y)) => {
             if x == y { Unknown::Known(x.clone()) } else { Unknown::Possibly(vec![x.clone(), y.clone()]) }
@@ -832,7 +1057,18 @@ fn run_pass5_all_mons(
             .unwrap_or(false);
         if has_known_species
             && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                pass5_back_solve(mon, config, dex);
+                // Mirror onto a live Zoroark hypothesis (Increment 2): this is also the
+                // promotion backstop for Pass 3's stat tightening (see the "synergy"
+                // note in the plan) — Pass 3 never panics itself, so a primary stat
+                // window it silently made infeasible only surfaces HERE, as
+                // `pass5_back_solve` panicking on the primary while the hypothesis
+                // (independently tightened by Pass 3's own mirrored call) still solves
+                // cleanly.
+                let outcome = apply_with_illusion_mirroring(mon, |m| pass5_back_solve(m, config, dex));
+                if matches!(outcome, IllusionMirrorOutcome::Promoted) {
+                    let side = if mon_is_p2(state, idx) { Player::P2 } else { Player::P1 };
+                    resolve_zoroark_globally(state, side);
+                }
             }
     }
 }
@@ -1174,9 +1410,18 @@ fn pass1_apply_event(
             if *move_used == PokemonMove::Struggle {
                 return;
             }
+            // Set when the move-legality mirroring below resolves this mon's Zoroark
+            // hypothesis (the primary was infeasible, the hypothesis wasn't) — acted on
+            // AFTER the mon borrow ends, since `resolve_zoroark_globally` needs `state`.
+            let mut promoted_illusion = false;
             if let Some(idx) = mon_idx_for_active_slot(state, user)
                 && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    reveal_move_on_mon(mon, move_used);
+                    let learnset_dex = &ctx.config.learnset_dex;
+                    let outcome = apply_with_illusion_mirroring(mon, |m| {
+                        reveal_move_on_mon(m, move_used);
+                        check_move_legal_for_species(m, move_used, learnset_dex);
+                    });
+                    promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
@@ -1220,6 +1465,9 @@ fn pass1_apply_event(
             // unconditionally for any executed non-Struggle move, on the top-level state,
             // not per-mon — set after the mon borrow above ends).
             state.last_move_on_field = Some(move_used.clone());
+            if promoted_illusion {
+                resolve_zoroark_globally(state, user.player);
+            }
         }
 
         EventKind::Faint { slot } => {
@@ -1365,11 +1613,25 @@ fn pass1_apply_event(
                 // e.g. Frisk revealing a foe's Tricked-in item).
                 let was_transferred = get_mon_by_idx(state, idx)
                     .is_some_and(|m| m.item_was_transferred);
+                let mut promoted_illusion = false;
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    unknown_set_known(&mut mon.item, item.clone(), &format!("mon#{idx} item"));
+                    // `unknown_set_known` panics on any conflict (unlike ability reveal,
+                    // which has its own "live change" overwrite path) — mirror it onto a
+                    // live Zoroark hypothesis so an item inconsistent with the
+                    // hypothesis' own item bound drops it. `enforce_unique_item` below is
+                    // a whole-side, cross-teammate side effect and stays primary-only —
+                    // `apply_with_illusion_mirroring`'s contract requires the mirrored
+                    // closure to only touch `mon` itself.
+                    let outcome = apply_with_illusion_mirroring(mon, |m| {
+                        unknown_set_known(&mut m.item, item.clone(), &format!("mon#{idx} item"));
+                    });
+                    promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
                 }
                 if !was_transferred {
                     enforce_unique_item(state, idx, item, ctx.config.allow_repeat_items);
+                }
+                if promoted_illusion {
+                    resolve_zoroark_globally(state, slot.player);
                 }
             }
         }
@@ -1871,13 +2133,22 @@ fn pass1_apply_event(
         }
 
         EventKind::ChargingMove { user, move_used } => {
+            let mut promoted_illusion = false;
             if let Some(idx) = mon_idx_for_active_slot(state, user)
                 && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    reveal_move_on_mon(mon, move_used);
+                    let learnset_dex = &ctx.config.learnset_dex;
+                    let outcome = apply_with_illusion_mirroring(mon, |m| {
+                        reveal_move_on_mon(m, move_used);
+                        check_move_legal_for_species(m, move_used, learnset_dex);
+                    });
+                    promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
                 }
+            if promoted_illusion {
+                resolve_zoroark_globally(state, user.player);
+            }
         }
 
         // ── Anticipation: add KnowsThreateningMove clause for opposing active mons ──
@@ -1934,81 +2205,100 @@ fn pass1_apply_event(
         }
 
         // ── IllusionEnded: reveal the true species when the disguise breaks ────────
-        // Unlike FormeChange, we do NOT use unknown_set_known (which contradiction-panics
-        // if the current Known value differs from the new one). Instead we directly
-        // overwrite possible_species, since the mon's apparent species was the disguise.
+        // This is an AUTHORITATIVE resolution (direct-damage break, or ability
+        // suppression/change — never fires for indirect damage): the slot's PRIMARY
+        // (shown-species) identity was never real, and `possible_illusion_state` (if
+        // still live) is confirmed correct. Promote it wholesale rather than
+        // rebuilding species/types/ability/stats from scratch — the hypothesis has
+        // been independently tracked and narrowed by every mirrored pass since it was
+        // seeded, so it already carries whatever this physical mon's own history has
+        // taught us (revealed moves, item, etc.), which a from-scratch rebuild would
+        // throw away.
         EventKind::IllusionEnded { slot, actual_species } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+                let discarded_species = get_mon_by_idx(state, idx)
+                    .and_then(|m| match &m.possible_species {
+                        Unknown::Known(s) => Some(s.clone()),
+                        _ => None,
+                    });
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    mon.possible_species = Unknown::Known(actual_species.clone());
-                    if let Some(data) = ctx.dex.get(actual_species) {
-                        mon.possible_types = Unknown::Known(data.types.clone());
-                        // Reset ability candidates to the true species' ability set.
-                        let new_abilities = if data.abilities.is_empty() {
-                            Unknown::Not(Vec::new())
-                        } else {
-                            Unknown::Possibly(data.abilities.clone())
-                        };
-                        mon.possible_original_abilities = new_abilities.clone();
-                        mon.possible_abilities = new_abilities;
-                        mon.possible_weight_hg = Unknown::Known(data.weight);
+                    if let Some(sub) = mon.possible_illusion_state.take() {
+                        promote_illusion_to_primary(mon, *sub);
+                    } else {
+                        // Defensive fallback (shouldn't happen in normal play — every
+                        // eligible mon is seeded with a hypothesis at battle start):
+                        // overwrite directly and recompute worst/best-case bounds for
+                        // the revealed species, same as a brand-new sighting would get.
+                        mon.possible_species = Unknown::Known(actual_species.clone());
+                        if let Some(data) = ctx.dex.get(actual_species) {
+                            mon.possible_types = Unknown::Known(data.types.clone());
+                            let new_abilities = if data.abilities.is_empty() {
+                                Unknown::Not(Vec::new())
+                            } else {
+                                Unknown::Possibly(data.abilities.clone())
+                            };
+                            mon.possible_original_abilities = new_abilities.clone();
+                            mon.possible_abilities = new_abilities;
+                            mon.possible_weight_hg = Unknown::Known(data.weight);
+                        }
+                        // See the historical note below on why stat bounds must be
+                        // reset rather than left as the disguise species' window.
+                        recompute_stats_for_iv_mode(mon, actual_species, ctx.dex, ctx.config);
+                        mon.min_evs = [0; 6];
+                        mon.max_evs = [252; 6];
                     }
-                    // Everything Pass 3/5 had narrowed (min_stats/max_stats,
-                    // min_pre_nature_stat/max_pre_nature_stat, min_ivs/max_ivs, and
-                    // min_evs/max_evs) was back-solved against the DISGUISE species' base
-                    // stat table, which describes a completely different Pokemon than the
-                    // one now revealed — those bounds carry no information about the true
-                    // mon and must not survive the reveal. Leaving them in place produced
-                    // a real contradiction: a small-base-HP mon (e.g. Zoroark, base 60)
-                    // revealed from behind a large-base-HP disguise (e.g. Snorlax, base
-                    // 160) left `min_stats[0]/max_stats[0]` pinned to Snorlax's achievable-HP
-                    // window, which no Zoroark IV/EV combination can reach — pass5-hp's
-                    // "no IV/EV can produce observed HP bounds" contradiction. Reset to the
-                    // true species' theoretical worst/best case (same computation a
-                    // brand-new sighting gets via `recompute_stats_for_iv_mode`, called
-                    // from `pass1_switch`) and widen EVs back to the full lattice range;
-                    // nature stays untouched since it's not species-dependent and any
-                    // narrowing already learned about the physical mon's nature remains
-                    // valid post-reveal.
-                    recompute_stats_for_iv_mode(mon, actual_species, ctx.dex, ctx.config);
-                    mon.min_evs = [0; 6];
-                    mon.max_evs = [252; 6];
                 }
-                // Persisted CNF clauses referencing this slot accumulated while it
-                // displayed the disguise. Two kinds:
-                //  - Species-VALUE clauses (EVIVStatGE/LE, SpeedComparison,
-                //    NatureBoostsStat/NerfsStat, KnowsThreateningMove) were derived
-                //    from the DISGUISE species' base stats/movepool — stale for the
-                //    same reason `Transformed` purges them (see below). Left in place,
-                //    BCP's `force_literal` could re-tighten `min_pre_nature_stat`/
-                //    `max_pre_nature_stat` (or min_stats/max_stats) right back to a
-                //    disguise-derived value on the next fixpoint pass, undoing the
-                //    reset above and reintroducing the "no IV/EV can produce observed
-                //    HP bounds" contradiction.
-                //  - Species-IDENTITY tie clauses (HasSpecies/HasItem, from
-                //    `widen_item_for_illusion`) are NOT stale — they're conditionals
-                //    ("if species=Zoroark then item=X") that stay true regardless of
-                //    which hypothesis wins, and now that `possible_species` is Known
-                //    above, BCP's very next fixpoint pass correctly collapses them
-                //    (the false disjunct drops out, forcing the item). Purging these
-                //    too would silently discard the only mechanism that resolves the
-                //    item — the reveal's whole point.
-                // `statement_stale_after_species_reveal` distinguishes the two.
-                if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-                    state
-                        .predicates
-                        .retain(|clause| !clause.iter().any(|lit| statement_stale_after_species_reveal(lit, idx)));
+                // Historical note (kept for context): stat/EV bounds narrowed by Pass
+                // 3/5 while this slot displayed the disguise were back-solved against
+                // the DISGUISE species' base stat table — a small-base-HP mon (e.g.
+                // Zoroark, base 60) revealed from behind a large-base-HP disguise
+                // (e.g. Snorlax, base 160) could leave min/max HP pinned to a window no
+                // Zoroark IV/EV combination can reach. Promotion sidesteps this
+                // entirely: the hypothesis being promoted was ALWAYS tracked against
+                // Zoroark's own base stats (mirrored independently since it was
+                // seeded), never the disguise's — there is no stale disguise-derived
+                // window to reset in the promoted case, only in the defensive fallback
+                // above (which mirrors what `pass1_switch` gives a brand-new sighting).
+
+                // Persisted CNF clauses referencing this slot that were derived from
+                // the DISGUISE species' base stats/movepool (EVIVStatGE/LE,
+                // SpeedComparison, NatureBoostsStat/NerfsStat, KnowsThreateningMove)
+                // are now stale for the promoted identity, for the same reason
+                // `Transformed` purges them below — left in place, BCP could re-tighten
+                // bounds right back to a disguise-derived value on the next fixpoint.
+                state
+                    .predicates
+                    .retain(|clause| !clause.iter().any(|lit| statement_stale_after_species_reveal(lit, idx)));
+
+                // The side's Illusion forme is now positively located: drop every
+                // remaining sibling hypothesis once fully accounted for.
+                resolve_zoroark_globally(state, slot.player);
+
+                // The discarded PRIMARY identity (e.g. "Snorlax") was never actually
+                // confirmed on the field at all — the active slot was secretly this
+                // side's Illusion forme the whole time. The real Snorlax must still be
+                // unaccounted for somewhere in the party; restore it to `possible_back`
+                // at a fresh, unrevealed baseline (everything "observed" about it while
+                // it looked active was actually the Illusion forme's behavior, so none
+                // of it is trustworthy information about the real mon). Skip if a
+                // matching entry already exists in the bench (e.g. the doubles
+                // two-in-front case never consumed one in the first place — see
+                // `maybe_resolve_illusion_two_in_front` — so restoring here would
+                // create a phantom duplicate).
+                if let Some(discarded) = discarded_species
+                    && !unknowns::is_illusion_capable_species(&discarded)
+                    && !combined_back(state, &slot.player)
+                        .iter()
+                        .any(|m| unknown_is_known_as(&m.possible_species, &discarded))
+                {
+                    restore_discarded_primary_to_bench(state, slot.player, discarded, ctx.dex, ctx.config);
                 }
-                // S29 companion: `pass1_switch` never consumed the benched Illusion-forme
-                // entry (to avoid merging two distinct mons while the disguise was still
-                // ambiguous) — and per `combined_back`, that entry could be sitting in
-                // EITHER known_back or possible_back. Now that it's confirmed to be THIS
-                // mon, that benched entry is a stale duplicate of the same physical
-                // Pokémon — left in place, it would make
-                // `teammate_indices`/`enforce_unique_item` see two teammates both
-                // holding whatever item BCP just resolved (a false item-clause
-                // contradiction; discovered via `widen_item_for_illusion`'s regression
-                // test). Discard it, same as the S29 switch-out-while-ambiguous case.
+
+                // The Illusion forme's OWN benched baseline entry (species known,
+                // sitting untouched in `known_back`/`possible_back` this whole time —
+                // see `seed_illusion_hypotheses`) is now a stale duplicate of this same
+                // physical Pokémon. Left in place, `teammate_indices`/`enforce_unique_item`
+                // would see two teammates holding the same resolved item. Discard it.
                 let known_back = match slot.player {
                     Player::P1 => &mut state.p1_known_back_mons,
                     Player::P2 => &mut state.p2_known_back_mons,
@@ -2179,7 +2469,6 @@ fn statement_references_mon(stmt: &Statement, idx: usize) -> bool {
         Statement::Not(inner) => statement_references_mon(inner, idx),
         Statement::HasItem { mon_idx, .. }
         | Statement::HasAbility { mon_idx, .. }
-        | Statement::HasSpecies { mon_idx, .. }
         | Statement::NatureBoostsStat { mon_idx, .. }
         | Statement::NatureNerfsStat { mon_idx, .. }
         | Statement::EVIVStatGE { mon_idx, .. }
@@ -2394,9 +2683,7 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming
         if benched.fainted {
             // Route to the fainted bucket rather than dropping it: it's outside
             // the `mon_idx` flat-index space and excluded from `combined_back`
-            // (see the field doc comment on `UnknownBattleState::p1/p2_fainted_mons`),
-            // so unlike the live-bench case there is no S29 double-count hazard —
-            // push it regardless of whether its species ever collapsed to `Known`.
+            // (see the field doc comment on `UnknownBattleState::p1/p2_fainted_mons`).
             // This preserves the knowledge accumulated about the mon (species,
             // revealed moves/item/ability) for display instead of silently
             // discarding it, which previously made fainted-then-replaced opponent
@@ -2405,20 +2692,23 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming
                 Player::P1 => state.p1_fainted_mons.push(benched),
                 Player::P2 => state.p2_fainted_mons.push(benched),
             }
-        } else if matches!(&benched.possible_species, Unknown::Known(_)) {
+        } else {
+            // `possible_species` is always `Known` under the parallel-hypothesis
+            // Zoroark model (a mon's shown identity is never itself ambiguous —
+            // Zoroark ambiguity lives entirely in `possible_illusion_state`, which
+            // moves along for free since it's a nested field on `benched` and this
+            // whole value is being moved, not rebuilt). Previously (S29) an
+            // unresolved disguise widened `possible_species` itself to a `Possibly`
+            // that this branch discarded rather than benched, to avoid double-
+            // counting a physical roster member; that widening no longer happens,
+            // so every non-fainted leaver benches uniformly here, hypothesis intact
+            // — this is exactly the "switch-out persists, doesn't discard" behavior
+            // the Zoroark lifecycle depends on (see `possible_illusion_state`'s doc
+            // comment).
             match slot.player {
                 Player::P1 => state.p1_known_back_mons.push(benched),
                 Player::P2 => state.p2_known_back_mons.push(benched),
             }
-        } else {
-            // S29: a non-`Known` species here is an unresolved Illusion disguise
-            // (`Possibly([shown, Zoroark…])`, never collapsed by learnset narrowing).
-            // Discard rather than bench: `pass1_switch` re-matches by `Known` species
-            // so it could never be pulled back out, and benching it alongside the real
-            // teammate's still-present entry would double-count one physical roster
-            // member in `teammate_indices`/item-clause propagation (the hazard the
-            // `teammate_indices` TODO warns about). Losing knowledge gained while
-            // ambiguous is an acceptable trade for a Zoroark edge case.
         }
     }
 }
@@ -2485,50 +2775,45 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         return;
     }
 
-    // S29: if an Illusion disguise is possible on this side (a Zoroark forme sits
-    // anywhere on this side's bench) and the incoming "species" is not itself a
-    // Zoroark forme, the shown species may be a disguise. Consuming the matching
-    // benched teammate's entry would move the REAL teammate's accumulated
-    // observations into the active slot and then mutate them with events that
-    // physically happen to the Zoroark — merging two distinct mons. Build a fresh
-    // species-only entry instead and let `maybe_widen_for_illusion` widen it to
-    // `Possibly([species, Zoroark…])`.
-    let illusion_possible = {
-        let back_species: Vec<Species> = combined_back(state, player)
-            .iter()
-            .filter_map(|m| match &m.possible_species {
-                Unknown::Known(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect();
-        bcp::contains_illusion_forme(&back_species) && !bcp::is_illusion_forme(species)
+    // Under the parallel-hypothesis Zoroark model, `possible_species` is always
+    // pinned (never a `Possibly` disjunction) — a mon's Zoroark ambiguity lives
+    // entirely in its own `possible_illusion_state`, which was already seeded
+    // once, upfront, on every eligible roster entry at the team-preview→battle
+    // transition (`seed_illusion_hypotheses` in `unknowns.rs`). That means
+    // straightforward species-matching against the bench is now ALWAYS sound —
+    // no S29 special-case needed: whichever physical roster member's true
+    // species matches the shown species is exactly the one being pulled onto
+    // the field, hypothesis (if any) riding along automatically since the whole
+    // `UnknownPokemonState` is moved, not rebuilt.
+    let known = match player {
+        Player::P1 => &mut state.p1_known_back_mons,
+        Player::P2 => &mut state.p2_known_back_mons,
     };
-
-    // Find the mon in the back and move it to the active slot — skipped entirely when
-    // an Illusion disguise is possible (S29: never consume a benched entry then).
-    let back_mon: Option<UnknownPokemonState> = if illusion_possible {
-        None
+    let back_mon: Option<UnknownPokemonState> = if let Some(pos) =
+        known.iter().position(|m| unknown_is_known_as(&m.possible_species, species))
+    {
+        Some(known.remove(pos))
     } else {
-        let known = match player {
-            Player::P1 => &mut state.p1_known_back_mons,
-            Player::P2 => &mut state.p2_known_back_mons,
+        let possible = match player {
+            Player::P1 => &mut state.p1_possible_back_mons,
+            Player::P2 => &mut state.p2_possible_back_mons,
         };
-        if let Some(pos) = known
+        possible
             .iter()
             .position(|m| unknown_is_known_as(&m.possible_species, species))
-        {
-            Some(known.remove(pos))
-        } else {
-            let possible = match player {
-                Player::P1 => &mut state.p1_possible_back_mons,
-                Player::P2 => &mut state.p2_possible_back_mons,
-            };
-            possible
-                .iter()
-                .position(|m| unknown_is_known_as(&m.possible_species, species))
-                .map(|pos| possible.remove(pos))
-        }
+            .map(|pos| possible.remove(pos))
     };
+
+    // Did this switch-in bring the real Illusion forme itself onto the field,
+    // undisguised (it was the last conscious party member, so Illusion had no
+    // one else to copy)? Per Bulbapedia, only the true Illusion forme can ever
+    // be shown AS the Illusion forme's own species — no other mon can impersonate
+    // it — so this positively resolves its location the instant it's seen.
+    let resolves_illusion_forme =
+        unknowns::is_illusion_capable_species(species) && match player {
+            Player::P1 => state.p1_unresolved_zoroark_count > 0,
+            Player::P2 => state.p2_unresolved_zoroark_count > 0,
+        };
 
     let mut mon = if let Some(mut m) = back_mon {
         // B2: before apply_switch_state_to_mon overwrites m.hp, compare the benched
@@ -2539,6 +2824,10 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         // Completely new opponent mon: build from species, then recompute stat bounds for
         // the configured IV mode (always call — fixes the bug where non-force_max_ivs mode
         // left the mon with the from_opponent_species defaults instead of proper bounds).
+        // In normal operation every roster member was already seeded into `possible_back`
+        // at team preview (including its Zoroark hypothesis, if eligible), so this branch
+        // is a defensive fallback (e.g. a species outside the known roster in a test), not
+        // a path that needs its own hypothesis-seeding logic.
         let mut new_mon =
             UnknownPokemonState::from_opponent_species(species.clone(), ctx.dex, ctx.config.level);
         recompute_stats_for_iv_mode(&mut new_mon, species, ctx.dex, ctx.config);
@@ -2552,25 +2841,6 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
 
     apply_switch_state_to_mon(&mut mon, sw, ctx.config);
 
-    // Illusion widening (only for unknown / opponent mons). Scans the FULL bench
-    // (known + possible) — see `combined_back`'s doc comment.
-    let opponent_known_back_species: Vec<Species> = combined_back(state, player)
-        .iter()
-        .filter_map(|m| {
-            if let Unknown::Known(s) = &m.possible_species { Some(s.clone()) } else { None }
-        })
-        .collect();
-    // Same benched Illusion-forme entries, but keeping their own item bound too —
-    // needed by `widen_item_for_illusion` below to tie this slot's item to whichever
-    // physical identity it turns out to be.
-    let illusion_bench_entries: Vec<(Species, Unknown<Item>)> = combined_back(state, player)
-        .iter()
-        .filter_map(|m| match &m.possible_species {
-            Unknown::Known(s) if bcp::is_illusion_forme(s) => Some((s.clone(), m.item.clone())),
-            _ => None,
-        })
-        .collect();
-
     let actives = match sw.slot.player {
         Player::P1 => &mut state.p1_active_mons,
         Player::P2 => &mut state.p2_active_mons,
@@ -2581,15 +2851,71 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         actives.push(mon);
     }
 
-    bcp::maybe_widen_for_illusion(state, &sw.slot, &opponent_known_back_species, ctx.dex);
-    // Only tie the item if species widening actually happened above (re-check rather
-    // than duplicate `maybe_widen_for_illusion`'s own eligibility logic).
-    let species_was_widened = mon_idx_for_active_slot(state, &sw.slot)
-        .and_then(|i| get_mon_by_idx(state, i))
-        .is_some_and(|m| matches!(&m.possible_species, Unknown::Possibly(_)));
-    if species_was_widened {
-        bcp::widen_item_for_illusion(state, &sw.slot, &illusion_bench_entries);
+    if resolves_illusion_forme {
+        resolve_zoroark_globally(state, *player);
+    } else {
+        maybe_resolve_illusion_two_in_front(state, &sw.slot, species, ctx);
     }
+}
+
+/// Doubles-only refinement: if the SAME species is now shown on two active
+/// slots on the same side simultaneously, Species Clause guarantees only one
+/// of them is the real thing — the other must be this side's Illusion forme in
+/// disguise (no other mon can impersonate anything). This is a genuine
+/// exclusive-or between the two slots, but rather than encode that correlation
+/// precisely (which would need a dedicated cross-mon-idx CNF clause), this
+/// attaches an independent hypothesis to the JUST-ARRIVED slot from the side's
+/// current baseline — sound (never excludes the true possibility) even though
+/// it doesn't capture "resolving one slot pins the other," which is a known,
+/// documented precision gap, not a soundness one.
+fn maybe_resolve_illusion_two_in_front(
+    state: &mut UnknownBattleState,
+    slot: &FieldSlot,
+    species: &Species,
+    ctx: &BattleContext,
+) {
+    if state.active_per_side < 2 {
+        return;
+    }
+    let unresolved = match slot.player {
+        Player::P1 => state.p1_unresolved_zoroark_count,
+        Player::P2 => state.p2_unresolved_zoroark_count,
+    };
+    if unresolved == 0 {
+        return;
+    }
+    let actives = match slot.player {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    };
+    let slot_i = slot.slot_index as usize;
+    let duplicate_elsewhere = actives.iter().enumerate().any(|(i, m)| {
+        i != slot_i && unknown_is_known_as(&m.possible_species, species)
+    });
+    if !duplicate_elsewhere {
+        return;
+    }
+    // Find the side's Illusion-forme baseline (still sitting in the bench,
+    // unresolved) to seed a hypothesis for the newly-arrived slot, if it
+    // doesn't already carry one (e.g. a returning mon resuming its own).
+    let baseline = combined_back(state, &slot.player)
+        .into_iter()
+        .find(|m| {
+            matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
+        })
+        .cloned();
+    let Some(baseline) = baseline else { return };
+    let actives_mut = match slot.player {
+        Player::P1 => &mut state.p1_active_mons,
+        Player::P2 => &mut state.p2_active_mons,
+    };
+    if let Some(mon) = actives_mut.get_mut(slot_i)
+        && mon.possible_illusion_state.is_none()
+    {
+        mon.possible_illusion_state =
+            Some(Box::new(unknowns::seed_illusion_hypothesis_for(mon, &baseline)));
+    }
+    let _ = ctx; // reserved for future dex-dependent refinements
 }
 
 /// Recompute `min_stats`/`max_stats` and pin IVs according to `config.force_max_ivs`.
@@ -2877,6 +3203,39 @@ pub(crate) fn apply_switch_out_reset(state: &mut UnknownBattleState, slot: &Fiel
         // Live ability resets to the innate ability set on switch-out.
         // Trace / Skill Swap / Mummy / etc. do not persist across a switch.
         mon.possible_abilities = mon.possible_original_abilities.clone();
+
+        // Keep a live Zoroark sub-state's own physically-observable fields in
+        // lockstep — it describes the same physical mon, just under a different
+        // identity hypothesis (see `possible_illusion_state`'s doc comment).
+        mirror_infallible_on_illusion(mon, |sub| {
+            sub.boosts.iter_mut().for_each(|b| *b = 0);
+            sub.volatiles.clear();
+            if matches!(sub.status, Some(Status::ToxicPoison(_))) {
+                sub.status = Some(Status::ToxicPoison(0));
+            }
+            sub.entered_this_turn = false;
+            sub.first_move_on_field = false;
+            sub.first_turn_on_field_pending = false;
+            sub.cud_chew_pending = None;
+            sub.item_lost = false;
+            sub.damaged_this_turn = false;
+            sub.damaged_by_this_turn.clear();
+            sub.last_physical_damage_taken = PokemonHP::Percent(0);
+            sub.last_physical_attacker = None;
+            sub.last_special_damage_taken = PokemonHP::Percent(0);
+            sub.last_special_attacker = None;
+            sub.last_damage_taken = PokemonHP::Percent(0);
+            sub.last_damage_attacker = None;
+            sub.stats_raised_this_turn = false;
+            sub.stats_lowered_this_turn = false;
+            sub.switched_in_this_turn = false;
+            sub.stall_counter = 0;
+            sub.ally_switch_counter = 0;
+            sub.consecutive_move_count = 0;
+            sub.last_used_move = None;
+            sub.times_hit = 0;
+            sub.possible_abilities = sub.possible_original_abilities.clone();
+        });
     }
 }
 
@@ -2896,6 +3255,41 @@ fn reveal_move_on_mon(mon: &mut UnknownPokemonState, pokemon_move: &PokemonMove)
     }
     // All 4 slots filled but move not found — legal mon constraint violated.
     // Don't panic; widening is sound.
+}
+
+/// Confirms `move_used` is legally learnable by `mon`'s (single, `Known`) species
+/// — panics via `inference_contradiction!` if the species' learnset is known and
+/// does NOT include the move (a genuine impossibility for a real, unrevealed
+/// Pokémon of that species to have used it). Absent learnset data is NOT treated
+/// as a contradiction (sound: absence of data isn't evidence of inability — same
+/// rule the old `narrow_species_by_learnset` documented). A no-op when
+/// `mon.possible_species` isn't `Known` or `learnset_dex` is empty (learnset
+/// narrowing disabled).
+///
+/// This is the fallible half of move-reveal handling for the Zoroark parallel-
+/// hypothesis model: called alongside `reveal_move_on_mon` (which just records
+/// the move and never itself panics) through `apply_with_illusion_mirroring`, so
+/// a move outside a hypothesis' learnset drops that hypothesis, and a move
+/// outside the PRIMARY's own learnset (while the hypothesis' learnset accepts
+/// it) promotes the mon to that hypothesis instead.
+fn check_move_legal_for_species(
+    mon: &UnknownPokemonState,
+    move_used: &PokemonMove,
+    learnset_dex: &HashMap<Species, HashSet<PokemonMove>>,
+) {
+    if learnset_dex.is_empty() {
+        return;
+    }
+    let Unknown::Known(species) = &mon.possible_species else { return };
+    if let Some(moves) = learnset_dex.get(species)
+        && !moves.contains(move_used)
+    {
+        inference_contradiction!(
+            species,
+            "species cannot learn revealed move {:?}",
+            move_used
+        );
+    }
 }
 
 /// Narrow `possible_species` (when `Possibly`) by excluding candidates whose learnset
@@ -5868,6 +6262,14 @@ struct NatureClassBound {
     bsv_hi_neutral: Option<u16>,
 }
 
+/// Shared return type of `compute_attacker_stat_bounds` (Direction B) and
+/// `compute_defender_stat_bounds` (Direction A) — see either function's doc comment.
+/// `(global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi, per_class,
+/// primary-only CNF booster/reducer items, primary-only CNF booster/reducer
+/// abilities, stat index)`.
+type StatBoundsSearchResult =
+    Option<(Option<u16>, Option<u16>, Option<u16>, Option<u16>, Vec<NatureClassBound>, Vec<Item>, Vec<Ability>, usize)>;
+
 /// Returns the still-possible nature classes for `stat` on `possible_natures`.
 ///
 /// Each triple is `(nat_mod, is_boost, is_nerf)`:
@@ -5930,6 +6332,10 @@ fn spread_targets_mult(
 ///
 /// Only updates when the new bound is strictly tighter than the current tracked range,
 /// preserving soundness (never expands a tracked range).
+///
+/// Thin `mon_idx` wrapper over [`apply_unconditional_tightening_to_mon`] — kept so the
+/// primary path's call sites are unchanged. See that function for the actual logic and
+/// for the hypothesis-mirroring use (Increment 2).
 fn apply_unconditional_tightening(
     state: &mut UnknownBattleState,
     mon_idx: usize,
@@ -5940,23 +6346,42 @@ fn apply_unconditional_tightening(
     global_stat_hi: Option<u16>,
 ) {
     if let Some(mon) = get_mon_mut_by_idx(state, mon_idx) {
-        if let Some(lo) = global_bsv_lo
-            && lo > mon.min_pre_nature_stat[si] {
-                mon.min_pre_nature_stat[si] = lo;
-            }
-        if let Some(hi) = global_bsv_hi
-            && hi < mon.max_pre_nature_stat[si] {
-                mon.max_pre_nature_stat[si] = hi;
-            }
-        if let Some(lo) = global_stat_lo
-            && lo > mon.min_stats[si] {
-                mon.min_stats[si] = lo;
-            }
-        if let Some(hi) = global_stat_hi
-            && hi < mon.max_stats[si] {
-                mon.max_stats[si] = hi;
-            }
+        apply_unconditional_tightening_to_mon(
+            mon, si, global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
+        );
     }
+}
+
+/// Core of [`apply_unconditional_tightening`], operating directly on a mon rather than
+/// a `mon_idx` lookup — this is what lets it also run against a live Zoroark hypothesis
+/// (`possible_illusion_state`), which has no `mon_idx` of its own (Increment 2). Never
+/// emits CNF (that stays primary-only via `emit_nature_conditional_bounds`, which a
+/// hypothesis cannot be soundly addressed by either) — purely a direct field tightening,
+/// so it's safe to call on any `UnknownPokemonState`, hypothetical or real.
+fn apply_unconditional_tightening_to_mon(
+    mon: &mut UnknownPokemonState,
+    si: usize,
+    global_bsv_lo: Option<u16>,
+    global_bsv_hi: Option<u16>,
+    global_stat_lo: Option<u16>,
+    global_stat_hi: Option<u16>,
+) {
+    if let Some(lo) = global_bsv_lo
+        && lo > mon.min_pre_nature_stat[si] {
+            mon.min_pre_nature_stat[si] = lo;
+        }
+    if let Some(hi) = global_bsv_hi
+        && hi < mon.max_pre_nature_stat[si] {
+            mon.max_pre_nature_stat[si] = hi;
+        }
+    if let Some(lo) = global_stat_lo
+        && lo > mon.min_stats[si] {
+            mon.min_stats[si] = lo;
+        }
+    if let Some(hi) = global_stat_hi
+        && hi < mon.max_stats[si] {
+            mon.max_stats[si] = hi;
+        }
 }
 
 /// Emits per-nature-class conditional CNF clauses bounding `mon_idx`'s pre-nature stat.
@@ -6079,16 +6504,17 @@ fn pass3_direction_b(
     // True for Gyro Ball / Electro Ball — BP depends on attacker + target speeds.
     speed_dep_bp: bool,
 ) {
-    use crate::information::materialize::{materialize_battle, materialize_pokemon};
-    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
-    use crate::simulator::DamageConfig;
-
     // S24: enumerate items/abilities and materialize from the PRE-MOVE snapshots —
     // the live mons already carry this move's own reactions (self-boosts, mid-move
     // status, consumed items), which must not leak into the oracle run for a hit
     // that happened before them. Bounds are still written back to the live mon by
     // apply_unconditional_tightening. Falls back to the live mon when no snapshot
     // exists (defensive; MoveUsed always populates it).
+    //
+    // This snapshot ALSO carries a clone of the attacker's `possible_illusion_state`
+    // as it stood pre-move (Rust's derive(Clone) on `Option<Box<UnknownPokemonState>>`
+    // deep-clones the box) — Increment 2's hypothesis mirror below reads it directly
+    // from here rather than re-fetching, for the exact same S24 pre-move reason.
     let attacker_unk = ctx
         .move_context
         .as_ref()
@@ -6119,29 +6545,101 @@ fn pass3_direction_b(
     // S23: materialize the target at the HP this hit was actually taken at.
     target_unk.hp = hit_pre_hp.clone();
 
+    if let Some((global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi, per_class, booster_items, booster_abilities, si)) =
+        compute_attacker_stat_bounds(
+            state, &attacker_unk, &target_unk, user_slot, target_slot, move_data, off_stat,
+            ctx, is_crit, exact_damage, bp_override, speed_dep_bp,
+        )
+    {
+        // Apply unconditional tightening.
+        apply_unconditional_tightening(
+            state, user_idx, si,
+            global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
+        );
+
+        // ── Conditional CNF predicates ────────────────────────────────────────
+        // For each nature class κ, emit nature-guarded GE/LE clauses with booster
+        // disjuncts. `current_pre_min/max` are read from the pre-tightening clone
+        // (attacker_unk) so the "worth emitting" gate is stable throughout the loop.
+        emit_nature_conditional_bounds(
+            state, user_idx, off_stat,
+            &per_class, &booster_items, &booster_abilities,
+            attacker_unk.min_pre_nature_stat[si],
+            attacker_unk.max_pre_nature_stat[si],
+        );
+    }
+
+    // Increment 2: mirror the same search onto a live Zoroark hypothesis, if the
+    // attacker's pre-move snapshot carried one. Never emits CNF (no sound `mon_idx`
+    // to key a hypothesis's clause to) — see the plan's scope note.
+    if let Some(hyp) = attacker_unk.possible_illusion_state.clone() {
+        mirror_pass3_direction_b_onto_hypothesis(
+            state, user_idx, target_idx, *hyp, &target_unk, user_slot, target_slot,
+            move_data, off_stat, ctx, is_crit, exact_damage, bp_override, speed_dep_bp,
+        );
+    }
+}
+
+/// Core Direction B search: for a candidate attacker (`attacker_unk`) that dealt
+/// `exact_damage` to `target_unk` with `move_data`, enumerates nature classes × items
+/// × abilities × Metronome streak × pinch-HP hypotheses, binary-searching the feasible
+/// BSV interval via `find_feasible_bsv_range_b` for each combination and unioning into
+/// a single tightest-known window. Extracted verbatim from `pass3_direction_b` so the
+/// SAME search can run against either the real attacker (primary) or a live Zoroark
+/// hypothesis (Increment 2) with zero risk of the two hypotheses' math drifting apart.
+///
+/// Pure computation over its value parameters: `state`/`ctx` are read-only oracle
+/// context (field/weather materialization, `Analytic` last-mover lookup), never
+/// mutated — `attacker_unk`/`target_unk` are the ONLY things the returned bounds
+/// depend on.
+///
+/// Returns `None` for any of the early-return conditions the primary path always
+/// had (unknown attacker species, empty pre-nature window, no possible nature class)
+/// — callers must treat that as "no new evidence from this hit," never a
+/// contradiction (absence of derivable evidence is never grounds to drop a
+/// hypothesis). Returns `Some((global_bsv_lo, global_bsv_hi, global_stat_lo,
+/// global_stat_hi, per_class, booster_items, booster_abilities, si))` otherwise —
+/// `per_class`/`booster_items`/`booster_abilities` are only consumed by the primary's
+/// CNF emission, but are returned uniformly so the primary call site is unchanged.
+#[allow(clippy::too_many_arguments)]
+fn compute_attacker_stat_bounds(
+    state: &UnknownBattleState,
+    attacker_unk: &UnknownPokemonState,
+    target_unk: &UnknownPokemonState,
+    user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
+    off_stat: &crate::state::dex_data::PokemonStat,
+    ctx: &BattleContext,
+    is_crit: bool,
+    exact_damage: u16,
+    bp_override: Option<u16>,
+    speed_dep_bp: bool,
+) -> StatBoundsSearchResult {
+    use crate::simulator::DamageConfig;
+
     // Need known attacker species for BSV-based inference.
     let base_stats = match &attacker_unk.possible_species {
         Unknown::Known(s) => match ctx.dex.get(s) {
             Some(d) => d.base_stats,
-            None => return,
+            None => return None,
         },
-        _ => return,
+        _ => return None,
     };
 
     let si = bcp::stat_to_stats_idx(off_stat);
-    let level = attacker_unk.level;
 
     // Current pre-nature BSV range for this stat.
     let bsv_lo = attacker_unk.min_pre_nature_stat[si];
     let bsv_hi = attacker_unk.max_pre_nature_stat[si];
     if bsv_lo > bsv_hi {
-        return;
+        return None;
     }
 
     // Determine which nature classes are still possible.
     let nature_classes = possible_nature_classes(&attacker_unk.possible_natures, off_stat, si);
     if nature_classes.is_empty() {
-        return;
+        return None;
     }
 
     // Booster sets for predicate emission.
@@ -6152,7 +6650,7 @@ fn pass3_direction_b(
     // therefore in the oracle run; non-type-converting entries use the raw type.
     let eff_type_b = move_data.pokemon_type.clone();
     let booster_items = {
-        let mut items = offensive_damage_items(&attacker_unk);
+        let mut items = offensive_damage_items(attacker_unk);
         items.retain(|item| {
             match item {
                 Item::MuscleBand  => matches!(move_data.category, MoveCategory::Physical),
@@ -6168,7 +6666,7 @@ fn pass3_direction_b(
         items
     };
     let booster_abilities = {
-        let mut abilities = offensive_damage_abilities(&attacker_unk);
+        let mut abilities = offensive_damage_abilities(attacker_unk);
         abilities.retain(|ability| {
             match ability {
                 Ability::IronFist     => move_has_flag(move_data, &MoveFlag::Punch),
@@ -6258,7 +6756,7 @@ fn pass3_direction_b(
         // a neutral-item run (for predicate lower bound).
         let item_choices: Vec<Item> = {
             let mut items = booster_items.clone();
-            let neutral = neutral_item(&attacker_unk);
+            let neutral = neutral_item(attacker_unk);
             if !items.contains(&neutral) {
                 items.push(neutral);
             }
@@ -6266,7 +6764,7 @@ fn pass3_direction_b(
         };
         let ability_choices: Vec<Ability> = {
             let mut abs = booster_abilities.clone();
-            let neutral = neutral_ability(&attacker_unk);
+            let neutral = neutral_ability(attacker_unk);
             if !abs.contains(&neutral) {
                 abs.push(neutral);
             }
@@ -6284,8 +6782,8 @@ fn pass3_direction_b(
         // S25: union across the attacker HP hypotheses — a Known pinch ability
         // (neutral_a) needs the correct gate state, and a wider neutral interval
         // only loosens the emitted GE/LE clause bounds (sound).
-        let neutral_i = neutral_item(&attacker_unk);
-        let neutral_a = neutral_ability(&attacker_unk);
+        let neutral_i = neutral_item(attacker_unk);
+        let neutral_a = neutral_ability(attacker_unk);
 
         let mut bsv_lo_neutral: Option<u16> = None;
         let mut bsv_hi_neutral: Option<u16> = None;
@@ -6297,7 +6795,7 @@ fn pass3_direction_b(
             let (lo, hi) = find_feasible_bsv_range_b(
                 state,
                 &atk_neutral,
-                &target_unk,
+                target_unk,
                 user_slot,
                 target_slot,
                 move_data,
@@ -6346,7 +6844,7 @@ fn pass3_direction_b(
                         let (lo, hi) = find_feasible_bsv_range_b(
                             state,
                             &atk_for_oracle,
-                            &target_unk,
+                            target_unk,
                             user_slot,
                             target_slot,
                             move_data,
@@ -6381,22 +6879,67 @@ fn pass3_direction_b(
         }
     }
 
-    // Apply unconditional tightening.
-    apply_unconditional_tightening(
-        state, user_idx, si,
+    Some((
         global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
-    );
+        per_class, booster_items, booster_abilities, si,
+    ))
+}
 
-    // ── Conditional CNF predicates ────────────────────────────────────────────
-    // For each nature class κ, emit nature-guarded GE/LE clauses with booster disjuncts.
-    // `current_pre_min/max` are read from the pre-tightening clone (attacker_unk) so the
-    // "worth emitting" gate is stable throughout the loop.
-    emit_nature_conditional_bounds(
-        state, user_idx, off_stat,
-        &per_class, &booster_items, &booster_abilities,
-        attacker_unk.min_pre_nature_stat[si],
-        attacker_unk.max_pre_nature_stat[si],
-    );
+/// Mirrors Direction B's tightening onto a live Zoroark hypothesis (Increment 2).
+/// `hyp` is the attacker's pre-move hypothesis snapshot (from `attacker_unk`'s own
+/// cloned `possible_illusion_state` — see `pass3_direction_b`'s S24 comment). Unlike
+/// the primary path, never emits CNF (no sound `mon_idx` to key a hypothesis's
+/// clause to — see the plan's scope note) and detects infeasibility via an inline
+/// inverted-window check, since Pass 3 itself never panics — nothing else will
+/// discover a hypothesis-only contradiction if this doesn't.
+#[allow(clippy::too_many_arguments)]
+fn mirror_pass3_direction_b_onto_hypothesis(
+    state: &mut UnknownBattleState,
+    user_idx: usize,
+    target_idx: usize,
+    mut hyp: UnknownPokemonState,
+    target_unk: &UnknownPokemonState,
+    user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
+    off_stat: &crate::state::dex_data::PokemonStat,
+    ctx: &BattleContext,
+    is_crit: bool,
+    exact_damage: u16,
+    bp_override: Option<u16>,
+    speed_dep_bp: bool,
+) {
+    // Doubles/ally-hit edge case: if the target ALSO carries a live hypothesis (both
+    // sides of this hit are ambiguous), skip tightening entirely — sound (declining
+    // to extract information from an ambiguous-vs-ambiguous hit is always safe; an
+    // unmodeled joint approximation is not). In practice Direction B only ever fires
+    // when the target is the viewer's own (Number-HP-tracked) mon, which never
+    // carries a hypothesis, so this is a defensive guard, not a live path today.
+    let target_has_hyp = get_mon_by_idx(state, target_idx)
+        .is_some_and(|t| t.possible_illusion_state.is_some());
+    // S26 (mirrored): a Transformed hypothesis can't be soundly analyzed this way.
+    if target_has_hyp || hyp.pre_transform.is_some() {
+        if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
+            mon.possible_illusion_state = Some(Box::new(hyp));
+        }
+        return;
+    }
+
+    let feasible = match compute_attacker_stat_bounds(
+        state, &hyp, target_unk, user_slot, target_slot, move_data, off_stat,
+        ctx, is_crit, exact_damage, bp_override, speed_dep_bp,
+    ) {
+        None => true, // no new evidence derivable from this hit for this identity
+        Some((bsv_lo, bsv_hi, stat_lo, stat_hi, _per_class, _items, _abilities, si)) => {
+            apply_unconditional_tightening_to_mon(&mut hyp, si, bsv_lo, bsv_hi, stat_lo, stat_hi);
+            hyp.min_pre_nature_stat[si] <= hyp.max_pre_nature_stat[si]
+                && hyp.min_stats[si] <= hyp.max_stats[si]
+        }
+    };
+
+    if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
+        mon.possible_illusion_state = feasible.then_some(Box::new(hyp));
+    }
 }
 
 /// Generic monotone binary-search for the feasible BSV interval `[found_lo, found_hi]`.
@@ -6764,9 +7307,7 @@ fn pass3_direction_a(
     // True for Gyro Ball / Electro Ball — defender's speed affects BP.
     speed_dep_bp: bool,
 ) {
-    use crate::information::materialize::{materialize_battle, materialize_pokemon};
-    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
-    use crate::simulator::DamageConfig;
+    use crate::information::materialize::materialize_pokemon;
 
     // S11 soundness fix: Direction A materializes the attacker from its CURRENT
     // stat/item/ability fields as if they were the exact truth (`atk_stats =
@@ -6778,11 +7319,18 @@ fn pass3_direction_a(
     // its unresolved stat bounds as exact would produce an unsound defender-BSV
     // bound. P1 is the observer throughout this module (see S16); only P1's moves
     // have a fully-Known attacker, so gate Direction A on that.
+    //
+    // Increment 2 note: this gate is also what guarantees the attacker here NEVER
+    // carries a `possible_illusion_state` (only the non-viewer side is ever seeded
+    // one) — so, unlike Direction B, Direction A's hypothesis mirror below doesn't
+    // need a "both sides ambiguous" guard at all; it's provably unreachable.
     if user_slot.player != Player::P1 {
         return;
     }
 
     // S24: source both mons from the pre-move snapshots (see pass3_direction_b).
+    // The defender's snapshot also carries a pre-move clone of its
+    // `possible_illusion_state`, read directly by the hypothesis mirror below.
     let defender_unk = ctx
         .move_context
         .as_ref()
@@ -6814,13 +7362,111 @@ fn pass3_direction_a(
         return;
     };
 
+    // Attacker is OUR known mon; use its actual known stats. Materialized ONCE and
+    // shared by both the primary defender AND (Increment 2) a mirrored hypothesis
+    // search — the attacker is never ambiguous (see the S11 note above), so there is
+    // nothing to recompute per-hypothesis here.
+    let atk_stats = attacker_unk.min_stats;
+    let atk_item = neutral_item(&attacker_unk);
+    // Analytic correction: ×1.3 only when the attacker (our own mon = user_slot)
+    // moves LAST this turn. When it did not fire, substitute Ability::None so the
+    // oracle uses ×1.0 — otherwise the inflated damage prediction raises the
+    // defender's min stat bound above the truth (unsound exclusion). S28: decided by
+    // the precomputed per-segment last-mover, not by whether the target has moved.
+    let atk_ability = {
+        let raw = neutral_ability(&attacker_unk);
+        if raw == Ability::Analytic && !analytic_fired(ctx, user_slot) {
+            Ability::None
+        } else {
+            raw
+        }
+    };
+    let atk_ps = materialize_pokemon(&attacker_unk, atk_stats, atk_item, atk_ability);
+
+    if let Some((global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi, per_class_a, reducer_items, reducer_abilities, si)) =
+        compute_defender_stat_bounds(
+            state, &defender_unk, &atk_ps, user_slot, target_slot, move_data, def_stat,
+            ctx, is_crit, pre_pct, post_pct, bp_override, speed_dep_bp,
+        )
+    {
+        // Apply unconditional tightening.
+        apply_unconditional_tightening(
+            state, target_idx, si,
+            global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
+        );
+
+        // ── I1: Conditional CNF predicates (Direction A) ─────────────────────
+        // For each nature class κ, emit nature-guarded GE/LE clauses with reducer
+        // disjuncts. Reducers (Eviolite, AV, Multiscale, …) could allow a lower raw
+        // BSV to explain the observed damage, so they appear as disjuncts mirroring
+        // Direction B's booster role. `current_pre_min/max` come from the
+        // pre-tightening clone (defender_unk).
+        emit_nature_conditional_bounds(
+            state, target_idx, def_stat,
+            &per_class_a, &reducer_items, &reducer_abilities,
+            defender_unk.min_pre_nature_stat[si],
+            defender_unk.max_pre_nature_stat[si],
+        );
+    }
+
+    // Increment 2: mirror the same search onto a live Zoroark hypothesis, if the
+    // defender's pre-move snapshot carried one. Never emits CNF (no sound `mon_idx`
+    // to key a hypothesis's clause to) — see the plan's scope note. Note: only the
+    // defensive stat is mirrored here, matching exactly what the primary path above
+    // tightens — Direction A does not itself narrow HP (that would need a
+    // `PokemonStat::Hp` variant, which doesn't exist; `hp_candidates` above is
+    // enumeration input, not an output written back).
+    if let Some(hyp) = defender_unk.possible_illusion_state.clone() {
+        mirror_pass3_direction_a_onto_hypothesis(
+            state, target_idx, *hyp, &atk_ps, user_slot, target_slot, move_data,
+            def_stat, ctx, is_crit, pre_pct, post_pct, bp_override, speed_dep_bp,
+        );
+    }
+}
+
+/// Core Direction A search: for a candidate defender (`defender_unk`) that took the
+/// observed pre/post-hit display percents from `atk_ps`'s hit with `move_data`,
+/// enumerates achievable HP hypotheses × nature classes × defensive items ×
+/// abilities, binary-searching the feasible BSV interval via
+/// `find_feasible_bsv_range_a` for each combination and unioning into a single
+/// tightest-known window. Extracted verbatim from `pass3_direction_a` so the SAME
+/// search can run against either the real defender (primary) or a live Zoroark
+/// hypothesis (Increment 2).
+///
+/// Pure computation over its value parameters — `atk_ps` (the attacker, already
+/// materialized, always the viewer's own unambiguous mon) is a FIXED oracle input,
+/// never re-derived per hypothesis.
+///
+/// Returns `None` for the same early-return conditions the primary path always had
+/// (unknown defender species, empty pre-nature window, no possible nature class) —
+/// treat as "no new evidence from this hit," never a contradiction. Returns
+/// `Some((global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi, per_class_a,
+/// reducer_items, reducer_abilities, si))` otherwise.
+#[allow(clippy::too_many_arguments)]
+fn compute_defender_stat_bounds(
+    state: &UnknownBattleState,
+    defender_unk: &UnknownPokemonState,
+    atk_ps: &crate::state::pokemon::PokemonState,
+    user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
+    def_stat: &crate::state::dex_data::PokemonStat,
+    ctx: &BattleContext,
+    is_crit: bool,
+    pre_pct: u8,
+    post_pct: u8,
+    bp_override: Option<u16>,
+    speed_dep_bp: bool,
+) -> StatBoundsSearchResult {
+    use crate::simulator::DamageConfig;
+
     // Need known defender species for BSV inference.
     let base_stats = match &defender_unk.possible_species {
         Unknown::Known(s) => match ctx.dex.get(s) {
             Some(d) => d.base_stats,
-            None => return,
+            None => return None,
         },
-        _ => return,
+        _ => return None,
     };
 
     let si = bcp::stat_to_stats_idx(def_stat);
@@ -6829,17 +7475,13 @@ fn pass3_direction_a(
     let bsv_lo = defender_unk.min_pre_nature_stat[si];
     let bsv_hi = defender_unk.max_pre_nature_stat[si];
     if bsv_lo > bsv_hi {
-        return;
+        return None;
     }
-
-    // HP bounds for the defender.
-    let hp_lo = defender_unk.min_stats[0];
-    let hp_hi = defender_unk.max_stats[0];
 
     // Nature classes for the defensive stat.
     let nature_classes = possible_nature_classes(&defender_unk.possible_natures, def_stat, si);
     if nature_classes.is_empty() {
-        return;
+        return None;
     }
 
     // Oracle config.
@@ -6859,24 +7501,6 @@ fn pass3_direction_a(
     let mut global_bsv_hi: Option<u16> = None;
     let mut global_stat_lo: Option<u16> = None;
     let mut global_stat_hi: Option<u16> = None;
-
-    // Attacker is OUR known mon; use its actual known stats.
-    let atk_stats = attacker_unk.min_stats;
-    let atk_item = neutral_item(&attacker_unk);
-    // Analytic correction: ×1.3 only when the attacker (our own mon = user_slot)
-    // moves LAST this turn. When it did not fire, substitute Ability::None so the
-    // oracle uses ×1.0 — otherwise the inflated damage prediction raises the
-    // defender's min stat bound above the truth (unsound exclusion). S28: decided by
-    // the precomputed per-segment last-mover, not by whether the target has moved.
-    let atk_ability = {
-        let raw = neutral_ability(&attacker_unk);
-        if raw == Ability::Analytic && !analytic_fired(ctx, user_slot) {
-            Ability::None
-        } else {
-            raw
-        }
-    };
-    let atk_ps = materialize_pokemon(&attacker_unk, atk_stats, atk_item, atk_ability);
 
     // Defender speed endpoints for Gyro Ball / Electro Ball (Direction A: we attacked
     // the opponent, so the *target/defender's* speed is the unknown that affects BP).
@@ -6899,7 +7523,7 @@ fn pass3_direction_a(
     // atk_ability was moved into materialize_pokemon; read from atk_ps which holds the same value.
     let eff_move_type = pruning_move_type(&atk_ps.ability, move_data);
     let def_items = {
-        let mut items = defensive_damage_items(&defender_unk);
+        let mut items = defensive_damage_items(defender_unk);
         items.retain(|item| {
             // AssaultVest: stat-bake handled in run_def_oracle (×1.5 SpD Special only).
             // For Physical moves it contributes nothing — identical to neutral item run.
@@ -6916,7 +7540,7 @@ fn pass3_direction_a(
         items
     };
     let def_abilities = {
-        let mut abilities = defensive_damage_abilities(&defender_unk);
+        let mut abilities = defensive_damage_abilities(defender_unk);
         abilities.retain(|ability| {
             match ability {
                 // Category-gated.
@@ -6955,8 +7579,8 @@ fn pass3_direction_a(
         abilities
     };
 
-    let neutral_def_item = neutral_item(&defender_unk);
-    let neutral_def_ability = neutral_ability(&defender_unk);
+    let neutral_def_item = neutral_item(defender_unk);
+    let neutral_def_ability = neutral_ability(defender_unk);
 
     // Per-nature-class neutral-gear BSV bounds, accumulated across hp_cand hypotheses.
     // Used by the I1 CNF predicate emission after the main loops.
@@ -6976,7 +7600,7 @@ fn pass3_direction_a(
     // above the true value (unsound exclusion).  Using the EV-lattice enumeration
     // ensures every realistically achievable HP is covered.
     let hp_candidates =
-        achievable_defender_hp_values(base_stats[0], level, ctx.config, &defender_unk);
+        achievable_defender_hp_values(base_stats[0], level, ctx.config, defender_unk);
     for hp_cand in hp_candidates {
         // S22: exact damage band for this max-HP hypothesis from the display buckets
         // of BOTH endpoints (each percent carries its own rounding). A `None` band
@@ -6990,7 +7614,7 @@ fn pass3_direction_a(
             // Mirrors the shape of Direction B's find_feasible_bsv_range_b calls.
             let search = |di: &Item, da: &Ability| {
                 find_feasible_bsv_range_a(
-                    state, &defender_unk, &atk_ps,
+                    state, defender_unk, atk_ps,
                     user_slot, target_slot, move_data,
                     oracle_config, targets_mult, *nat_mod, si, bsv_lo, bsv_hi,
                     hp_cand, di, da, &defender_speed_endpoints,
@@ -7041,17 +7665,6 @@ fn pass3_direction_a(
         }
     }
 
-    // Apply unconditional tightening.
-    apply_unconditional_tightening(
-        state, target_idx, si,
-        global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
-    );
-
-    // ── I1: Conditional CNF predicates (Direction A) ─────────────────────────
-    // For each nature class κ, emit nature-guarded GE/LE clauses with reducer disjuncts.
-    // Reducers (Eviolite, AV, Multiscale, …) could allow a lower raw BSV to explain the
-    // observed damage, so they appear as disjuncts mirroring Direction B's booster role.
-    // `current_pre_min/max` come from the pre-tightening clone (defender_unk).
     let reducer_items: Vec<Item> = def_items
         .iter()
         .filter(|i| **i != neutral_def_item)
@@ -7062,12 +7675,60 @@ fn pass3_direction_a(
         .filter(|a| **a != neutral_def_ability)
         .cloned()
         .collect();
-    emit_nature_conditional_bounds(
-        state, target_idx, def_stat,
-        &per_class_a, &reducer_items, &reducer_abilities,
-        defender_unk.min_pre_nature_stat[si],
-        defender_unk.max_pre_nature_stat[si],
-    );
+
+    Some((
+        global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
+        per_class_a, reducer_items, reducer_abilities, si,
+    ))
+}
+
+/// Mirrors Direction A's defensive-stat tightening onto a live Zoroark hypothesis
+/// (Increment 2). `hyp` is the defender's pre-move hypothesis snapshot (from
+/// `defender_unk`'s own cloned `possible_illusion_state`). No "both sides ambiguous"
+/// guard is needed here (unlike Direction B) — the attacker is provably never
+/// ambiguous under the S11 P1-attacker-only gate. Never emits CNF; detects
+/// infeasibility via an inline inverted-window check, since Pass 3 itself never
+/// panics.
+#[allow(clippy::too_many_arguments)]
+fn mirror_pass3_direction_a_onto_hypothesis(
+    state: &mut UnknownBattleState,
+    target_idx: usize,
+    mut hyp: UnknownPokemonState,
+    atk_ps: &crate::state::pokemon::PokemonState,
+    user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
+    def_stat: &crate::state::dex_data::PokemonStat,
+    ctx: &BattleContext,
+    is_crit: bool,
+    pre_pct: u8,
+    post_pct: u8,
+    bp_override: Option<u16>,
+    speed_dep_bp: bool,
+) {
+    // S26 (mirrored): a Transformed hypothesis can't be soundly analyzed this way.
+    if hyp.pre_transform.is_some() {
+        if let Some(mon) = get_mon_mut_by_idx(state, target_idx) {
+            mon.possible_illusion_state = Some(Box::new(hyp));
+        }
+        return;
+    }
+
+    let feasible = match compute_defender_stat_bounds(
+        state, &hyp, atk_ps, user_slot, target_slot, move_data, def_stat,
+        ctx, is_crit, pre_pct, post_pct, bp_override, speed_dep_bp,
+    ) {
+        None => true, // no new evidence derivable from this hit for this identity
+        Some((bsv_lo, bsv_hi, stat_lo, stat_hi, _per_class, _items, _abilities, si)) => {
+            apply_unconditional_tightening_to_mon(&mut hyp, si, bsv_lo, bsv_hi, stat_lo, stat_hi);
+            hyp.min_pre_nature_stat[si] <= hyp.max_pre_nature_stat[si]
+                && hyp.min_stats[si] <= hyp.max_stats[si]
+        }
+    };
+
+    if let Some(mon) = get_mon_mut_by_idx(state, target_idx) {
+        mon.possible_illusion_state = feasible.then_some(Box::new(hyp));
+    }
 }
 
 // ── Pass 4: Speed ordering → Spe bounds ──────────────────────────────────────
