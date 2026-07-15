@@ -261,6 +261,24 @@ pub struct UnknownBattleState {
     pub p1_unresolved_zoroark_count: u8,
     pub p2_unresolved_zoroark_count: u8,
 
+    /// Pristine "what team preview told us about species S" snapshot for every
+    /// physical roster member on this side, captured ONCE at the team-preview→battle
+    /// transition (`into_battle_state`), before any switch/disguise churn touches it.
+    /// Under an open team sheet these entries carry the full `Known` item/moves/
+    /// ability/nature set; under species-only preview they're identical to what
+    /// `from_opponent_species` would already build.
+    ///
+    /// Exists purely as a restore source: `restore_discarded_primary_to_bench` (after
+    /// an `IllusionEnded` promotion) and `pass1_switch`'s "species not found on the
+    /// bench" fallback both need to rebuild a roster entry from scratch, and MUST
+    /// prefer cloning from here over calling `from_opponent_species` — the latter is
+    /// species-only and, under an open sheet, would regress a fully-known mon back to
+    /// "no information" the moment it's rebuilt (see the TODO.md Zoroark-switching
+    /// regression this fixes). Never mutated after `into_battle_state` populates it;
+    /// never itself displayed or read by any other pass.
+    pub p1_roster_templates: Vec<UnknownPokemonState>,
+    pub p2_roster_templates: Vec<UnknownPokemonState>,
+
     pub turn_number: u16,
 
     //Both false = waiting for moves from both players
@@ -548,6 +566,15 @@ impl UnknownTeamPreviewState {
             // freshly-populated `possible_back` roster for Illusion-capable formes.
             p1_unresolved_zoroark_count: 0,
             p2_unresolved_zoroark_count: 0,
+
+            // Pristine snapshot of what team preview told us, per physical roster
+            // member, BEFORE the viewer-side/opponent-side split above and any later
+            // switch/disguise churn — see the field's doc comment. Cloned from
+            // `self.p1_mons`/`self.p2_mons` directly (not from whichever bucket this
+            // physical side ended up in), since `possible_illusion_state` is `None` on
+            // every entry at this point regardless (seeding happens below).
+            p1_roster_templates: self.p1_mons.clone(),
+            p2_roster_templates: self.p2_mons.clone(),
 
             turn_number: 0,
             turn_started: false,

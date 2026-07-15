@@ -119,6 +119,8 @@ fn battle_nvn(
         p2_fainted_mons: vec![],
         p1_unresolved_zoroark_count: 0,
         p2_unresolved_zoroark_count: 0,
+        p1_roster_templates: vec![],
+        p2_roster_templates: vec![],
         turn_number:   1,
         turn_started:  false,
         turn_ended:    false,
@@ -171,6 +173,31 @@ fn apply_ex(
         &dex,
         &move_dex,
         &HashMap::new(), // ability_dex — not needed for most tests
+        &InferenceConfig::default(),
+    );
+    match result {
+        UnknownMatchState::Battle(b) => b,
+        _ => panic!("expected Battle state"),
+    }
+}
+
+/// Like [`apply_ex`], but against real dex/move-dex references (mirrors
+/// `roundtrip_soundness::apply_roundtrip`) — `apply_ex` demands OWNED dex maps,
+/// which doesn't work for real-dex tests since `PokemonData`/`MoveData` aren't
+/// `Clone`.
+fn apply_real_dex(
+    state: UnknownBattleState,
+    events: Vec<InformationEvent>,
+    dex: &HashMap<Species, PokemonData>,
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) -> UnknownBattleState {
+    let result = apply_information(
+        UnknownMatchState::Battle(state),
+        &events,
+        false,
+        dex,
+        move_dex,
+        &HashMap::new(), // ability_dex — not needed for these tests
         &InferenceConfig::default(),
     );
     match result {
@@ -1971,6 +1998,567 @@ fn test_zoroark_illusion_ended_promotes_and_restores_decoy() {
         result.p2_unresolved_zoroark_count, 0,
         "the side's Zoroark is now positively located"
     );
+}
+
+/// TODO.md regression, open-sheet ground truth: when a disguised Zoroark's
+/// disguise breaks, the discarded decoy identity (e.g. Dragonite) is restored
+/// to `possible_back` via `restore_discarded_primary_to_bench` — but under an
+/// open team sheet, that decoy's item/moves/ability/nature were already fully
+/// `Known` from turn 0 (`team_preview_open_sheet_from_perspective`). Rebuilding
+/// it species-only (`from_opponent_species`, the pre-fix behavior) regresses a
+/// fully-known mon to "no information" the moment its disguise is seen through
+/// — exactly the bug reported in TODO.md ("it displays that we have no
+/// information about that mon, but it should use the teamsheet information").
+/// This drives the real lifecycle end-to-end with real dex data and asserts the
+/// restored decoy — and the same physical mon once it later switches in for
+/// real — still carries its open-sheet set.
+#[test]
+fn test_zoroark_illusion_ended_restores_decoy_with_open_sheet_data() {
+    use crate::information::unknowns::{InformationMode, UnknownTeamPreviewState};
+    use crate::state::pokemon::{build_pokemon_state, Nature};
+    use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
+
+    let pd = pokemon_dex();
+    let md = move_dex();
+
+    let p1_lead = build_pokemon_state(
+        Species::Snorlax, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
+    );
+    let zoroark = build_pokemon_state(
+        Species::Zoroark, pd, md, Some(50),
+        Some([Some(PokemonMove::NastyPlot), Some(PokemonMove::DarkPulse), None, None]),
+        None, Some(Ability::Illusion), Some(Nature::Timid), Some(Item::ChoiceSpecs),
+        None, None, None, true,
+    );
+    let dragonite = build_pokemon_state(
+        Species::Dragonite, pd, md, Some(50),
+        Some([Some(PokemonMove::DragonDance), Some(PokemonMove::ExtremeSpeed), None, None]),
+        None, Some(Ability::Multiscale), Some(Nature::Adamant), Some(Item::HeavyDutyBoots),
+        None, None, None, true,
+    );
+    let corviknight = build_pokemon_state(
+        Species::Corviknight, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
+    );
+
+    let preview_state = crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+        Player::P1,
+        &[p1_lead],
+        &[zoroark, dragonite, corviknight],
+        pd,
+        1,
+        3,
+        50,
+        InformationMode::OpenTeamSheet,
+        true,
+    );
+    let preview: UnknownTeamPreviewState = match preview_state {
+        crate::information::unknowns::UnknownMatchState::TeamPreview(tp) => tp,
+        _ => panic!("expected TeamPreview state"),
+    };
+    let seeded = preview.into_battle_state(Player::P1, &[0], &[], &[1], &[0, 2]);
+    assert_eq!(
+        seeded.p2_unresolved_zoroark_count, 1,
+        "team preview must detect the one real Zoroark on P2's roster"
+    );
+
+    // P2 leads Zoroark, DISGUISED as Dragonite — the observer's event stream
+    // (perspective-gated, as the real simulator would emit it) carries the
+    // shown species, not the true one.
+    let after_lead = apply_real_dex(
+        seeded,
+        vec![event(EventKind::SimultaneousSwitch {
+            switches: vec![
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p1(0), species: Species::Snorlax, level: 50,
+                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                },
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p2(0), species: Species::Dragonite, level: 50,
+                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                },
+            ],
+        })],
+        pd,
+        md,
+    );
+
+    // A real damaging hit breaks the disguise.
+    let after_reveal = apply_real_dex(
+        after_lead,
+        vec![event(EventKind::IllusionEnded { slot: p2(0), actual_species: Species::Zoroark })],
+        pd,
+        md,
+    );
+
+    let restored_dragonite = combined_back(&after_reveal, &Player::P2)
+        .into_iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Dragonite)))
+        .expect("the discarded Dragonite decoy must be restored to the bench");
+    assert_eq!(
+        restored_dragonite.item,
+        Unknown::Known(Item::HeavyDutyBoots),
+        "open-sheet item must survive the restore, not regress to fully unknown"
+    );
+    assert_eq!(
+        restored_dragonite.possible_abilities,
+        Unknown::Known(Ability::Multiscale),
+        "open-sheet ability must survive the restore"
+    );
+    assert!(
+        restored_dragonite.known_moves.contains(&Some(PokemonMove::DragonDance))
+            && restored_dragonite.known_moves.contains(&Some(PokemonMove::ExtremeSpeed)),
+        "open-sheet moves must survive the restore, got {:?}",
+        restored_dragonite.known_moves
+    );
+
+    // The same physical mon later switches in for real — the display-facing
+    // symptom from TODO.md — and must show that same preserved set, not
+    // "no information".
+    let after_return = apply_real_dex(
+        after_reveal,
+        vec![switch_in(Species::Dragonite, p2(0))],
+        pd,
+        md,
+    );
+    let active_dragonite = &after_return.p2_active_mons[0];
+    assert_eq!(active_dragonite.possible_species, Unknown::Known(Species::Dragonite));
+    assert_eq!(active_dragonite.item, Unknown::Known(Item::HeavyDutyBoots));
+    assert_eq!(active_dragonite.possible_abilities, Unknown::Known(Ability::Multiscale));
+}
+
+/// Live-server regression found via end-to-end verification (not by static
+/// analysis): promotion can happen via move-legality mirroring — a move the
+/// shown species can't learn but Zoroark can — WITHOUT the disguise ever
+/// visibly breaking (`IllusionEnded` only fires on direct damage or an ability
+/// change; a status move revealing illegality never damages anyone). Driving
+/// this exact sequence against the real Axum server (Zoroark-Hisui disguised as
+/// Dragonite, using Nasty Plot — legal for Zoroark, not for Dragonite) showed
+/// the decoy vanishing from the tracked roster entirely: `restore_discarded_primary_to_bench`
+/// was only ever called from the `IllusionEnded` handler, so a promotion that
+/// happens via any OTHER path (move-legality here; the same gap exists for the
+/// Pass 3/Pass 5 stat-tightening backstop and item-reveal mirroring) never
+/// restored the decoy — and by the time (if ever) `IllusionEnded` later fires,
+/// the handler's own "what was discarded" capture reads the ALREADY-promoted
+/// Zoroark identity, not the decoy, so its restore is skipped too. This is
+/// `finish_illusion_promotion_restore`'s fix: every promotion site now restores
+/// the decoy at the moment it actually happens, not only on an explicit
+/// `IllusionEnded` reveal.
+#[test]
+fn test_zoroark_move_legality_promotion_restores_decoy_without_illusion_ended() {
+    use crate::state::pokemon::{build_pokemon_state, Nature};
+    use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
+
+    let pd = pokemon_dex();
+    let md = move_dex();
+
+    let p1_lead = build_pokemon_state(
+        Species::Snorlax, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
+    );
+    let zoroark = build_pokemon_state(
+        Species::Zoroark, pd, md, Some(50),
+        Some([Some(PokemonMove::NastyPlot), Some(PokemonMove::DarkPulse), None, None]),
+        None, Some(Ability::Illusion), Some(Nature::Timid), Some(Item::ChoiceSpecs),
+        None, None, None, true,
+    );
+    let dragonite = build_pokemon_state(
+        Species::Dragonite, pd, md, Some(50),
+        Some([Some(PokemonMove::DragonDance), Some(PokemonMove::ExtremeSpeed), None, None]),
+        None, Some(Ability::Multiscale), Some(Nature::Adamant), Some(Item::HeavyDutyBoots),
+        None, None, None, true,
+    );
+    let corviknight = build_pokemon_state(
+        Species::Corviknight, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
+    );
+
+    let preview_state = crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+        Player::P1,
+        &[p1_lead],
+        &[zoroark, dragonite, corviknight],
+        pd,
+        1,
+        3,
+        50,
+        crate::information::unknowns::InformationMode::OpenTeamSheet,
+        true,
+    );
+    let preview: crate::information::unknowns::UnknownTeamPreviewState = match preview_state {
+        crate::information::unknowns::UnknownMatchState::TeamPreview(tp) => tp,
+        _ => panic!("expected TeamPreview state"),
+    };
+    let seeded = preview.into_battle_state(Player::P1, &[0], &[], &[1, 2], &[0]);
+    assert_eq!(seeded.p2_unresolved_zoroark_count, 1);
+
+    // P2 leads Zoroark, disguised as Dragonite.
+    let after_lead = apply_real_dex(
+        seeded,
+        vec![event(EventKind::SimultaneousSwitch {
+            switches: vec![
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p1(0), species: Species::Snorlax, level: 50,
+                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                },
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p2(0), species: Species::Dragonite, level: 50,
+                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                },
+            ],
+        })],
+        pd, md,
+    );
+
+    // Nasty Plot: illegal for Dragonite, legal for Zoroark — promotes via
+    // move-legality mirroring alone. `IllusionEnded` is never emitted in this
+    // test at all — the point is that the restore must not depend on it.
+    let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    learnset_dex.insert(
+        Species::Dragonite,
+        [PokemonMove::DragonDance, PokemonMove::ExtremeSpeed].into_iter().collect(),
+    );
+    learnset_dex.insert(
+        Species::Zoroark,
+        [PokemonMove::NastyPlot, PokemonMove::DarkPulse].into_iter().collect(),
+    );
+    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+    let result = apply_information(
+        UnknownMatchState::Battle(after_lead),
+        &[event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::NastyPlot,
+            targets: vec![p2(0)],
+        })],
+        false,
+        pd,
+        md,
+        &HashMap::new(),
+        &config,
+    );
+    let UnknownMatchState::Battle(result) = result else { panic!("expected Battle state") };
+
+    // Promotion happened via move-legality (not IllusionEnded).
+    assert_eq!(result.p2_active_mons[0].possible_species, Unknown::Known(Species::Zoroark));
+    assert_eq!(result.p2_active_mons[0].item, Unknown::Known(Item::ChoiceSpecs));
+    assert_eq!(result.p2_unresolved_zoroark_count, 0);
+
+    // The decoy (Dragonite) must already be restored to the bench, with its
+    // open-sheet set intact — the exact regression the live server exposed.
+    let restored_dragonite = combined_back(&result, &Player::P2)
+        .into_iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Dragonite)))
+        .expect(
+            "the decoy must be restored to the bench immediately on promotion, \
+             not only when/if IllusionEnded later fires",
+        );
+    assert_eq!(
+        restored_dragonite.item,
+        Unknown::Known(Item::HeavyDutyBoots),
+        "open-sheet item must survive this promotion path too"
+    );
+    assert_eq!(restored_dragonite.possible_abilities, Unknown::Known(Ability::Multiscale));
+}
+
+/// F3 (TODO.md: "Make sure everything works with zoroark switching ... Tracking
+/// zoroark should make sense over the course of the entire battle!"): a disguised
+/// Zoroark that switches out WITHOUT its disguise ever breaking must bench under
+/// its shown identity with its hypothesis intact (already covered synthetically by
+/// `test_zoroark_switch_out_persists_hypothesis`/`test_zoroark_own_hypothesis_resumes_on_return`)
+/// — this drives the same lifecycle with real open-sheet ground truth, across a
+/// LONGER multi-switch sequence (three different replacements, then the disguised
+/// mon returns), and asserts the strongest form of the TODO.md complaint directly:
+/// at every step, every single P2 roster member's open-sheet item stays `Known` —
+/// it must never regress to "no information" for ANY mon, at ANY point, no matter
+/// how many switches have happened.
+#[test]
+fn test_zoroark_open_sheet_data_survives_full_battle_switch_sequence() {
+    use crate::state::pokemon::{build_pokemon_state, Nature};
+    use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
+
+    let pd = pokemon_dex();
+    let md = move_dex();
+
+    let p1_lead = build_pokemon_state(
+        Species::Snorlax, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
+    );
+    let zoroark = build_pokemon_state(
+        Species::Zoroark, pd, md, Some(50),
+        Some([Some(PokemonMove::NastyPlot), Some(PokemonMove::DarkPulse), None, None]),
+        None, Some(Ability::Illusion), Some(Nature::Timid), Some(Item::ChoiceSpecs),
+        None, None, None, true,
+    );
+    let dragonite = build_pokemon_state(
+        Species::Dragonite, pd, md, Some(50),
+        Some([Some(PokemonMove::DragonDance), Some(PokemonMove::ExtremeSpeed), None, None]),
+        None, Some(Ability::Multiscale), Some(Nature::Adamant), Some(Item::HeavyDutyBoots),
+        None, None, None, true,
+    );
+    let corviknight = build_pokemon_state(
+        Species::Corviknight, pd, md, Some(50),
+        Some([Some(PokemonMove::BraveBird), Some(PokemonMove::Roost), None, None]),
+        None, Some(Ability::Pressure), Some(Nature::Impish), Some(Item::Leftovers),
+        None, None, None, true,
+    );
+    let milotic = build_pokemon_state(
+        Species::Milotic, pd, md, Some(50),
+        Some([Some(PokemonMove::Scald), Some(PokemonMove::Recover), None, None]),
+        None, Some(Ability::MarvelScale), Some(Nature::Calm), Some(Item::AssaultVest),
+        None, None, None, true,
+    );
+
+    let preview_state = crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+        Player::P1,
+        &[p1_lead],
+        &[zoroark, dragonite, corviknight, milotic],
+        pd,
+        1,
+        4,
+        50,
+        crate::information::unknowns::InformationMode::OpenTeamSheet,
+        true,
+    );
+    let preview: crate::information::unknowns::UnknownTeamPreviewState = match preview_state {
+        crate::information::unknowns::UnknownMatchState::TeamPreview(tp) => tp,
+        _ => panic!("expected TeamPreview state"),
+    };
+    let mut state = preview.into_battle_state(Player::P1, &[0], &[], &[1, 2, 3], &[0]);
+    assert_eq!(state.p2_unresolved_zoroark_count, 1);
+
+    assert_all_p2_items_known(&state, "team preview");
+
+    // P2 leads Zoroark, disguised as Dragonite. Never revealed for the rest of
+    // this test — exercising the un-revealed switch-out path, not the promotion
+    // path already covered above.
+    state = apply_real_dex(
+        state,
+        vec![event(EventKind::SimultaneousSwitch {
+            switches: vec![
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p1(0), species: Species::Snorlax, level: 50,
+                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                },
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p2(0), species: Species::Dragonite, level: 50,
+                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                },
+            ],
+        })],
+        pd, md,
+    );
+    assert_all_p2_items_known(&state, "after disguised lead");
+    assert!(
+        state.p2_active_mons[0].possible_illusion_state.is_some(),
+        "the disguised lead must carry a live Zoroark hypothesis"
+    );
+
+    // Corviknight switches in — the disguised "Dragonite" benches, unrevealed.
+    state = apply_real_dex(state, vec![switch_in(Species::Corviknight, p2(0))], pd, md);
+    assert_all_p2_items_known(&state, "after Corviknight switches in");
+    let benched_dragonite = combined_back(&state, &Player::P2)
+        .into_iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Dragonite)))
+        .expect("the un-revealed disguised mon must bench under its shown identity");
+    assert!(
+        benched_dragonite.possible_illusion_state.is_some(),
+        "the benched, still-unrevealed disguise must keep its Zoroark hypothesis"
+    );
+    assert!(
+        state.p2_active_mons[0].possible_illusion_state.is_some(),
+        "Corviknight itself must also carry its own hypothesis — the side's \
+         Zoroark is still unresolved and could physically be either mon"
+    );
+
+    // Milotic switches in — Corviknight benches with ITS own hypothesis intact.
+    state = apply_real_dex(state, vec![switch_in(Species::Milotic, p2(0))], pd, md);
+    assert_all_p2_items_known(&state, "after Milotic switches in");
+    let benched_corviknight = combined_back(&state, &Player::P2)
+        .into_iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Corviknight)))
+        .expect("Corviknight must bench under its own identity");
+    assert!(benched_corviknight.possible_illusion_state.is_some());
+
+    // The disguised mon ("Dragonite") switches back in — must re-match its OWN
+    // benched entry (open-sheet set + hypothesis intact), never rebuilt from
+    // scratch by any fallback path.
+    state = apply_real_dex(state, vec![switch_in(Species::Dragonite, p2(0))], pd, md);
+    assert_all_p2_items_known(&state, "after Dragonite returns");
+    let active = &state.p2_active_mons[0];
+    assert_eq!(active.possible_species, Unknown::Known(Species::Dragonite));
+    assert_eq!(active.item, Unknown::Known(Item::HeavyDutyBoots));
+    assert!(
+        active.possible_illusion_state.is_some(),
+        "the returning disguise must resume its still-live, never-broken hypothesis"
+    );
+}
+
+/// F4 (TODO.md: "Same thing is true if zoroark's partner switches out"): in
+/// doubles, a disguised Zoroark's PARTNER switching out (an unrelated slot on
+/// the same side, not the disguised slot itself) must not disturb the disguised
+/// slot's hypothesis, and the mon that replaces the partner must itself receive/
+/// retain its own hypothesis — the side's Zoroark is still unresolved and, from
+/// the observer's perspective, could physically be any not-yet-ruled-out mon on
+/// that side, not just the one that happened to switch. Also exercises the
+/// doubles-specific `mon_idx` bookkeeping (both active segments fixed at the
+/// front — see the module README's "S1" note) to make sure slot0/slot1 never
+/// cross-contaminate.
+#[test]
+fn test_zoroark_doubles_partner_switch_out_preserves_hypotheses() {
+    use crate::state::pokemon::{build_pokemon_state, Nature};
+    use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
+
+    let pd = pokemon_dex();
+    let md = move_dex();
+
+    let p1a = build_pokemon_state(
+        Species::Snorlax, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
+    );
+    let p1b = build_pokemon_state(
+        Species::Garchomp, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
+    );
+    let zoroark = build_pokemon_state(
+        Species::Zoroark, pd, md, Some(50),
+        Some([Some(PokemonMove::NastyPlot), Some(PokemonMove::DarkPulse), None, None]),
+        None, Some(Ability::Illusion), Some(Nature::Timid), Some(Item::ChoiceSpecs),
+        None, None, None, true,
+    );
+    let dragonite = build_pokemon_state(
+        Species::Dragonite, pd, md, Some(50),
+        Some([Some(PokemonMove::DragonDance), Some(PokemonMove::ExtremeSpeed), None, None]),
+        None, Some(Ability::Multiscale), Some(Nature::Adamant), Some(Item::HeavyDutyBoots),
+        None, None, None, true,
+    );
+    let corviknight = build_pokemon_state(
+        Species::Corviknight, pd, md, Some(50),
+        Some([Some(PokemonMove::BraveBird), Some(PokemonMove::Roost), None, None]),
+        None, Some(Ability::Pressure), Some(Nature::Impish), Some(Item::Leftovers),
+        None, None, None, true,
+    );
+    let milotic = build_pokemon_state(
+        Species::Milotic, pd, md, Some(50),
+        Some([Some(PokemonMove::Scald), Some(PokemonMove::Recover), None, None]),
+        None, Some(Ability::MarvelScale), Some(Nature::Calm), Some(Item::AssaultVest),
+        None, None, None, true,
+    );
+
+    let preview_state = crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+        Player::P1,
+        &[p1a, p1b],
+        &[zoroark, dragonite, corviknight, milotic],
+        pd,
+        2,
+        4,
+        50,
+        crate::information::unknowns::InformationMode::OpenTeamSheet,
+        true,
+    );
+    let preview: crate::information::unknowns::UnknownTeamPreviewState = match preview_state {
+        crate::information::unknowns::UnknownMatchState::TeamPreview(tp) => tp,
+        _ => panic!("expected TeamPreview state"),
+    };
+    // P2 params are ignored for viewer=P1 (its whole roster dumps to possible_back
+    // regardless — see `into_battle_state`'s doc comment), so these are placeholders.
+    let mut state = preview.into_battle_state(Player::P1, &[0, 1], &[], &[1, 2], &[0, 3]);
+    assert_eq!(state.p2_unresolved_zoroark_count, 1);
+
+    // P2 leads slot0 = Zoroark disguised as Dragonite, slot1 = the genuine Corviknight.
+    state = apply_real_dex(
+        state,
+        vec![event(EventKind::SimultaneousSwitch {
+            switches: vec![
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p1(0), species: Species::Snorlax, level: 50,
+                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                },
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p1(1), species: Species::Garchomp, level: 50,
+                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                },
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p2(0), species: Species::Dragonite, level: 50,
+                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                },
+                SwitchState { disguise_species: None, max_hp: 0,
+                    slot: p2(1), species: Species::Corviknight, level: 50,
+                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                },
+            ],
+        })],
+        pd, md,
+    );
+    assert_all_p2_items_known(&state, "doubles lead");
+    assert!(
+        state.p2_active_mons[0].possible_illusion_state.is_some(),
+        "the disguised slot0 must carry a Zoroark hypothesis"
+    );
+    assert!(
+        state.p2_active_mons[1].possible_illusion_state.is_some(),
+        "slot1 (Corviknight) must ALSO independently carry a hypothesis — the \
+         side's Zoroark is still unresolved and isn't pinned to slot0 specifically"
+    );
+
+    // The PARTNER (slot1) switches out — Milotic switches in. Slot0's disguise is
+    // never touched or revealed at any point in this test.
+    state = apply_real_dex(state, vec![switch_in(Species::Milotic, p2(1))], pd, md);
+    assert_all_p2_items_known(&state, "after partner switch-out");
+
+    assert_eq!(
+        state.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Dragonite),
+        "the disguised slot0 must be completely undisturbed by its partner switching"
+    );
+    assert!(
+        state.p2_active_mons[0].possible_illusion_state.is_some(),
+        "slot0's hypothesis must survive its partner's switch-out"
+    );
+    assert!(
+        state.p2_active_mons[1].possible_illusion_state.is_some(),
+        "Milotic, replacing the partner, must receive/retain its own hypothesis"
+    );
+    let benched_corviknight = combined_back(&state, &Player::P2)
+        .into_iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Corviknight)))
+        .expect("the switched-out partner must bench under its own identity");
+    assert!(
+        benched_corviknight.possible_illusion_state.is_some(),
+        "the benched former partner must keep its own hypothesis too"
+    );
+
+    // The former partner (Corviknight) returns to slot1 — must re-match its own
+    // benched entry (open-sheet set + hypothesis intact), and slot0 must still be
+    // completely unaffected.
+    state = apply_real_dex(state, vec![switch_in(Species::Corviknight, p2(1))], pd, md);
+    assert_all_p2_items_known(&state, "after partner returns");
+    assert_eq!(state.p2_active_mons[1].possible_species, Unknown::Known(Species::Corviknight));
+    assert_eq!(state.p2_active_mons[1].item, Unknown::Known(Item::Leftovers));
+    assert!(state.p2_active_mons[1].possible_illusion_state.is_some());
+    assert_eq!(
+        state.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Dragonite),
+        "slot0 must remain untouched throughout"
+    );
+    assert!(state.p2_active_mons[0].possible_illusion_state.is_some());
+}
+
+fn combined_back<'a>(state: &'a UnknownBattleState, player: &Player) -> Vec<&'a UnknownPokemonState> {
+    match player {
+        Player::P1 => state.p1_known_back_mons.iter().chain(state.p1_possible_back_mons.iter()).collect(),
+        Player::P2 => state.p2_known_back_mons.iter().chain(state.p2_possible_back_mons.iter()).collect(),
+    }
+}
+
+/// Every P2 roster member's (active + bench) open-sheet item must be `Known` at
+/// this checkpoint — the direct encoding of the TODO.md complaint ("it displays
+/// that we have no information about that mon, but it should use the teamsheet
+/// information"). Used by the open-sheet Zoroark switching regression tests to
+/// assert no roster member EVER regresses to "no information", at any point in
+/// an arbitrarily long switch sequence.
+fn assert_all_p2_items_known(state: &UnknownBattleState, checkpoint: &str) {
+    let mut all: Vec<&UnknownPokemonState> = state.p2_active_mons.iter().collect();
+    all.extend(combined_back(state, &Player::P2));
+    for mon in all {
+        assert!(
+            matches!(mon.item, Unknown::Known(_)),
+            "[{checkpoint}] open-sheet item regressed to non-Known for {:?}: {:?}",
+            mon.possible_species, mon.item
+        );
+    }
 }
 
 fn combined_back_species(state: &UnknownBattleState, player: &Player) -> Vec<Species> {

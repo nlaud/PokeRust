@@ -339,16 +339,84 @@ pub(super) fn resolve_zoroark_globally(state: &mut UnknownBattleState, side: Pla
     }
 }
 
+/// Shared follow-up for EVERY `IllusionMirrorOutcome::Promoted` call site — Pass 1
+/// move/item reveals, and Pass 3's stat-tightening backstop surfacing through
+/// Pass 5 — not just the dedicated `IllusionEnded` event handler. `discarded_species`
+/// is the mon's `possible_species` captured by the caller BEFORE
+/// `apply_with_illusion_mirroring` overwrote it with the resolved (Zoroark)
+/// identity: that shown species was never really on the field and must be
+/// restored to `possible_back`, exactly like `IllusionEnded`'s handler does for a
+/// direct-damage/ability-change reveal.
+///
+/// Without this, a promotion triggered by move-legality (or a damage/stat
+/// contradiction) — which can and does fire BEFORE the disguise visibly breaks
+/// in-game — silently drops the decoy species from the tracked roster forever:
+/// by the time (if ever) the real `IllusionEnded` event later arrives, this
+/// mon's `possible_species` already reads as the resolved Zoroark identity, so
+/// that handler's own "what was discarded" capture no longer sees the decoy
+/// either, and its `is_illusion_capable_species` guard skips the restore
+/// entirely (it looks like there's nothing left to discard). Calling this at
+/// EVERY promotion site closes that gap at the moment it actually happens.
+///
+/// Guarded exactly like `IllusionEnded`'s own restore: a no-op if
+/// `discarded_species` wasn't `Known` (defensive; `possible_species` is always
+/// `Known` pre-promotion under the current model), if it's itself
+/// Illusion-capable (promotion only ever fires FROM a non-Illusion-capable shown
+/// identity), or if a matching bench entry already exists (e.g. `IllusionEnded`
+/// got here first this same turn).
+fn finish_illusion_promotion_restore(
+    state: &mut UnknownBattleState,
+    side: Player,
+    discarded_species: Unknown<Species>,
+    dex: &HashMap<Species, PokemonData>,
+    config: &InferenceConfig,
+) {
+    let Unknown::Known(discarded) = discarded_species else { return };
+    if unknowns::is_illusion_capable_species(&discarded) {
+        return;
+    }
+    if combined_back(state, &side).iter().any(|m| unknown_is_known_as(&m.possible_species, &discarded)) {
+        return;
+    }
+    restore_discarded_primary_to_bench(state, side, discarded, dex, config);
+}
+
+/// Look up `species`'s pristine team-preview snapshot in `side`'s
+/// `p{side}_roster_templates` (see that field's doc comment on
+/// `UnknownBattleState`). `None` under species-only (non-open-sheet) preview —
+/// the templates list is empty there — or for a species genuinely outside the
+/// team-preview roster (a synthetic test scenario). Callers must fall back to
+/// `from_opponent_species` in that case, exactly as they did before templates
+/// existed.
+fn find_roster_template<'a>(
+    state: &'a UnknownBattleState,
+    side: Player,
+    species: &Species,
+) -> Option<&'a UnknownPokemonState> {
+    let templates = match side {
+        Player::P1 => &state.p1_roster_templates,
+        Player::P2 => &state.p2_roster_templates,
+    };
+    templates.iter().find(|m| unknown_is_known_as(&m.possible_species, species))
+}
+
 /// Companion to a promotion (e.g. via `IllusionEnded`): the mon's PRIMARY identity
 /// being discarded (e.g. "Snorlax") was never actually confirmed to be on the
 /// field at all — the active slot was secretly this side's Illusion forme in
 /// disguise the whole time. That means the real `discarded_species` must still be
-/// unaccounted for somewhere in the party. Restore it to `possible_back` at a
-/// fresh, unrevealed baseline: everything "observed" about the discarded identity
-/// while it looked active was actually the Illusion forme's behavior
-/// misattributed to it, so none of it is trustworthy information about the real
-/// mon. Sound, if imprecise (the cost of having briefly guessed wrong about which
-/// physical mon was on the field — never a soundness gap).
+/// unaccounted for somewhere in the party. Restore it to `possible_back`.
+///
+/// Prefers cloning `discarded_species`'s pristine team-preview snapshot
+/// (`find_roster_template`) over rebuilding species-only: under an open team
+/// sheet, that snapshot already carries the fully-`Known` item/moves/ability/
+/// nature set team preview revealed, and everything "observed" about the
+/// discarded identity while it looked active was actually the Illusion forme's
+/// behavior misattributed to it — none of it is trustworthy information about
+/// the real mon, but the PRE-BATTLE sheet reveal still is. Falls back to the old
+/// species-only baseline only when no template exists (species-only preview, or
+/// a species outside the known roster). Sound either way, if imprecise in the
+/// fallback case (the cost of having briefly guessed wrong about which physical
+/// mon was on the field — never a soundness gap).
 ///
 /// Callers must first confirm no matching bench entry already exists for
 /// `discarded_species` (see the `IllusionEnded` handler) — this function
@@ -361,12 +429,70 @@ pub(super) fn restore_discarded_primary_to_bench(
     dex: &HashMap<Species, PokemonData>,
     config: &InferenceConfig,
 ) {
-    let mut restored =
-        UnknownPokemonState::from_opponent_species(discarded_species.clone(), dex, config.level);
-    recompute_stats_for_iv_mode(&mut restored, &discarded_species, dex, config);
+    let mut restored = if let Some(template) = find_roster_template(state, side, &discarded_species) {
+        let mut t = template.clone();
+        t.possible_illusion_state = None; // defensive; templates never carry one
+        t
+    } else {
+        let mut restored =
+            UnknownPokemonState::from_opponent_species(discarded_species.clone(), dex, config.level);
+        recompute_stats_for_iv_mode(&mut restored, &discarded_species, dex, config);
+        restored
+    };
+    // F2: if the side STILL has an unresolved Illusion forme after this
+    // restoration (a non-Species-Clause format with more than one Illusion-capable
+    // roster member — see `p{side}_unresolved_zoroark_count`'s doc comment), this
+    // freshly-rebuilt entry is itself eligible to be that OTHER Zoroark and must
+    // not be silently treated as ruled out. Under the ordinary single-Zoroark case
+    // this is a no-op: `resolve_zoroark_globally` (called by every caller of this
+    // function before it) already drops the count to 0 and clears every hypothesis
+    // side-wide once the side's one Illusion forme is positively located.
+    maybe_seed_fresh_hypothesis(state, side, &mut restored);
     match side {
         Player::P1 => state.p1_possible_back_mons.push(restored),
         Player::P2 => state.p2_possible_back_mons.push(restored),
+    }
+}
+
+/// Find `side`'s real Illusion-forme roster member — the template to seed a fresh
+/// hypothesis from — checking the live bench first (`combined_back`, in case it's
+/// still sitting there unresolved) and falling back to the pristine team-preview
+/// snapshot (`p{side}_roster_templates`) for the case where its live bench entry
+/// was already consumed or removed by earlier bookkeeping.
+fn find_illusion_baseline(state: &UnknownBattleState, side: Player) -> Option<UnknownPokemonState> {
+    let is_baseline = |m: &&UnknownPokemonState| {
+        matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
+    };
+    combined_back(state, &side).into_iter().find(is_baseline).cloned().or_else(|| {
+        let templates = match side {
+            Player::P1 => &state.p1_roster_templates,
+            Player::P2 => &state.p2_roster_templates,
+        };
+        templates.iter().find(|m| is_baseline(m)).cloned()
+    })
+}
+
+/// If `side` still has an unresolved Illusion forme, and `mon` is neither itself
+/// Illusion-capable nor already carrying a hypothesis, seed one from the side's
+/// Illusion-forme baseline. A no-op whenever the side's count is already 0 — under
+/// the ordinary Species-Clause case (at most one Illusion-capable roster member),
+/// that's always true by the time a rebuild path like `restore_discarded_primary_to_bench`
+/// runs, since the side's one Illusion forme was just positively located. This only
+/// does real work for a hypothetical multi-Illusion-forme roster, where a second,
+/// still-unresolved Illusion forme could legitimately be this freshly-rebuilt mon.
+fn maybe_seed_fresh_hypothesis(state: &UnknownBattleState, side: Player, mon: &mut UnknownPokemonState) {
+    let unresolved = match side {
+        Player::P1 => state.p1_unresolved_zoroark_count,
+        Player::P2 => state.p2_unresolved_zoroark_count,
+    };
+    if unresolved == 0 || mon.possible_illusion_state.is_some() {
+        return;
+    }
+    if matches!(&mon.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s)) {
+        return;
+    }
+    if let Some(baseline) = find_illusion_baseline(state, side) {
+        mon.possible_illusion_state = Some(Box::new(unknowns::seed_illusion_hypothesis_for(mon, &baseline)));
     }
 }
 
@@ -1057,6 +1183,9 @@ fn run_pass5_all_mons(
             .unwrap_or(false);
         if has_known_species
             && let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                // Captured BEFORE mirroring can overwrite `possible_species` on a
+                // `Promoted` outcome — see `finish_illusion_promotion_restore`.
+                let discarded_before = mon.possible_species.clone();
                 // Mirror onto a live Zoroark hypothesis (Increment 2): this is also the
                 // promotion backstop for Pass 3's stat tightening (see the "synergy"
                 // note in the plan) — Pass 3 never panics itself, so a primary stat
@@ -1068,6 +1197,7 @@ fn run_pass5_all_mons(
                 if matches!(outcome, IllusionMirrorOutcome::Promoted) {
                     let side = if mon_is_p2(state, idx) { Player::P2 } else { Player::P1 };
                     resolve_zoroark_globally(state, side);
+                    finish_illusion_promotion_restore(state, side, discarded_before, dex, config);
                 }
             }
     }
@@ -1414,8 +1544,12 @@ fn pass1_apply_event(
             // hypothesis (the primary was infeasible, the hypothesis wasn't) — acted on
             // AFTER the mon borrow ends, since `resolve_zoroark_globally` needs `state`.
             let mut promoted_illusion = false;
+            let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
             if let Some(idx) = mon_idx_for_active_slot(state, user)
                 && let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    // Captured BEFORE mirroring can overwrite `possible_species` on a
+                    // `Promoted` outcome — see `finish_illusion_promotion_restore`.
+                    discarded_before = mon.possible_species.clone();
                     let learnset_dex = &ctx.config.learnset_dex;
                     let outcome = apply_with_illusion_mirroring(mon, |m| {
                         reveal_move_on_mon(m, move_used);
@@ -1467,6 +1601,7 @@ fn pass1_apply_event(
             state.last_move_on_field = Some(move_used.clone());
             if promoted_illusion {
                 resolve_zoroark_globally(state, user.player);
+                finish_illusion_promotion_restore(state, user.player, discarded_before, ctx.dex, ctx.config);
             }
         }
 
@@ -1614,7 +1749,11 @@ fn pass1_apply_event(
                 let was_transferred = get_mon_by_idx(state, idx)
                     .is_some_and(|m| m.item_was_transferred);
                 let mut promoted_illusion = false;
+                let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    // Captured BEFORE mirroring can overwrite `possible_species` on a
+                    // `Promoted` outcome — see `finish_illusion_promotion_restore`.
+                    discarded_before = mon.possible_species.clone();
                     // `unknown_set_known` panics on any conflict (unlike ability reveal,
                     // which has its own "live change" overwrite path) — mirror it onto a
                     // live Zoroark hypothesis so an item inconsistent with the
@@ -1632,6 +1771,7 @@ fn pass1_apply_event(
                 }
                 if promoted_illusion {
                     resolve_zoroark_globally(state, slot.player);
+                    finish_illusion_promotion_restore(state, slot.player, discarded_before, ctx.dex, ctx.config);
                 }
             }
         }
@@ -2134,8 +2274,12 @@ fn pass1_apply_event(
 
         EventKind::ChargingMove { user, move_used } => {
             let mut promoted_illusion = false;
+            let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
             if let Some(idx) = mon_idx_for_active_slot(state, user)
                 && let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    // Captured BEFORE mirroring can overwrite `possible_species` on a
+                    // `Promoted` outcome — see `finish_illusion_promotion_restore`.
+                    discarded_before = mon.possible_species.clone();
                     let learnset_dex = &ctx.config.learnset_dex;
                     let outcome = apply_with_illusion_mirroring(mon, |m| {
                         reveal_move_on_mon(m, move_used);
@@ -2148,6 +2292,7 @@ fn pass1_apply_event(
                 }
             if promoted_illusion {
                 resolve_zoroark_globally(state, user.player);
+                finish_illusion_promotion_restore(state, user.player, discarded_before, ctx.dex, ctx.config);
             }
         }
 
@@ -2821,21 +2966,38 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         infer_regenerator_from_hp_delta(&mut m, sw, state);
         m
     } else {
-        // Completely new opponent mon: build from species, then recompute stat bounds for
-        // the configured IV mode (always call — fixes the bug where non-force_max_ivs mode
-        // left the mon with the from_opponent_species defaults instead of proper bounds).
-        // In normal operation every roster member was already seeded into `possible_back`
-        // at team preview (including its Zoroark hypothesis, if eligible), so this branch
-        // is a defensive fallback (e.g. a species outside the known roster in a test), not
-        // a path that needs its own hypothesis-seeding logic.
-        let mut new_mon =
-            UnknownPokemonState::from_opponent_species(species.clone(), ctx.dex, ctx.config.level);
-        recompute_stats_for_iv_mode(&mut new_mon, species, ctx.dex, ctx.config);
-        if let Some(legal) = &ctx.config.legal_items {
-            let mut candidates: Vec<Item> = legal.iter().cloned().collect();
-            candidates.push(Item::None);
-            new_mon.item = Unknown::Possibly(candidates);
-        }
+        // Not found on the bench — either a genuinely new opponent mon (a species
+        // outside the known roster, e.g. a synthetic test), or this physical roster
+        // member's bench entry was already consumed/removed by earlier bookkeeping
+        // (e.g. an Illusion decoy restored via `restore_discarded_primary_to_bench`
+        // and then immediately re-matched here, before F1 existed). Prefer the
+        // pristine team-preview snapshot (`find_roster_template`) over rebuilding
+        // species-only — under an open team sheet that snapshot still carries the
+        // fully-`Known` item/moves/ability/nature set, same reasoning as
+        // `restore_discarded_primary_to_bench`. In normal operation every roster
+        // member was already seeded into `possible_back` at team preview (including
+        // its Zoroark hypothesis, if eligible) and would have been found by the bench
+        // search above, so reaching this branch at all is the defensive case.
+        let mut new_mon = if let Some(template) = find_roster_template(state, *player, species) {
+            let mut t = template.clone();
+            t.possible_illusion_state = None; // defensive; templates never carry one
+            t
+        } else {
+            // Genuinely new: build from species, then recompute stat bounds for the
+            // configured IV mode (always call — fixes the bug where non-force_max_ivs
+            // mode left the mon with the from_opponent_species defaults instead of
+            // proper bounds).
+            let mut new_mon =
+                UnknownPokemonState::from_opponent_species(species.clone(), ctx.dex, ctx.config.level);
+            recompute_stats_for_iv_mode(&mut new_mon, species, ctx.dex, ctx.config);
+            if let Some(legal) = &ctx.config.legal_items {
+                let mut candidates: Vec<Item> = legal.iter().cloned().collect();
+                candidates.push(Item::None);
+                new_mon.item = Unknown::Possibly(candidates);
+            }
+            new_mon
+        };
+        maybe_seed_fresh_hypothesis(state, *player, &mut new_mon);
         new_mon
     };
 

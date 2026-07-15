@@ -157,11 +157,12 @@ would risk excluding the true value is never performed; the engine unions
 possibilities instead and lets a later, more specific observation narrow
 things down.
 
-`Possibly` exists specifically for Illusion (Zoroark): `maybe_widen_for_illusion`
-widens a switch-in's species to `Possibly([shown_species, zoroark_forme, …])`
-when a disguise is possible, and learnset narrowing (see below) prunes
-candidates that can't have produced an observed move, eventually collapsing to
-`Known` if only one survives.
+`Possibly` is used for ordinary multi-candidate uncertainty (e.g. a fresh
+opponent sighting's ability set, `Possibly(dex[species].abilities)`). Illusion
+(Zoroark) is deliberately **not** modelled this way — `possible_species` stays
+pinned to a single `Known` even for a mon that might be a disguised Zoroark; see
+"Illusion: the parallel-hypothesis model" below for how that ambiguity is
+tracked instead.
 
 ### Per-Pokémon fog: `UnknownPokemonState`
 
@@ -354,16 +355,19 @@ via Knock Off. `item_was_transferred` similarly gates Choice-lock exclusion
 Choice item, but not if a Choice item arrived mid-stint via Trick — that's
 consistent with "moved, was Tricked a Choice item, then legally moved again."
 
-**Illusion and the bench (S29).** If a Zoroark forme is on the switching
-side's known bench and the incoming species isn't itself a Zoroark forme,
-`pass1_switch` does not match the shown species against that benched entry —
-doing so risks merging the real teammate's accumulated fog with the disguised
-Zoroark's future events. Instead it creates a fresh, ambiguous active entry
-and widens it via `maybe_widen_for_illusion`. If that entry switches back out
-still unresolved (no `IllusionEnded`, no learnset collapse), `bench_outgoing_mon`
-discards it rather than benching it, since an ambiguous (`Possibly`-species)
-bench entry can never be re-matched by species and would otherwise double-count
-one physical roster slot.
+**Illusion and the bench.** Under the current parallel-hypothesis model (see
+"Illusion: the parallel-hypothesis model" below), `possible_species` is always
+pinned — Zoroark ambiguity lives entirely in a mon's own `possible_illusion_state`,
+which rides along for free whenever `pass1_switch`/`bench_outgoing_mon` move a
+whole `UnknownPokemonState` between active and bench. So switch-in matching is
+always plain species-matching against the bench, with no special-casing needed
+for a suspected disguise: whichever physical roster member's shown species
+matches is exactly the one being pulled onto the field, hypothesis (if any)
+attached. (This superseded an earlier design, S29, where a suspected disguise
+widened `possible_species` itself to `Possibly([shown, zoroark])` and had to be
+discarded rather than benched on an unresolved switch-out to avoid double-
+counting a roster slot — the parallel-hypothesis model has no such gap, since
+`possible_species` never widens and every non-fainted leaver benches uniformly.)
 
 ### Pass 2 — Item / Ability Presence and Absence from Behaviour
 
@@ -596,18 +600,95 @@ clause, the whole loop runs to a fixpoint rather than a single pass.
 
 ---
 
-## Learnset Narrowing (Illusion / species disambiguation)
+## Illusion: the parallel-hypothesis model
 
-**Where:** `narrow_species_by_learnset`, called from the `MoveUsed` and
-`ChargingMove` handlers.
+Zoroark's Illusion ability lets a switch-in *look like* any other non-fainted
+party member. This is the one place the engine tracks physical-identity
+ambiguity, and it does so without ever widening `possible_species` into a
+`Possibly` disjunction (an earlier design did this — see the historical note
+under Pass 1's "Illusion and the bench" above — and was superseded because a
+widened species can't be re-matched by species on the next switch-in without
+extra bookkeeping).
 
-When `possible_species` is `Possibly([s1, s2, …])` — set by
-`maybe_widen_for_illusion` for a suspected Zoroark disguise — and a move is
-observed, every candidate whose learnset is known and does *not* contain that
-move is dropped. Species with no learnset data available are kept (absence of
-data is not evidence of inability — dropping them would be unsound). If
-exactly one candidate survives, the state collapses to `Known` and refreshes
-every species-derived field (types, weight) from the resolved identity.
+**The model:** every mon that *could* secretly be the side's disguised Illusion
+forme carries a second, full `UnknownPokemonState` in its own
+`possible_illusion_state: Option<Box<UnknownPokemonState>>` field — "the
+restrictions on this physical mon IF it is actually Zoroark, disguised as
+whatever this mon's own shown species is." `possible_species` itself never
+moves; the ambiguity lives entirely in this parallel sub-state.
+
+**Seeding.** `seed_illusion_hypotheses` runs once, at the team-preview→battle
+transition (`into_battle_state`) — the only moment a side's whole roster is
+known and freshly built. It counts the side's real Illusion-capable roster
+members into `p{side}_unresolved_zoroark_count` (`UnknownBattleState`; almost
+always 0 or 1 — Species Clause permits at most one) and, if `> 0`, attaches a
+hypothesis (`seed_illusion_hypothesis_for`) to every *other* roster entry from
+that Illusion forme's own baseline: identity fields (species, types, ability,
+moves, item, nature, stat bounds, …) come from the baseline, while every
+physically-observable field (HP, status, boosts, volatiles, `times_hit`, …)
+comes from the host slot — both describe the same physical mon, just under a
+different identity hypothesis. From then on, ordinary bench/active bookkeeping
+(`pass1_switch`, `bench_outgoing_mon`) moves the *whole* `UnknownPokemonState`
+between active and bench, so the nested hypothesis rides along for free; no
+switch handler needs Illusion-specific logic.
+
+**Mirroring every pass.** `apply_with_illusion_mirroring` (`inference.rs`) is
+the generic wrapper: given a fallible per-mon operation `f` (the same one
+already used for the primary — e.g. `check_move_legal_for_species` for a
+learnset-legality check, or a Pass 3 stat-bound tightening), it replays `f`
+against the hypothesis first, then the primary, and resolves the four-way
+outcome:
+
+| Hypothesis under `f` | Primary under `f` | Result |
+|---|---|---|
+| OK | OK | `Unchanged` — both survive, kept side by side |
+| contradicts | OK | `HypothesisRejected` — not Zoroark; hypothesis dropped |
+| OK | contradicts | `Promoted` — IS Zoroark; `promote_illusion_to_primary` replaces the mon's fields wholesale |
+| contradicts | contradicts | genuine impossibility — panics as usual |
+
+`mirror_infallible_on_illusion` is the non-fallible counterpart, used for pure
+state transitions (e.g. clearing per-turn flags on switch-out) that can't
+contradict and so don't need the panic-catching machinery. This wiring covers
+Pass 1 move/item reveals, Pass 3 damage→stat tightening (both directions), and
+Pass 5 back-solve — a move or a damage roll that's impossible for the shown
+species but possible for Zoroark silently promotes the hypothesis.
+
+**Resolution.** Whenever a `Promoted` outcome fires, or an `IllusionEnded`
+event arrives (a direct-damage disguise break, or an ability
+suppression/change), or the real Illusion forme itself switches in undisguised
+(only it can ever be shown *as* its own species), the caller follows up with
+`resolve_zoroark_globally`: decrement `p{side}_unresolved_zoroark_count`, and
+at 0, drop every remaining `possible_illusion_state` on the side — the side's
+one Illusion forme (Species Clause) is now fully accounted for, so no other
+mon needs to keep carrying a hypothesis.
+
+Every `Promoted` site — Pass 1 move/item reveals, Pass 3's stat-tightening
+backstop surfacing through Pass 5, and the dedicated `IllusionEnded` handler —
+also follows up with `finish_illusion_promotion_restore`: the DISCARDED
+shown-species identity (captured by the caller before promotion overwrote it)
+was never really on the field and must be restored to `possible_back`, via
+`restore_discarded_primary_to_bench`. This matters because promotion routinely
+happens via move-legality (or a stat/damage contradiction) *before* the
+disguise ever visibly breaks in-game — a status move revealing an
+illegal-for-the-shown-species moveslot never deals damage, so `IllusionEnded`
+may not fire until much later, if ever. An end-to-end server run against a
+real open-sheet team surfaced exactly this gap: restoring the decoy only from
+the `IllusionEnded` handler meant a promotion that happened earlier (say, from
+Nasty Plot on a disguised Zoroark) left the decoy specie's `possible_species`
+already overwritten by the time (if ever) `IllusionEnded` arrived — so that
+handler's own "what was discarded" capture read the *already-promoted* Zoroark
+identity, not the decoy, and skipped the restore too. Calling
+`finish_illusion_promotion_restore` at every promotion site, right when it
+happens, closes that gap regardless of which mechanism triggered it.
+
+`restore_discarded_primary_to_bench` itself prefers a clone of the decoy
+species' pristine team-preview snapshot (`p{side}_roster_templates`, captured
+once at `into_battle_state`) over rebuilding species-only, so an
+open-team-sheet mon's already-known item/moves/ability/nature survive the
+reveal instead of regressing to "no information." The same roster-template
+preference applies to `pass1_switch`'s defensive "species not found on the
+bench" fallback. The `IllusionEnded` handler additionally purges CNF
+predicates derived from the now-stale disguise species' base stats/movepool.
 
 ---
 
