@@ -1,32 +1,30 @@
 # TODO
 ### Fixes
-- [x] Zoroark switching: an incoming mon that had been consumed as a disguise decoy
-  (or discarded after promotion) was rebuilt species-only via `from_opponent_species`,
-  regressing a fully-known open-sheet mon to "no information." Fixed via
-  `p{side}_roster_templates` (pristine team-preview snapshots) preferred by
-  `restore_discarded_primary_to_bench` and `pass1_switch`'s fallback, plus
-  `finish_illusion_promotion_restore` calling that restore at EVERY promotion site
-  (not just the `IllusionEnded` handler) — a live server run showed promotion via
-  move-legality mirroring can resolve a disguise well before it visibly breaks,
-  which previously dropped the decoy from the roster forever. Un-revealed
-  switch-out/return and doubles partner-switch round-trips (both singles and
-  doubles) are covered by regression tests; see `information/README.md`'s
-  "Illusion: the parallel-hypothesis model" section for the full design.
-- Add a test that just does the simulator + inference engine for both players, with random teams from the teamsheets and just clicking random moves until one player wins (do this like 25 times). And make sure this can run consistently and pass, since there shouldn't be anything impossible happening.
+- [x] Add inference to the benchmarking, sampling from all the teamsheets in the
+  folder: added `poke_rust/benches/battle_sweep.rs` (full doubles battles across
+  all 25 ordered teamsheet pairings, each resolved once and replayed against all
+  4 information modes so `apply_information` cost is timed fairly on an
+  identical event stream) and reworked `benches/turn_speed.rs` to sweep the same
+  pairings with seeded random leads/moves instead of two fixed teams (enumerate
+  mode capped at ≤4 damage rolls — full enumeration is the >15 GB doubles risk
+  CLAUDE.md flags, and randomized moves make branch counts unpredictable ahead
+  of time; sample mode keeps the full 1-16 roll grid). Command selection and
+  belief seeding are ported from the proven `random_battle_tests.rs` fuzzer,
+  shared between both benches via the new `benches/bench_common.rs`. Seeding
+  only reproduces the harness's first draw (team-preview leads) exactly — the
+  engine's own entropy-based RNG (damage rolls/crits/misses) feeds back into
+  which commands are legal on later turns, so `battle_sweep`'s full trajectory
+  varies run to run; `turn_speed`'s single post-preview turn is unaffected and
+  reproduces exactly (verified by diffing branch counts across two runs).
+  `battle_sweep` also surfaces, at low frequency (~1-2% of calls), the same two
+  known inference contradictions tracked below — expected, not a bench defect.
+- `random_doubles_battles_are_sound` (poke_rust/src/tests/random_battle_tests.rs) currently fails — found two real inference-engine soundness bugs, both unfixed:
+  - Pass 5 nature back-solve hits a crossed min/max stat bound (`information/inference.rs:8732`) — some earlier pass (likely Pass 3's damage-based stat inversion) narrows a bound past an existing one without detecting the crossing. Seen on Def, SpA, and SpD, so systemic not stat-specific.
+  - Learnset-based Illusion narrowing (`information/inference.rs:3449`, `check_move_legal_for_species`) misfires on ordinary moves (Aqua Jet, Rock Slide, Scald, etc.) almost any time a Zoroark-line Pokémon is on the field. Every existing test disables this feature (`learnset_dex: HashMap::new()`), so it likely has never run against real data before — suspect `parse_learnset_dex` (`state/dex_data.rs:2016`) is mis-parsing the learnset file (e.g. missing TM/egg moves). See memory `project_random_battle_fuzz_test_findings.md` for full repro details.
 ### New features
 - Link all the READMEs to the main project README.
 - Frontend features
   - We need a favicon lul
-- [x] Implement Closed Team Sheets information mode: added `InformationMode::ClosedTeamSheet`,
-  reusing the engine's existing species-only fog primitive (`from_opponent_species` /
-  a new `team_preview_closed_sheet_from_perspective` constructor) that was previously
-  test-only. Wired end-to-end through `routes.rs`/`dto.rs` as `"closedSheet"` and made
-  it the new default (replacing `perfect`) in both the server DTO and the frontend
-  setup UI. `force_max_ivs` threads through via a `pin_min_ivs_to_max` helper factored
-  out of `from_opponent_open_sheet`, so closed-sheet stat bounds are tightened to IV 31
-  under the Champions competitive default same as open-sheet. Verified with 2 new Rust
-  regression tests (`mapping.rs`) plus a live Playwright E2E run against the real
-  server + dev frontend.
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)
 - Create a meta sampler from pikalytics, and then get the algorithm to understand that
   - [ ] Tracker page: needs a parser for lines of input -> action / reaction tree
