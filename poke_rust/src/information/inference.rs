@@ -7047,6 +7047,29 @@ fn compute_attacker_stat_bounds(
     ))
 }
 
+/// Write a Pass-3-derived hypothesis value back onto `idx`'s LIVE mon — but only
+/// if that mon is still ambiguous right now. `value` is computed from a pre-move
+/// snapshot (`defender_unk`/`attacker_unk`) taken before Pass 1 ran; between that
+/// snapshot and this write, an earlier reaction in the SAME event-tree walk (most
+/// commonly a direct-damage `IllusionEnded`, or the mon's own learnset-illegal
+/// move) may have already promoted or rejected this mon's hypothesis via
+/// `promote_illusion_to_primary`/`resolve_zoroark_globally` — `possible_illusion_
+/// state` is already `None` on the live mon in that case, and writing `value`
+/// back here would silently un-resolve an already-settled identity, leaving
+/// `is_illusion_suspected` stuck `true` even though species/ability/moves have
+/// already flipped to the resolved truth. S42.
+fn write_back_pass3_hypothesis(
+    state: &mut UnknownBattleState,
+    idx: usize,
+    value: Option<Box<UnknownPokemonState>>,
+) {
+    if let Some(mon) = get_mon_mut_by_idx(state, idx)
+        && mon.possible_illusion_state.is_some()
+    {
+        mon.possible_illusion_state = value;
+    }
+}
+
 /// Mirrors Direction B's tightening onto a live Zoroark hypothesis (Increment 2).
 /// `hyp` is the attacker's pre-move hypothesis snapshot (from `attacker_unk`'s own
 /// cloned `possible_illusion_state` — see `pass3_direction_b`'s S24 comment). Unlike
@@ -7081,9 +7104,7 @@ fn mirror_pass3_direction_b_onto_hypothesis(
         .is_some_and(|t| t.possible_illusion_state.is_some());
     // S26 (mirrored): a Transformed hypothesis can't be soundly analyzed this way.
     if target_has_hyp || hyp.pre_transform.is_some() {
-        if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
-            mon.possible_illusion_state = Some(Box::new(hyp));
-        }
+        write_back_pass3_hypothesis(state, user_idx, Some(Box::new(hyp)));
         return;
     }
 
@@ -7099,9 +7120,7 @@ fn mirror_pass3_direction_b_onto_hypothesis(
         }
     };
 
-    if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
-        mon.possible_illusion_state = feasible.then_some(Box::new(hyp));
-    }
+    write_back_pass3_hypothesis(state, user_idx, feasible.then_some(Box::new(hyp)));
 }
 
 /// Generic monotone binary-search for the feasible BSV interval `[found_lo, found_hi]`.
@@ -7870,9 +7889,7 @@ fn mirror_pass3_direction_a_onto_hypothesis(
 ) {
     // S26 (mirrored): a Transformed hypothesis can't be soundly analyzed this way.
     if hyp.pre_transform.is_some() {
-        if let Some(mon) = get_mon_mut_by_idx(state, target_idx) {
-            mon.possible_illusion_state = Some(Box::new(hyp));
-        }
+        write_back_pass3_hypothesis(state, target_idx, Some(Box::new(hyp)));
         return;
     }
 
@@ -7888,9 +7905,7 @@ fn mirror_pass3_direction_a_onto_hypothesis(
         }
     };
 
-    if let Some(mon) = get_mon_mut_by_idx(state, target_idx) {
-        mon.possible_illusion_state = feasible.then_some(Box::new(hyp));
-    }
+    write_back_pass3_hypothesis(state, target_idx, feasible.then_some(Box::new(hyp)));
 }
 
 // ── Pass 4: Speed ordering → Spe bounds ──────────────────────────────────────

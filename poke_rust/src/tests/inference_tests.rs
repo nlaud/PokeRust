@@ -3055,6 +3055,129 @@ fn test_zoroark_pass3_direction_a_promotes_on_defender_infeasibility() {
     );
 }
 
+/// S42 regression, Direction A: a direct-damage reveal (`IllusionEnded`, nested as
+/// a reaction under this same hit's `DamageDealt`) must leave `possible_illusion_
+/// state` cleared. Pass 1 processes `IllusionEnded` (promoting + `resolve_zoroark_
+/// globally`) while walking this `MoveUsed` event's reactions, BEFORE Pass 3 runs
+/// for the same event; Pass 3's Direction A mirror reads a PRE-MOVE snapshot of
+/// the defender that still carries the (now-stale) hypothesis, and before the S42
+/// fix (`write_back_pass3_hypothesis`) unconditionally wrote it straight back onto
+/// the just-resolved live mon — leaving `is_illusion_suspected` stuck `true`
+/// forever even though the species had already correctly flipped to Zoroark.
+///
+/// The damage (5% — 100% to 95%) is deliberately light: empirically verified, a
+/// heavier hit (e.g. 50%) narrows the re-attached hypothesis's stat window enough
+/// that Pass 5's own EV/IV-lattice check independently rejects it as infeasible —
+/// coincidentally masking the Pass 3 bug by cleaning up its bad write-back for an
+/// unrelated reason. A light hit is comfortably "no new evidence" for either
+/// Garchomp's or Zoroark's Def (`compute_defender_stat_bounds` returns `None`,
+/// `feasible` defaults to `true`), so nothing downstream rejects the erroneously
+/// re-attached hypothesis — isolating the write-back bug on its own.
+#[test]
+fn test_s42_pass3_direction_a_does_not_reattach_hypothesis_after_illusion_ended() {
+    let mut p1_mon = unknown_mon_species(Species::Snorlax);
+    p1_mon.hp = PokemonHP::Number(500);
+    p1_mon.min_stats = [500, 100, 100, 100, 100, 100];
+    p1_mon.max_stats = [500, 100, 100, 100, 100, 100];
+    p1_mon.item = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    let mut garchomp_shown = neutral_no_item_garchomp();
+    garchomp_shown.hp = PokemonHP::Percent(100);
+    seed_zoroark_hypothesis_on(&mut garchomp_shown, &neutral_no_item_zoroark());
+
+    let state = battle_1v1(p1_mon, garchomp_shown);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Earthquake, targets: vec![p2(0)] },
+            vec![event_with(
+                EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(95) },
+                vec![event(EventKind::IllusionEnded { slot: p2(0), actual_species: Species::Zoroark })],
+            )],
+        )],
+        garchomp_zoroark_dex(),
+        move_dex,
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "IllusionEnded must promote the slot to the true (Zoroark) identity"
+    );
+    assert!(
+        result.p2_active_mons[0].possible_illusion_state.is_none(),
+        "S42: Pass 3's Direction A mirror must NOT re-attach the pre-move \
+         hypothesis snapshot after IllusionEnded already resolved this mon \
+         earlier in the same event-tree walk"
+    );
+    assert_eq!(
+        result.p2_unresolved_zoroark_count, 0,
+        "the side's Zoroark is now positively located"
+    );
+}
+
+/// S42 regression, Direction B: Zoroark's own damaging move that's illegal for the
+/// shown species (Garchomp) promotes the hypothesis via `MoveUsed`'s Pass 1
+/// handler (move-legality contradiction) — but this SAME event also runs Pass 3
+/// Direction B (the move dealt real damage to P1's Number-tracked HP), which reads
+/// the ATTACKER's pre-move snapshot (still carrying the stale hypothesis) and,
+/// before the S42 fix, wrote it straight back onto the just-promoted live mon.
+/// Companion to the Direction A test above, covering the attacker-side write-back
+/// site (`user_idx`) instead of the defender-side one (`target_idx`).
+#[test]
+fn test_s42_pass3_direction_b_does_not_reattach_hypothesis_after_learnset_promotion() {
+    let mut garchomp_shown = neutral_no_item_garchomp();
+    seed_zoroark_hypothesis_on(&mut garchomp_shown, &neutral_no_item_zoroark());
+
+    let our_mon = known_p1_normal();
+    let pre_hp = match our_mon.hp { PokemonHP::Number(n) => n, _ => panic!("expected Number") };
+
+    let state = battle_1v1(our_mon, garchomp_shown);
+
+    let mut dark_pulse = normal_physical_move(PokemonMove::DarkPulse, 80);
+    dark_pulse.category = MoveCategory::Special;
+    dark_pulse.pokemon_type = PokemonType::Dark;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::DarkPulse, dark_pulse);
+
+    let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    learnset_dex.insert(Species::Garchomp, [PokemonMove::Earthquake].into_iter().collect());
+    learnset_dex.insert(Species::Zoroark, [PokemonMove::DarkPulse].into_iter().collect());
+    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+
+    let result = apply_with_config(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::DarkPulse, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(pre_hp.saturating_sub(30)),
+            })],
+        )],
+        garchomp_zoroark_dex(),
+        move_dex,
+        config,
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "a move only Zoroark can know must promote the hypothesis to primary"
+    );
+    assert!(
+        result.p2_active_mons[0].possible_illusion_state.is_none(),
+        "S42: Pass 3's Direction B mirror must NOT re-attach the pre-move \
+         hypothesis snapshot after the MoveUsed handler already promoted this \
+         mon earlier in the same event"
+    );
+}
+
 // ── Direction B: upper-bound tightening ──────────────────────────────────────
 
 /// Damage 91 is achievable by Garchomp BSV ≤ 161 but NOT by BSV ≥ 162.
