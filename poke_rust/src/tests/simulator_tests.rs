@@ -7503,6 +7503,77 @@ mod tests {
             }
 
             #[test]
+            fn sparkling_aria_cure_emits_status_cured_event() {
+                // Sparkling Aria's Burn cure previously mutated `tgt.status = None` with
+                // no emitted event at all — invisible to the fog-of-war observer, same
+                // silent-mutation class as the Frozen-thaw fix above. Silently curing
+                // Burn here left the belief still tracking Burn, which could later
+                // collide with a genuinely new status inflicted on the same mon.
+                use crate::information::information::{EventKind, InformationEvent};
+                use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+                fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+                    events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+                }
+
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+
+                let attacker = build_pokemon_state(
+                    Species::Primarina,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::SparklingAria), None, None, None]),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+
+                let mut defender = build_pokemon_state(
+                    Species::Snorlax,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+                defender.status = Some(Status::Burn);
+
+                let outcomes = run_single_turn_with_events(
+                    &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    move_dex,
+                    pokemon_dex,
+                    Player::P1,
+                );
+
+                assert!(
+                    outcomes.iter().any(|(_, events, _)| {
+                        events.as_ref().is_some_and(|events| {
+                            tree_contains(events, &|k| matches!(
+                                k, EventKind::StatusCured { status: Status::Burn, .. }
+                            ))
+                        })
+                    }),
+                    "Sparkling Aria curing Burn must emit StatusCured, not just mutate status silently"
+                );
+            }
+
+            #[test]
             fn freeze_immunities() {
                 let pokemon_dex = pokemon_dex();
                 let move_dex = move_dex();
@@ -9395,6 +9466,49 @@ mod tests {
             // The Natural Cure mon (now on the bench) is healed of its status.
             assert_eq!(after.p1_back_mons[0].ability, Ability::NaturalCure);
             assert_eq!(after.p1_back_mons[0].status, None);
+        }
+
+        #[test]
+        fn natural_cure_switch_out_emits_status_cured_event() {
+            // Natural Cure previously mutated `mon.status = None` on switch-out with no
+            // emitted event at all — invisible to the fog-of-war observer, unlike the
+            // already-fixed EOT ability cures (Shed Skin/Hydration) and the Frozen-thaw
+            // damage path. Silently curing Burn here left the belief still tracking
+            // Burn, which later collided with a genuinely new status inflicted on the
+            // same mon (a real "StatusInflicted X but already has Burn" contradiction).
+            use crate::information::information::{EventKind, InformationEvent};
+            use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+            fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+                events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+            }
+
+            let leaving = mon(Species::Snorlax, Ability::NaturalCure, None, Some(Status::Burn));
+            let replacement = mon(Species::Clefable, Ability::Pressure, None, None);
+            let target = mon(Species::Snorlax, Ability::Pressure, None, None);
+            let initial = battle_state_from_lists(vec![leaving], vec![replacement], vec![target], vec![]);
+
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let outcomes = run_single_turn_with_events(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand { party_index: 0 })]),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                mdex, pdex, Player::P1,
+            );
+
+            let cured_branch_has_event = outcomes.iter().any(|(s, events, _)| {
+                matches!(s, MatchState::BattleState(bs) if bs.p1_back_mons[0].status.is_none())
+                    && events.as_ref().is_some_and(|events| {
+                        tree_contains(events, &|k| matches!(
+                            k, EventKind::StatusCured { status: Status::Burn, .. }
+                        ))
+                    })
+            });
+            assert!(
+                cured_branch_has_event,
+                "Natural Cure curing status on switch-out must emit StatusCured, not just mutate status silently"
+            );
         }
 
         #[test]
@@ -22334,6 +22448,42 @@ mod volatile_status_debuffs {
         let (bs, _) = extract_battle_state(outcomes);
         assert_eq!(bs.p2_active_mons[0].status, None,
             "Uproar should wake all sleeping Pokémon");
+    }
+
+    #[test]
+    fn uproar_wake_emits_status_cured_event() {
+        // Uproar waking a sleeping mon previously mutated `mon.status = None` with no
+        // emitted event at all — invisible to the fog-of-war observer (masked only by
+        // StatusInflicted's Sleep-conflict self-heal, so it didn't crash, but a later
+        // status-inflicting effect on the woken mon would misattribute the cure).
+        use crate::information::information::{EventKind, InformationEvent};
+        use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+        fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+            events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+        }
+
+        let p1 = mon(Species::Snorlax, PokemonMove::Uproar, Ability::None);
+        let mut p2 = mon(Species::Snorlax, PokemonMove::Splash, Ability::None);
+        p2.status = Some(Status::Sleep(2));
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+        let outcomes = run_single_turn_with_events(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            move_dex(), pokemon_dex(), Player::P1,
+        );
+
+        assert!(
+            outcomes.iter().any(|(_, events, _)| {
+                events.as_ref().is_some_and(|events| {
+                    tree_contains(events, &|k| matches!(
+                        k, EventKind::StatusCured { status: Status::Sleep(_), .. }
+                    ))
+                })
+            }),
+            "Uproar waking a sleeping target must emit StatusCured, not just mutate status silently"
+        );
     }
 
     #[test]

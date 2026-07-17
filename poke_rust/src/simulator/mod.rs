@@ -759,6 +759,9 @@ fn apply_single_hit_branch(
         // volatiles below) so `StatusCured` can be emitted once the target_mon
         // borrow has ended.
         let mut frozen_thawed_by_damage: Option<Status> = None;
+        // Same split-borrow pattern: Uproar waking this sleeping target is captured
+        // here so `StatusCured` can be emitted once the target_mon borrow has ended.
+        let mut uproar_woke_target = false;
         // Captures (new_hp, max_hp) after take_damage so DamageDealt can be emitted once
         // the target_mon borrow has ended (same split pattern as Smack Down volatiles below).
         let mut damage_dealt_hp_info: Option<(u16, u16)> = None;
@@ -897,6 +900,7 @@ fn apply_single_hit_branch(
             if *move_name == PokemonMove::Uproar
                 && let Some(crate::state::dex_data::Status::Sleep(_)) = target_mon.status {
                     target_mon.status = None;
+                    uproar_woke_target = true;
                 }
 
             if *move_name == PokemonMove::SkyDrop {
@@ -1076,6 +1080,13 @@ fn apply_single_hit_branch(
         // ended — see `frozen_thawed_by_damage`'s doc comment above.
         if let Some(status) = frozen_thawed_by_damage {
             simulator_helpers::emit(&mut bs, EventKind::StatusCured { target: target_slot, status });
+        }
+
+        // Uproar waking this (sleeping) target — same silent-mutation fix pattern as
+        // the Frozen-thaw case just above; previously invisible to the observer
+        // (masked today only by StatusInflicted's Sleep-conflict self-heal).
+        if uproar_woke_target {
+            simulator_helpers::emit(&mut bs, EventKind::StatusCured { target: target_slot, status: Status::Sleep(0) });
         }
 
         // Berserk: HP crossed from above 50% to ≤ 50% — emit reveal + SpA boost nested under it.
@@ -7828,7 +7839,7 @@ fn perform_switch_out_in(
 
     // All switch-out side effects (switch-out abilities, Neutralizing Gas lift, primal
     // weather ending) are handled here, after the departing Pokémon has reached the bench.
-    simulator_helpers::handle_pokemon_switch_out(next_state, user_slot.player, bench_index);
+    simulator_helpers::handle_pokemon_switch_out(next_state, user_slot, bench_index);
 }
 
 /// Perform a self-switch (U-turn, Baton Pass, Shed Tail, etc.) from `user_slot` to

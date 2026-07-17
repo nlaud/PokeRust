@@ -5696,6 +5696,20 @@ fn pass_eot_sand_immunity(
         return;
     }
 
+    // Weather naturally expiring THIS end-of-turn skips residual damage entirely for
+    // every mon, immune or not (confirmed game behavior: the turn Sandstorm "subsides",
+    // nobody takes chip, matching `decrement_effect_timers` clearing the weather before
+    // `apply_pre_status_residuals` runs in `end_turn`, simulator/helpers.rs). `state.weather`
+    // above still reads Sandstorm because pass 1 hasn't processed this EndOfTurn's
+    // `WeatherChanged` reaction yet — check the reaction directly (deep scan, same as
+    // `apply_end_of_turn`'s own `weather_ended` check) so "no chip" here is correctly
+    // read as carrying zero information about item/ability, not evidence of immunity.
+    if any_reaction_deep(&event.reactions, &|k| {
+        matches!(k, EventKind::WeatherChanged { weather: None })
+    }) {
+        return;
+    }
+
     let legal_ok = |item: &Item| ctx.config.legal_item_ok(item);
 
     // p2 active mons start after all p1 segments.
@@ -6196,6 +6210,13 @@ fn pass3_damage_to_stats(
                 (PokemonHP::Number(pre), PokemonHP::Number(post)) => {
                     let exact_damage = (*pre).saturating_sub(*post);
                     if exact_damage > 0 {
+                        // S46: a hit that faints the target only reveals a LOWER bound on
+                        // the true damage — HP can't go negative, so `exact_damage` here
+                        // is `min(true_damage, pre_hp)`, not necessarily the true damage
+                        // itself. Any attacker offense strong enough to overkill by an
+                        // arbitrary margin produces the exact same observed (0 HP, Faint)
+                        // outcome. See `pass3_direction_b`'s `lethal` parameter.
+                        let lethal = *post == 0;
                         pass3_direction_b(
                             state,
                             event,
@@ -6209,6 +6230,7 @@ fn pass3_damage_to_stats(
                             is_crit,
                             &current_hp,
                             exact_damage,
+                            lethal,
                             bp_override,
                             speed_dep_bp,
                         );
@@ -6964,6 +6986,9 @@ fn pass3_direction_b(
     // full-HP-gated reducers like Multiscale on the hit that broke full HP).
     hit_pre_hp: &PokemonHP,
     exact_damage: u16,
+    // S46: true when this hit fainted the target (`exact_damage` is then a lower bound
+    // on the true damage, not an exact value) — see `find_feasible_bsv_range_b`.
+    lethal: bool,
     // Per-hit base power override for multi-hit moves (None = use move's base_power).
     bp_override: Option<u16>,
     // True for Gyro Ball / Electro Ball — BP depends on attacker + target speeds.
@@ -7013,7 +7038,7 @@ fn pass3_direction_b(
     if let Some((global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi, per_class, booster_items, booster_abilities, si)) =
         compute_attacker_stat_bounds(
             state, &attacker_unk, &target_unk, user_slot, target_slot, move_data, off_stat,
-            ctx, is_crit, exact_damage, bp_override, speed_dep_bp,
+            ctx, is_crit, exact_damage, lethal, bp_override, speed_dep_bp,
         )
     {
         // Apply unconditional tightening.
@@ -7062,7 +7087,7 @@ fn pass3_direction_b(
     if let Some(hyp) = attacker_unk.possible_illusion_state.clone() {
         mirror_pass3_direction_b_onto_hypothesis(
             state, user_idx, target_idx, *hyp, &target_unk, user_slot, target_slot,
-            move_data, off_stat, ctx, is_crit, exact_damage, bp_override, speed_dep_bp,
+            move_data, off_stat, ctx, is_crit, exact_damage, lethal, bp_override, speed_dep_bp,
         );
     }
 }
@@ -7158,6 +7183,9 @@ fn compute_attacker_stat_bounds(
     ctx: &BattleContext,
     is_crit: bool,
     exact_damage: u16,
+    // S46: true when this hit fainted the target — see `find_feasible_bsv_range_b`'s
+    // `lethal` doc comment for why this changes the oracle's feasibility check.
+    lethal: bool,
     bp_override: Option<u16>,
     speed_dep_bp: bool,
 ) -> StatBoundsSearchResult {
@@ -7365,6 +7393,7 @@ fn compute_attacker_stat_bounds(
                 0,
                 exact_damage,
                 is_crit,
+                lethal,
                 bp_override,
                 attacker_speed_range,
             );
@@ -7414,6 +7443,7 @@ fn compute_attacker_stat_bounds(
                             streak,
                             exact_damage,
                             is_crit,
+                            lethal,
                             bp_override,
                             attacker_speed_range,
                         );
@@ -7483,6 +7513,8 @@ fn mirror_pass3_direction_b_onto_hypothesis(
     ctx: &BattleContext,
     is_crit: bool,
     exact_damage: u16,
+    // S46: see `pass3_direction_b`'s `lethal` doc comment.
+    lethal: bool,
     bp_override: Option<u16>,
     speed_dep_bp: bool,
 ) {
@@ -7502,7 +7534,7 @@ fn mirror_pass3_direction_b_onto_hypothesis(
 
     let feasible = match compute_attacker_stat_bounds(
         state, &hyp, target_unk, user_slot, target_slot, move_data, off_stat,
-        ctx, is_crit, exact_damage, bp_override, speed_dep_bp,
+        ctx, is_crit, exact_damage, lethal, bp_override, speed_dep_bp,
     ) {
         None => true, // no new evidence derivable from this hit for this identity
         Some((bsv_lo, bsv_hi, stat_lo, stat_hi, _per_class, _items, _abilities, si)) => {
@@ -7610,6 +7642,13 @@ fn find_feasible_bsv_range_b(
     streak: u8,
     exact_damage: u16,
     is_crit: bool,
+    // S46: `exact_damage` is `min(true_damage, pre_hp)` when the target fainted on this
+    // hit — HP can't go negative, so any attacker offense strong enough to overkill by
+    // an arbitrary margin produces the identical observed (0 HP, Faint) outcome. Treating
+    // this as an exact-match requirement (the non-lethal case) unsoundly excludes every
+    // BSV whose damage roll exceeds `exact_damage`, which for a high-Atk attacker can be
+    // ALL of them — silently excluding the true value. See the call site's doc comment.
+    lethal: bool,
     bp_override: Option<u16>,
     attacker_speed_range: Option<(u16, u16)>,
 ) -> (Option<u16>, Option<u16>) {
@@ -7688,12 +7727,14 @@ fn find_feasible_bsv_range_b(
     };
 
     // A BSV is feasible if the oracle produces `exact_damage` with correct crit for
-    // *any* speed endpoint (sound union over the speed range).
+    // *any* speed endpoint (sound union over the speed range). For a lethal hit,
+    // feasibility is `dmg >= exact_damage` instead of exact equality — see `lethal`'s
+    // doc comment on this function's signature.
     let can_produce = |bsv: u16| -> bool {
         speed_endpoints.iter().any(|&spe| {
-            run_oracle(bsv, spe)
-                .iter()
-                .any(|(dmg, crit, _)| *dmg == exact_damage && *crit == is_crit)
+            run_oracle(bsv, spe).iter().any(|(dmg, crit, _)| {
+                *crit == is_crit && if lethal { *dmg >= exact_damage } else { *dmg == exact_damage }
+            })
         })
     };
 
@@ -7712,6 +7753,35 @@ fn find_feasible_bsv_range_b(
         }
         (lo, hi)
     };
+
+    // S46: a lethal hit only constrains the LOWER end of the BSV range (strong enough
+    // to have dealt at least `exact_damage`) — there is no true upper constraint, since
+    // arbitrarily higher offense still produces the identical (0 HP, Faint) observation.
+    // `p_hi`/`bracket_hi`'s "min_roll ≤ exact_damage" is only valid for the non-lethal
+    // exact-match case; reusing it here would wrongly cap the true (possibly much
+    // higher) BSV. Search only the lower bracket and report `bsv_hi` (the existing
+    // search ceiling) as the upper bound — a sound "no new constraint" value, since
+    // callers only ever narrow their tracked max via `.min()` against it.
+    if lethal {
+        let p_lo = |b: u16| roll_band(b).1.is_some_and(|m| m >= exact_damage);
+        let (lo, hi) = (bsv_lo as i32, bsv_hi as i32);
+        let mut lo_search = lo;
+        let mut hi_search = hi;
+        let mut bracket_lo: Option<u16> = None;
+        while lo_search <= hi_search {
+            let mid = (lo_search + hi_search) / 2;
+            if p_lo(mid as u16) {
+                bracket_lo = Some(mid as u16);
+                hi_search = mid - 1;
+            } else {
+                lo_search = mid + 1;
+            }
+        }
+        return match bracket_lo {
+            Some(bl) => ((bl..=bsv_hi).find(|&b| can_produce(b)), Some(bsv_hi)),
+            None => (None, None),
+        };
+    }
 
     // Binary-search for the feasible BSV interval, exploiting the monotone damage
     // property (higher offensive BSV → more damage, non-decreasing).

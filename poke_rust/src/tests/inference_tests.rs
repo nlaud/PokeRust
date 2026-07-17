@@ -3385,6 +3385,53 @@ fn test_pass3_dir_b_lower_bound_tightened() {
     );
 }
 
+// ── S46: Direction B must not exact-match a lethal hit's damage ──────────────
+//
+// A hit that faints the target only reveals `exact_damage = min(true_damage, pre_hp)`
+// — HP can't go negative, so any attacker offense strong enough to overkill by an
+// arbitrary margin produces the identical (0 HP, Faint) observation. Treating this
+// as an exact-match requirement (as the non-lethal case correctly does) unsoundly
+// excludes every BSV whose damage roll exceeds `exact_damage`, which can be the
+// TRUE value. Found via `random_doubles_battles_are_sound` (AerodactylMega, true
+// nature Jolly — neutral for Atk — wrongly excluded down to nerf-Atk-only natures
+// after a Dual Wingbeat/Rock Slide KO).
+
+/// Same BSV/damage derivation as `test_pass3_dir_b_upper_bound_tightened` (damage=91,
+/// only reachable by BSV≤161 as an *exact* match) — but here the target's whole HP
+/// IS 91, so this hit is lethal. BSV=182 (Garchomp's true neutral maximum) deals well
+/// over 91 at every roll, which would have (wrongly) excluded it under the old
+/// exact-match rule. The upper bound must remain at the true ceiling (182), not drop
+/// to 161 as it would for an equivalent non-lethal hit.
+#[test]
+fn test_s46_pass3_dir_b_lethal_hit_does_not_cap_upper_bound() {
+    let mut p1_mon = known_p1_normal();
+    p1_mon.hp = PokemonHP::Number(91);
+    p1_mon.min_stats[0] = 91;
+    p1_mon.max_stats[0] = 91;
+
+    let state = battle_1v1(p1_mon, neutral_no_item_garchomp());
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(0) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+    let p2 = &result.p2_active_mons[0];
+
+    assert!(
+        p2.max_pre_nature_stat[1] >= 182,
+        "a lethal hit must not cap the upper BSV bound below the true ceiling (182) — \
+         got {}. A lethal hit's exact_damage is a lower bound, not an exact value.",
+        p2.max_pre_nature_stat[1]
+    );
+}
+
 // ── Direction B: soundness across the full damage range ──────────────────────
 
 /// Every achievable damage value in Garchomp's EQ range (under force_max_ivs=true)
@@ -10855,6 +10902,50 @@ fn test_eot_sand_immunity_not_emitted_without_sandstorm() {
     assert!(
         !has_clause,
         "Sand-immunity clause must NOT be emitted when there is no Sandstorm"
+    );
+}
+
+/// When Sandstorm naturally expires THIS end-of-turn (confirmed game behavior: the
+/// turn weather "subsides," nobody takes residual chip that turn — `end_turn`
+/// clears `state.weather` via `decrement_effect_timers` before `apply_pre_status_
+/// residuals` runs), "no chip" carries zero information about item/ability and must
+/// NOT emit a sand-immunity disjunction, even though `state.weather` (pass 1 hasn't
+/// processed this EndOfTurn's `WeatherChanged` reaction yet) still reads Sandstorm.
+/// Regression for the mega-stone/item Known-conflict this over-narrow produced
+/// (e.g. `Known(SafetyGoggles)` forced on a mon whose true held item was later
+/// revealed as its Mega Stone via `MegaEvolution`).
+#[test]
+fn test_sand_immunity_not_inferred_when_weather_expires_this_eot() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::AirLock, Ability::CloudNine]);
+
+    let mut state = battle_with_p2(vec![p2_mon]);
+    state.weather = Some(Weather::Sandstorm);
+
+    // No DamageDealt (no visible chip) — but this EOT's own reactions show weather
+    // naturally ending, fully explaining the absent chip.
+    let eot = event_with(
+        EventKind::EndOfTurn,
+        vec![event(EventKind::WeatherChanged { weather: None })],
+    );
+    let result = apply(state, vec![eot]);
+
+    let has_sand_immunity_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::SandVeil, .. }
+                | Statement::HasAbility { ability: Ability::SandRush, .. }
+                | Statement::HasAbility { ability: Ability::SandForce, .. }
+                | Statement::HasAbility { ability: Ability::Overcoat, .. }
+                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
+        ))
+    });
+    assert!(
+        !has_sand_immunity_clause,
+        "no sand-immunity clause should be emitted when Sandstorm naturally expires \
+         this same end-of-turn — the absent chip is fully explained by expiry, not immunity"
     );
 }
 

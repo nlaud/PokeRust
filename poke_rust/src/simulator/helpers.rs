@@ -6693,7 +6693,9 @@ pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
 }
 
 /// Handle every effect triggered when a Pokémon switches out. Call this *after* the
-/// active/bench swap, passing the bench index where the departing Pokémon now rests.
+/// active/bench swap, passing the bench index where the departing Pokémon now rests
+/// and `user_slot` — the active `FieldSlot` it just vacated (needed to attribute a
+/// Natural Cure `StatusCured` reveal to the right mon; see the emission below).
 ///
 /// Covers:
 /// - Switch-out abilities on the departing Pokémon (Natural Cure, Regenerator),
@@ -6701,12 +6703,13 @@ pub fn process_pokemon_gain_ability(state: &mut BattleState, slot: FieldSlot) {
 /// - Neutralizing Gas suppression lifting once its holder is gone.
 /// - Primal weather (Desolate Land / Primordial Sea / Delta Stream) ending, unless
 ///   another active holder of the same ability remains.
-pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_index: usize) {
+pub fn handle_pokemon_switch_out(state: &mut BattleState, user_slot: FieldSlot, bench_index: usize) {
+    let player = user_slot.player;
     let abilities_suppressed = abilities_are_suppressed(state);
     let items_suppressed = items_are_suppressed(state);
 
     // Apply the departing Pokémon's own switch-out ability, and note its ability and id.
-    let (departed_ability, departing_mon_id) = {
+    let (departed_ability, departing_mon_id, cured_status) = {
         let back = match player {
             Player::P1 => &mut state.p1_back_mons,
             Player::P2 => &mut state.p2_back_mons,
@@ -6716,11 +6719,29 @@ pub fn handle_pokemon_switch_out(state: &mut BattleState, player: Player, bench_
         };
         let ability = departed.ability.clone();
         let mon_id = departed.mon_id;
+        let mut cured_status = None;
         if !abilities_suppressed {
+            let pre_status = departed.status.clone();
             apply_switch_out_ability_effects(departed, BerryEnv::simple(items_suppressed));
+            // Natural Cure silently clears status with no dedicated event of its own —
+            // the observer must still learn it (same "silent status mutation" class as
+            // the Frozen-thaw / Shed Skin / Hydration gaps: S44/S45). Emitted below,
+            // once this scope's mutable borrow of `back` ends, targeting `user_slot`
+            // (the slot this mon still occupied from the inference engine's point of
+            // view) rather than its new bench position — the caller emits this BEFORE
+            // the Switch event that rebinds the slot to the incoming mon, so the belief
+            // still has the departing mon bound there when it processes this event
+            // (mirrors `send_out_with_switch_event`'s doc comment on the same ordering).
+            if pre_status.is_some() && departed.status.is_none() {
+                cured_status = pre_status;
+            }
         }
-        (ability, mon_id)
+        (ability, mon_id, cured_status)
     };
+
+    if let Some(status) = cured_status {
+        emit(state, EventKind::StatusCured { target: user_slot, status });
+    }
 
     // Neutralizing Gas suppression lifts when its holder leaves the field.
     if departed_ability == Ability::NeutralizingGas && !any_pokemon_has_neutralizing_gas(state) {
@@ -12878,13 +12899,23 @@ pub fn apply_secondary_effects(
     // (bypasssub) means the cure can happen through a Substitute as well.
     if move_data.name == PokemonMove::SparklingAria {
         for (bs, _) in branches.iter_mut() {
+            // Capture the cure inside the target_mon-borrowed block, then emit
+            // StatusCured once the borrow ends — same silent-mutation fix pattern as
+            // the Frozen-thaw (S44) and Natural Cure (switch-out) cases. This cure was
+            // previously invisible to the fog-of-war observer, which could leave the
+            // belief still tracking Burn into a later, genuinely new status inflict.
+            let mut cured = false;
             if let Some(tgt) = get_pokemon_at_slot_mut(bs, target_slot)
                 && has_status_volatile(tgt, &VolatileStatus::SparklingAria) {
                     remove_status_volatile(tgt, &VolatileStatus::SparklingAria);
                     if matches!(tgt.status, Some(Status::Burn)) {
                         tgt.status = None;
+                        cured = true;
                     }
                 }
+            if cured {
+                emit(bs, EventKind::StatusCured { target: target_slot, status: Status::Burn });
+            }
         }
     }
 
@@ -13006,14 +13037,25 @@ pub fn apply_secondary_effects(
     // Sleep prevention for subsequent turns is handled in apply_status_to_pokemon.
     if move_data.name == PokemonMove::Uproar {
         for (bs, _) in branches.iter_mut() {
-            for mon in bs
-                .p1_active_mons
-                .iter_mut()
-                .chain(bs.p2_active_mons.iter_mut())
-            {
+            // Collect wakes first (slot + FieldSlot) so emission can happen after the
+            // iter_mut borrows end — same silent-mutation fix pattern as Sparkling
+            // Aria/Frozen-thaw/Natural Cure above. Previously invisible to the observer
+            // (masked today only by StatusInflicted's Sleep-conflict self-heal).
+            let mut woken: Vec<FieldSlot> = Vec::new();
+            for (i, mon) in bs.p1_active_mons.iter_mut().enumerate() {
                 if matches!(mon.status, Some(crate::state::dex_data::Status::Sleep(_))) {
                     mon.status = None;
+                    woken.push(FieldSlot { player: Player::P1, slot_index: i as u8 });
                 }
+            }
+            for (i, mon) in bs.p2_active_mons.iter_mut().enumerate() {
+                if matches!(mon.status, Some(crate::state::dex_data::Status::Sleep(_))) {
+                    mon.status = None;
+                    woken.push(FieldSlot { player: Player::P2, slot_index: i as u8 });
+                }
+            }
+            for slot in woken {
+                emit(bs, EventKind::StatusCured { target: slot, status: Status::Sleep(0) });
             }
         }
     }
