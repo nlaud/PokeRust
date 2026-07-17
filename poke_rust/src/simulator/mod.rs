@@ -751,6 +751,14 @@ fn apply_single_hit_branch(
         let mut berserk_delta_for_emit: Option<i8> = None;
         let mut smack_down_removed_magnet_rise = false;
         let mut smack_down_removed_telekinesis = false;
+        // S44: `handle_unfreeze_on_damage`'s Fire-move/thaws-target thaw was a silent
+        // `mon.status = None` with no matching event — the observer's belief kept
+        // tracking Frozen, so a later status-inflicting effect (e.g. this same
+        // move's own burn secondary) surfaced as an "already has Frozen" inference
+        // contradiction. Captured here (same split-borrow pattern as the Smack Down
+        // volatiles below) so `StatusCured` can be emitted once the target_mon
+        // borrow has ended.
+        let mut frozen_thawed_by_damage: Option<Status> = None;
         // Captures (new_hp, max_hp) after take_damage so DamageDealt can be emitted once
         // the target_mon borrow has ended (same split pattern as Smack Down volatiles below).
         let mut damage_dealt_hp_info: Option<(u16, u16)> = None;
@@ -879,7 +887,12 @@ fn apply_single_hit_branch(
                 seed_sower_triggered = true;
             }
 
+            let frozen_status_before = target_mon.status.clone();
             simulator_helpers::handle_unfreeze_on_damage(target_mon, move_data.thaws_target, &move_data.pokemon_type, eff_damage);
+            if let Some(status @ Status::Frozen(_)) = frozen_status_before
+                && target_mon.status.is_none() {
+                    frozen_thawed_by_damage = Some(status);
+                }
 
             if *move_name == PokemonMove::Uproar
                 && let Some(crate::state::dex_data::Status::Sleep(_)) = target_mon.status {
@@ -1057,6 +1070,12 @@ fn apply_single_hit_branch(
             simulator_helpers::emit_item_consumed_with(&mut bs, target_slot, berry, |bs| {
                 simulator_helpers::emit(bs, EventKind::Healed { target: target_slot, new_hp: pokemon_hp, max_hp });
             });
+        }
+
+        // S44: emit the Fire-move/thaws-target thaw now that the target_mon borrow has
+        // ended — see `frozen_thawed_by_damage`'s doc comment above.
+        if let Some(status) = frozen_thawed_by_damage {
+            simulator_helpers::emit(&mut bs, EventKind::StatusCured { target: target_slot, status });
         }
 
         // Berserk: HP crossed from above 50% to ≤ 50% — emit reveal + SpA boost nested under it.

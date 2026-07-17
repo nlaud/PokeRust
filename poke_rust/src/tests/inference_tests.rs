@@ -265,6 +265,30 @@ fn test_status_inflicted_then_cured() {
     assert_eq!(result.p2_active_mons[0].status, None);
 }
 
+/// S44: a Fire-type/`thawsTarget` move thawing a Frozen target used to be a silent
+/// `mon.status = None` in `simulator::apply_single_hit_branch` with no matching
+/// `StatusCured` event — the observer's belief kept tracking Frozen, so a later
+/// status-inflicting effect surfaced as "StatusInflicted X but already has Frozen",
+/// an inference contradiction on ordinary, legal play. The actual fix is on the
+/// simulator side (see `fire_move_unfreeze_emits_status_cured_event` in
+/// `simulator_tests.rs`, which asserts the event is now emitted at all); this
+/// companion test locks in the OTHER half of the contract — that once the cure is
+/// correctly emitted, the belief round-trips it cleanly with no panic — mirroring
+/// `test_status_inflicted_then_cured` above for the Frozen-then-Burn transition.
+#[test]
+fn test_s44_status_cured_then_new_status_does_not_panic() {
+    let state = battle_with_p2(vec![unknown_mon()]);
+    let result = apply(
+        state,
+        vec![
+            event(EventKind::StatusInflicted { target: p2(0), status: Status::Frozen(0) }),
+            event(EventKind::StatusCured { target: p2(0), status: Status::Frozen(0) }),
+            event(EventKind::StatusInflicted { target: p2(0), status: Status::Burn }),
+        ],
+    );
+    assert_eq!(result.p2_active_mons[0].status, Some(Status::Burn));
+}
+
 /// Belt-and-braces faint detection: a `DamageDealt` whose payload is 0 HP marks the mon
 /// fainted even without an explicit `Faint` event (the display convention shows 0 only at
 /// an actual faint). Guards the fainted-gates in the EOT passes and suppression scans.
@@ -6073,6 +6097,87 @@ fn test_pass3_dir_a_skipped_for_opponent_ally_hit() {
     assert_eq!(
         defender.max_pre_nature_stat[4], orig_bsv_hi,
         "defender's max SpD BSV must be untouched by an unknown-attacker hit"
+    );
+}
+
+/// A dual-player harness (e.g. the doubles fuzz test) tracks a belief from EACH
+/// side's perspective. Under a P2-viewer belief, P1 is the fogged/opponent side —
+/// so a true-P1 attacker is NOT automatically "the observer's own known mon" the
+/// way it is for a P1-viewer belief. Before the S43 fix, Direction A gated on the
+/// literal `user_slot.player == Player::P1`, assuming P1 is always the observer;
+/// under a P2-viewer belief this fires for ANY true-P1 attacker, including one
+/// that is itself still fogged (e.g. P1's own ally-hit, P1_1 hitting P1_0) —
+/// materializing an uncertain attacker's still-unresolved stats as if exact and
+/// corrupting the defender's BSV window. After the fix, Direction A checks the
+/// attacker's actual fields (species/stats/item/ability all `Known`) instead of
+/// its side label, so it correctly skips here regardless of which side is
+/// nominally "P1". Mirrors `test_pass3_dir_a_skipped_for_opponent_ally_hit` above
+/// with the ambiguous pair moved onto P1's side instead of P2's.
+#[test]
+fn test_s43_pass3_direction_a_requires_attacker_fully_known() {
+    // P1 mon 0: the defender — Garchomp, with a wide starting SpD BSV range.
+    let mut p1_defender = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp, &garchomp_dex(), 50,
+    );
+    p1_defender.hp = PokemonHP::Percent(100);
+    let orig_bsv_lo = p1_defender.min_pre_nature_stat[4];
+    let orig_bsv_hi = p1_defender.max_pre_nature_stat[4];
+    // P1 mon 1: the attacker — still fogged/uncertain, even though it's on the
+    // "P1" side the old hardcoded gate trusted unconditionally.
+    let p1_attacker = unknown_mon_species(Species::Snorlax);
+
+    let p2_mons = vec![unknown_mon(), unknown_mon()];
+
+    let mut state = battle_nvn(vec![p1_defender, p1_attacker], p2_mons);
+    state.active_per_side = 2;
+
+    let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
+    psychic.category = MoveCategory::Special;
+    psychic.pokemon_type = PokemonType::Psychic;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Psychic, psychic);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(1),
+                move_used: PokemonMove::Psychic,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt { max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(80), // 20% damage
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    // No EVIVStat predicate for the defender's SpD may be emitted — Direction A
+    // must not have run at all when the attacker isn't fully known.
+    let has_spd_predicate = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::EVIVStatGE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
+                | Statement::EVIVStatLE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
+            )
+        })
+    });
+    assert!(
+        !has_spd_predicate,
+        "Direction A must not emit any defender predicate when the attacker isn't fully known"
+    );
+
+    let defender = &result.p1_active_mons[0];
+    assert_eq!(
+        defender.min_pre_nature_stat[4], orig_bsv_lo,
+        "defender's min SpD BSV must be untouched when the attacker isn't fully known"
+    );
+    assert_eq!(
+        defender.max_pre_nature_stat[4], orig_bsv_hi,
+        "defender's max SpD BSV must be untouched when the attacker isn't fully known"
     );
 }
 

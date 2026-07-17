@@ -7429,6 +7429,79 @@ mod tests {
                 }));
             }
 
+            /// S44: `handle_unfreeze_on_damage`'s Fire-move thaw used to mutate
+            /// `mon.status = None` with no matching event — `fire_move_unfreeze` above
+            /// only ever checked the resulting STATE, so it never caught this. The
+            /// fog-of-war inference engine tracks status purely from the event stream,
+            /// so a missing `StatusCured` here left a Frozen mon's belief stale; a later
+            /// status-inflicting effect that same turn then panicked with "already has
+            /// Frozen". Assert the event itself is emitted, not just the state change.
+            #[test]
+            fn fire_move_unfreeze_emits_status_cured_event() {
+                use crate::information::information::{EventKind, InformationEvent};
+                use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+                fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+                    events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+                }
+
+                let pokemon_dex = pokemon_dex();
+                let move_dex = move_dex();
+
+                let attacker = build_pokemon_state(
+                    Species::Charizard,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Flamethrower), None, None, None]),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+
+                let mut defender = build_pokemon_state(
+                    Species::Shuckle,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+                defender.status = Some(Status::Frozen(0));
+
+                let outcomes = run_single_turn_with_events(
+                    &MatchState::BattleState(battle_state_from_lists(vec![attacker], vec![], vec![defender], vec![])),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    move_dex,
+                    pokemon_dex,
+                    Player::P1,
+                );
+
+                assert!(
+                    outcomes.iter().any(|(_, events, _)| {
+                        events.as_ref().is_some_and(|events| {
+                            tree_contains(events, &|k| matches!(
+                                k, EventKind::StatusCured { status: Status::Frozen(_), .. }
+                            ))
+                        })
+                    }),
+                    "a Fire-type hit thawing a Frozen target must emit StatusCured, not just mutate status silently"
+                );
+            }
+
             #[test]
             fn freeze_immunities() {
                 let pokemon_dex = pokemon_dex();

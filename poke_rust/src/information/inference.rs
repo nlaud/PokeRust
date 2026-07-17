@@ -7881,7 +7881,7 @@ fn pass3_direction_a(
 ) {
     use crate::information::materialize::materialize_pokemon;
 
-    // S11 soundness fix: Direction A materializes the attacker from its CURRENT
+    // S11/S43 soundness fix: Direction A materializes the attacker from its CURRENT
     // stat/item/ability fields as if they were the exact truth (`atk_stats =
     // attacker_unk.min_stats`, `neutral_item`/`neutral_ability`) — sound only for the
     // observer's own fully-`Known` Pokémon. Direction A fires whenever the target's
@@ -7889,16 +7889,26 @@ fn pass3_direction_a(
     // ally with a spread move (the ally's HP is `Percent` too, since it belongs to
     // the non-observer side) — there the attacker is itself unknown, and treating
     // its unresolved stat bounds as exact would produce an unsound defender-BSV
-    // bound. P1 is the observer throughout this module (see S16); only P1's moves
-    // have a fully-Known attacker, so gate Direction A on that.
+    // bound.
     //
-    // Increment 2 note: this gate is also what guarantees the attacker here NEVER
-    // carries a `possible_illusion_state` (only the non-viewer side is ever seeded
-    // one) — so, unlike Direction B, Direction A's hypothesis mirror below doesn't
-    // need a "both sides ambiguous" guard at all; it's provably unreachable.
-    if user_slot.player != Player::P1 {
-        return;
-    }
+    // S43: this used to gate on `user_slot.player == Player::P1`, assuming "P1 is
+    // always the observer" — true for the server (always tracks belief from P1's
+    // view) but NOT true for the dual-player fuzz harness, which also tracks a P2
+    // belief (`team_preview_closed_sheet_from_perspective(Player::P2, ...)`, which
+    // keeps `p1_mons`/`p2_mons` at their TRUE identity rather than relabeling by
+    // viewer). Under a P2 belief, the true P1 attacking would pass that hardcoded
+    // check and get materialized as an "exact" attacker even though P1 is the FOGGED
+    // side there — corrupting the defender's BSV bound with a bogus overconfident
+    // attacker stat, eventually surfacing turns later as pass5's "every candidate
+    // nature is infeasible" contradiction. Check the actual precondition instead
+    // (attacker's stats, item, and ability are all genuinely pinned) rather than
+    // using player identity as a proxy for it — see the check right after
+    // `attacker_unk` is bound below.
+    //
+    // Increment 2 note: this also guarantees the attacker here NEVER carries a
+    // `possible_illusion_state` (only a not-fully-known mon is ever seeded one) —
+    // so, unlike Direction B, Direction A's hypothesis mirror below doesn't need a
+    // "both sides ambiguous" guard at all; it's provably unreachable.
 
     // S24: source both mons from the pre-move snapshots (see pass3_direction_b).
     // The defender's snapshot also carries a pre-move clone of its
@@ -7933,11 +7943,21 @@ fn pass3_direction_a(
     let Some(attacker_unk) = attacker_unk else {
         return;
     };
+    // S43: Direction A is only sound when the attacker is genuinely fully known —
+    // see the precondition note above. Checking the actual fields (rather than
+    // `user_slot.player`) makes this correct for either belief a caller tracks.
+    let attacker_fully_known = matches!(attacker_unk.possible_species, Unknown::Known(_))
+        && (0..6).all(|i| attacker_unk.min_stats[i] == attacker_unk.max_stats[i])
+        && matches!(attacker_unk.item, Unknown::Known(_))
+        && matches!(attacker_unk.possible_abilities, Unknown::Known(_));
+    if !attacker_fully_known {
+        return;
+    }
 
     // Attacker is OUR known mon; use its actual known stats. Materialized ONCE and
     // shared by both the primary defender AND (Increment 2) a mirrored hypothesis
-    // search — the attacker is never ambiguous (see the S11 note above), so there is
-    // nothing to recompute per-hypothesis here.
+    // search — the attacker is never ambiguous (see the S11/S43 note above), so
+    // there is nothing to recompute per-hypothesis here.
     let atk_stats = attacker_unk.min_stats;
     let atk_item = neutral_item(&attacker_unk);
     // Analytic correction: ×1.3 only when the attacker (our own mon = user_slot)
