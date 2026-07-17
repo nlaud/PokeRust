@@ -17747,6 +17747,59 @@ mod priority_abilities {
             }
         }
 
+        /// S45: `apply_status_cure_abilities`'s Shed Skin/Hydration/Healer cures used to
+        /// be silent `mon.status = None` mutations with no matching event — the
+        /// fog-of-war inference engine tracks status purely from the event stream, so a
+        /// later status-inflicting effect the same battle found the belief still
+        /// tracking the "cured" status and panicked ("StatusInflicted X but already has
+        /// Y"). Assert the branch where Shed Skin actually fires carries both
+        /// `AbilityRevealed` and `StatusCured`, not just the state change.
+        #[test]
+        fn shed_skin_cure_emits_ability_revealed_and_status_cured() {
+            use crate::information::information::{EventKind, InformationEvent};
+            use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+            fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+                events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+            }
+
+            let mut p1 = splash_mon(Species::Snorlax, Ability::ShedSkin, None, Some(Status::Burn));
+            let max_hp = p1.stats[0];
+            p1.hp = max_hp;
+            let mut state = battle_state_from_lists(
+                vec![p1],
+                vec![],
+                vec![splash_mon(Species::Snorlax, Ability::None, None, None)],
+                vec![],
+            );
+            state.p1_active_mons[0].entered_this_turn = false;
+
+            let pdex = pokemon_dex();
+            let mdex = move_dex();
+            let outcomes = run_single_turn_with_events(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                mdex, pdex, Player::P1,
+            );
+
+            // The cured branch (status now None) must be the one carrying the events.
+            let cured_branch_has_events = outcomes.iter().any(|(s, events, _)| {
+                matches!(s, MatchState::BattleState(bs) if bs.p1_active_mons[0].status.is_none())
+                    && events.as_ref().is_some_and(|events| {
+                        tree_contains(events, &|k| matches!(
+                            k, EventKind::AbilityRevealed { ability: Ability::ShedSkin, .. }
+                        )) && tree_contains(events, &|k| matches!(
+                            k, EventKind::StatusCured { status: Status::Burn, .. }
+                        ))
+                    })
+            });
+            assert!(
+                cured_branch_has_events,
+                "Shed Skin curing a status must emit AbilityRevealed + StatusCured, not just mutate status silently"
+            );
+        }
+
         // ─── Healer ─────────────────────────────────────────────────────────────────
 
         #[test]

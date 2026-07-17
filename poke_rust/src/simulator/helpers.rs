@@ -9081,22 +9081,19 @@ fn apply_status_cure_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(Battle
         match ability {
             // Hydration: deterministic cure in rain.
             Ability::Hydration => {
-                for (bs, _) in result.iter_mut() {
+                result = eot_fork_status_cure(result, *slot, *slot, Ability::Hydration, 1.0, |bs, cured_slot| {
                     let rain = weather_is_rain(bs);
-                    if let Some(mon) = get_pokemon_at_slot_mut(bs, *slot) {
-                        // Setting None to None is a no-op; the is_some() guard is omitted.
-                        if !mon.fainted && rain {
-                            mon.status = None;
-                        }
+                    let mon = get_pokemon_at_slot_mut(bs, cured_slot)?;
+                    if mon.fainted || !rain {
+                        return None;
                     }
-                }
+                    mon.status.take()
+                });
             }
             // Shed Skin: 1/3 chance to cure the holder's own non-volatile status.
             Ability::ShedSkin => {
-                result = eot_fork_per_slot(result, *slot, 1.0 / 3.0, |mon| {
-                    if mon.status.is_some() {
-                        mon.status = None;
-                    }
+                result = eot_fork_status_cure(result, *slot, *slot, Ability::ShedSkin, 1.0 / 3.0, |bs, cured_slot| {
+                    get_pokemon_at_slot_mut(bs, cured_slot)?.status.take()
                 });
             }
             // Healer: 50% chance per adjacent ally to cure that ally's status.
@@ -9109,10 +9106,8 @@ fn apply_status_cure_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(Battle
                     .copied()
                     .collect();
                 for ally_slot in ally_slots {
-                    result = eot_fork_per_slot(result, ally_slot, 0.5, |mon| {
-                        if mon.status.is_some() {
-                            mon.status = None;
-                        }
+                    result = eot_fork_status_cure(result, ally_slot, *slot, Ability::Healer, 0.5, |bs, cured_slot| {
+                        get_pokemon_at_slot_mut(bs, cured_slot)?.status.take()
                     });
                 }
             }
@@ -9120,6 +9115,70 @@ fn apply_status_cure_abilities(branches: Vec<(BattleState, f64)>) -> Vec<(Battle
         }
     }
 
+    result
+}
+
+/// S45: like `eot_fork_per_slot`, but specialized for a status-cure ability that must
+/// also emit `AbilityRevealed`/`StatusCured` on the branch where it actually fires.
+/// `apply_status_cure_abilities`'s Hydration/Shed Skin/Healer used to call
+/// `eot_fork_per_slot` with a plain `mon.status = None` mutation and no event at all —
+/// the fog-of-war inference engine tracks status purely from the event stream, so a
+/// later status-inflicting effect the same battle found the belief still tracking the
+/// "cured" status and panicked ("StatusInflicted X but already has Y").
+///
+/// `eot_fork_per_slot`'s generic `Vec<(BattleState, f64)>` output carries no marker for
+/// which output branches are the ones that actually triggered (a fainted-mon or
+/// zero-probability input branch produces a DIFFERENT number of outputs than a normal
+/// one, so position arithmetic on the flattened result can't recover it either) —
+/// emitting inline, at the one point where "this specific branch is the triggered one"
+/// is unambiguous, is the only sound way to do it. `cure_fn` both performs the mutation
+/// and reports the pre-cure status (`Some` if it fired, `None` if the mon was
+/// ineligible) so the caller doesn't need a separate before/after read.
+fn eot_fork_status_cure(
+    branches: Vec<(BattleState, f64)>,
+    cured_slot: FieldSlot,
+    holder_slot: FieldSlot,
+    ability: Ability,
+    chance: f64,
+    cure_fn: impl Fn(&mut BattleState, FieldSlot) -> Option<Status>,
+) -> Vec<(BattleState, f64)> {
+    if chance <= 0.0 {
+        return branches;
+    }
+    if chance >= 1.0 {
+        let mut result = branches;
+        for (bs, _) in result.iter_mut() {
+            if let Some(status) = cure_fn(bs, cured_slot) {
+                with_reactions(bs, EventKind::AbilityRevealed { slot: holder_slot, ability: ability.clone() }, |bs| {
+                    emit(bs, EventKind::StatusCured { target: cured_slot, status });
+                });
+            }
+        }
+        return result;
+    }
+    let mut result = Vec::with_capacity(branches.len() * 2);
+    for (bs, prob) in branches {
+        if prob <= 0.0 {
+            continue;
+        }
+        let should_check = get_pokemon_at_slot(&bs, cured_slot)
+            .map(|m| !m.fainted && m.status.is_some())
+            .unwrap_or(false);
+        if !should_check {
+            result.push((bs, prob));
+            continue;
+        }
+        // "Not triggered" branch.
+        result.push((bs.clone(), prob * (1.0 - chance)));
+        // "Triggered" branch.
+        let mut triggered = bs;
+        if let Some(status) = cure_fn(&mut triggered, cured_slot) {
+            with_reactions(&mut triggered, EventKind::AbilityRevealed { slot: holder_slot, ability: ability.clone() }, |bs| {
+                emit(bs, EventKind::StatusCured { target: cured_slot, status });
+            });
+        }
+        result.push((triggered, prob * chance));
+    }
     result
 }
 
