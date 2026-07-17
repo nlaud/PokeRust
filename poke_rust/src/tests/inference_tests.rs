@@ -1888,6 +1888,126 @@ fn test_zoroark_learnset_promotes_when_primary_impossible() {
     );
 }
 
+/// Regression test for the `random_doubles_battles_are_sound` fuzz-test failure:
+/// Illusion re-activates on EVERY switch-in with no "already revealed"
+/// suppression (`simulator::helpers::compute_illusion_disguise`), so a Zoroark
+/// resolved once can switch out and later re-enter disguised as a DIFFERENT
+/// decoy. `resolve_zoroark_globally` only ever decrements
+/// `p{side}_unresolved_zoroark_count`, so without `rearm_zoroark_on_side` the
+/// count stayed at 0 forever after the first resolution — the re-disguised
+/// slot's next signature move then hard-panicked in
+/// `check_move_legal_for_species` instead of promoting, since no hypothesis was
+/// left anywhere on the side to route the panic through. This drives the exact
+/// sequence: Zoroark resolves as Garchomp, switches out, switches back in as
+/// Milotic (a different decoy), and must re-promote on its next signature move.
+#[test]
+fn test_zoroark_repromotes_after_switching_out_and_back_in_as_different_decoy() {
+    let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
+    let milotic_back =
+        UnknownPokemonState::from_opponent_species(Species::Milotic, &HashMap::new(), 50);
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back, milotic_back];
+    state.p2_possible_back_mons = vec![zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+    state.p2_unresolved_zoroark_count = 1;
+
+    let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
+    learnset_dex.insert(Species::Garchomp, [PokemonMove::Earthquake].into_iter().collect());
+    learnset_dex.insert(Species::Milotic, [PokemonMove::Scald].into_iter().collect());
+    learnset_dex.insert(Species::Zoroark, [PokemonMove::NastyPlot].into_iter().collect());
+    let make_config = || InferenceConfig {
+        learnset_dex: learnset_dex.clone(),
+        ev_total_cap: None,
+        ..Default::default()
+    };
+
+    // Zoroark enters disguised as Garchomp, then reveals itself with a move only
+    // Zoroark can learn.
+    let state = apply_with_config(
+        state,
+        vec![
+            switch_in(Species::Garchomp, p2(0)),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::NastyPlot,
+                targets: vec![p1(0)],
+            }),
+        ],
+        HashMap::new(),
+        HashMap::new(),
+        make_config(),
+    );
+    assert_eq!(state.p2_active_mons[0].possible_species, Unknown::Known(Species::Zoroark));
+    assert_eq!(
+        state.p2_unresolved_zoroark_count, 0,
+        "first promotion must resolve the side's Zoroark"
+    );
+
+    // The now-revealed Zoroark switches out; Milotic — a DIFFERENT decoy than the
+    // one it was resolved from — switches in. Illusion re-activates: this slot is
+    // secretly Zoroark again.
+    let state = apply_with_config(
+        state,
+        vec![switch_in(Species::Milotic, p2(0))],
+        HashMap::new(),
+        HashMap::new(),
+        make_config(),
+    );
+    assert_eq!(
+        state.p2_unresolved_zoroark_count, 1,
+        "the resolved Zoroark switching back out must re-arm tracking, not leave it at 0 forever"
+    );
+    assert!(
+        state.p2_active_mons[0].possible_illusion_state.is_some(),
+        "the newly-arrived decoy slot must carry a freshly re-seeded hypothesis"
+    );
+
+    // "Milotic" uses Nasty Plot — illegal for Milotic, legal for Zoroark. Before
+    // the fix this hard-panicked in `check_move_legal_for_species`.
+    let result = apply_with_config(
+        state,
+        vec![event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::NastyPlot,
+            targets: vec![p1(0)],
+        })],
+        HashMap::new(),
+        HashMap::new(),
+        make_config(),
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "the re-disguised slot must re-promote to Zoroark instead of panicking"
+    );
+    assert!(result.p2_active_mons[0].possible_illusion_state.is_none());
+    assert_eq!(result.p2_unresolved_zoroark_count, 0);
+
+    // No stale duplicate bench entry left claiming to also be Zoroark (the second
+    // promotion's `remove_stale_zoroark_bench_duplicate` follow-up).
+    let bench_zoroark_count = combined_back(&result, &Player::P2)
+        .into_iter()
+        .filter(|m| matches!(&m.possible_species, Unknown::Known(Species::Zoroark)))
+        .count();
+    assert_eq!(
+        bench_zoroark_count, 0,
+        "no stale duplicate Zoroark bench entry should remain after the second promotion"
+    );
+
+    // Both decoys — Garchomp from the first reveal, Milotic from the second —
+    // must be restored to the bench, not lost.
+    let bench_species: Vec<Species> = combined_back(&result, &Player::P2)
+        .into_iter()
+        .filter_map(|m| match &m.possible_species {
+            Unknown::Known(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(bench_species.contains(&Species::Garchomp), "the first decoy must be restored");
+    assert!(bench_species.contains(&Species::Milotic), "the second decoy must be restored");
+}
+
 /// Switch-out must PERSIST the hypothesis (bench it alongside the primary), not
 /// discard it — this reverses the old S29 discard-on-switch-out behavior, which
 /// is exactly the "information must persist even if it switches out" requirement.

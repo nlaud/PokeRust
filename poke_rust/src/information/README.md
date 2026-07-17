@@ -690,6 +690,42 @@ preference applies to `pass1_switch`'s defensive "species not found on the
 bench" fallback. The `IllusionEnded` handler additionally purges CNF
 predicates derived from the now-stale disguise species' base stats/movepool.
 
+**Resolution is not permanent — re-disguise on re-entry.** Illusion
+re-activates on *every* switch-in with no "already revealed" suppression
+(`simulator::helpers::compute_illusion_disguise` always recomputes the
+disguise from the current back-mons list). So a Zoroark that was positively
+located earlier in the battle, then switches back out, can re-enter later
+disguised as a *different* decoy than the one it was resolved from. Treating
+`resolve_zoroark_globally`'s decrement as one-way left the belief with no way
+to recover: once `p{side}_unresolved_zoroark_count` hit 0, every hypothesis
+side-wide was gone for good, so the re-disguised mon's next signature-move
+reveal had no hypothesis to promote into and hard-panicked in
+`check_move_legal_for_species` instead.
+
+`rearm_zoroark_on_side` (`inference.rs`) closes this gap: `bench_outgoing_mon`
+calls it whenever the mon being benched has a `Known`, Illusion-capable
+`possible_species` — i.e. a previously-resolved Zoroark heading back to the
+bench. It bumps the count back up (capped at the side's true Illusion-roster
+size) and re-seeds `possible_illusion_state` on every other eligible mon from
+the just-benched entry (which already carries everything learned about this
+physical Zoroark this battle, more precise than falling back to the
+team-preview template). Ordering makes this transparent to `pass1_switch`:
+every switch event benches ALL outgoing mons before pulling ANY incoming one,
+so by the time the new decoy's bench entry is pulled onto the field, it's
+already carrying a fresh hypothesis — exactly as if it had been seeded at
+team preview. Re-arming only ever adds hypotheses back (widens the belief),
+so it can't itself introduce a contradiction.
+
+Because resolution can now happen more than once per battle, every promotion
+site (Pass 1 move/item reveals, the Pass 5 backstop, and `IllusionEnded`) also
+calls `remove_stale_zoroark_bench_duplicate` right after
+`finish_illusion_promotion_restore`: the side's own pre-existing bench entry
+for this same physical Zoroark (seeded at team preview, or re-attached by a
+prior `rearm_zoroark_on_side`) is now a stale duplicate of the mon that just
+resolved, and left in place would both trip `enforce_unique_item`'s
+same-item-twice check and could later be mistaken by `rearm_zoroark_on_side`
+for a second, still-unresolved Illusion forme.
+
 ---
 
 ## The Materialize Bridge (`materialize.rs`)

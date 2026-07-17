@@ -339,6 +339,84 @@ pub(super) fn resolve_zoroark_globally(state: &mut UnknownBattleState, side: Pla
     }
 }
 
+/// Count of `side`'s roster members whose species is `Known` and Illusion-capable,
+/// scanning EVERY bucket (active, known-back, possible-back, fainted) — the true,
+/// fixed size of "how many real Zorua/Zoroark-line mons this side actually has,"
+/// used only to cap `rearm_zoroark_on_side`'s increment. Mirrors `side_mons_mut`'s
+/// bucket chain but read-only (that function is mutable-only, since its only other
+/// caller needs to write through it).
+fn count_illusion_capable_on_side(state: &UnknownBattleState, side: Player) -> u8 {
+    let is_illusion = |m: &&UnknownPokemonState| {
+        matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
+    };
+    match side {
+        Player::P1 => state
+            .p1_active_mons
+            .iter()
+            .chain(state.p1_known_back_mons.iter())
+            .chain(state.p1_possible_back_mons.iter())
+            .chain(state.p1_fainted_mons.iter())
+            .filter(is_illusion)
+            .count() as u8,
+        Player::P2 => state
+            .p2_active_mons
+            .iter()
+            .chain(state.p2_known_back_mons.iter())
+            .chain(state.p2_possible_back_mons.iter())
+            .chain(state.p2_fainted_mons.iter())
+            .filter(is_illusion)
+            .count() as u8,
+    }
+}
+
+/// Re-arm `side`'s Illusion tracking after a previously-resolved Illusion forme
+/// switches back OUT (called from `bench_outgoing_mon`). Illusion re-activates on
+/// every switch-in — `simulator::helpers::compute_illusion_disguise` has no
+/// "already revealed" suppression, so a Zoroark located earlier in the battle can
+/// re-enter later disguised as a DIFFERENT decoy than the one it was resolved
+/// from. Without this, `p{side}_unresolved_zoroark_count` stays permanently at 0
+/// after the first resolution (`resolve_zoroark_globally` only ever decrements),
+/// so the re-disguised slot never gets a fresh hypothesis and a later
+/// signature-move reveal on the NEW decoy hard-panics in
+/// `check_move_legal_for_species` instead of promoting — the exact failure this
+/// function exists to prevent.
+///
+/// Bumps the count back up by 1 (capped at `count_illusion_capable_on_side`, since
+/// a non-Species-Clause format could in principle have more than one Illusion
+/// forme still unresolved) and re-attaches a fresh `possible_illusion_state`
+/// hypothesis — seeded from `baseline` (the just-benched Zoroark's own entry,
+/// already carrying everything learned about it this battle) — to every OTHER
+/// non-fainted, non-Illusion-capable mon on the side that doesn't already carry
+/// one. Fainted mons are deliberately skipped: they can never be switched in or
+/// act again, so re-attaching a hypothesis to one serves no future inference (see
+/// `combined_back`'s analogous exclusion).
+///
+/// Sound: this only ever ADDS hypotheses back — it widens the belief rather than
+/// narrowing it, so it can't itself introduce a contradiction.
+pub(super) fn rearm_zoroark_on_side(
+    state: &mut UnknownBattleState,
+    side: Player,
+    baseline: &UnknownPokemonState,
+) {
+    let cap = count_illusion_capable_on_side(state, side);
+    let count = match side {
+        Player::P1 => &mut state.p1_unresolved_zoroark_count,
+        Player::P2 => &mut state.p2_unresolved_zoroark_count,
+    };
+    *count = count.saturating_add(1).min(cap);
+    for mon in side_mons_mut(state, side) {
+        if mon.fainted || mon.possible_illusion_state.is_some() {
+            continue;
+        }
+        if matches!(&mon.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
+        {
+            continue;
+        }
+        mon.possible_illusion_state =
+            Some(Box::new(unknowns::seed_illusion_hypothesis_for(mon, baseline)));
+    }
+}
+
 /// Shared follow-up for EVERY `IllusionMirrorOutcome::Promoted` call site — Pass 1
 /// move/item reveals, and Pass 3's stat-tightening backstop surfacing through
 /// Pass 5 — not just the dedicated `IllusionEnded` event handler. `discarded_species`
@@ -379,6 +457,40 @@ fn finish_illusion_promotion_restore(
         return;
     }
     restore_discarded_primary_to_bench(state, side, discarded, dex, config);
+}
+
+/// Shared follow-up for EVERY point a Zoroark hypothesis is positively resolved
+/// (a `Promoted` mirroring outcome, OR the dedicated `IllusionEnded` handler):
+/// the side's own pre-existing benched entry for this same physical Pokémon —
+/// seeded at team preview (`seed_illusion_hypotheses`) or re-attached on a later
+/// switch-out (`rearm_zoroark_on_side`) — is now a stale duplicate of the mon
+/// that was just resolved. Left in place, `teammate_indices`/`enforce_unique_item`
+/// would see two teammates holding the same resolved item (or, worse, `rearm_
+/// zoroark_on_side` could later mistake this stale entry for a still-unresolved
+/// Illusion forme and seed a THIRD, spurious hypothesis from it). Removes it from
+/// whichever bench bucket (`known_back` preferred, `possible_back` fallback) it's
+/// currently sitting in; a no-op if neither has a matching entry (nothing stale
+/// to remove — e.g. called twice for the same resolution in one event).
+fn remove_stale_zoroark_bench_duplicate(
+    state: &mut UnknownBattleState,
+    side: Player,
+    resolved_species: &Species,
+) {
+    let known_back = match side {
+        Player::P1 => &mut state.p1_known_back_mons,
+        Player::P2 => &mut state.p2_known_back_mons,
+    };
+    if let Some(pos) = known_back.iter().position(|m| unknown_is_known_as(&m.possible_species, resolved_species)) {
+        known_back.remove(pos);
+        return;
+    }
+    let possible_back = match side {
+        Player::P1 => &mut state.p1_possible_back_mons,
+        Player::P2 => &mut state.p2_possible_back_mons,
+    };
+    if let Some(pos) = possible_back.iter().position(|m| unknown_is_known_as(&m.possible_species, resolved_species)) {
+        possible_back.remove(pos);
+    }
 }
 
 /// Look up `species`'s pristine team-preview snapshot in `side`'s
@@ -1214,10 +1326,24 @@ fn run_pass5_all_mons(
                 // (independently tightened by Pass 3's own mirrored call) still solves
                 // cleanly.
                 let outcome = apply_with_illusion_mirroring(mon, |m| pass5_back_solve(m, config, dex));
-                if matches!(outcome, IllusionMirrorOutcome::Promoted) {
+                let promoted = matches!(outcome, IllusionMirrorOutcome::Promoted);
+                // Captured AFTER promotion overwrites `possible_species` with the
+                // resolved Zoroark identity — see `remove_stale_zoroark_bench_duplicate`.
+                let resolved_species: Option<Species> = if promoted {
+                    match &mon.possible_species {
+                        Unknown::Known(s) => Some(s.clone()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if promoted {
                     let side = if mon_is_p2(state, idx) { Player::P2 } else { Player::P1 };
                     resolve_zoroark_globally(state, side);
                     finish_illusion_promotion_restore(state, side, discarded_before, dex, config);
+                    if let Some(resolved) = resolved_species {
+                        remove_stale_zoroark_bench_duplicate(state, side, &resolved);
+                    }
                 }
             }
     }
@@ -1565,6 +1691,10 @@ fn pass1_apply_event(
             // AFTER the mon borrow ends, since `resolve_zoroark_globally` needs `state`.
             let mut promoted_illusion = false;
             let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
+            // Set alongside `promoted_illusion`, from INSIDE the mon borrow below,
+            // right after promotion overwrites `possible_species` — see
+            // `remove_stale_zoroark_bench_duplicate`.
+            let mut resolved_species: Option<Species> = None;
             // Captured before the mutable mon borrow below (see `check_move_legal_for_species`'s
             // doc comment for why this gates its self-heal). Self-heal ONLY applies when
             // THIS mon has no hypothesis of its own to route the panic through: when it
@@ -1589,6 +1719,9 @@ fn pass1_apply_event(
                         check_move_legal_for_species(m, move_used, learnset_dex, side_has_unresolved_zoroark_without_hypothesis);
                     });
                     promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
+                    if promoted_illusion && let Unknown::Known(s) = &mon.possible_species {
+                        resolved_species = Some(s.clone());
+                    }
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
@@ -1635,6 +1768,9 @@ fn pass1_apply_event(
             if promoted_illusion {
                 resolve_zoroark_globally(state, user.player);
                 finish_illusion_promotion_restore(state, user.player, discarded_before, ctx.dex, ctx.config);
+                if let Some(resolved) = &resolved_species {
+                    remove_stale_zoroark_bench_duplicate(state, user.player, resolved);
+                }
             }
         }
 
@@ -1804,6 +1940,7 @@ fn pass1_apply_event(
                     .is_some_and(|m| m.item_was_transferred);
                 let mut promoted_illusion = false;
                 let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
+                let mut resolved_species: Option<Species> = None;
                 if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     // Captured BEFORE mirroring can overwrite `possible_species` on a
                     // `Promoted` outcome — see `finish_illusion_promotion_restore`.
@@ -1819,6 +1956,9 @@ fn pass1_apply_event(
                         unknown_set_known(&mut m.item, item.clone(), &format!("mon#{idx} item"));
                     });
                     promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
+                    if promoted_illusion && let Unknown::Known(s) = &mon.possible_species {
+                        resolved_species = Some(s.clone());
+                    }
                 }
                 if !was_transferred {
                     enforce_unique_item(state, idx, item, ctx.config.allow_repeat_items);
@@ -1826,6 +1966,9 @@ fn pass1_apply_event(
                 if promoted_illusion {
                     resolve_zoroark_globally(state, slot.player);
                     finish_illusion_promotion_restore(state, slot.player, discarded_before, ctx.dex, ctx.config);
+                    if let Some(resolved) = &resolved_species {
+                        remove_stale_zoroark_bench_duplicate(state, slot.player, resolved);
+                    }
                 }
             }
         }
@@ -2329,6 +2472,7 @@ fn pass1_apply_event(
         EventKind::ChargingMove { user, move_used } => {
             let mut promoted_illusion = false;
             let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
+            let mut resolved_species: Option<Species> = None;
             // See `check_move_legal_for_species`'s doc comment.
             let side_has_unresolved_zoroark_without_hypothesis = match user.player {
                 Player::P1 => state.p1_unresolved_zoroark_count > 0,
@@ -2347,6 +2491,9 @@ fn pass1_apply_event(
                         check_move_legal_for_species(m, move_used, learnset_dex, side_has_unresolved_zoroark_without_hypothesis);
                     });
                     promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
+                    if promoted_illusion && let Unknown::Known(s) = &mon.possible_species {
+                        resolved_species = Some(s.clone());
+                    }
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
@@ -2354,6 +2501,9 @@ fn pass1_apply_event(
             if promoted_illusion {
                 resolve_zoroark_globally(state, user.player);
                 finish_illusion_promotion_restore(state, user.player, discarded_before, ctx.dex, ctx.config);
+                if let Some(resolved) = &resolved_species {
+                    remove_stale_zoroark_bench_duplicate(state, user.player, resolved);
+                }
             }
         }
 
@@ -2502,30 +2652,10 @@ fn pass1_apply_event(
 
                 // The Illusion forme's OWN benched baseline entry (species known,
                 // sitting untouched in `known_back`/`possible_back` this whole time —
-                // see `seed_illusion_hypotheses`) is now a stale duplicate of this same
-                // physical Pokémon. Left in place, `teammate_indices`/`enforce_unique_item`
-                // would see two teammates holding the same resolved item. Discard it.
-                let known_back = match slot.player {
-                    Player::P1 => &mut state.p1_known_back_mons,
-                    Player::P2 => &mut state.p2_known_back_mons,
-                };
-                if let Some(pos) = known_back
-                    .iter()
-                    .position(|m| unknown_is_known_as(&m.possible_species, actual_species))
-                {
-                    known_back.remove(pos);
-                } else {
-                    let possible_back = match slot.player {
-                        Player::P1 => &mut state.p1_possible_back_mons,
-                        Player::P2 => &mut state.p2_possible_back_mons,
-                    };
-                    if let Some(pos) = possible_back
-                        .iter()
-                        .position(|m| unknown_is_known_as(&m.possible_species, actual_species))
-                    {
-                        possible_back.remove(pos);
-                    }
-                }
+                // seeded at team preview, or re-attached by a later
+                // `rearm_zoroark_on_side` if this mon had switched out and back in
+                // before) is now a stale duplicate of this same physical Pokémon.
+                remove_stale_zoroark_bench_duplicate(state, slot.player, actual_species);
             }
         }
 
@@ -2911,9 +3041,22 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming
             // — this is exactly the "switch-out persists, doesn't discard" behavior
             // the Zoroark lifecycle depends on (see `possible_illusion_state`'s doc
             // comment).
+            //
+            // Captured BEFORE `benched` moves into the push below: if this leaver's
+            // species is `Known` and Illusion-capable, it's a previously-RESOLVED
+            // Zoroark heading back to the bench — Illusion re-activates on its next
+            // switch-in (possibly disguised as a different decoy than before), so
+            // `rearm_zoroark_on_side` must re-open tracking for it. See that
+            // function's doc comment for why this is the fix for the re-disguise
+            // gap (`resolve_zoroark_globally` only ever decrements).
+            let rearm_baseline = matches!(&benched.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
+                .then(|| benched.clone());
             match slot.player {
                 Player::P1 => state.p1_known_back_mons.push(benched),
                 Player::P2 => state.p2_known_back_mons.push(benched),
+            }
+            if let Some(baseline) = rearm_baseline {
+                rearm_zoroark_on_side(state, slot.player, &baseline);
             }
         }
     }

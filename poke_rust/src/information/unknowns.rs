@@ -250,18 +250,28 @@ pub struct UnknownBattleState {
     pub p2_fainted_mons: Vec<UnknownPokemonState>,
 
     /// Number of this side's REAL roster members that are an Illusion-capable
-    /// forme (Zoroark line) whose physical identity/location has not yet been
-    /// positively pinned down. Almost always 0 or 1 (Species Clause permits at
-    /// most one). Seeded once, at the team-preview→battle transition, from the
-    /// true roster (`into_battle_state`) — team preview always reveals true
-    /// species, so this is never itself uncertain. While `> 0`, every OTHER mon
-    /// on this side that isn't itself confirmed to BE that Illusion forme may
-    /// carry a `possible_illusion_state` hypothesis (see that field's doc
-    /// comment on `UnknownPokemonState`). Decremented by `resolve_zoroark_globally`
+    /// forme (Zoroark line) currently DISGUISED / not pinned to a known field
+    /// location. Almost always 0 or 1 (Species Clause permits at most one).
+    /// Seeded once, at the team-preview→battle transition, from the true roster
+    /// (`into_battle_state`) — team preview always reveals true species, so the
+    /// initial count is never itself uncertain. While `> 0`, every OTHER mon on
+    /// this side that isn't itself confirmed to BE that Illusion forme may carry
+    /// a `possible_illusion_state` hypothesis (see that field's doc comment on
+    /// `UnknownPokemonState`).
+    ///
+    /// **Not monotonic** — it re-arms. `resolve_zoroark_globally` decrements it
     /// each time a hypothesis is positively resolved (promotion, `IllusionEnded`,
     /// or the Illusion forme itself entering undisguised); at 0, every remaining
-    /// `possible_illusion_state` on the side is dropped — Zoroark's location(s)
-    /// are now fully accounted for.
+    /// `possible_illusion_state` on the side is dropped, since Zoroark's
+    /// location is fully accounted for. But Illusion re-activates on EVERY
+    /// switch-in with no "already revealed" suppression
+    /// (`simulator::helpers::compute_illusion_disguise`), so a Zoroark located
+    /// earlier in the battle can switch out and later re-enter disguised as a
+    /// DIFFERENT decoy. `rearm_zoroark_on_side` (`information::inference`)
+    /// bumps the count back up — and re-seeds hypotheses on the side's other
+    /// mons — whenever a mon whose `possible_species` is `Known` and
+    /// Illusion-capable switches back out (`bench_outgoing_mon`), so the count
+    /// really means "currently unresolved," not "resolved zero times so far."
     pub p1_unresolved_zoroark_count: u8,
     pub p2_unresolved_zoroark_count: u8,
 
