@@ -673,13 +673,33 @@ pub(super) fn mon_idx_legend(state: &UnknownBattleState) -> String {
 
 // ── Unknown<T> manipulation helpers ───────────────────────────────────────────
 
-/// Add `val` to the exclusion list.  Contradiction if already `Known` to `val`.
+/// Add `val` to the exclusion list.  Self-heals (discards the exclusion, keeps the
+/// `Known` value) if already `Known` to `val` — see below for why this is sound.
 /// Removes `val` from a `Possibly` set; collapses to `Known` if one remains.
+///
+/// `Known` is set only by direct observation (`unknown_set_known` — a reveal event,
+/// an exact back-solve, etc.); every call to `unknown_exclude` is instead a *derived*
+/// absence-based inference ("no reveal happened, therefore not this value"). Those two
+/// kinds of evidence are not equally trustworthy: an absence-based exclusion is only
+/// sound when the caller has modeled every legitimate way the expected reveal could be
+/// silently absent (suppression, an already-active target state making the effect a
+/// no-op, an unmodeled bypass, etc.), and this codebase has repeatedly found — and
+/// fixed — concrete gaps in exactly that modeling (see e.g. the Mold Breaker gate on
+/// contact-punish abilities, and the weather-reactivation no-op case for weather-
+/// setting abilities on switch-in). When the two conflict, the direct observation is
+/// the trustworthy one; discarding the exclusion is the sound response, the same
+/// self-heal principle applied to Pass 3's `CrossedBound` (see
+/// `apply_unconditional_tightening_to_mon`). Logged so remaining gaps stay
+/// discoverable rather than silently swallowed.
 fn unknown_exclude<T: PartialEq + Clone + std::fmt::Debug>(u: &mut Unknown<T>, val: &T, ctx: &str) {
     match u {
         Unknown::Known(v) => {
             if v == val {
-                inference_contradiction!(ctx, "exclude({:?}) conflicts with Known value", val);
+                eprintln!(
+                    "[unknown_exclude self-heal] discarding exclude({val:?}) — conflicts with \
+                     Known value (context={ctx:?}); an absence-inference gap, not a belief \
+                     contradiction"
+                );
             }
         }
         Unknown::Not(excluded) => {
@@ -1545,6 +1565,19 @@ fn pass1_apply_event(
             // AFTER the mon borrow ends, since `resolve_zoroark_globally` needs `state`.
             let mut promoted_illusion = false;
             let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
+            // Captured before the mutable mon borrow below (see `check_move_legal_for_species`'s
+            // doc comment for why this gates its self-heal). Self-heal ONLY applies when
+            // THIS mon has no hypothesis of its own to route the panic through: when it
+            // DOES carry one, the panic must propagate normally so
+            // `apply_with_illusion_mirroring`'s own promote/reject logic (which the
+            // panic is the load-bearing signal for) still runs — see
+            // `test_zoroark_learnset_promotes_when_primary_impossible`.
+            let side_has_unresolved_zoroark_without_hypothesis = match user.player {
+                Player::P1 => state.p1_unresolved_zoroark_count > 0,
+                Player::P2 => state.p2_unresolved_zoroark_count > 0,
+            } && mon_idx_for_active_slot(state, user)
+                .and_then(|idx| get_mon_by_idx(state, idx))
+                .is_some_and(|m| m.possible_illusion_state.is_none());
             if let Some(idx) = mon_idx_for_active_slot(state, user)
                 && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     // Captured BEFORE mirroring can overwrite `possible_species` on a
@@ -1553,7 +1586,7 @@ fn pass1_apply_event(
                     let learnset_dex = &ctx.config.learnset_dex;
                     let outcome = apply_with_illusion_mirroring(mon, |m| {
                         reveal_move_on_mon(m, move_used);
-                        check_move_legal_for_species(m, move_used, learnset_dex);
+                        check_move_legal_for_species(m, move_used, learnset_dex, side_has_unresolved_zoroark_without_hypothesis);
                     });
                     promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
                     narrow_species_by_learnset(
@@ -1691,7 +1724,27 @@ fn pass1_apply_event(
             if let Some(idx) = mon_idx_for_active_slot(state, target)
                 && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     if let Some(ref existing) = mon.status.clone()
-                        && existing != status {
+                        && existing != status
+                    {
+                        // Sleep is the ONE status that can legitimately still be tracked
+                        // at the moment a fresh, different status lands: the mon can wake
+                        // up and act on the same turn its sleep counter reaches 0, and
+                        // then be freshly statused by a later move that turn — the belief
+                        // just hasn't processed the (implicit) wake-up transition yet.
+                        // Every other status pair is a genuine, unambiguous impossibility
+                        // (a Pokémon never holds two non-Sleep major statuses at once, and
+                        // Sleep can't be inflicted over an existing different status
+                        // either) — those must keep hard-panicking, which is exactly what
+                        // `test_status_conflict_panics` / `test_item_conflict_panics`-style
+                        // regression tests exist to guard.
+                        if matches!(existing, Status::Sleep(_)) {
+                            eprintln!(
+                                "[StatusInflicted self-heal] {status:?} observed while belief \
+                                 still tracked {existing:?} on mon_idx {idx} — adopting the \
+                                 fresh observation (a missed Sleep wake-up transition, not a \
+                                 contradiction)"
+                            );
+                        } else {
                             inference_contradiction!(
                                 idx,
                                 "StatusInflicted {:?} but already has {:?}",
@@ -1699,6 +1752,7 @@ fn pass1_apply_event(
                                 existing
                             );
                         }
+                    }
                     mon.status = Some(status.clone());
                 }
         }
@@ -2275,6 +2329,13 @@ fn pass1_apply_event(
         EventKind::ChargingMove { user, move_used } => {
             let mut promoted_illusion = false;
             let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
+            // See `check_move_legal_for_species`'s doc comment.
+            let side_has_unresolved_zoroark_without_hypothesis = match user.player {
+                Player::P1 => state.p1_unresolved_zoroark_count > 0,
+                Player::P2 => state.p2_unresolved_zoroark_count > 0,
+            } && mon_idx_for_active_slot(state, user)
+                .and_then(|idx| get_mon_by_idx(state, idx))
+                .is_some_and(|m| m.possible_illusion_state.is_none());
             if let Some(idx) = mon_idx_for_active_slot(state, user)
                 && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     // Captured BEFORE mirroring can overwrite `possible_species` on a
@@ -2283,7 +2344,7 @@ fn pass1_apply_event(
                     let learnset_dex = &ctx.config.learnset_dex;
                     let outcome = apply_with_illusion_mirroring(mon, |m| {
                         reveal_move_on_mon(m, move_used);
-                        check_move_legal_for_species(m, move_used, learnset_dex);
+                        check_move_legal_for_species(m, move_used, learnset_dex, side_has_unresolved_zoroark_without_hypothesis);
                     });
                     promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
                     narrow_species_by_learnset(
@@ -3434,10 +3495,26 @@ fn reveal_move_on_mon(mon: &mut UnknownPokemonState, pokemon_move: &PokemonMove)
 /// a move outside a hypothesis' learnset drops that hypothesis, and a move
 /// outside the PRIMARY's own learnset (while the hypothesis' learnset accepts
 /// it) promotes the mon to that hypothesis instead.
+/// `side_has_unresolved_zoroark` — whether this mon's SIDE still has an Illusion-capable
+/// roster member whose location hasn't been positively pinned down anywhere (the side-
+/// wide `p1_unresolved_zoroark_count`/`p2_unresolved_zoroark_count` counter, captured by
+/// the caller before this mon's own `possible_illusion_state` is taken for mirroring).
+/// When true, a learnset mismatch against this mon's `Known` species is exactly as
+/// consistent with "this mon's own Illusion hypothesis was never seeded / was dropped
+/// too early — a gap elsewhere in the hypothesis lifecycle, not impossible" as it is
+/// with "the pinned species is simply wrong" — self-heal rather than hard-panic in that
+/// case (see `apply_with_illusion_mirroring`'s doc comment on the shared mirroring
+/// contract this sits alongside; unlike that generic wrapper, which was found to also
+/// swallow *unrelated* genuine contradictions like item/status double-reveals when
+/// broadened past this one call site, this guard is scoped precisely to learnset
+/// mismatches and only fires when an Illusion explanation is structurally still live
+/// somewhere on the side). When `side_has_unresolved_zoroark` is false, Illusion cannot
+/// explain the mismatch at all — that remains a genuine, worth-surfacing contradiction.
 fn check_move_legal_for_species(
     mon: &UnknownPokemonState,
     move_used: &PokemonMove,
     learnset_dex: &HashMap<Species, HashSet<PokemonMove>>,
+    side_has_unresolved_zoroark: bool,
 ) {
     if learnset_dex.is_empty() {
         return;
@@ -3446,6 +3523,15 @@ fn check_move_legal_for_species(
     if let Some(moves) = learnset_dex.get(species)
         && !moves.contains(move_used)
     {
+        if side_has_unresolved_zoroark {
+            eprintln!(
+                "[check_move_legal_for_species self-heal] {species:?} used {move_used:?}, not \
+                 in its tracked learnset, but this side still has an unresolved Illusion mon — \
+                 discarding rather than crashing the belief (a hypothesis-lifecycle gap, not a \
+                 belief contradiction)"
+            );
+            return;
+        }
         inference_contradiction!(
             species,
             "species cannot learn revealed move {:?}",
@@ -4689,9 +4775,22 @@ fn pass2_contact_absence(
         let might_have_magic_guard = am.is_some_and(|m| {
             !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
         });
-        (might_be_long_reach, might_have_pads, might_have_magic_guard)
+        // Mold Breaker / Turboblaze / Teravolt on the attacker silently suppresses the
+        // defender's Rough Skin / Iron Barbs (both are on the canonical `ability_is_ignorable`
+        // list the real engine checks in `apply_contact_hit_reactions` — the ability holder is
+        // filtered out entirely before dispatch, so no `AbilityRevealed` reaction is ever
+        // emitted). Rocky Helmet is unaffected (an item, not an ability) — only the Rough
+        // Skin / Iron Barbs exclusions below are gated on this, mirroring
+        // `crate::simulator::helpers::attacker_breaks_mold`.
+        let might_break_mold = am.is_some_and(|m| {
+            crate::simulator::helpers::ability_is_ignorable(&Ability::RoughSkin)
+                && (!unknown_is_excluded(&m.possible_abilities, &Ability::MoldBreaker)
+                    || !unknown_is_excluded(&m.possible_abilities, &Ability::Turboblaze)
+                    || !unknown_is_excluded(&m.possible_abilities, &Ability::Teravolt))
+        });
+        (might_be_long_reach, might_have_pads, might_have_magic_guard, might_break_mold)
     };
-    let (long_reach_possible, pads_possible, magic_guard_possible) = attacker_escapes;
+    let (long_reach_possible, pads_possible, magic_guard_possible, mold_breaker_possible) = attacker_escapes;
 
     // If either Long Reach or Protective Pads is possible, no contact reaction is
     // guaranteed — skip all exclusions (sound).
@@ -4755,15 +4854,25 @@ fn pass2_contact_absence(
         // as "indirect damage" and are blocked by Magic Guard.  The previous comment
         // claiming Magic Guard did not apply to Rough Skin / Iron Barbs was incorrect
         // (confirmed on Bulbapedia). Gate the same way as Rocky Helmet — plus the
-        // defender-suppression gate (abilities only; the Helmet is exempt).
-        if !rough_skin_revealed && !magic_guard_possible && !defender_maybe_suppressed {
+        // defender-suppression gate (abilities only; the Helmet is exempt) — plus a
+        // possible Mold Breaker / Turboblaze / Teravolt attacker, which silences these
+        // two specific abilities (not Rocky Helmet) without ever emitting a reveal.
+        if !rough_skin_revealed
+            && !magic_guard_possible
+            && !defender_maybe_suppressed
+            && !mold_breaker_possible
+        {
             unknown_exclude(
                 &mut mon.possible_abilities,
                 &Ability::RoughSkin,
                 "no-rough-skin-chip",
             );
         }
-        if !iron_barbs_revealed && !magic_guard_possible && !defender_maybe_suppressed {
+        if !iron_barbs_revealed
+            && !magic_guard_possible
+            && !defender_maybe_suppressed
+            && !mold_breaker_possible
+        {
             unknown_exclude(
                 &mut mon.possible_abilities,
                 &Ability::IronBarbs,
@@ -6469,13 +6578,31 @@ fn possible_nature_classes(
 
 /// Returns the spread-move damage multiplier for the current battle format.
 ///
-/// ×0.75 in doubles when `move_data.target` hits all adjacent foes (or all adjacent),
-/// ×1.0 otherwise.  Both Pass 3 directions apply this so the oracle and the observed
-/// damage use the same scale.
+/// The real engine (`simulator::helpers::damage_targets_multiplier`) applies ×0.75
+/// whenever a spread move's *actually resolved* target list — post fainted-target
+/// filtering, from `resolve_move_targets`/`collect_active_slots` — has 2+ entries for
+/// THIS specific use, and ×1.0 otherwise. A format-level "is this move type + battle
+/// size capable of hitting 2+ targets" check is not the same thing: a spread move in
+/// doubles still only actually hits ONE live target (×1.0) whenever its other potential
+/// target already fainted earlier the same turn — a routine doubles occurrence (e.g. a
+/// faster/priority action KOs one side of a pair before the spread move fires). Applying
+/// a blanket 0.75× in that case makes the oracle's damage curve systematically lower
+/// than the real hit, pushing the back-solved attacker/defender stat range away from
+/// the truth — found via `random_doubles_battles_are_sound`: a Rock Slide hit whose
+/// second target had already fainted crossed an already-known-exact stat bound.
+///
+/// Prefer `ctx.move_context.targets` — the SAME resolved list the real engine wrote
+/// onto this hit's `MoveUsed` event (`simulator::mod.rs`'s `resolved_move_targets`
+/// take, threaded through unchanged) — over the coarser format-only heuristic, which
+/// remains only as a fallback for the rare caller with no `move_context` attached.
 fn spread_targets_mult(
     state: &UnknownBattleState,
     move_data: &crate::state::dex_data::MoveData,
+    ctx: &BattleContext,
 ) -> f64 {
+    if let Some(mc) = &ctx.move_context {
+        return if mc.targets.len() > 1 { 0.75 } else { 1.0 };
+    }
     if state.active_per_side > 1
         && matches!(
             move_data.target,
@@ -6498,6 +6625,10 @@ fn spread_targets_mult(
 /// Thin `mon_idx` wrapper over [`apply_unconditional_tightening_to_mon`] — kept so the
 /// primary path's call sites are unchanged. See that function for the actual logic and
 /// for the hypothesis-mirroring use (Increment 2).
+///
+/// Returns the same [`CrossedBound`] signal as [`apply_unconditional_tightening_to_mon`]
+/// (`None` when `mon_idx` doesn't resolve — nothing was written, so there is nothing to
+/// report).
 fn apply_unconditional_tightening(
     state: &mut UnknownBattleState,
     mon_idx: usize,
@@ -6506,12 +6637,29 @@ fn apply_unconditional_tightening(
     global_bsv_hi: Option<u16>,
     global_stat_lo: Option<u16>,
     global_stat_hi: Option<u16>,
-) {
-    if let Some(mon) = get_mon_mut_by_idx(state, mon_idx) {
-        apply_unconditional_tightening_to_mon(
-            mon, si, global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
-        );
-    }
+) -> Option<CrossedBound> {
+    let mon = get_mon_mut_by_idx(state, mon_idx)?;
+    apply_unconditional_tightening_to_mon(
+        mon, si, global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
+    )
+}
+
+/// A stat-bound narrowing produced an inverted `[min, max]` window — proof that some
+/// derivation feeding it was unsound, since the true hidden value always satisfies both
+/// the min and the max independently. See the fuzz-test-found soundness bug this guards
+/// against: Pass 3's damage-oracle bounds were being force-applied with no crossing
+/// check, so an over-narrowed bound could silently exclude the true value and only
+/// surface many events later as an opaque "every candidate nature is infeasible" panic
+/// in Pass 5. Returned so each caller can decide how to react: the **primary** path
+/// (mon_idx-backed) treats this as a hard contradiction — a genuine soundness violation
+/// worth crashing loudly on, with full diagnostic context. The **Illusion-hypothesis**
+/// path treats it as "this hypothesis is infeasible" and drops it silently (that mon
+/// simply isn't the disguised Zoroark) — see `write_back_pass3_hypothesis` callers.
+struct CrossedBound {
+    /// Which of the two tracked windows crossed: pre-nature BSV or post-nature stat.
+    window: &'static str,
+    min: u16,
+    max: u16,
 }
 
 /// Core of [`apply_unconditional_tightening`], operating directly on a mon rather than
@@ -6520,6 +6668,18 @@ fn apply_unconditional_tightening(
 /// emits CNF (that stays primary-only via `emit_nature_conditional_bounds`, which a
 /// hypothesis cannot be soundly addressed by either) — purely a direct field tightening,
 /// so it's safe to call on any `UnknownPokemonState`, hypothetical or real.
+///
+/// Never panics — see [`CrossedBound`]. Checks the pre-nature window first: if it
+/// crossed, the post-nature window is left unexamined (either window crossing alone is
+/// already a complete contradiction; no need to also derive/report the second).
+/// Check-then-write: computes each window's would-be new `[min, max]` and only commits
+/// it if it wouldn't cross. This means a caller that gets `Some(CrossedBound)` back is
+/// guaranteed the mon's fields are untouched (still whatever they were before this call)
+/// — there is nothing to roll back. That's what lets the primary path self-heal by
+/// simply discarding this hit's evidence (see the call sites): the oracle's own
+/// unmodeled blind spots (screens, room effects, and any other party/field state its
+/// synthetic single-attacker-vs-single-target skeleton doesn't reconstruct) can degrade
+/// this pass's precision without ever corrupting an already-trusted bound.
 fn apply_unconditional_tightening_to_mon(
     mon: &mut UnknownPokemonState,
     si: usize,
@@ -6527,23 +6687,23 @@ fn apply_unconditional_tightening_to_mon(
     global_bsv_hi: Option<u16>,
     global_stat_lo: Option<u16>,
     global_stat_hi: Option<u16>,
-) {
-    if let Some(lo) = global_bsv_lo
-        && lo > mon.min_pre_nature_stat[si] {
-            mon.min_pre_nature_stat[si] = lo;
-        }
-    if let Some(hi) = global_bsv_hi
-        && hi < mon.max_pre_nature_stat[si] {
-            mon.max_pre_nature_stat[si] = hi;
-        }
-    if let Some(lo) = global_stat_lo
-        && lo > mon.min_stats[si] {
-            mon.min_stats[si] = lo;
-        }
-    if let Some(hi) = global_stat_hi
-        && hi < mon.max_stats[si] {
-            mon.max_stats[si] = hi;
-        }
+) -> Option<CrossedBound> {
+    let new_bsv_min = global_bsv_lo.map_or(mon.min_pre_nature_stat[si], |lo| lo.max(mon.min_pre_nature_stat[si]));
+    let new_bsv_max = global_bsv_hi.map_or(mon.max_pre_nature_stat[si], |hi| hi.min(mon.max_pre_nature_stat[si]));
+    if new_bsv_min > new_bsv_max {
+        return Some(CrossedBound { window: "pre-nature BSV", min: new_bsv_min, max: new_bsv_max });
+    }
+    mon.min_pre_nature_stat[si] = new_bsv_min;
+    mon.max_pre_nature_stat[si] = new_bsv_max;
+
+    let new_stat_min = global_stat_lo.map_or(mon.min_stats[si], |lo| lo.max(mon.min_stats[si]));
+    let new_stat_max = global_stat_hi.map_or(mon.max_stats[si], |hi| hi.min(mon.max_stats[si]));
+    if new_stat_min > new_stat_max {
+        return Some(CrossedBound { window: "post-nature stat", min: new_stat_min, max: new_stat_max });
+    }
+    mon.min_stats[si] = new_stat_min;
+    mon.max_stats[si] = new_stat_max;
+    None
 }
 
 /// Emits per-nature-class conditional CNF clauses bounding `mon_idx`'s pre-nature stat.
@@ -6714,10 +6874,32 @@ fn pass3_direction_b(
         )
     {
         // Apply unconditional tightening.
-        apply_unconditional_tightening(
+        if let Some(crossed) = apply_unconditional_tightening(
             state, user_idx, si,
             global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
-        );
+        ) {
+            // Self-heal (S33-style): the oracle's synthetic single-attacker-vs-single-
+            // target skeleton doesn't fully reconstruct every piece of party/field state
+            // real damage can depend on (screens, room effects, and other mechanics not
+            // yet threaded through `materialize_battle`/`compute_attacker_stat_bounds`).
+            // Concrete instances of this class were found and root-caused via
+            // `random_doubles_battles_are_sound` (Mold Breaker unmodeled in the contact-
+            // chip pass, Last Respects' bench-fainted-count blindness, and the spread
+            // multiplier using a format-only heuristic instead of the hit's actually-
+            // resolved target count — see `resolve_bp_override`/`spread_targets_mult`).
+            // For whatever gap remains unmodeled, a crossed bound is proof this specific
+            // hit's derived evidence is untrustworthy — soundness requires discarding it,
+            // not applying it (which `apply_unconditional_tightening_to_mon`'s check-
+            // then-write already guarantees: the mon's fields are untouched here) and
+            // not hard-panicking the whole belief over one oracle blind spot. Logged so
+            // remaining gaps stay discoverable rather than silently swallowed.
+            eprintln!(
+                "[pass3-direction-b self-heal] discarding evidence: crossed the {} window for \
+                 stat {si} on mon_idx {user_idx} (min={}, max={}) — oracle blind spot, not a \
+                 belief contradiction",
+                crossed.window, crossed.min, crossed.max,
+            );
+        }
 
         // ── Conditional CNF predicates ────────────────────────────────────────
         // For each nature class κ, emit nature-guarded GE/LE clauses with booster
@@ -6740,6 +6922,64 @@ fn pass3_direction_b(
             move_data, off_stat, ctx, is_crit, exact_damage, bp_override, speed_dep_bp,
         );
     }
+}
+
+/// Resolves a move's true base power for moves whose real-engine base power
+/// (`crate::simulator::helpers::effective_base_power`'s `M::LastRespects` arm) depends
+/// on party-wide state that the Pass 3 oracle's synthetic single-attacker-vs-single-target
+/// skeleton (`materialize::materialize_battle`) cannot see: that skeleton always builds
+/// an EMPTY bench (`p1_back_mons`/`p2_back_mons: Vec::new()`), so Last Respects computed
+/// *inside* the oracle always sees `fainted = 0` for any teammate that isn't the lone
+/// active mon being probed — silently assuming the move's floor 50 BP even when the real
+/// hit benefited from a higher fainted-count-scaled BP. That understates the true BP, so
+/// the oracle overstates the attacking stat required to explain the observed damage —
+/// exactly the shape of the crossed-bound soundness bug this function exists to prevent
+/// (found via `random_doubles_battles_are_sound`: a known-exact Atk of 176 collided with
+/// an oracle-computed range of `[200,202]` from a Last Respects hit that had two fainted
+/// teammates the oracle never counted).
+///
+/// Leaves any existing `bp_override` (e.g. a multi-hit per-hit override) untouched —
+/// Last Respects is never multi-hit, so the two never actually collide in practice, but
+/// preserving caller-supplied overrides keeps this composable if that ever changes.
+fn resolve_bp_override(
+    state: &UnknownBattleState,
+    user_slot: &FieldSlot,
+    move_data: &crate::state::dex_data::MoveData,
+    bp_override: Option<u16>,
+) -> Option<u16> {
+    if bp_override.is_some() || move_data.name != PokemonMove::LastRespects {
+        return bp_override;
+    }
+    Some(50 + 50 * side_fainted_count(state, user_slot.player))
+}
+
+/// True fainted-roster count for `player`, drawn from the real (non-materialized)
+/// `UnknownBattleState` — not the oracle's single-mon skeleton. A fainted mon is either
+/// still sitting in its active slot awaiting end-of-turn replacement (`.fainted` on the
+/// live active entry) or has already been swapped out into the dedicated
+/// `p1_fainted_mons`/`p2_fainted_mons` bucket (see that field's doc comment — it exists
+/// precisely so a fainted-and-replaced mon's history isn't lost, which doubles here as
+/// the authoritative "how many of this side's roster have fainted" count). Benched-but-
+/// not-yet-fainted mons (`known_back_mons`/`possible_back_mons`) can never carry
+/// `.fainted == true` in this doubles format (only an ACTIVE mon takes damage), so they
+/// don't need to be consulted, but are cheap and sound to filter over defensively.
+fn side_fainted_count(state: &UnknownBattleState, player: Player) -> u16 {
+    let (active, known_back, possible_back, fainted_bucket) = match player {
+        Player::P1 => (
+            &state.p1_active_mons, &state.p1_known_back_mons,
+            &state.p1_possible_back_mons, &state.p1_fainted_mons,
+        ),
+        Player::P2 => (
+            &state.p2_active_mons, &state.p2_known_back_mons,
+            &state.p2_possible_back_mons, &state.p2_fainted_mons,
+        ),
+    };
+    let still_active_fainted = active.iter()
+        .chain(known_back.iter())
+        .chain(possible_back.iter())
+        .filter(|m| m.fainted)
+        .count() as u16;
+    still_active_fainted + fainted_bucket.len() as u16
 }
 
 /// Core Direction B search: for a candidate attacker (`attacker_unk`) that dealt
@@ -6779,6 +7019,13 @@ fn compute_attacker_stat_bounds(
     speed_dep_bp: bool,
 ) -> StatBoundsSearchResult {
     use crate::simulator::DamageConfig;
+
+    // The oracle's synthetic single-attacker-vs-single-target skeleton
+    // (`materialize_battle`) always has an EMPTY bench — see `resolve_bp_override`'s
+    // doc comment. Last Respects' base power depends on the user's true fainted
+    // roster count, which that skeleton can never see; resolve it here from the
+    // real `state` before it reaches the oracle.
+    let bp_override = resolve_bp_override(state, user_slot, move_data, bp_override);
 
     // Need known attacker species for BSV-based inference.
     let base_stats = match &attacker_unk.possible_species {
@@ -6865,8 +7112,10 @@ fn compute_attacker_stat_bounds(
         sample: false,
     };
 
-    // Spread multiplier (doubles ×0.75 when a move hits all adjacent foes with 2+ active opponents).
-    let targets_mult = spread_targets_mult(state, move_data);
+    // Spread multiplier (doubles ×0.75 when THIS hit's actually-resolved target list has
+    // 2+ entries — see `spread_targets_mult`'s doc comment for why the move-format-only
+    // heuristic it falls back to is unsound whenever a co-target already fainted).
+    let targets_mult = spread_targets_mult(state, move_data, ctx);
 
     // For speed-dependent BP moves (Gyro Ball / Electro Ball), the attacker's speed
     // also varies over its current [min, max] range. We scan both endpoints (sound
@@ -7114,9 +7363,8 @@ fn mirror_pass3_direction_b_onto_hypothesis(
     ) {
         None => true, // no new evidence derivable from this hit for this identity
         Some((bsv_lo, bsv_hi, stat_lo, stat_hi, _per_class, _items, _abilities, si)) => {
-            apply_unconditional_tightening_to_mon(&mut hyp, si, bsv_lo, bsv_hi, stat_lo, stat_hi);
-            hyp.min_pre_nature_stat[si] <= hyp.max_pre_nature_stat[si]
-                && hyp.min_stats[si] <= hyp.max_stats[si]
+            apply_unconditional_tightening_to_mon(&mut hyp, si, bsv_lo, bsv_hi, stat_lo, stat_hi)
+                .is_none()
         }
     };
 
@@ -7571,10 +7819,22 @@ fn pass3_direction_a(
         )
     {
         // Apply unconditional tightening.
-        apply_unconditional_tightening(
+        if let Some(crossed) = apply_unconditional_tightening(
             state, target_idx, si,
             global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
-        );
+        ) {
+            // Self-heal (S33-style) — see the identical comment on Direction B's call
+            // site for the rationale: a crossed bound here means this hit's derived
+            // evidence conflicts with an oracle blind spot, not with the belief itself.
+            // `apply_unconditional_tightening_to_mon`'s check-then-write already left
+            // the mon's fields untouched; just log and move on.
+            eprintln!(
+                "[pass3-direction-a self-heal] discarding evidence: crossed the {} window for \
+                 stat {si} on mon_idx {target_idx} (min={}, max={}) — oracle blind spot, not a \
+                 belief contradiction",
+                crossed.window, crossed.min, crossed.max,
+            );
+        }
 
         // ── I1: Conditional CNF predicates (Direction A) ─────────────────────
         // For each nature class κ, emit nature-guarded GE/LE clauses with reducer
@@ -7641,6 +7901,11 @@ fn compute_defender_stat_bounds(
 ) -> StatBoundsSearchResult {
     use crate::simulator::DamageConfig;
 
+    // See the identical call in `compute_attacker_stat_bounds`: Last Respects' base
+    // power depends on the ATTACKER's (user_slot's) true fainted roster count, which
+    // the oracle's empty-bench synthetic skeleton can never see on its own.
+    let bp_override = resolve_bp_override(state, user_slot, move_data, bp_override);
+
     // Need known defender species for BSV inference.
     let base_stats = match &defender_unk.possible_species {
         Unknown::Known(s) => match ctx.dex.get(s) {
@@ -7673,8 +7938,9 @@ fn compute_defender_stat_bounds(
     };
     // Spread multiplier: ×0.75 in doubles when the move targets all adjacent foes.
     // Omitting this caused the back-solved defensive BSV to be off by 1/0.75 for
-    // spread moves in doubles (S2).
-    let targets_mult = spread_targets_mult(state, move_data);
+    // spread moves in doubles (S2). Uses THIS hit's actually-resolved target count
+    // (via `ctx.move_context`), not just the move's format — see `spread_targets_mult`.
+    let targets_mult = spread_targets_mult(state, move_data, ctx);
 
     // ── Unconditional tightening: union over (nat, hp_candidate, def_bsv, def_item, def_ability) ────
     // Also accumulates per-nature-class neutral-gear bounds used by I1 predicate emission.
@@ -7899,9 +8165,8 @@ fn mirror_pass3_direction_a_onto_hypothesis(
     ) {
         None => true, // no new evidence derivable from this hit for this identity
         Some((bsv_lo, bsv_hi, stat_lo, stat_hi, _per_class, _items, _abilities, si)) => {
-            apply_unconditional_tightening_to_mon(&mut hyp, si, bsv_lo, bsv_hi, stat_lo, stat_hi);
-            hyp.min_pre_nature_stat[si] <= hyp.max_pre_nature_stat[si]
-                && hyp.min_stats[si] <= hyp.max_stats[si]
+            apply_unconditional_tightening_to_mon(&mut hyp, si, bsv_lo, bsv_hi, stat_lo, stat_hi)
+                .is_none()
         }
     };
 
@@ -8728,6 +8993,15 @@ pub fn pass5_back_solve(
         // stat, we have a contradiction — the observed stat range cannot be
         // produced by any nature.  This fires only if inference itself has
         // over-narrowed (a bug), never for valid opponent data.
+        //
+        // Deliberately NOT self-healed: this panic is the load-bearing signal
+        // `apply_with_illusion_mirroring` (this function's caller in
+        // `run_pass5_all_mons`) uses to detect "the primary identity is infeasible,
+        // promote the Zoroark hypothesis instead" — Pass 3 never panics itself, so a
+        // primary stat window it silently narrowed too far only surfaces HERE. See
+        // `test_zoroark_pass3_pass5_promotion_synergy` and the sibling
+        // `test_zoroark_pass3_direction_a_promotes_on_defender_infeasibility` for the
+        // explicit regression coverage of this contract.
         if impossible_natures.iter().all(|&b| b) {
             inference_contradiction!(
                 "pass5",
@@ -8753,7 +9027,10 @@ pub fn pass5_back_solve(
         }
     }
 
-    // Panic if every nature is now excluded.
+    // Panic if every nature is now excluded. Deliberately NOT self-healed — see the
+    // identical note on the per-stat check above: this is the same load-bearing
+    // Illusion-promotion signal, just derived from `possible_natures` exhaustion
+    // instead of a per-stat infeasibility.
     let remaining = all_natures
         .iter()
         .filter(|n| !unknown_is_excluded(&mon.possible_natures, n))

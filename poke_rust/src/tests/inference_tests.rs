@@ -10819,6 +10819,10 @@ fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
     use crate::state::dex_data::MoveFlag;
 
     // Attacker: Magic Guard excluded; LongReach excluded; item None (no Protective Pads).
+    // Mold Breaker / Turboblaze / Teravolt must also be excluded — any of those would
+    // silently suppress the defender's Rough Skin / Iron Barbs (both are on the
+    // canonical `ability_is_ignorable` list) with no reveal, so their possibility alone
+    // (sound: might be true) blocks the exclusion below just like Magic Guard does.
     // NeutralizingGas must be excluded on BOTH actives, or the defender-suppression
     // gate (sound: the chip could be suppressed field-wide) skips the exclusions.
     let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
@@ -10827,6 +10831,9 @@ fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
         Ability::LongReach,
         Ability::MagicGuard,
         Ability::NeutralizingGas,
+        Ability::MoldBreaker,
+        Ability::Turboblaze,
+        Ability::Teravolt,
     ]);
 
     let mut p2_mon = unknown_mon();

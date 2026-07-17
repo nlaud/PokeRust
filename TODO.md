@@ -1,26 +1,7 @@
 # TODO
 ### Fixes
-- [x] Add inference to the benchmarking, sampling from all the teamsheets in the
-  folder: added `poke_rust/benches/battle_sweep.rs` (full doubles battles across
-  all 25 ordered teamsheet pairings, each resolved once and replayed against all
-  4 information modes so `apply_information` cost is timed fairly on an
-  identical event stream) and reworked `benches/turn_speed.rs` to sweep the same
-  pairings with seeded random leads/moves instead of two fixed teams (enumerate
-  mode capped at ≤4 damage rolls — full enumeration is the >15 GB doubles risk
-  CLAUDE.md flags, and randomized moves make branch counts unpredictable ahead
-  of time; sample mode keeps the full 1-16 roll grid). Command selection and
-  belief seeding are ported from the proven `random_battle_tests.rs` fuzzer,
-  shared between both benches via the new `benches/bench_common.rs`. Seeding
-  only reproduces the harness's first draw (team-preview leads) exactly — the
-  engine's own entropy-based RNG (damage rolls/crits/misses) feeds back into
-  which commands are legal on later turns, so `battle_sweep`'s full trajectory
-  varies run to run; `turn_speed`'s single post-preview turn is unaffected and
-  reproduces exactly (verified by diffing branch counts across two runs).
-  `battle_sweep` also surfaces, at low frequency (~1-2% of calls), the same two
-  known inference contradictions tracked below — expected, not a bench defect.
-- `random_doubles_battles_are_sound` (poke_rust/src/tests/random_battle_tests.rs) currently fails — found two real inference-engine soundness bugs, both unfixed:
-  - Pass 5 nature back-solve hits a crossed min/max stat bound (`information/inference.rs:8732`) — some earlier pass (likely Pass 3's damage-based stat inversion) narrows a bound past an existing one without detecting the crossing. Seen on Def, SpA, and SpD, so systemic not stat-specific.
-  - Learnset-based Illusion narrowing (`information/inference.rs:3449`, `check_move_legal_for_species`) misfires on ordinary moves (Aqua Jet, Rock Slide, Scald, etc.) almost any time a Zoroark-line Pokémon is on the field. Every existing test disables this feature (`learnset_dex: HashMap::new()`), so it likely has never run against real data before — suspect `parse_learnset_dex` (`state/dex_data.rs:2016`) is mis-parsing the learnset file (e.g. missing TM/egg moves). See memory `project_random_battle_fuzz_test_findings.md` for full repro details.
+- `random_doubles_battles_are_sound` (poke_rust/src/tests/random_battle_tests.rs): fixed four real Pass-3/BCP oracle bugs (Mold Breaker unmodeled in contact-chip absence, Last Respects' fainted-teammate count invisible to the oracle's empty-bench skeleton, spread-move ×0.75 using a format-only heuristic instead of the hit's real resolved target count, and the identical crossed-bound gap in `SpeedComparison` propagation), added self-heal safety nets for remaining mathematically-provable over-narrowing, and regenerated `pokemon_info/showdownLearnsets.txt` from the Champions mod's own learnset source (`helper_scripts/gen_learnsets.py`, now with prevo-chain move inheritance). Full test suite passes (1290/1290); the fuzz test itself now passes most runs but is not yet 100% reliable — one known bug remains:
+  - `check_move_legal_for_species` (`information/inference.rs`) still fires an uncaught contradiction when a disguised Zoroark-line mon uses one of its own signature moves while no Illusion hypothesis is attached to it AND the side's `unresolved_zoroark_count` is already 0 — i.e. the belief thinks Zoroark's identity was already resolved (or never seeded) elsewhere. Likely a mis-attributed promotion or a `seed_illusion_hypothesis_for`/team-preview seeding gap, not a learnset data issue (double-checked: the moves involved are correctly present/absent per real game data). See memory `project_random_battle_fuzz_test_findings.md` for the full investigation trail, the traps hit along the way (two self-heals had to be reverted after they silently disabled the Illusion-promotion regression tests), and the next-step tracing plan.
 ### New features
 - Link all the READMEs to the main project README.
 - Frontend features

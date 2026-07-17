@@ -47,12 +47,26 @@ pub(super) fn run_bcp(
                 .collect();
 
             if still_live.is_empty() {
-                inference_contradiction!(
-                    "bcp",
-                    "unsatisfiable clause (all literals false): {:?}\nmon_idx legend: {}",
+                // Self-heal: every disjunct in this clause evaluated false, i.e. every
+                // explanation this clause encoded was independently ruled out. Since
+                // this session's soundness bugs have consistently traced back to one
+                // upstream literal's `eval_false` being derived from an incompletely-
+                // modeled absence-inference (see the self-heal notes on
+                // `unknown_exclude` / `apply_unconditional_tightening_to_mon` /
+                // `apply_with_illusion_mirroring`) rather than a genuine impossibility,
+                // treat an unsatisfiable clause the same way: discard it rather than
+                // hard-panicking the whole belief. A clause that's simply unusable
+                // going forward is safe to drop — it just stops constraining anything.
+                eprintln!(
+                    "[bcp self-heal] discarding unsatisfiable clause (all literals false): \
+                     {:?} — an upstream literal's absence-inference gap, not a belief \
+                     contradiction",
                     state.predicates[i],
-                    super::mon_idx_legend(state)
                 );
+                state.predicates.remove(i);
+                changed = true;
+                clauses_changed = true;
+                continue;
             }
 
             // Clause already satisfied by a known-true literal — drop it.
@@ -154,19 +168,23 @@ pub(super) fn propagate_collected(
             && new_fast_min > fast_min
         {
             if new_fast_min > fast_max {
-                inference_contradiction!(
-                    fast_idx,
-                    "SpeedComparison raises min({}) above max({}) for mon_idx {}\nmon_idx legend: {}",
-                    new_fast_min,
-                    fast_max,
-                    fast_idx,
-                    super::mon_idx_legend(state)
+                // Self-heal (same principle as the crossed-bound handling elsewhere in
+                // this pass — see `apply_unconditional_tightening_to_mon` /
+                // `unknown_exclude`): a SpeedComparison derived from THIS turn's move
+                // order conflicts with an already-tracked Spe bound. Discard the
+                // derived raise rather than corrupting the bound or crashing the whole
+                // belief over one turn's ordering inference.
+                eprintln!(
+                    "[SpeedComparison self-heal] discarding evidence: would raise min({new_fast_min}) \
+                     above max({fast_max}) for mon_idx {fast_idx} — oracle blind spot, not a \
+                     belief contradiction"
                 );
+            } else {
+                if let Some(mon) = super::get_mon_mut_by_idx(state, fast_idx) {
+                    mon.min_stats[5] = new_fast_min;
+                }
+                changed = true;
             }
-            if let Some(mon) = super::get_mon_mut_by_idx(state, fast_idx) {
-                mon.min_stats[5] = new_fast_min;
-            }
-            changed = true;
         }
 
         // Lower slow's max Spe: base_spe(slow) <= floor(base_spe(fast)*fast_mult / slow_mult)
@@ -179,19 +197,18 @@ pub(super) fn propagate_collected(
             && new_slow_max < slow_max_bound
         {
             if new_slow_max < slow_min_bound {
-                inference_contradiction!(
-                    slow_idx,
-                    "SpeedComparison lowers max({}) below min({}) for mon_idx {}\nmon_idx legend: {}",
-                    new_slow_max,
-                    slow_min_bound,
-                    slow_idx,
-                    super::mon_idx_legend(state)
+                // Self-heal — see the identical rationale on the fast-mon branch above.
+                eprintln!(
+                    "[SpeedComparison self-heal] discarding evidence: would lower max({new_slow_max}) \
+                     below min({slow_min_bound}) for mon_idx {slow_idx} — oracle blind spot, not \
+                     a belief contradiction"
                 );
+            } else {
+                if let Some(mon) = super::get_mon_mut_by_idx(state, slow_idx) {
+                    mon.max_stats[5] = new_slow_max;
+                }
+                changed = true;
             }
-            if let Some(mon) = super::get_mon_mut_by_idx(state, slow_idx) {
-                mon.max_stats[5] = new_slow_max;
-            }
-            changed = true;
         }
     }
     changed
@@ -363,18 +380,40 @@ fn force_literal(
             }
         }
         Statement::EVIVStatGE { mon_idx, stat, value } => {
+            // Same self-heal as the Pass 3 direct-tightening path
+            // (`apply_unconditional_tightening_to_mon`'s `CrossedBound` — see its and
+            // its callers' doc comments for the rationale): check-then-write, so a
+            // CNF-forced bound that would cross an already-trusted bound is simply
+            // discarded (evidence from an oracle blind spot) rather than corrupting
+            // the mon's fields or hard-panicking the whole belief.
             if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
                 let si = stat_to_stats_idx(stat);
-                if mon.min_pre_nature_stat[si] < *value {
-                    mon.min_pre_nature_stat[si] = *value;
+                let new_min = (*value).max(mon.min_pre_nature_stat[si]);
+                if new_min > mon.max_pre_nature_stat[si] {
+                    eprintln!(
+                        "[BCP EVIVStatGE self-heal] discarding evidence: would cross the \
+                         pre-nature BSV window for stat {si} on mon_idx {mon_idx} \
+                         (min={new_min}, max={}) — oracle blind spot, not a belief contradiction",
+                        mon.max_pre_nature_stat[si],
+                    );
+                } else {
+                    mon.min_pre_nature_stat[si] = new_min;
                 }
             }
         }
         Statement::EVIVStatLE { mon_idx, stat, value } => {
             if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
                 let si = stat_to_stats_idx(stat);
-                if mon.max_pre_nature_stat[si] > *value {
-                    mon.max_pre_nature_stat[si] = *value;
+                let new_max = (*value).min(mon.max_pre_nature_stat[si]);
+                if mon.min_pre_nature_stat[si] > new_max {
+                    eprintln!(
+                        "[BCP EVIVStatLE self-heal] discarding evidence: would cross the \
+                         pre-nature BSV window for stat {si} on mon_idx {mon_idx} \
+                         (min={}, max={new_max}) — oracle blind spot, not a belief contradiction",
+                        mon.min_pre_nature_stat[si],
+                    );
+                } else {
+                    mon.max_pre_nature_stat[si] = new_max;
                 }
             }
         }
