@@ -560,6 +560,30 @@ pub(super) fn restore_discarded_primary_to_bench(
     // function before it) already drops the count to 0 and clears every hypothesis
     // side-wide once the side's one Illusion forme is positively located.
     maybe_seed_fresh_hypothesis(state, side, &mut restored);
+    // S49: about to push a new bench entry, growing `side`'s back bucket by one.
+    // `mon_idx` for every back-bucket mon is a live Vec-position recomputed fresh from
+    // `MonSegments::ranges()` on every call, not a stable per-individual id (S1/S18
+    // document + fix the analogous problem for ACTIVE slots; this is the sibling gap
+    // for the BACK segments). In the `[p1_active, p2_active, p1_back, p2_back]` flat
+    // layout, growing P1's back bucket silently shifts every mon_idx in P2's back
+    // segment by one — a CNF predicate or setter attribution recorded against an index
+    // at or beyond the about-to-move boundary can, after the shift, reference a
+    // completely different physical mon, even one on the OTHER side. Concretely: a
+    // `pass_eot_heal`-seeded `Statement::HasItem` clause about a P2 back mon, recorded
+    // before this push, got BCP-forced after it against whatever now occupied that
+    // (shifted) index — P1's own newly-restored decoy placeholder — which then
+    // `enforce_unique_item`'d a real item exclusion onto that placeholder's actual
+    // teammates, later colliding with a genuine reveal. Purge every fact referencing
+    // an index at or beyond the boundary BEFORE the push, rather than trying to
+    // reindex survivors (every `Statement` variant embedding a `mon_idx`, plus every
+    // setter field, would need updating in lockstep — a missed one silently
+    // reintroduces this bug). Always sound: discarding a constraint only widens.
+    let boundary = MonSegments::of(state).ranges()[match side {
+        Player::P1 => 2,
+        Player::P2 => 3,
+    }]
+    .end;
+    purge_facts_at_or_beyond_idx(state, boundary);
     match side {
         Player::P1 => state.p1_possible_back_mons.push(restored),
         Player::P2 => state.p2_possible_back_mons.push(restored),
@@ -2878,6 +2902,68 @@ fn purge_mon_scoped_knowledge(state: &mut UnknownBattleState, slot: &FieldSlot) 
         .chain(state.p2_side_condition_setters.iter_mut())
     {
         if *setter == Some(idx) {
+            *setter = None;
+        }
+    }
+}
+
+/// Boundary-generalized `statement_references_mon`: `true` if `stmt` (recursing
+/// through `Not`) references any `mon_idx` `>= boundary`. See
+/// `purge_facts_at_or_beyond_idx`.
+fn statement_references_mon_at_or_beyond(stmt: &Statement, boundary: usize) -> bool {
+    match stmt {
+        Statement::Not(inner) => statement_references_mon_at_or_beyond(inner, boundary),
+        Statement::HasItem { mon_idx, .. }
+        | Statement::HasAbility { mon_idx, .. }
+        | Statement::NatureBoostsStat { mon_idx, .. }
+        | Statement::NatureNerfsStat { mon_idx, .. }
+        | Statement::EVIVStatGE { mon_idx, .. }
+        | Statement::EVIVStatLE { mon_idx, .. }
+        | Statement::KnowsThreateningMove { mon_idx, .. } => *mon_idx >= boundary,
+        Statement::SpeedComparison { fast_idx, slow_idx, .. } => {
+            *fast_idx >= boundary || *slow_idx >= boundary
+        }
+        Statement::WeatherTurns { .. }
+        | Statement::TerrainTurns { .. }
+        | Statement::SideConditionTurns { .. } => false,
+    }
+}
+
+/// S49: `purge_mon_scoped_knowledge`'s S18 fix drops facts about a single re-bound
+/// *active* slot index. This is the sibling fix for *back*-bucket indices, which are
+/// live Vec-positions recomputed from `MonSegments::ranges()` on every call (see the
+/// call site in `restore_discarded_primary_to_bench`) rather than stable per-
+/// individual ids: pushing a new entry onto one side's back bucket silently shifts
+/// every `mon_idx` in whatever segment comes after it in the flat
+/// `[p1_active, p2_active, p1_back, p2_back]` layout — most importantly, growing P1's
+/// back bucket shifts every index in P2's back segment. A predicate or setter
+/// attribution recorded against an index at or beyond the about-to-move boundary can,
+/// post-shift, silently reference a different physical mon — even one on the other
+/// side. Call with `boundary` = the flat index the new entry is about to land at
+/// (i.e. the growing side's back-segment end, captured BEFORE the push). Purges the
+/// same categories `purge_mon_scoped_knowledge` already treats as idx-sensitive,
+/// generalized from "== idx" to ">= boundary". A correct reindex of survivors was
+/// deliberately not attempted: every `Statement` variant embedding a `mon_idx`, plus
+/// every setter field, would need updating in lockstep, and a missed one would
+/// silently reintroduce this exact bug. Discarding instead is the same trade this
+/// engine already makes at S18 and in BCP's unsatisfiable-clause self-heal, and is
+/// always sound — it only widens the belief, never falsely narrows it.
+fn purge_facts_at_or_beyond_idx(state: &mut UnknownBattleState, boundary: usize) {
+    state.predicates.retain(|clause| {
+        !clause.iter().any(|lit| statement_references_mon_at_or_beyond(lit, boundary))
+    });
+    if state.weather_setter_mon_idx.is_some_and(|idx| idx >= boundary) {
+        state.weather_setter_mon_idx = None;
+    }
+    if state.terrain_setter_mon_idx.is_some_and(|idx| idx >= boundary) {
+        state.terrain_setter_mon_idx = None;
+    }
+    for setter in state
+        .p1_side_condition_setters
+        .iter_mut()
+        .chain(state.p2_side_condition_setters.iter_mut())
+    {
+        if setter.is_some_and(|idx| idx >= boundary) {
             *setter = None;
         }
     }

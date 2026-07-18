@@ -2400,6 +2400,100 @@ fn test_zoroark_move_legality_promotion_restores_decoy_without_illusion_ended() 
     assert_eq!(restored_dragonite.possible_abilities, Unknown::Known(Ability::Multiscale));
 }
 
+/// S49: found via a 300+-seed doubles fuzz sweep (`random_battle_tests.rs`) as an
+/// `ItemRevealed`-vs-`Not([..])` contradiction whose exclusion traced back to a
+/// completely unrelated mon, sometimes on the OTHER side. Root cause: `mon_idx` for a
+/// *benched* Pokémon is not a stable per-individual id — it's a live Vec-position
+/// recomputed fresh from `MonSegments::ranges()` on every call, laid out as
+/// `[p1_active, p2_active, p1_back, p2_back]`. `restore_discarded_primary_to_bench`
+/// (called on every Illusion promotion, e.g. here via `IllusionEnded`) unconditionally
+/// pushes the discarded shown identity onto the promoted mon's side's back bucket.
+/// When that side's Illusion forme was the active lead from the start (no separate
+/// bench placeholder for `remove_stale_zoroark_bench_duplicate` to remove in
+/// exchange), the push is a NET +1 growth — which silently shifts every `mon_idx` in
+/// the OTHER side's back segment by one, since P1's back segment sits immediately
+/// before P2's in the flat layout. A CNF predicate recorded against an index at or
+/// beyond that boundary — here, one pinning P2's own back mon to Leftovers — survives
+/// the shift unchanged and gets force-committed by BCP against whatever now occupies
+/// that (shifted) index instead: P1's own newly-restored decoy placeholder. This test
+/// directly demonstrates the fix (`purge_facts_at_or_beyond_idx`, called from
+/// `restore_discarded_primary_to_bench` right before the growing push): a predicate
+/// referencing an index at/after the boundary must not survive the push.
+#[test]
+fn test_s49_illusion_promotion_bench_growth_does_not_shift_cross_side_predicate() {
+    // P1's Zoroark is the active lead from turn 1, disguised as Garchomp, with NO
+    // separate bench placeholder — exactly the case where the promotion's bench-push
+    // isn't offset by a matching removal.
+    let zoroark_baseline =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    let mut garchomp_active =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    seed_zoroark_hypothesis_on(&mut garchomp_active, &zoroark_baseline);
+
+    let pikachu_active = UnknownPokemonState::from_opponent_species(Species::Pikachu, &HashMap::new(), 50);
+    let blissey_back = UnknownPokemonState::from_opponent_species(Species::Blissey, &HashMap::new(), 50);
+
+    let mut state = battle_nvn(vec![garchomp_active], vec![pikachu_active]);
+    state.p1_unresolved_zoroark_count = 1;
+    state.p2_known_back_mons = vec![blissey_back];
+
+    // Flat layout before promotion: p1_active=[0,1), p2_active=[1,2), p1_back=[2,2)
+    // (empty — Zoroark has no separate placeholder), p2_back=[2,3) — Blissey is idx 2.
+    let blissey_idx_before = 2usize;
+    assert_eq!(
+        get_mon_by_idx(&state, blissey_idx_before).map(|m| &m.possible_species),
+        Some(&Unknown::Known(Species::Blissey)),
+        "test setup sanity: idx 2 must be Blissey before the promotion"
+    );
+
+    // Simulate an earlier pass having recorded a fact about Blissey (P2's back mon) —
+    // e.g. an EOT-heal-sourced item disjunction that later collapsed to a unit clause.
+    state.predicates.push(vec![Statement::HasItem { mon_idx: blissey_idx_before, item: Item::Leftovers }]);
+
+    // The disguise breaks: P1's Zoroark is revealed, promoting the active slot and
+    // pushing "Garchomp" (the discarded shown identity) onto P1's back bucket — a net
+    // +1 growth with nothing to remove in exchange, shifting P2's back segment.
+    let result = apply(
+        state,
+        vec![event(EventKind::IllusionEnded { slot: p1(0), actual_species: Species::Zoroark })],
+    );
+
+    assert_eq!(
+        result.p1_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "IllusionEnded must promote P1's active slot to the true (Zoroark) identity"
+    );
+    let restored_garchomp = combined_back(&result, &Player::P1)
+        .into_iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp)))
+        .expect("the discarded Garchomp identity must be restored to P1's bench");
+
+    // Flat layout after promotion: p1_back now holds the restored Garchomp decoy at
+    // the SAME index (2) Blissey held before the shift. Without the fix, BCP would
+    // force-commit the stale `HasItem(2, Leftovers)` clause onto THIS mon.
+    assert_ne!(
+        restored_garchomp.item,
+        Unknown::Known(Item::Leftovers),
+        "S49: a predicate recorded against P2's back mon before the promotion must not \
+         survive the bench-growth shift and get force-committed onto P1's own restored \
+         decoy placeholder just because it now occupies the same numeric index"
+    );
+
+    // Blissey itself — now shifted to idx 3 — must remain untouched by the stale
+    // predicate (which referenced its OLD index, 2).
+    let blissey_after = result
+        .p2_known_back_mons
+        .iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Blissey)))
+        .expect("Blissey must still be tracked on P2's bench after the shift");
+    assert_ne!(
+        blissey_after.item,
+        Unknown::Known(Item::Leftovers),
+        "S49: Blissey's own item must not be spuriously resolved by a predicate that \
+         only ever meant to reference its pre-shift index"
+    );
+}
+
 /// F3 (TODO.md: "Make sure everything works with zoroark switching ... Tracking
 /// zoroark should make sense over the course of the entire battle!"): a disguised
 /// Zoroark that switches out WITHOUT its disguise ever breaking must bench under
