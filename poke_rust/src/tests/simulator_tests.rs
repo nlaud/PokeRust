@@ -24538,6 +24538,45 @@ mod ability_manipulation_moves {
     }
 
     #[test]
+    fn worry_seed_cure_emits_status_cured_event() {
+        // Worry Seed waking a sleeping target previously mutated `.status = None` with
+        // no emitted event — invisible to the fog-of-war observer (masked only by
+        // StatusInflicted's Sleep-conflict self-heal, so it didn't crash, but a later
+        // status-inflicting effect on the woken mon would misattribute the cure).
+        use crate::information::information::{EventKind, InformationEvent};
+        use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+        fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+            events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+        }
+
+        let pdex = pokemon_dex(); let mdex = move_dex();
+        let mut p1 = mon(Species::Exeggutor, Ability::Chlorophyll, PokemonMove::WorrySeed);
+        p1.stats[5] = 200;
+        let mut p2 = mon(Species::Snorlax, Ability::ThickFat, PokemonMove::Splash);
+        p2.status = Some(Status::Sleep(3));
+        let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+
+        let outcomes = run_single_turn_with_events(
+            &MatchState::BattleState(state),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, Player::P1,
+        );
+
+        assert!(
+            outcomes.iter().any(|(_, events, _)| {
+                events.as_ref().is_some_and(|events| {
+                    tree_contains(events, &|k| matches!(
+                        k, EventKind::StatusCured { status: Status::Sleep(_), .. }
+                    ))
+                })
+            }),
+            "Worry Seed waking a sleeping target must emit StatusCured, not just mutate status silently"
+        );
+    }
+
+    #[test]
     fn worry_seed_fails_on_truant() {
         let pdex = pokemon_dex(); let mdex = move_dex();
         let mut p1 = mon(Species::Exeggutor, Ability::Chlorophyll, PokemonMove::WorrySeed);
@@ -26111,6 +26150,45 @@ mod side_and_field_condition_moves {
         let (bs, _) = extract_battle_state(outcomes);
         let is_asleep = matches!(bs.p1_active_mons[0].status, Some(crate::state::dex_data::Status::Sleep(_)));
         assert!(is_asleep, "Safeguard should NOT block Rest (self-induced sleep)");
+    }
+
+    #[test]
+    fn rest_overwriting_prior_status_emits_status_cured_event() {
+        // Rest legitimately cures and overwrites an existing status (Burn/Paralysis/
+        // Poison/etc.) with Sleep — that mutation previously happened with no emitted
+        // StatusCured for the overwritten status, leaving the fog-of-war observer's
+        // belief still tracking the old status. Same silent-mutation class as the
+        // Frozen-thaw/Sparkling Aria/Uproar fixes.
+        use crate::information::information::{EventKind, InformationEvent};
+        use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+        fn tree_contains(events: &[InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+            events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+        }
+
+        let mdex = move_dex();
+        let pdex = pokemon_dex();
+        let mut resting = mon(Species::Snorlax, PokemonMove::Rest);
+        resting.hp = resting.stats[0] / 2;
+        resting.status = Some(crate::state::dex_data::Status::Burn);
+
+        let outcomes = run_single_turn_with_events(
+            &MatchState::BattleState(battle_state_from_lists(vec![resting], vec![], vec![bulky()], vec![])),
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            mdex, pdex, Player::P1,
+        );
+
+        assert!(
+            outcomes.iter().any(|(_, events, _)| {
+                events.as_ref().is_some_and(|events| {
+                    tree_contains(events, &|k| matches!(
+                        k, EventKind::StatusCured { status: crate::state::dex_data::Status::Burn, .. }
+                    ))
+                })
+            }),
+            "Rest overwriting Burn with Sleep must emit StatusCured, not just mutate status silently"
+        );
     }
 
     #[test]

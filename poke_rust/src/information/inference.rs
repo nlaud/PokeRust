@@ -1426,6 +1426,7 @@ fn apply_information_battle(
         move_context: None,
         switch_slot: None,
         damaging_hits_this_turn: Vec::new(),
+        switched_slots_this_turn: Vec::new(),
         move_users_this_turn: Vec::new(),
         analytic_last_movers: compute_analytic_last_movers(events),
         turn_segment: 0,
@@ -1495,9 +1496,21 @@ struct BattleContext<'a> {
     /// non-self target.  Populated in the MoveUsed block; cleared at EndOfTurn.
     /// Consulted by the Cant{Flinch} handler to attribute King's Rock / Razor Fang / Stench.
     damaging_hits_this_turn: Vec<(FieldSlot, FieldSlot, PokemonMove)>,
-    /// Ordered list of user slots that have executed a MoveUsed event so far this turn.
-    /// Populated after each MoveUsed's Pass 3 runs; cleared at EndOfTurn.
-    /// (Retained for potential future use; Analytic now uses `analytic_last_movers`.)
+    /// Slots that had a `Switch`/`SimultaneousSwitch` in this turn segment. Cleared at
+    /// EndOfTurn. `pass2_flinch_holder_from_cant` treats an attacker slot appearing here
+    /// as "attribution no longer safe" — a mid-turn switch means whichever mon is
+    /// resolved from that slot later (at Cant-processing time) may not be the mon that
+    /// actually dealt the damage, since `mon_idx_for_active_slot` is slot-based (it
+    /// returns whoever currently occupies the slot, not a stable per-individual id).
+    switched_slots_this_turn: Vec<FieldSlot>,
+    /// Slots that have committed a move action (MoveUsed/Cant/MustRecharge/ChargingMove/
+    /// SingleMoveOrTurn — the same "commits a move" set `compute_analytic_last_movers`
+    /// uses) so far this turn segment, in order. Populated after each MoveUsed's Pass 3
+    /// runs (so a move's own oracle call never sees itself in the list yet); cleared at
+    /// EndOfTurn. Consulted by `resolve_bp_override` for Payback's "did the target
+    /// already act this turn" question — a switch-in is deliberately excluded (matches
+    /// the real engine's `!switched_in_this_turn` guard: a switch consumes the action
+    /// slot without the mon having moved).
     move_users_this_turn: Vec<FieldSlot>,
     /// S28: per-turn-segment last move-committed actor — the slot for which Analytic's
     /// "moved last" fires. Computed once from the event stream (`compute_analytic_last_movers`),
@@ -1641,6 +1654,10 @@ fn process_battle_event(
     // can attribute the effect to the switching mon.
     if let EventKind::Switch(sw) = &event.kind {
         ctx.switch_slot = Some(sw.slot);
+        ctx.switched_slots_this_turn.push(sw.slot);
+    }
+    if let EventKind::SimultaneousSwitch { switches } = &event.kind {
+        ctx.switched_slots_this_turn.extend(switches.iter().map(|sw| sw.slot));
     }
 
     pass1_apply_event(state, event, ctx);
@@ -1660,14 +1677,28 @@ fn process_battle_event(
         pass2_ground_immune_clause(state, event, ctx);
         pass3_damage_to_stats(state, event, ctx);
         // Recorded after Pass 3 so this move's own oracle calls don't see the user in
-        // the list yet (vestigial ordering; Analytic itself now uses analytic_last_movers).
+        // the list yet.
         ctx.move_users_this_turn.push(user_slot_for_order);
+    }
+    // A mon can also commit its move action without a MoveUsed event (full paralysis,
+    // recharge, or a charging-move's charge turn) — these consume the action slot the
+    // same way a real move does, so they count as "already acted" for Payback purposes
+    // exactly like `compute_analytic_last_movers` treats them for Analytic.
+    if let EventKind::Cant { slot, .. }
+    | EventKind::MustRecharge { slot }
+    | EventKind::SingleMoveOrTurn { slot, .. } = &event.kind
+    {
+        ctx.move_users_this_turn.push(*slot);
+    }
+    if let EventKind::ChargingMove { user, .. } = &event.kind {
+        ctx.move_users_this_turn.push(*user);
     }
 
     // Clear per-turn accumulators at the boundary of each turn.
     if matches!(event.kind, EventKind::EndOfTurn) {
         ctx.damaging_hits_this_turn.clear();
         ctx.move_users_this_turn.clear();
+        ctx.switched_slots_this_turn.clear();
         // S28: advance to the next turn segment's precomputed last-mover.
         ctx.turn_segment += 1;
     }
@@ -3079,13 +3110,17 @@ fn resolve_item_clauses_on_item_change(
 /// P1 only worked for a P1 belief; for a P2 belief it's P2's side that's
 /// pre-placed, and leaving this one P1-only would silently re-introduce the
 /// orphaned-duplicate bug on P2's side instead. A genuine mid-battle switch
-/// always changes who's active, so this condition can only fire at the one-time
-/// reveal, regardless of player — no real switch-out is ever skipped. Mirrors
-/// `purge_mon_scoped_knowledge`'s own "nothing actually left" self-guard just
-/// above.
+/// always changes who's active, so this condition is INTENDED to only fire at
+/// the one-time reveal — but species alone can't distinguish that from a later
+/// genuine switch that happens to coincide in species via Illusion (a
+/// disguised Zoroark copying a species that's genuinely active in another
+/// slot on the same side), so this also gates on `turn_number == 0`, mirroring
+/// `pass1_switch`'s own S37 guard exactly (the two must agree — see below).
+/// Mirrors `purge_mon_scoped_knowledge`'s own "nothing actually left"
+/// self-guard just above.
 fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming_species: &Species) {
     let slot_i = slot.slot_index as usize;
-    let already_placed = match slot.player {
+    let already_placed = state.turn_number == 0 && match slot.player {
         Player::P1 => state.p1_active_mons.get(slot_i),
         Player::P2 => state.p2_active_mons.get(slot_i),
     }
@@ -3190,11 +3225,17 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     // `[0,252]`) and overwriting the correct entry `into_battle_state` had
     // already placed. A genuine mid-battle switch always changes who's active,
     // so the incoming species can never already match the slot's CURRENT
-    // occupant except at this one-time reveal — regardless of which player it
-    // is — so detect that case and just apply the transient switch fields
-    // (HP/status/etc.) to the existing, already-correct entry instead of
-    // discarding it.
-    let already_placed = match player {
+    // occupant except at this one-time reveal — UNLESS Illusion is involved:
+    // a disguised Zoroark can copy a species that's genuinely active in
+    // another slot on the same side, so "species already matches" is not
+    // exclusive to the one-time reveal in doubles. Gate on `turn_number == 0`
+    // (still true throughout the whole first turn, before the first
+    // `EndOfTurn` bumps it) to keep this shortcut scoped to the actual
+    // one-time transition instead of firing on a later genuine switch that
+    // happens to coincide in species — a stale match there would silently
+    // no-op the real replacement instead of running it through the normal
+    // bench-matching logic below.
+    let already_placed = state.turn_number == 0 && match player {
         Player::P1 => state.p1_active_mons.get(slot_i),
         Player::P2 => state.p2_active_mons.get(slot_i),
     }
@@ -4900,6 +4941,16 @@ fn pass2_flinch_holder_from_cant(
     let attacker_slot = attacker_slot.unwrap();
     let move_used = move_used.unwrap();
 
+    // If the attacker's slot had any switch this turn, `mon_idx_for_active_slot` below
+    // would resolve to whoever currently occupies it — not necessarily the mon that
+    // actually dealt the damage (mon_idx is slot-based, not a stable per-individual id,
+    // and a mid-turn switch overwrites that slot's belief state entirely). Attribution
+    // isn't provably sound in that case, so skip the clause rather than risk pinning it
+    // on the wrong mon.
+    if ctx.switched_slots_this_turn.contains(attacker_slot) {
+        return;
+    }
+
     // Move-secondary gate: if the move already has a flinch secondary, the flinch is
     // fully explained by the move itself — no item or ability deduction.
     let Some(move_data) = ctx.move_dex.get(move_used) else {
@@ -5144,25 +5195,6 @@ fn reaction_contains_ability_reveal(
     })
 }
 
-/// Returns `true` if `event`'s reactions include any of `Immune`, `MoveFailed`, or
-/// `Blocked` directed at `target`.  This covers the three ways a move can "not happen"
-/// on a particular target without having missed (missed = wrong target choice, not
-/// absorbed/immunity/blocked here).
-///
-/// Used by `pass2_prankster_immunity`, `pass2_powder_immunity`, and
-/// `pass2_guaranteed_status_absence` (which also checks `Missed`).
-fn move_blocked_on_target(event: &InformationEvent, target: &FieldSlot) -> bool {
-    event.reactions.iter().any(|r| {
-        matches!(
-            &r.kind,
-            EventKind::Immune { target: t }
-            | EventKind::MoveFailed { slot: t }
-            | EventKind::Blocked { target: t }
-            if t == target
-        )
-    })
-}
-
 /// Returns `true` if a damaging move's reactions include `DamageDealt` for `target`
 /// (confirming the hit landed), or if a status move's reactions contain none of the
 /// failure signals (`Missed`, `Immune`, `MoveFailed`, `Blocked`) for `target`.
@@ -5315,8 +5347,16 @@ fn ability_grants_move_immunity(ability: &Ability, move_type: &PokemonType) -> b
 // ── Pass 2d: Powder-move immunity reveal ──────────────────────────────────────
 
 /// When a move with `MoveFlag::Powder` targets a **non-Grass** Pokémon and
-/// results in `Immune`/`MoveFailed`/`Blocked`, the only non-type-immunity
-/// explanation is Safety Goggles or Overcoat on the target.
+/// results in an `Immune` reaction, the only non-type-immunity explanation is
+/// Safety Goggles or Overcoat on the target.
+///
+/// Only `Immune` is accepted — same guard as `pass2_prankster_immunity`.
+/// `MoveFailed`/`Blocked` also fire from an already-statused target, Substitute,
+/// Safeguard, and Misty Terrain, none of which imply Safety Goggles/Overcoat;
+/// accepting them here degenerated the clause to a bare `[HasItem(SafetyGoggles)]`
+/// for a species that can't have Overcoat, forcing it `Known` too early (found
+/// via `random_doubles_battles_are_sound` — collided with a later `MegaEvolution`
+/// reveal of the true item).
 fn pass2_powder_immunity(
     state: &mut UnknownBattleState,
     event: &InformationEvent,
@@ -5346,7 +5386,10 @@ fn pass2_powder_immunity(
             continue;
         }
 
-        if !move_blocked_on_target(event, target) {
+        let immune = event.reactions.iter().any(|r| {
+            matches!(&r.kind, EventKind::Immune { target: t } if t == target)
+        });
+        if !immune {
             continue;
         }
 
@@ -7193,18 +7236,43 @@ fn pass3_direction_b(
 /// teammates the oracle never counted).
 ///
 /// Leaves any existing `bp_override` (e.g. a multi-hit per-hit override) untouched —
-/// Last Respects is never multi-hit, so the two never actually collide in practice, but
-/// preserving caller-supplied overrides keeps this composable if that ever changes.
+/// Last Respects and Payback are both never multi-hit, so this never actually collides
+/// with one in practice, but preserving caller-supplied overrides keeps this composable
+/// if that ever changes.
+///
+/// Also resolves Payback (`simulator/helpers.rs`'s `target_has_acted_this_turn` &&
+/// `!switched_in_this_turn` check): that check reads the real engine's `action_queue`,
+/// which the oracle's `materialize_battle` skeleton always builds empty, so every
+/// oracle call for Payback sees it as unconditionally doubled (120 BP) regardless of
+/// true turn order — the same class of oracle/real-engine divergence Last Respects and
+/// Analytic already have fixes for. Resolved here instead from
+/// `ctx.move_users_this_turn`, which (unlike the empty action_queue) is populated live
+/// from the real event stream and excludes switch-ins, matching the real check exactly.
 fn resolve_bp_override(
     state: &UnknownBattleState,
     user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
     move_data: &crate::state::dex_data::MoveData,
+    ctx: &BattleContext,
     bp_override: Option<u16>,
 ) -> Option<u16> {
-    if bp_override.is_some() || move_data.name != PokemonMove::LastRespects {
+    if bp_override.is_some() {
         return bp_override;
     }
-    Some(50 + 50 * side_fainted_count(state, user_slot.player))
+    match move_data.name {
+        PokemonMove::LastRespects => {
+            Some(50 + 50 * side_fainted_count(state, user_slot.player))
+        }
+        PokemonMove::Payback => {
+            let target_already_acted = ctx.move_users_this_turn.contains(target_slot);
+            Some(if target_already_acted {
+                move_data.base_power * 2
+            } else {
+                move_data.base_power
+            })
+        }
+        _ => bp_override,
+    }
 }
 
 /// True fainted-roster count for `player`, drawn from the real (non-materialized)
@@ -7278,11 +7346,12 @@ fn compute_attacker_stat_bounds(
     use crate::simulator::DamageConfig;
 
     // The oracle's synthetic single-attacker-vs-single-target skeleton
-    // (`materialize_battle`) always has an EMPTY bench — see `resolve_bp_override`'s
-    // doc comment. Last Respects' base power depends on the user's true fainted
-    // roster count, which that skeleton can never see; resolve it here from the
-    // real `state` before it reaches the oracle.
-    let bp_override = resolve_bp_override(state, user_slot, move_data, bp_override);
+    // (`materialize_battle`) always has an EMPTY bench/action_queue — see
+    // `resolve_bp_override`'s doc comment. Last Respects' base power depends on the
+    // user's true fainted roster count and Payback's on the target's true turn-order
+    // position, neither of which that skeleton can see; resolve both here from the
+    // real `state`/`ctx` before it reaches the oracle.
+    let bp_override = resolve_bp_override(state, user_slot, target_slot, move_data, ctx, bp_override);
 
     // Need known attacker species for BSV-based inference.
     let base_stats = match &attacker_unk.possible_species {
@@ -8221,9 +8290,10 @@ fn compute_defender_stat_bounds(
     use crate::simulator::DamageConfig;
 
     // See the identical call in `compute_attacker_stat_bounds`: Last Respects' base
-    // power depends on the ATTACKER's (user_slot's) true fainted roster count, which
-    // the oracle's empty-bench synthetic skeleton can never see on its own.
-    let bp_override = resolve_bp_override(state, user_slot, move_data, bp_override);
+    // power depends on the ATTACKER's (user_slot's) true fainted roster count, and
+    // Payback's on the TARGET's (target_slot's) true turn-order position — neither of
+    // which the oracle's empty-bench/action_queue synthetic skeleton can see on its own.
+    let bp_override = resolve_bp_override(state, user_slot, target_slot, move_data, ctx, bp_override);
 
     // Need known defender species for BSV inference.
     let base_stats = match &defender_unk.possible_species {
@@ -8374,6 +8444,17 @@ fn compute_defender_stat_bounds(
         let Some((d_lo, d_hi)) = percent_delta_damage_band(pre_pct, post_pct, hp_cand) else {
             continue;
         };
+        // S47: a lethal hit (post_pct == 0) only reveals `true_damage >= d_lo` — HP
+        // can't go negative, so `d_hi` (which `percent_delta_damage_band` derives from
+        // the defender's pre-hit HP bucket) is NOT a true upper cap on the damage: an
+        // arbitrarily weaker defense would still have produced the identical (0%,
+        // Faint) observation. Treating it as a real cap raises the defender's *minimum*
+        // defensive-BSV bound (`p_lo`, which uses `d_hi`) above the truth — the same
+        // class of bug as S46's Direction-B exact-match fix, mirrored here for the
+        // inverted (damage non-increasing in defense) monotonicity. `d_lo` remains
+        // sound (a genuine lower bound on true damage) and still constrains the
+        // *maximum* defensive BSV (`p_hi`) normally.
+        let d_hi = if post_pct == 0 { u16::MAX } else { d_hi };
 
         for (class_idx, (nat_mod, _is_boost, _is_nerf)) in nature_classes.iter().enumerate() {
             // Thin wrapper so the two call sites below don't repeat the full argument list.

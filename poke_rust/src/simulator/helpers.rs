@@ -10705,6 +10705,12 @@ fn apply_healing_move(
     // Capture HP before the mutable borrow so we can compute the delta for Healed emission.
     let pre_hp = get_pokemon_at_slot(bs, attacker_slot).map(|m| m.hp).unwrap_or(0);
     let mut rest_slept = false;
+    // Rest legitimately cures and overwrites an existing Burn/Paralysis/Poison/etc. with
+    // Sleep — captured here so `StatusCured` can be emitted for it once the attacker_mon
+    // borrow has ended (same silent-mutation fix pattern as Frozen-thaw/Sparkling Aria/
+    // Uproar). Previously silent: only `StatusInflicted{Sleep(0)}` was emitted, leaving
+    // the fog-of-war observer's belief still tracking the overwritten status.
+    let mut rest_overwrote_status: Option<Status> = None;
 
     let Some(attacker_mon) = get_pokemon_at_slot_mut(bs, attacker_slot) else {
         return false;
@@ -10753,6 +10759,7 @@ fn apply_healing_move(
                 return false;
             }
             attacker_mon.volatiles.clear();
+            rest_overwrote_status = attacker_mon.status.take();
             attacker_mon.status = Some(Status::Sleep(0));
             // Rest's sleep is a deterministic 2 blocked turns (1 with Early Bird), not the
             // normal random 1/3-vs-2/3 duration — see the Status::Sleep(n) wake-up arm in
@@ -10788,7 +10795,12 @@ fn apply_healing_move(
         _ => return false,
     }
     // attacker_mon borrow ends here — emit events now that &mut BattleState is free.
-    // Rest: StatusInflicted precedes Healed (sleep comes before the recovery completes).
+    // Rest: StatusCured for whatever Rest overwrote precedes StatusInflicted{Sleep} (the
+    // cure happens as part of falling asleep, before the sleep itself is announced), which
+    // in turn precedes Healed (sleep comes before the recovery completes).
+    if let Some(status) = rest_overwrote_status {
+        emit(bs, EventKind::StatusCured { target: attacker_slot, status });
+    }
     if rest_slept {
         emit(bs, EventKind::StatusInflicted { target: attacker_slot, status: Status::Sleep(0) });
     }

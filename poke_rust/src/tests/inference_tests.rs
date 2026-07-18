@@ -3526,6 +3526,68 @@ fn test_s46_pass3_dir_b_lethal_hit_does_not_cap_upper_bound() {
     );
 }
 
+// ── S48: Direction B must not assume Payback is always doubled ───────────────
+//
+// Real Payback (`simulator/helpers.rs`'s `M::Payback` arm) doubles its dex base power
+// (50→100) only when the target already acted this turn (and didn't just switch in).
+// That check reads the real engine's `action_queue`, which the oracle's
+// `materialize_battle` skeleton always builds empty — so every oracle call for Payback
+// saw it as unconditionally doubled, even for a hit where the target had genuinely not
+// yet acted (true BP=50). A too-high assumed BP makes the oracle think less attacker
+// Atk is needed to explain the observed damage, wrongly excluding the true (higher) BSV.
+// Fixed by resolving the override from `ctx.move_users_this_turn` (populated live from
+// the real event stream) instead of the oracle's own empty action queue.
+
+/// Dark-type physical move (Payback stand-in) — Dark vs. the Normal-type
+/// `known_p1_normal` target is neutral effectiveness, and Garchomp isn't Dark-type,
+/// so there's no STAB/type-effectiveness complication to account for by hand.
+fn dark_physical_move(name: PokemonMove, bp: u16) -> MoveData {
+    MoveData { pokemon_type: PokemonType::Dark, ..normal_physical_move(name, bp) }
+}
+
+/// A single top-level `MoveUsed` event with no preceding move this turn — the target
+/// (`known_p1_normal`) has NOT yet acted, so true Payback BP is 50 (not doubled to 100).
+/// Doubling BP roughly doubles achievable damage for any given BSV, which (for
+/// Garchomp's narrow [135,182] BSV range) shifts the *entire* BP=100 damage range
+/// clear of the BP=50 damage range — so a wrong-BP=100 read of a true BP=50 hit
+/// doesn't produce a wrongly-*shifted* feasible window, it makes the search find
+/// no feasible BSV at all and silently skip tightening entirely. So (unlike S46's
+/// wrongly-excluded-value shape) this test checks for that silent-miss shape: the
+/// min bound must genuinely rise from the untouched prior (135) to the true
+/// required floor, rather than staying at 135 because the buggy BP=100 assumption
+/// found the (real, BP=50) damage unreachable by any BSV and gave up.
+///
+/// Damage derivation (Def=100, no STAB/crit, BP=50): base_dmg(atk) =
+/// floor(floor(11*atk)/50)+2. atk=150 → floor(1650/50)=33 → base=35, max roll
+/// (100%) → exactly 35. atk=149 → floor(1639/50)=32 → base=34, max roll → 34 < 35
+/// — so 150 is the true minimum BSV able to produce damage=35 at BP=50. Verified
+/// empirically: this test gives min=135 (untouched) without the fix, min=150 with it.
+#[test]
+fn test_s48_pass3_dir_b_payback_target_not_acted_tightens_min_bound() {
+    let state = battle_1v1(known_p1_normal(), neutral_no_item_garchomp());
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Payback, dark_physical_move(PokemonMove::Payback, 50));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Payback, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(500 - 35) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+    let p2 = &result.p2_active_mons[0];
+
+    assert!(
+        p2.min_pre_nature_stat[1] >= 150,
+        "assuming Payback was doubled when the target hadn't acted makes this hit's real \
+         (BP=50) damage look unreachable by any BSV, silently skipping the tightening it \
+         should prove (min BSV should rise from 135 to 150) — got {}",
+        p2.min_pre_nature_stat[1]
+    );
+}
+
 // ── Direction B: soundness across the full damage range ──────────────────────
 
 /// Every achievable damage value in Garchomp's EQ range (under force_max_ivs=true)
@@ -4925,6 +4987,46 @@ fn test_powder_immunity_reveals_safety_goggles_or_overcoat() {
     assert!(has_sg_and_overcoat, "Should emit [SafetyGoggles ∨ Overcoat] clause on powder immunity");
 }
 
+/// A powder move that `MoveFailed` (not `Immune`) must NOT emit a sand/powder-immunity
+/// clause — `MoveFailed` also covers an already-statused target, Substitute, Safeguard,
+/// and Misty Terrain, none of which imply Safety Goggles/Overcoat. Regression for the
+/// bug found via `random_doubles_battles_are_sound`: accepting `MoveFailed`/`Blocked`
+/// here degenerated the clause to a bare `[HasItem(SafetyGoggles)]` for a species that
+/// can't have Overcoat, forcing it `Known` too early.
+#[test]
+fn test_powder_immunity_not_inferred_from_move_failed() {
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
+    let state = battle_with_p2(vec![p2_mon]);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::PowderSnow, powder_status_move(PokemonMove::PowderSnow));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::PowderSnow, targets: vec![p2(0)] },
+            vec![event(EventKind::MoveFailed { slot: p2(0) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    let has_powder_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasItem { item: Item::SafetyGoggles, .. }
+                | Statement::HasAbility { ability: Ability::Overcoat, .. }
+        ))
+    });
+    assert!(
+        !has_powder_clause,
+        "MoveFailed (not Immune) must not emit a sand/powder-immunity clause — it doesn't \
+         distinguish item/ability immunity from an already-statused target, Substitute, \
+         Safeguard, or Misty Terrain"
+    );
+}
+
 // ── Phase 3: Prankster-immunity from Dark-type bounce ────────────────────────
 
 /// When a status move from the opponent fails against our Known Dark-type mon,
@@ -5775,6 +5877,83 @@ fn test_pass3_dir_a_assault_vest_defender_does_not_exclude_true_bsv() {
         p2_result.min_pre_nature_stat[4] <= 70,
         "Assault Vest defender with true SpDef BSV = 70 must remain feasible; \
          got min_pre_nature_stat[4] = {} (expected ≤ 70)",
+        p2_result.min_pre_nature_stat[4]
+    );
+}
+
+// ── S47: Direction A must not exact-match a lethal hit's damage ──────────────
+//
+// A hit that faints the (percent-tracked) opponent only reveals `true_damage >=
+// d_lo` — HP can't go negative, so `percent_delta_damage_band`'s `d_hi` (derived
+// from the defender's pre-hit HP bucket) is NOT a true upper cap: an arbitrarily
+// weaker defense would still have produced the identical (0%, Faint) observation.
+// Mirrors S46's Direction-B fix for the inverted (damage non-increasing in
+// defense) monotonicity.
+
+/// P1 has SpA = 100; the move (BP 500 Special, neutral type) against Garchomp's
+/// own NATURAL minimum achievable SpDef (no artificial widening — `from_opponent_species`'s
+/// default worst-case, IV=0/EV=0/nerf-nature) always overkills a 200-max-HP mon:
+/// at that floor, even the weakest 85% roll clears 200 damage. So observing
+/// `Percent(100) -> Percent(0)` must NOT raise the defender's minimum achievable
+/// SpDef above its own natural floor, even though `d_hi` (naively capped at the
+/// defender's 200 max HP) would make the natural floor look like it "overshoots"
+/// the observed damage (the old code required `min_roll <= d_hi`, which fails at
+/// the natural floor, wrongly excluding it).
+#[test]
+fn test_s47_pass3_dir_a_lethal_hit_does_not_exclude_weak_defense() {
+    let mut p1_mon = unknown_mon_species(Species::Snorlax);
+    p1_mon.hp = PokemonHP::Number(500);
+    p1_mon.min_stats = [500, 100, 100, 100, 100, 100];
+    p1_mon.max_stats = [500, 100, 100, 100, 100, 100];
+    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(
+        Species::Garchomp, &garchomp_dex(), 50,
+    );
+    p2_mon.hp = PokemonHP::Percent(100);
+    p2_mon.min_stats[0] = 200; // fix max-HP to 200 for deterministic % → HP conversion
+    p2_mon.max_stats[0] = 200;
+    p2_mon.possible_abilities = Unknown::Known(Ability::None);
+    p2_mon.item               = Unknown::Known(Item::None);
+    // Natural (unmodified) SpDef range from `from_opponent_species` — the floor this
+    // test asserts must not be pushed up.
+    let natural_min_spdef = p2_mon.min_pre_nature_stat[4];
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    // BP chosen so even at the defender's natural minimum SpDef, every roll overkills
+    // a 200-HP mon (verified empirically against Garchomp's real SpDef base of 85).
+    let mut heavy_special = normal_physical_move(PokemonMove::Psychic, 500);
+    heavy_special.category     = MoveCategory::Special;
+    heavy_special.pokemon_type = PokemonType::Psychic;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Psychic, heavy_special);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user:      p1(0),
+                move_used: PokemonMove::Psychic,
+                targets:   vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt { max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(0),
+            })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+
+    let p2_result = &result.p2_active_mons[0];
+    assert!(
+        p2_result.min_pre_nature_stat[4] <= natural_min_spdef,
+        "a lethal hit must not raise the defender's minimum achievable SpDef above \
+         its natural floor ({natural_min_spdef}) — the observed KO is equally \
+         explained by weaker defense (more overkill), not just defense strong \
+         enough to land exactly at 0%; got min_pre_nature_stat[4] = {}",
         p2_result.min_pre_nature_stat[4]
     );
 }
@@ -8414,6 +8593,114 @@ fn flinch_no_deduction_when_observer_side_flinches() {
     assert!(!has_flinch_clause,
         "P2 flinching (from P1 attack) must not push a flinch clause on P1;\n\
          predicates = {:#?}", result.predicates);
+}
+
+/// S49: the attacker's slot switches (a different mon takes over P2/0) between the
+/// damaging hit and the target's flinch. `mon_idx_for_active_slot` is slot-based — it
+/// resolves to whoever CURRENTLY occupies the slot, not who dealt the damage — so
+/// re-resolving the attacker after the switch would wrongly pin the King's Rock /
+/// Razor Fang / Stench clause on the new (innocent) occupant. No clause should be
+/// pushed at all once attribution can't be pinned to a stable mon.
+#[test]
+fn flinch_no_deduction_when_attacker_switches_before_cant() {
+    let mut attacker = unknown_mon();
+    attacker.item = Unknown::Not(vec![Item::RazorFang]);
+    attacker.possible_abilities = Unknown::Not(vec![Ability::Stench]);
+
+    let state = battle_1v1(unknown_mon(), attacker);
+
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(80) })],
+        ),
+        // The original attacker switches out before P1's flinch resolves.
+        event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+            slot: p2(0),
+            species: Species::Zapdos,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        })),
+        event(EventKind::Cant { slot: p1(0), reason: CantReason::Flinch }),
+    ];
+
+    let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
+    let result = apply_ex(state, events, HashMap::new(), md);
+
+    let has_flinch_clause = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(s,
+            Statement::HasItem { item: Item::KingsRock, .. }
+            | Statement::HasItem { item: Item::RazorFang, .. }
+            | Statement::HasAbility { ability: Ability::Stench, .. }
+        ))
+    });
+    assert!(!has_flinch_clause,
+        "A mid-turn switch at the attacker's slot must not push a flinch clause \
+         (attribution can no longer be pinned to a stable mon);\n\
+         predicates = {:#?}", result.predicates);
+    // The switched-in mon (now at p2_active_mons[0]) must not be wrongly forced either.
+    assert!(!matches!(&result.p2_active_mons[0].item, Unknown::Known(Item::KingsRock)),
+        "The switched-in mon must not inherit the departed attacker's flinch clause; \
+         got {:?}", result.p2_active_mons[0].item);
+}
+
+/// S37-gate regression (item-9 investigation): `pass1_switch`'s "already placed" shortcut
+/// (and its `bench_outgoing_mon` companion) is meant to fire only at the one-time
+/// team-preview→battle transition, where `into_battle_state` pre-places the viewer's own
+/// lead and the battle-phase reveal re-announces the SAME mon at the SAME slot. Species
+/// Clause makes that coincidence otherwise impossible for a genuine mid-battle switch —
+/// UNLESS Illusion is involved: a disguised Zoroark can show the SAME species the slot's
+/// own outgoing mon just vacated (a real Garchomp switches out, a Zoroark disguised as
+/// Garchomp switches in, while ANOTHER copy of Garchomp is genuinely active in the other
+/// doubles slot). Before gating this shortcut on `turn_number == 0`, that second, later
+/// switch was wrongly treated as the one-time reveal — the shortcut `return`s immediately,
+/// skipping `maybe_resolve_illusion_two_in_front` entirely, so the doubles-only "same
+/// species shown on two active slots at once ⇒ one of them must be this side's Illusion
+/// forme in disguise" refinement never ran and no hypothesis got seeded for the arrival.
+///
+/// Test: P2 has Garchomp genuinely active in slot 0, and a Zoroark baseline sitting
+/// unresolved on the bench. A mid-battle switch at slot 1 reveals "Garchomp" again (the
+/// slot's own prior occupant, hence hitting the old shortcut) while slot 0 STILL shows
+/// Garchomp — a live two-in-front collision. With the gate, the shortcut is skipped and
+/// `maybe_resolve_illusion_two_in_front` seeds a Zoroark hypothesis on the arrival.
+#[test]
+fn test_pass1_switch_species_coincidence_mid_battle_seeds_two_in_front_hypothesis() {
+    let zoroark_back =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+
+    let mut state = battle_nvn(
+        vec![unknown_mon_species(Species::Pikachu)],
+        vec![unknown_mon_species(Species::Garchomp), unknown_mon_species(Species::Garchomp)],
+    );
+    state.p2_possible_back_mons = vec![zoroark_back];
+    state.p2_unresolved_zoroark_count = 1;
+    assert_eq!(
+        state.turn_number, 1,
+        "test setup sanity: battle_nvn defaults past turn 0, i.e. mid-battle"
+    );
+
+    // Slot 1's own prior occupant already shows Garchomp too, so this switch's species
+    // matches the pre-fix shortcut's condition exactly — while slot 0 ALSO still shows
+    // Garchomp, a live two-in-front collision `maybe_resolve_illusion_two_in_front` must
+    // see once the shortcut no longer swallows it.
+    let events = vec![switch_in(Species::Garchomp, p2(1))];
+
+    let result = apply_ex(state, events, HashMap::new(), HashMap::new());
+
+    assert!(
+        result.p2_active_mons[1].possible_illusion_state.is_some(),
+        "a same-species mid-battle switch coinciding with the slot's own prior occupant \
+         must still run the two-in-front Illusion refinement (not skip it via the S37 \
+         shortcut) when another active slot on the same side shows the same species; \
+         got possible_illusion_state={:?}",
+        result.p2_active_mons[1].possible_illusion_state
+    );
 }
 
 // ── Regression tests for audit fixes (C1–C4) ─────────────────────────────────

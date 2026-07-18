@@ -4501,12 +4501,21 @@ fn possible_damage_outcomes_for_move(
         {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
+        // Captured so `StatusCured` can be emitted once the target borrow ends — same
+        // silent-mutation fix pattern as Rest/Frozen-thaw/Sparkling Aria/Uproar above.
+        // Previously silent: Worry Seed's Insomnia grant woke a sleeping target with no
+        // emitted event at all.
+        let mut worry_seed_woke_target = false;
         if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
             if tgt.original_ability.is_none() { tgt.original_ability = Some(tgt.ability.clone()); }
             tgt.ability = Ability::Insomnia;
             if matches!(tgt.status, Some(Status::Sleep(_))) {
                 tgt.status = None;
+                worry_seed_woke_target = true;
             }
+        }
+        if worry_seed_woke_target {
+            simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: target_slot, status: Status::Sleep(0) });
         }
         // Illusion break: target may have lost Illusion (gained Insomnia).
         simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
