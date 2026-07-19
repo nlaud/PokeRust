@@ -1,0 +1,59 @@
+Tyranitar-Mega @ Tyranitarite
+Ability: Sand Stream
+Level: 50
+EVs: 32 HP / 32 Atk / 2 Spe
+Adamant Nature
+- Rock Slide
+- Knock Off
+- Ice Punch
+- Protect
+
+Lycanroc @ Focus Sash
+Ability: Sand Rush
+Level: 50
+EVs: 32 Atk / 32 Spe
+Adamant Nature
+- Rock Slide
+- Psychic Fangs
+- Close Combat
+- Protect
+
+Corviknight @ Leftovers
+Ability: Mirror Armor
+Level: 50
+EVs: 28 HP / 28 Def / 10 Spe
+Adamant Nature
+- Brave Bird
+- Bulk Up
+- Tailwind
+- Protect
+
+Sinistcha @ Sitrus Berry
+Ability: Hospitality
+Level: 50
+EVs: 32 HP / 32 SpA / 2 Spe
+Modest Nature
+- Matcha Gotcha
+- Rage Powder
+- Imprison
+- Trick Room
+
+Raichu-Mega-Y @ Raichunite Y
+Ability: Lightning Rod
+Level: 50
+EVs: 2 HP / 32 SpA / 32 Spe
+Timid Nature
+- Fake Out
+- Zap Cannon
+- Focus Blast
+- Protect
+
+Hydreigon @ Choice Scarf
+Ability: Levitate
+Level: 50
+EVs: 2 HP / 32 SpA / 32 Spe
+Modest Nature
+- Draco Meteor
+- Snarl
+- Dark Pulse
+- Earth Power
