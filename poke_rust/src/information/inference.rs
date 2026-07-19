@@ -456,7 +456,10 @@ fn finish_illusion_promotion_restore(
     if combined_back(state, &side).iter().any(|m| unknown_is_known_as(&m.possible_species, &discarded)) {
         return;
     }
-    restore_discarded_primary_to_bench(state, side, discarded, dex, config);
+    // seed_hypothesis=true: this is a POST-resolution restore (the caller already
+    // ran `resolve_zoroark_globally` for this promotion), matching the original
+    // (pre-S52) unconditional behavior.
+    restore_discarded_primary_to_bench(state, side, discarded, dex, config, true);
 }
 
 /// Shared follow-up for EVERY point a Zoroark hypothesis is positively resolved
@@ -540,7 +543,27 @@ pub(super) fn restore_discarded_primary_to_bench(
     discarded_species: Species,
     dex: &HashMap<Species, PokemonData>,
     config: &InferenceConfig,
+    seed_hypothesis: bool,
 ) {
+    // Defensive hardening: if `discarded_species` is ALREADY shown on an active
+    // slot on `side`, Species Clause proves that active mon IS the genuine
+    // individual of that species — pushing another bench entry claiming the same
+    // species would recreate, on the bench side, the exact phantom-duplicate
+    // problem this function's own doc comment already guards against on the
+    // bench side (see the cross-slot Illusion collision guard in `pass1_switch`,
+    // which is the promotion path most likely to hit this). Skip the restore;
+    // the genuine individual is already accounted for on the field. Sound:
+    // discarding a would-be duplicate roster entry only avoids a false belief,
+    // never excludes a true one.
+    let already_active = match side {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    }
+    .iter()
+    .any(|m| unknown_is_known_as(&m.possible_species, &discarded_species));
+    if already_active {
+        return;
+    }
     let mut restored = if let Some(template) = find_roster_template(state, side, &discarded_species) {
         let mut t = template.clone();
         t.possible_illusion_state = None; // defensive; templates never carry one
@@ -559,7 +582,19 @@ pub(super) fn restore_discarded_primary_to_bench(
     // this is a no-op: `resolve_zoroark_globally` (called by every caller of this
     // function before it) already drops the count to 0 and clears every hypothesis
     // side-wide once the side's one Illusion forme is positively located.
-    maybe_seed_fresh_hypothesis(state, side, &mut restored);
+    //
+    // S52: `seed_hypothesis = false` for the ONE caller (`pass1_switch`'s eager
+    // consumption-time restore) that runs BEFORE any resolution — the side's one
+    // Zoroark is still unresolved at that point, so `maybe_seed_fresh_hypothesis`'s
+    // own doc-commented assumption ("by the time a rebuild path like this runs,
+    // the side's one Illusion forme was JUST positively located") does not hold;
+    // seeding a hypothesis here would let this placeholder AND the active slot's
+    // own hypothesis both independently chase promotion for the SAME one real
+    // Zoroark — the exact double-promotion class of bug this investigation is
+    // guarding against. Caught by `test_s52_consuming_hypothesis_host_restores_placeholder`.
+    if seed_hypothesis {
+        maybe_seed_fresh_hypothesis(state, side, &mut restored);
+    }
     // S49: about to push a new bench entry, growing `side`'s back bucket by one.
     // `mon_idx` for every back-bucket mon is a live Vec-position recomputed fresh from
     // `MonSegments::ranges()` on every call, not a stable per-individual id (S1/S18
@@ -606,6 +641,76 @@ fn find_illusion_baseline(state: &UnknownBattleState, side: Player) -> Option<Un
         };
         templates.iter().find(|m| is_baseline(m)).cloned()
     })
+}
+
+/// Like `find_illusion_baseline`, but REMOVES the baseline entry from the live
+/// bench (`known_back`/`possible_back`) if found there, instead of cloning it in
+/// place. Used by the cross-slot Illusion collision guard in `pass1_switch`: once
+/// Species Clause has proven the baseline's physical individual is on the field
+/// in disguise (showing an ALREADY-active teammate's species), leaving its old
+/// bench placeholder in place would double-count it as a separate, uncounted
+/// roster slot. Falls back to a non-removing clone from `p{side}_roster_templates`
+/// (a pristine snapshot, never part of the live bench Vecs, so nothing to remove
+/// there) when no live bench entry exists.
+///
+/// S49-sibling: removing a bench entry shifts every later `mon_idx` in that same
+/// flat position range down by one (the mirror image of S49's push-driven growth
+/// shift). Purges stale facts at/beyond the removal point first via
+/// `purge_facts_at_or_beyond_idx` — sound, since discarding a constraint only
+/// widens the belief.
+fn take_illusion_baseline_from_bench(
+    state: &mut UnknownBattleState,
+    side: Player,
+) -> Option<UnknownPokemonState> {
+    let is_baseline = |m: &UnknownPokemonState| {
+        matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
+    };
+    let back_start = match side {
+        Player::P1 => MonSegments::of(state).ranges()[2].start,
+        Player::P2 => MonSegments::of(state).ranges()[3].start,
+    };
+    let known_len = match side {
+        Player::P1 => state.p1_known_back_mons.len(),
+        Player::P2 => state.p2_known_back_mons.len(),
+    };
+
+    let known_pos = {
+        let known = match side {
+            Player::P1 => &state.p1_known_back_mons,
+            Player::P2 => &state.p2_known_back_mons,
+        };
+        known.iter().position(is_baseline)
+    };
+    if let Some(pos) = known_pos {
+        purge_facts_at_or_beyond_idx(state, back_start + pos);
+        let known = match side {
+            Player::P1 => &mut state.p1_known_back_mons,
+            Player::P2 => &mut state.p2_known_back_mons,
+        };
+        return Some(known.remove(pos));
+    }
+
+    let possible_pos = {
+        let possible = match side {
+            Player::P1 => &state.p1_possible_back_mons,
+            Player::P2 => &state.p2_possible_back_mons,
+        };
+        possible.iter().position(is_baseline)
+    };
+    if let Some(pos) = possible_pos {
+        purge_facts_at_or_beyond_idx(state, back_start + known_len + pos);
+        let possible = match side {
+            Player::P1 => &mut state.p1_possible_back_mons,
+            Player::P2 => &mut state.p2_possible_back_mons,
+        };
+        return Some(possible.remove(pos));
+    }
+
+    let templates = match side {
+        Player::P1 => &state.p1_roster_templates,
+        Player::P2 => &state.p2_roster_templates,
+    };
+    templates.iter().find(|m| is_baseline(m)).cloned()
 }
 
 /// If `side` still has an unresolved Illusion forme, and `mon` is neither itself
@@ -1349,7 +1454,7 @@ fn run_pass5_all_mons(
                 // `pass5_back_solve` panicking on the primary while the hypothesis
                 // (independently tightened by Pass 3's own mirrored call) still solves
                 // cleanly.
-                let outcome = apply_with_illusion_mirroring(mon, |m| pass5_back_solve(m, config, dex));
+                let outcome = apply_with_illusion_mirroring(mon, |m| pass5_back_solve(m, idx, config, dex));
                 let promoted = matches!(outcome, IllusionMirrorOutcome::Promoted);
                 // Captured AFTER promotion overwrites `possible_species` with the
                 // resolved Zoroark identity — see `remove_stale_zoroark_bench_duplicate`.
@@ -1362,6 +1467,11 @@ fn run_pass5_all_mons(
                     None
                 };
                 if promoted {
+                    // S52: drop any species-derived predicate recorded against this
+                    // mon_idx under the now-discarded (wrong) assumed identity, before
+                    // the side-wide bench bookkeeping below — see
+                    // `purge_species_derived_predicates_for_mon`.
+                    purge_species_derived_predicates_for_mon(state, idx);
                     let side = if mon_is_p2(state, idx) { Player::P2 } else { Player::P1 };
                     resolve_zoroark_globally(state, side);
                     finish_illusion_promotion_restore(state, side, discarded_before, dex, config);
@@ -1746,6 +1856,9 @@ fn pass1_apply_event(
             // AFTER the mon borrow ends, since `resolve_zoroark_globally` needs `state`.
             let mut promoted_illusion = false;
             let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
+            // S52: captured alongside `promoted_illusion` so the predicate purge below
+            // (also acted on after the mon borrow ends) knows which mon_idx to purge.
+            let mut promoted_idx: Option<usize> = None;
             // Set alongside `promoted_illusion`, from INSIDE the mon borrow below,
             // right after promotion overwrites `possible_species` — see
             // `remove_stale_zoroark_bench_duplicate`.
@@ -1774,8 +1887,11 @@ fn pass1_apply_event(
                         check_move_legal_for_species(m, move_used, learnset_dex, side_has_unresolved_zoroark_without_hypothesis);
                     });
                     promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
-                    if promoted_illusion && let Unknown::Known(s) = &mon.possible_species {
-                        resolved_species = Some(s.clone());
+                    if promoted_illusion {
+                        promoted_idx = Some(idx);
+                        if let Unknown::Known(s) = &mon.possible_species {
+                            resolved_species = Some(s.clone());
+                        }
                     }
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
@@ -1821,6 +1937,9 @@ fn pass1_apply_event(
             // not per-mon — set after the mon borrow above ends).
             state.last_move_on_field = Some(move_used.clone());
             if promoted_illusion {
+                if let Some(idx) = promoted_idx {
+                    purge_species_derived_predicates_for_mon(state, idx);
+                }
                 resolve_zoroark_globally(state, user.player);
                 finish_illusion_promotion_restore(state, user.player, discarded_before, ctx.dex, ctx.config);
                 if let Some(resolved) = &resolved_species {
@@ -1834,6 +1953,19 @@ fn pass1_apply_event(
                 && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     mon.fainted = true;
                     mon.hp = PokemonHP::Percent(0);
+                    // S51: mirror `simulator::helpers::clear_pokemon_on_faint`, which
+                    // clears status/volatiles/times_hit on the real engine's
+                    // `PokemonState` the instant a mon faints (with no matching event
+                    // emission — fainting is itself the observable signal). Without this,
+                    // a mon that entered with a status (revealed via the `Switch` event's
+                    // own `status` field) and then fainted kept that stale status in the
+                    // belief forever; a later slot reuse or teammate-scoped status
+                    // handling would then hard-panic on a status conflict that was never
+                    // real. Sound: a fainted mon provably has no status/volatiles/hit
+                    // counter, so this narrows to ground truth, not a guess.
+                    mon.status = None;
+                    mon.volatiles.clear();
+                    mon.times_hit = 0;
                 }
         }
 
@@ -1846,11 +1978,17 @@ fn pass1_apply_event(
             // Belt-and-braces faint detection: the display convention (hp_to_percent)
             // shows 0 only at an actual faint, so DamageDealt-to-0 implies fainted even
             // if the explicit Faint event is missing. Keeps fainted-guards in the EOT
-            // passes (and ability-suppression scans) sound.
+            // passes (and ability-suppression scans) sound. Mirrors the same
+            // status/volatiles/times_hit clear as the explicit `Faint` handler above,
+            // for the same reason — this IS a faint, just observed via HP instead of a
+            // separate event.
             if matches!(new_hp, PokemonHP::Number(0) | PokemonHP::Percent(0))
                 && let Some(idx) = mon_idx_for_active_slot(state, target)
                     && let Some(mon) = get_mon_mut_by_idx(state, idx) {
                         mon.fainted = true;
+                        mon.status = None;
+                        mon.volatiles.clear();
+                        mon.times_hit = 0;
                     }
 
             // Compute the HP delta (amount of damage dealt, not the pre-hit HP value).
@@ -2019,6 +2157,7 @@ fn pass1_apply_event(
                     enforce_unique_item(state, idx, item, ctx.config.allow_repeat_items);
                 }
                 if promoted_illusion {
+                    purge_species_derived_predicates_for_mon(state, idx);
                     resolve_zoroark_globally(state, slot.player);
                     finish_illusion_promotion_restore(state, slot.player, discarded_before, ctx.dex, ctx.config);
                     if let Some(resolved) = &resolved_species {
@@ -2528,6 +2667,7 @@ fn pass1_apply_event(
             let mut promoted_illusion = false;
             let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
             let mut resolved_species: Option<Species> = None;
+            let mut promoted_idx: Option<usize> = None;
             // See `check_move_legal_for_species`'s doc comment.
             let side_has_unresolved_zoroark_without_hypothesis = match user.player {
                 Player::P1 => state.p1_unresolved_zoroark_count > 0,
@@ -2546,14 +2686,20 @@ fn pass1_apply_event(
                         check_move_legal_for_species(m, move_used, learnset_dex, side_has_unresolved_zoroark_without_hypothesis);
                     });
                     promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
-                    if promoted_illusion && let Unknown::Known(s) = &mon.possible_species {
-                        resolved_species = Some(s.clone());
+                    if promoted_illusion {
+                        promoted_idx = Some(idx);
+                        if let Unknown::Known(s) = &mon.possible_species {
+                            resolved_species = Some(s.clone());
+                        }
                     }
                     narrow_species_by_learnset(
                         mon, move_used, &ctx.config.learnset_dex, ctx.dex,
                     );
                 }
             if promoted_illusion {
+                if let Some(idx) = promoted_idx {
+                    purge_species_derived_predicates_for_mon(state, idx);
+                }
                 resolve_zoroark_globally(state, user.player);
                 finish_illusion_promotion_restore(state, user.player, discarded_before, ctx.dex, ctx.config);
                 if let Some(resolved) = &resolved_species {
@@ -2677,9 +2823,7 @@ fn pass1_apply_event(
                 // are now stale for the promoted identity, for the same reason
                 // `Transformed` purges them below — left in place, BCP could re-tighten
                 // bounds right back to a disguise-derived value on the next fixpoint.
-                state
-                    .predicates
-                    .retain(|clause| !clause.iter().any(|lit| statement_stale_after_species_reveal(lit, idx)));
+                purge_species_derived_predicates_for_mon(state, idx);
 
                 // The side's Illusion forme is now positively located: drop every
                 // remaining sibling hypothesis once fully accounted for.
@@ -2702,7 +2846,9 @@ fn pass1_apply_event(
                         .iter()
                         .any(|m| unknown_is_known_as(&m.possible_species, &discarded))
                 {
-                    restore_discarded_primary_to_bench(state, slot.player, discarded, ctx.dex, ctx.config);
+                    // seed_hypothesis=true: post-resolution (resolve_zoroark_globally
+                    // just ran above), matching the original unconditional behavior.
+                    restore_discarded_primary_to_bench(state, slot.player, discarded, ctx.dex, ctx.config, true);
                 }
 
                 // The Illusion forme's OWN benched baseline entry (species known,
@@ -2918,6 +3064,15 @@ fn purge_mon_scoped_knowledge(state: &mut UnknownBattleState, slot: &FieldSlot) 
     let Some(idx) = mon_idx_for_active_slot(state, slot) else {
         return; // Initial lead send-out: the slot was never occupied.
     };
+    purge_predicates_and_setters_for_mon(state, idx);
+}
+
+/// Shared core of `purge_mon_scoped_knowledge`, factored out so a caller that
+/// already has a `mon_idx` (rather than a `FieldSlot`) can purge directly. Used
+/// when the occupant of `idx` has genuinely LEFT (a switch) — every predicate
+/// and setter attribution about the old occupant is discarded, since a totally
+/// different physical mon may occupy this slot next.
+fn purge_predicates_and_setters_for_mon(state: &mut UnknownBattleState, idx: usize) {
     state
         .predicates
         .retain(|clause| !clause.iter().any(|lit| statement_references_mon(lit, idx)));
@@ -2936,6 +3091,37 @@ fn purge_mon_scoped_knowledge(state: &mut UnknownBattleState, slot: &FieldSlot) 
             *setter = None;
         }
     }
+}
+
+/// S52: purge only the SPECIES-DERIVED predicates about `idx` — `EVIVStatGE/LE`,
+/// `SpeedComparison`, `NatureBoostsStat/NerfsStat`, `KnowsThreateningMove` (via
+/// `statement_stale_after_species_reveal`) — without touching `HasItem`/
+/// `HasAbility`/weather-setter/etc. attributions, which remain true regardless
+/// of species since they describe the same PHYSICAL mon, not derived from an
+/// assumed base-stat table.
+///
+/// Needed at every `apply_with_illusion_mirroring` call site that can return
+/// `Promoted`: `promote_illusion_to_primary` wholesale-replaces the mon's
+/// `UnknownPokemonState` fields, but that struct swap never touches the
+/// separate, mon_idx-keyed `state.predicates` CNF store. A `SpeedComparison`/
+/// `EVIVStatGE` clause recorded against this mon_idx BEFORE promotion was
+/// derived under the WRONG assumed identity (the shown decoy species, not the
+/// real Illusion forme) and is unsound to keep applying against the NEW,
+/// post-promotion stat bounds. The dedicated `IllusionEnded` handler (a
+/// *direct* disguise-break reveal, not a mirroring promotion) already does
+/// exactly this at its own call site — this extracts that same call so the
+/// OTHER promotion paths (Pass 1 move/item reveals, Pass 5's own backstop) get
+/// the identical treatment. Found via a live fuzz-test trace: a stale
+/// `SpeedComparison` survived a promotion and combined with the newly-promoted
+/// (legitimately narrower) Speed window to produce an unsatisfiable `[min, max]`
+/// pair, surfacing many events later as pass5's "every candidate nature is
+/// infeasible" panic on a stat no single nature could actually reconcile.
+/// Sound by construction (dropping a predicate only widens); the cost is
+/// completeness, not correctness.
+fn purge_species_derived_predicates_for_mon(state: &mut UnknownBattleState, idx: usize) {
+    state
+        .predicates
+        .retain(|clause| !clause.iter().any(|lit| statement_stale_after_species_reveal(lit, idx)));
 }
 
 /// Boundary-generalized `statement_references_mon`: `true` if `stmt` (recursing
@@ -3204,6 +3390,27 @@ fn combined_back<'a>(state: &'a UnknownBattleState, player: &Player) -> Vec<&'a 
     }
 }
 
+/// True if `species` is shown on some OTHER active slot on `player`'s side than
+/// `slot_i`. Only reachable via Illusion — Species Clause forbids a genuine
+/// second individual of the same species on one team — so a `true` result is a
+/// positive proof, not just a suspicion. See the cross-slot Illusion guard in
+/// `pass1_switch`.
+fn species_active_elsewhere_on_side(
+    state: &UnknownBattleState,
+    player: Player,
+    slot_i: usize,
+    species: &Species,
+) -> bool {
+    let actives = match player {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    };
+    actives
+        .iter()
+        .enumerate()
+        .any(|(i, m)| i != slot_i && unknown_is_known_as(&m.possible_species, species))
+}
+
 fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleContext) {
     let player = &sw.slot.player;
     let slot_i = sw.slot.slot_index as usize;
@@ -3251,6 +3458,67 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         return;
     }
 
+    // Cross-slot Illusion collision guard. In doubles, a disguised Zoroark can
+    // display the SAME species as an already-active teammate on this side (its
+    // disguise pool isn't restricted to bench members). The ordinary bench-match
+    // search below has no physical-identity tie-break — species equality alone —
+    // so left unguarded it either wrongly consumes a real bench member (there is
+    // no such second individual under Species Clause) or, finding no bench match,
+    // fabricates a brand-new `Known(species)` roster entry: a phantom duplicate
+    // of the real active mon, violating `teammate_indices`'s pairwise-distinct-
+    // physical-mon assumption and later colliding with a genuine item/ability
+    // reveal on either copy.
+    //
+    // Species Clause makes this unambiguous: if `species` is already shown
+    // active in a DIFFERENT slot on this side, this arrival cannot be a second
+    // individual of that species — it must be this side's still-unresolved
+    // Illusion forme, disguised. Route it through the parallel-hypothesis model
+    // directly instead of the ordinary bench-match/rebuild path below.
+    let unresolved_zoroark = match player {
+        Player::P1 => state.p1_unresolved_zoroark_count,
+        Player::P2 => state.p2_unresolved_zoroark_count,
+    };
+    if unresolved_zoroark > 0 && species_active_elsewhere_on_side(state, *player, slot_i, species) {
+        let mut mon = if let Some(template) = find_roster_template(state, *player, species) {
+            let mut t = template.clone();
+            t.possible_illusion_state = None; // defensive; templates never carry one
+            t
+        } else {
+            let mut new_mon =
+                UnknownPokemonState::from_opponent_species(species.clone(), ctx.dex, ctx.config.level);
+            recompute_stats_for_iv_mode(&mut new_mon, species, ctx.dex, ctx.config);
+            if let Some(legal) = &ctx.config.legal_items {
+                let mut candidates: Vec<Item> = legal.iter().cloned().collect();
+                candidates.push(Item::None);
+                new_mon.item = Unknown::Possibly(candidates);
+            }
+            new_mon
+        };
+        // Remove (not just clone) the side's Illusion-forme baseline from the
+        // bench: its physical individual has just been proven, by Species
+        // Clause, to be the one entering here in disguise, so its old bench
+        // placeholder must not persist as a separate, uncounted roster slot.
+        if let Some(baseline) = take_illusion_baseline_from_bench(state, *player) {
+            mon.possible_illusion_state =
+                Some(Box::new(unknowns::seed_illusion_hypothesis_for(&mon, &baseline)));
+        }
+        apply_switch_state_to_mon(&mut mon, sw, ctx.config);
+        let actives = match sw.slot.player {
+            Player::P1 => &mut state.p1_active_mons,
+            Player::P2 => &mut state.p2_active_mons,
+        };
+        if slot_i < actives.len() {
+            actives[slot_i] = mon;
+        } else {
+            actives.push(mon);
+        }
+        // Not `resolves_illusion_forme`: the shown species isn't the Illusion
+        // forme's own species, so this doesn't positively resolve it — it stays
+        // a hypothesis, exactly like any other disguised arrival, until a
+        // signature-move/stat contradiction or `IllusionEnded` promotes it.
+        return;
+    }
+
     // Under the parallel-hypothesis Zoroark model, `possible_species` is always
     // pinned (never a `Possibly` disjunction) — a mon's Zoroark ambiguity lives
     // entirely in its own `possible_illusion_state`, which was already seeded
@@ -3279,6 +3547,34 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
             .position(|m| unknown_is_known_as(&m.possible_species, species))
             .map(|pos| possible.remove(pos))
     };
+
+    // S52: if the matched bench entry itself carries a live Zoroark hypothesis
+    // (this physical individual is ambiguous — genuinely `species`, OR the side's
+    // disguised Illusion forme wearing its identity), consuming it into the active
+    // slot below removes the ONLY placeholder that could ever represent "the real
+    // `species`, if this active slot turns out to actually be Zoroark." Left alone,
+    // a LATER genuine switch-in of the real `species` individual (while THIS slot's
+    // ambiguity is still unresolved and no longer concurrently active — the case
+    // `species_active_elsewhere_on_side`'s cross-slot guard above cannot catch,
+    // since only one slot shows `species` at a time here) finds nothing on the
+    // bench and falls through to the "not found" branch below, fabricating a
+    // phantom duplicate roster entry — the root cause traced via a live fuzz-test
+    // run to a `Known(ZoroarkHisui)` slot being fed a decoy's move.
+    //
+    // Eagerly restore a hypothesis-less placeholder now, symmetric to what
+    // `restore_discarded_primary_to_bench` already does LAZILY at promotion time
+    // (reusing that same function — it already handles the template-preferring
+    // rebuild, the S49 mon_idx-shift purge, and the "already active elsewhere"
+    // defensive guard). Removed again if the hypothesis is later confirmed
+    // `HypothesisRejected` (this active slot really IS `species`, not Zoroark) —
+    // see the `apply_with_illusion_mirroring` call sites, which mirror this same
+    // discard on that outcome.
+    if back_mon.as_ref().is_some_and(|m| m.possible_illusion_state.is_some()) {
+        // seed_hypothesis=false: this runs BEFORE any resolution (the side's one
+        // Zoroark is still unresolved) — see the parameter's doc comment for why
+        // reseeding here would risk double-promotion.
+        restore_discarded_primary_to_bench(state, *player, species.clone(), ctx.dex, ctx.config, false);
+    }
 
     // Did this switch-in bring the real Illusion forme itself onto the field,
     // undisguised (it was the last conscious party member, so Illusion had no
@@ -9232,8 +9528,15 @@ fn compute_speed_multipliers(
 // ── Pass 5: Back-solve EV / IV / nature from stat bounds ──────────────────────
 
 /// Tighten `min_evs`/`max_evs`/`possible_natures` from current `min_stats`/`max_stats`.
+///
+/// `idx` is the mon's flat `mon_idx` (S52: threaded through purely for diagnostics —
+/// included in the "every candidate nature is infeasible" contradiction message so a
+/// sweep failure identifies which physical mon over-narrowed, without needing a
+/// separate trace pass just to recover it). Never used for any lookup inside this
+/// function; test call sites that have no real battle-wide index may pass any value.
 pub fn pass5_back_solve(
     mon: &mut UnknownPokemonState,
+    idx: usize,
     config: &InferenceConfig,
     dex: &HashMap<Species, PokemonData>,
 ) {
@@ -9316,7 +9619,7 @@ pub fn pass5_back_solve(
             mon.max_pre_nature_stat[0] = hi;
             mon.min_evs[0] = 0;
             mon.max_evs[0] = 252;
-            return pass5_back_solve(mon, config, dex);
+            return pass5_back_solve(mon, idx, config, dex);
         }
         if let Some(lo) = min_ev
             && lo > mon.min_evs[0] {
@@ -9405,7 +9708,7 @@ pub fn pass5_back_solve(
         if impossible_natures.iter().all(|&b| b) {
             inference_contradiction!(
                 "pass5",
-                "every candidate nature is infeasible for stat {stat_i} \
+                "every candidate nature is infeasible for mon_idx={idx} stat {stat_i} \
                  (minStat={s_min}, maxStat={s_max}) — inference over-narrowed"
             );
         }

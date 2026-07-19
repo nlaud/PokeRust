@@ -1825,6 +1825,53 @@ fn test_zoroark_hypothesis_rides_onto_active_slot_species_stays_known() {
     );
 }
 
+/// S52: consuming a hypothesis-carrying bench entry into an active slot must
+/// eagerly restore a hypothesis-less placeholder for the same species, so a
+/// LATER genuine switch-in of "the real `species`, if this slot turns out to be
+/// Zoroark" still has a bench entry to find. Without this, that later switch
+/// falls through to `pass1_switch`'s "not found" branch and fabricates a phantom
+/// duplicate roster entry — traced via a live fuzz-test run to a
+/// `Known(ZoroarkHisui)` slot being fed a decoy's move (proof the side's belief
+/// held TWO independently-tracked entries claiming the same physical mon).
+#[test]
+fn test_s52_consuming_hypothesis_host_restores_placeholder() {
+    let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
+    let mut state = battle_with_p2(vec![]);
+    state.p2_known_back_mons = vec![garchomp_back];
+    state.p2_possible_back_mons = vec![zoroark_back];
+    state.p2_slot_conditions = vec![vec![]];
+    state.p2_unresolved_zoroark_count = 1;
+
+    let result = apply(state, vec![switch_in(Species::Garchomp, p2(0))]);
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Garchomp),
+        "test setup sanity: matches \
+         test_zoroark_hypothesis_rides_onto_active_slot_species_stays_known"
+    );
+    let bench_species = combined_back_species(&result, &Player::P2);
+    assert!(
+        bench_species.contains(&Species::Garchomp),
+        "S52: consuming the hypothesis-carrying Garchomp bench entry must eagerly \
+         restore a fresh, hypothesis-less Garchomp placeholder to the bench, so a \
+         later genuine Garchomp sighting doesn't fabricate a phantom duplicate; \
+         bench={:?}",
+        bench_species
+    );
+    let restored = combined_back(&result, &Player::P2)
+        .into_iter()
+        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp)))
+        .expect("restored Garchomp placeholder must be findable on the bench");
+    assert!(
+        restored.possible_illusion_state.is_none(),
+        "the restored placeholder itself must NOT carry a hypothesis -- there is \
+         only one Zoroark on the team and it's already accounted for by the active \
+         slot's own hypothesis; got {:?}",
+        restored.possible_illusion_state
+    );
+}
+
 /// A move outside Zoroark's own learnset (but legal for the shown species) must
 /// drop the hypothesis — this mon is confirmed NOT Zoroark — while the primary
 /// identity is untouched.
@@ -2491,6 +2538,170 @@ fn test_s49_illusion_promotion_bench_growth_does_not_shift_cross_side_predicate(
         Unknown::Known(Item::Leftovers),
         "S49: Blissey's own item must not be spuriously resolved by a predicate that \
          only ever meant to reference its pre-shift index"
+    );
+}
+
+/// S50: doubles same-species Illusion-disguise collision, cross-slot case. In a
+/// doubles battle, a disguised Zoroark can display the SAME species as an
+/// ALREADY-ACTIVE teammate on the same side (its disguise pool isn't restricted to
+/// bench members). Before the fix, `pass1_switch`'s plain species-match bench search
+/// found no bench entry for the already-active species, fell into the "not found"
+/// rebuild branch, and fabricated a brand-new `Known(species)` roster entry — a
+/// phantom duplicate of the real active mon — while the side's actual Zoroark
+/// baseline sat untouched on the bench, double-counting the same physical
+/// individual. Species Clause makes this unambiguous: if `species` is already
+/// active in a different slot, the arrival cannot be a second individual of that
+/// species — it must be the side's still-unresolved Illusion forme, disguised.
+#[test]
+fn test_s50_cross_slot_illusion_collision_does_not_duplicate_roster() {
+    let zoroark_back =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
+    let mut milotic_active = unknown_mon_species(Species::Milotic);
+    milotic_active.item = Unknown::Possibly(vec![Item::Leftovers, Item::FocusSash, Item::None]);
+
+    let mut state = battle_nvn(
+        vec![unknown_mon_species(Species::Pikachu), unknown_mon_species(Species::Pikachu)],
+        vec![milotic_active, unknown_mon_species(Species::Snorlax)],
+    );
+    state.active_per_side = 2;
+    state.p2_possible_back_mons = vec![zoroark_back];
+    state.p2_unresolved_zoroark_count = 1;
+    state.p2_slot_conditions = vec![vec![], vec![]];
+    assert_eq!(
+        state.turn_number, 1,
+        "test setup sanity: battle_nvn defaults past turn 0, i.e. mid-battle"
+    );
+
+    // Zoroark, disguised as Milotic (the species already active in slot 0), switches
+    // into slot 1 mid-battle, replacing Snorlax.
+    let result = apply(state, vec![switch_in(Species::Milotic, p2(1))]);
+
+    // The arrival is tracked under the parallel-hypothesis model, exactly like any
+    // other disguised switch-in — shown identity stays pinned, hypothesis carries
+    // the alternate (Zoroark) truth.
+    assert_eq!(
+        result.p2_active_mons[1].possible_species,
+        Unknown::Known(Species::Milotic),
+        "shown identity stays pinned to the disguise species"
+    );
+    assert!(
+        result.p2_active_mons[1].possible_illusion_state.is_some(),
+        "the cross-slot duplicate must carry a Zoroark hypothesis, not a bare, \
+         unqualified Known(Milotic) identity"
+    );
+
+    // No phantom double-counting: the Zoroark baseline must have been consumed into
+    // slot 1's hypothesis, not left sitting inertly on the bench alongside it — that
+    // would track the same physical individual twice (once as the bench baseline,
+    // once as the active hypothesis-carrier).
+    let bench_species = combined_back_species(&result, &Player::P2);
+    assert!(
+        !bench_species.contains(&Species::Zoroark),
+        "the Zoroark baseline must be consumed into the cross-slot arrival's \
+         hypothesis, not left inertly on the bench; bench={:?}",
+        bench_species
+    );
+    // Snorlax (benched by the switch itself) is the only genuine bench occupant.
+    assert_eq!(
+        bench_species,
+        vec![Species::Snorlax],
+        "no phantom Milotic (or any other fabricated) bench entry"
+    );
+
+    // The real Milotic (slot 0) can still have its item positively revealed with no
+    // contradiction — the cross-slot arrival's own independent item uncertainty
+    // never got fabricated as a second, competing "Milotic" for item-uniqueness
+    // exclusion to trip over.
+    let revealed = apply(
+        result,
+        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+    );
+    assert_eq!(
+        revealed.p2_active_mons[0].item,
+        Unknown::Known(Item::Leftovers),
+        "revealing the real Milotic's item must not panic or conflict"
+    );
+}
+
+/// S51: `simulator::helpers::clear_pokemon_on_faint` clears status/volatiles/times_hit
+/// on the real engine's `PokemonState` the instant a mon faints, with no matching event
+/// emission — fainting is itself the observable signal. Before this fix, the inference
+/// engine's `Faint` handler only set `fainted`/`hp`, leaving a stale status in the
+/// belief forever: a mon that entered with a status (a legitimate ground-truth reveal
+/// via the `Switch` event's own `status` field) and then fainted kept that status even
+/// after its slot was reused by a fresh mon, so a later legitimate `StatusInflicted` on
+/// the SAME slot (now a different physical mon) hard-panicked on a status conflict that
+/// was never real.
+#[test]
+fn test_s51_faint_clears_stale_status_before_slot_reuse() {
+    let mut state = battle_nvn(
+        vec![unknown_mon_species(Species::Pikachu)],
+        vec![unknown_mon_species(Species::Pikachu)],
+    );
+
+    // Garchomp switches in already Paralyzed (a legitimate ground-truth reveal via the
+    // Switch event's own `status` field), benching the initial Pikachu.
+    let mut garchomp_switch = switch_in(Species::Garchomp, p2(0));
+    if let EventKind::Switch(sw) = &mut garchomp_switch.kind {
+        sw.status = Some(Status::Paralysis);
+    }
+    let state = apply(state, vec![garchomp_switch]);
+    assert_eq!(
+        state.p2_active_mons[0].status,
+        Some(Status::Paralysis),
+        "test setup sanity: Garchomp must enter Paralyzed"
+    );
+
+    // Garchomp faints.
+    let state = apply(state, vec![event(EventKind::Faint { slot: p2(0) })]);
+    assert_eq!(
+        state.p2_active_mons[0].status, None,
+        "S51: a fainted mon's belief status must clear, mirroring \
+         `clear_pokemon_on_faint`'s ground-truth behavior"
+    );
+
+    // A fresh mon (Snorlax) takes the same slot, status-free.
+    let state = apply(state, vec![switch_in(Species::Snorlax, p2(0))]);
+    assert_eq!(state.p2_active_mons[0].status, None, "test setup sanity: Snorlax enters healthy");
+
+    // The new occupant gets legitimately burned — must not panic on a stale-Paralysis
+    // conflict that was never real.
+    let state = apply(
+        state,
+        vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Burn })],
+    );
+    assert_eq!(
+        state.p2_active_mons[0].status,
+        Some(Status::Burn),
+        "the new occupant's legitimate status must land cleanly, with no stale-status \
+         conflict from the mon that fainted in this slot earlier"
+    );
+}
+
+/// S51 companion: the same faint-clears-status behavior for `Frozen(_)` — the status the
+/// original bug report's panic text specifically named ("already has Frozen").
+#[test]
+fn test_s51_faint_clears_stale_frozen_status() {
+    let state = battle_nvn(
+        vec![unknown_mon_species(Species::Pikachu)],
+        vec![unknown_mon_species(Species::Pikachu)],
+    );
+
+    let mut zapdos_switch = switch_in(Species::Zapdos, p2(0));
+    if let EventKind::Switch(sw) = &mut zapdos_switch.kind {
+        sw.status = Some(Status::Frozen(0));
+    }
+    let state = apply(state, vec![zapdos_switch]);
+    assert_eq!(
+        state.p2_active_mons[0].status,
+        Some(Status::Frozen(0)),
+        "test setup sanity: Zapdos must enter Frozen"
+    );
+
+    let state = apply(state, vec![event(EventKind::Faint { slot: p2(0) })]);
+    assert_eq!(
+        state.p2_active_mons[0].status, None,
+        "S51: Frozen must clear on faint, matching `clear_pokemon_on_faint`"
     );
 }
 
@@ -3238,6 +3449,87 @@ fn test_zoroark_pass3_pass5_promotion_synergy() {
     assert!(
         result.p2_active_mons[0].possible_illusion_state.is_none(),
         "promotion clears the (now-redundant) hypothesis slot"
+    );
+}
+
+/// S52: an Illusion promotion (`apply_with_illusion_mirroring` returning `Promoted`)
+/// wholesale-replaces the mon's `UnknownPokemonState` fields via
+/// `promote_illusion_to_primary`, but that struct swap never touches the separate,
+/// mon_idx-keyed `state.predicates` CNF store. A species-derived predicate (e.g.
+/// `EVIVStatGE`/`EVIVStatLE`/`SpeedComparison`) recorded against this mon_idx BEFORE
+/// promotion was derived under the WRONG assumed identity (the shown decoy species,
+/// not the real Illusion forme) and must not survive to be force-applied against the
+/// NEW, post-promotion stat bounds — found via a live fuzz-test trace where a stale
+/// `SpeedComparison` combined with a newly-promoted (legitimately narrower) Speed
+/// window to produce an unsatisfiable pass5 "every candidate nature is infeasible"
+/// panic many events later, on a stat no single nature could actually reconcile.
+///
+/// Asserts the numeric bound directly (not clause membership in `state.predicates`)
+/// because a `SpeedComparison`'s presence/absence there isn't a reliable
+/// discriminator — verified empirically: whenever the clause is resolvable at all,
+/// `propagate_collected` legitimately applies it, which makes it immediately
+/// `eval_true`-satisfied on the very next fixpoint iteration and drop out of
+/// `state.predicates` regardless of whether this fix's purge ran first. `EVIVStatGE`
+/// singleton clauses are unit-forced by BCP unconditionally too, so their absence
+/// from `state.predicates` afterward is equally uninformative — what actually proves
+/// the purge worked is whether the wrong VALUE it would have forced ever lands in
+/// the promoted mon's own field.
+#[test]
+fn test_s52_illusion_promotion_purges_stale_species_derived_predicate() {
+    let mut garchomp_shown = neutral_no_item_garchomp();
+    seed_zoroark_hypothesis_on(&mut garchomp_shown, &neutral_no_item_zoroark());
+
+    let our_mon = known_p1_normal();
+    let pre_hp = match our_mon.hp { PokemonHP::Number(n) => n, _ => panic!("expected Number") };
+    // Same damage=76 trigger as `test_zoroark_pass3_pass5_promotion_synergy`: makes
+    // Garchomp's own stat window EV/IV-infeasible while leaving Zoroark's untouched,
+    // forcing promotion.
+    let new_hp = pre_hp.saturating_sub(76);
+    let mut state = battle_1v1(our_mon, garchomp_shown);
+
+    // Inject a stale EVIVStatGE against mon_idx=1 (Garchomp's shown active slot), as
+    // if an earlier pass derived an Atk floor under the WRONG (Garchomp) assumption.
+    // value=110 sits just inside Zoroark's own true pre-nature Atk range (base=60 →
+    // roughly [80,112] at neutral nature), so it's a plausible-looking but WRONG
+    // floor: nothing about this turn's own evidence legitimately pins Zoroark's Atk
+    // that high (per `test_zoroark_pass3_pass5_promotion_synergy`'s own comment,
+    // Zoroark's window stays "untouched" by this exact damage trigger). If this
+    // predicate survives the promotion and reaches BCP, unit-forcing would bake 110
+    // straight into the PROMOTED (Zoroark) mon's `min_pre_nature_stat[1]` -- directly
+    // observable and a world apart from Zoroark's own legitimately-derived floor.
+    let stale = Statement::EVIVStatGE {
+        mon_idx: 1,
+        stat: crate::state::dex_data::PokemonStat::Atk,
+        value: 110,
+    };
+    state.predicates.push(vec![stale.clone()]);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+        )],
+        garchomp_zoroark_dex(),
+        move_dex,
+    );
+
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark),
+        "test setup sanity: this must promote, exactly as \
+         test_zoroark_pass3_pass5_promotion_synergy asserts for the same damage=76 trigger"
+    );
+    assert!(
+        result.p2_active_mons[0].min_pre_nature_stat[1] < 100,
+        "S52: a species-derived predicate (EVIVStatGE Atk >= 110) recorded against \
+         mon_idx=1 under the discarded (wrong) Garchomp assumption must not survive an \
+         Illusion promotion to that same mon_idx and get force-applied to the newly- \
+         promoted Zoroark's own Atk floor; got min_pre_nature_stat[1]={}",
+        result.p2_active_mons[0].min_pre_nature_stat[1]
     );
 }
 
@@ -4126,7 +4418,7 @@ fn test_s33_pass5_hp_self_heals_instead_of_panicking() {
     mon.max_evs[0] = 210;
 
     let config = InferenceConfig::default();
-    pass5_back_solve(&mut mon, &config, pd); // must not panic
+    pass5_back_solve(&mut mon, 0, &config, pd); // must not panic
 
     assert!(
         mon.min_stats[0] <= mon.max_stats[0],
@@ -4667,7 +4959,7 @@ fn test_ev_cap_tightens_remaining_stats() {
         ev_total_cap: Some(510),
     };
 
-    pass5_back_solve(&mut mon, &config, &garchomp_dex());
+    pass5_back_solve(&mut mon, 0, &config, &garchomp_dex());
 
     // Atk and Def EVs should be pinned near their expected values.
     assert_eq!(mon.min_evs[1], 196, "Atk minEV must be 196 for stat=175");
@@ -4717,7 +5009,7 @@ fn test_ev_cap_no_tightening_when_evs_low() {
         ev_total_cap: Some(510),
     };
 
-    pass5_back_solve(&mut mon, &config, &garchomp_dex());
+    pass5_back_solve(&mut mon, 0, &config, &garchomp_dex());
 
     // When min_evs are all 0, budget per stat = 510 - 0 = 510 ≥ 252 → no cap tightening.
     for i in 0..6 {
