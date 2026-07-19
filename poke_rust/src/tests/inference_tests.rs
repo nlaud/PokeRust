@@ -1825,16 +1825,28 @@ fn test_zoroark_hypothesis_rides_onto_active_slot_species_stays_known() {
     );
 }
 
-/// S52: consuming a hypothesis-carrying bench entry into an active slot must
-/// eagerly restore a hypothesis-less placeholder for the same species, so a
-/// LATER genuine switch-in of "the real `species`, if this slot turns out to be
-/// Zoroark" still has a bench entry to find. Without this, that later switch
-/// falls through to `pass1_switch`'s "not found" branch and fabricates a phantom
-/// duplicate roster entry — traced via a live fuzz-test run to a
-/// `Known(ZoroarkHisui)` slot being fed a decoy's move (proof the side's belief
-/// held TWO independently-tracked entries claiming the same physical mon).
+/// S53 (corrects S52's mistaken assumption): consuming a hypothesis-carrying
+/// bench entry into an active slot must NOT fabricate a second bench entry for
+/// the same species. `seed_illusion_hypotheses` attaches a hypothesis to EVERY
+/// non-Illusion roster member unconditionally whenever the side has an
+/// unresolved Zoroark — not just to whichever one a disguise happens to be
+/// wearing — so `possible_illusion_state.is_some()` is true for essentially
+/// every ordinary bench entry on a Zoroark-inclusive team, not a signal
+/// specific to "this entry represents a decoy identity being consumed."
+/// `pass1_switch` always moves the WHOLE `UnknownPokemonState` (hypothesis
+/// riding along), so this switch-in is already a complete, sound
+/// representation of the one physical individual — Species Clause allows only
+/// one Garchomp, so a second bench entry for it would be a fabricated
+/// duplicate. A prior session's fix eagerly restored exactly that duplicate;
+/// removed after a 500-battle sweep showed it was the dominant cause of the
+/// `random_doubles_battles_are_sound` item-Known-conflict family (1.4% of
+/// battles failing, ~10 roster-duplication hits/battle) and that removing it
+/// eliminated both without reintroducing the original symptom it was meant to
+/// fix. The correct behavior — no duplicate placeholder — already had
+/// coverage in `test_zoroark_hypothesis_rides_onto_active_slot_species_stays_known`;
+/// this test exists to specifically guard the bench-duplication regression.
 #[test]
-fn test_s52_consuming_hypothesis_host_restores_placeholder() {
+fn test_s53_consuming_hypothesis_host_does_not_duplicate_bench_entry() {
     let (garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![garchomp_back];
@@ -1852,23 +1864,12 @@ fn test_s52_consuming_hypothesis_host_restores_placeholder() {
     );
     let bench_species = combined_back_species(&result, &Player::P2);
     assert!(
-        bench_species.contains(&Species::Garchomp),
-        "S52: consuming the hypothesis-carrying Garchomp bench entry must eagerly \
-         restore a fresh, hypothesis-less Garchomp placeholder to the bench, so a \
-         later genuine Garchomp sighting doesn't fabricate a phantom duplicate; \
-         bench={:?}",
+        !bench_species.contains(&Species::Garchomp),
+        "S53: consuming the hypothesis-carrying Garchomp bench entry must NOT \
+         fabricate a second Garchomp bench entry — Species Clause allows only \
+         one, and it's already fully represented by the active slot (hypothesis \
+         riding along); bench={:?}",
         bench_species
-    );
-    let restored = combined_back(&result, &Player::P2)
-        .into_iter()
-        .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp)))
-        .expect("restored Garchomp placeholder must be findable on the bench");
-    assert!(
-        restored.possible_illusion_state.is_none(),
-        "the restored placeholder itself must NOT carry a hypothesis -- there is \
-         only one Zoroark on the team and it's already accounted for by the active \
-         slot's own hypothesis; got {:?}",
-        restored.possible_illusion_state
     );
 }
 
@@ -3877,6 +3878,71 @@ fn test_s48_pass3_dir_b_payback_target_not_acted_tightens_min_bound() {
          (BP=50) damage look unreachable by any BSV, silently skipping the tightening it \
          should prove (min BSV should rise from 135 to 150) — got {}",
         p2.min_pre_nature_stat[1]
+    );
+}
+
+// ── S54: Direction B must use the attacker's TRUE HP, not the materialize sentinel ──
+//
+// `materialize_pokemon` (information/materialize.rs) collapses any non-100% tracked
+// display percent to a fixed 0.5x-max HP sentinel — a deliberate simplification for
+// full-HP-gated defensive reducers (Multiscale etc., which only care "at full HP or
+// not"). S25 already found this unsound for the Blaze/Overgrow/Swarm/Torrent
+// pinch-ability gate (hp*3 <= max) and fixed it there via `attacker_hp_variants`, but
+// never extended that fix to moves whose base power is a CONTINUOUS (Eruption/Water
+// Spout) or STEPPED (Flail/Reversal) function of the attacker's own HP fraction —
+// those still silently used the wrong, fixed-50%-HP base power in the oracle.
+
+fn fire_special_move(name: PokemonMove, bp: u16) -> MoveData {
+    MoveData { category: MoveCategory::Special, pokemon_type: PokemonType::Fire, ..normal_physical_move(name, bp) }
+}
+
+/// Garchomp (attacker) pinned to max_hp=200, tracked display HP=Percent(90) (true HP
+/// is 179 or 180, giving true Eruption BP=floor(150*179/200)=134 or floor(150*180/200)=135).
+/// Against Snorlax's SpD=125 (`known_p1_normal`), no STAB (Garchomp isn't Fire-type),
+/// no type effectiveness complication (Normal vs Fire is neutral), max roll (100%):
+/// base_dmg = floor(floor(22 * BP * SpA) / (SpD * 50)) + 2. At true BP=135 and
+/// SpA=132 (Garchomp's own tracked pre-nature SpA ceiling under `force_max_ivs`):
+/// floor(22*135*132/(125*50))+2 = floor(392040/6250)+2 = 62+2 = 64 — reachable. At
+/// the buggy fixed-50%-HP sentinel (BP=floor(150*0.5)=75), even at that same SpA=132
+/// ceiling: floor(22*75*132/(125*50))+2 = floor(217800/6250)+2 = 34+2 = 36 —
+/// exact_damage=64 is UNREACHABLE by any SpA in Garchomp's tracked range under the
+/// wrong BP, so without the fix the search silently finds nothing (S48's "silent
+/// miss" shape) and `min_pre_nature_stat[SpA]` stays at its untouched floor. With the
+/// fix, the `hp=181` endpoint variant (BP=135, matching the true value) finds
+/// exact_damage=64 achievable at SpA=132, genuinely raising the min bound. Verified
+/// red-without-fix empirically (temporary disable): untouched floor is 85, not 100 as
+/// a first hand-derivation assumed — the assertion checks `> 100`, comfortably above
+/// that floor either way.
+#[test]
+fn test_s54_pass3_dir_b_eruption_uses_true_hp_not_sentinel() {
+    let mut garchomp = neutral_no_item_garchomp();
+    garchomp.min_stats[0] = 200;
+    garchomp.max_stats[0] = 200;
+    garchomp.hp = PokemonHP::Percent(90);
+
+    let state = battle_1v1(known_p1_normal(), garchomp);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Eruption, fire_special_move(PokemonMove::Eruption, 150));
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Eruption, targets: vec![p1(0)] },
+            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(500 - 64) })],
+        )],
+        garchomp_dex(),
+        move_dex,
+    );
+    let p2 = &result.p2_active_mons[0];
+
+    assert!(
+        p2.min_pre_nature_stat[3] > 100,
+        "assuming Eruption's BP came from the materialize sentinel's fixed 50% HP \
+         (BP=75) makes this hit's real (BP=135, true display HP=90%) damage look \
+         unreachable by any SpA in Garchomp's tracked range, silently skipping the \
+         tightening it should prove — got min SpA={} (untouched floor without the fix \
+         is 85, verified via a temporary disable)",
+        p2.min_pre_nature_stat[3]
     );
 }
 

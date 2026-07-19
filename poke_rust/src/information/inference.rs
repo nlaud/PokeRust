@@ -456,10 +456,7 @@ fn finish_illusion_promotion_restore(
     if combined_back(state, &side).iter().any(|m| unknown_is_known_as(&m.possible_species, &discarded)) {
         return;
     }
-    // seed_hypothesis=true: this is a POST-resolution restore (the caller already
-    // ran `resolve_zoroark_globally` for this promotion), matching the original
-    // (pre-S52) unconditional behavior.
-    restore_discarded_primary_to_bench(state, side, discarded, dex, config, true);
+    restore_discarded_primary_to_bench(state, side, discarded, dex, config);
 }
 
 /// Shared follow-up for EVERY point a Zoroark hypothesis is positively resolved
@@ -543,7 +540,6 @@ pub(super) fn restore_discarded_primary_to_bench(
     discarded_species: Species,
     dex: &HashMap<Species, PokemonData>,
     config: &InferenceConfig,
-    seed_hypothesis: bool,
 ) {
     // Defensive hardening: if `discarded_species` is ALREADY shown on an active
     // slot on `side`, Species Clause proves that active mon IS the genuine
@@ -583,18 +579,7 @@ pub(super) fn restore_discarded_primary_to_bench(
     // function before it) already drops the count to 0 and clears every hypothesis
     // side-wide once the side's one Illusion forme is positively located.
     //
-    // S52: `seed_hypothesis = false` for the ONE caller (`pass1_switch`'s eager
-    // consumption-time restore) that runs BEFORE any resolution — the side's one
-    // Zoroark is still unresolved at that point, so `maybe_seed_fresh_hypothesis`'s
-    // own doc-commented assumption ("by the time a rebuild path like this runs,
-    // the side's one Illusion forme was JUST positively located") does not hold;
-    // seeding a hypothesis here would let this placeholder AND the active slot's
-    // own hypothesis both independently chase promotion for the SAME one real
-    // Zoroark — the exact double-promotion class of bug this investigation is
-    // guarding against. Caught by `test_s52_consuming_hypothesis_host_restores_placeholder`.
-    if seed_hypothesis {
-        maybe_seed_fresh_hypothesis(state, side, &mut restored);
-    }
+    maybe_seed_fresh_hypothesis(state, side, &mut restored);
     // S49: about to push a new bench entry, growing `side`'s back bucket by one.
     // `mon_idx` for every back-bucket mon is a live Vec-position recomputed fresh from
     // `MonSegments::ranges()` on every call, not a stable per-individual id (S1/S18
@@ -2846,9 +2831,7 @@ fn pass1_apply_event(
                         .iter()
                         .any(|m| unknown_is_known_as(&m.possible_species, &discarded))
                 {
-                    // seed_hypothesis=true: post-resolution (resolve_zoroark_globally
-                    // just ran above), matching the original unconditional behavior.
-                    restore_discarded_primary_to_bench(state, slot.player, discarded, ctx.dex, ctx.config, true);
+                    restore_discarded_primary_to_bench(state, slot.player, discarded, ctx.dex, ctx.config);
                 }
 
                 // The Illusion forme's OWN benched baseline entry (species known,
@@ -3548,33 +3531,30 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
             .map(|pos| possible.remove(pos))
     };
 
-    // S52: if the matched bench entry itself carries a live Zoroark hypothesis
-    // (this physical individual is ambiguous — genuinely `species`, OR the side's
-    // disguised Illusion forme wearing its identity), consuming it into the active
-    // slot below removes the ONLY placeholder that could ever represent "the real
-    // `species`, if this active slot turns out to actually be Zoroark." Left alone,
-    // a LATER genuine switch-in of the real `species` individual (while THIS slot's
-    // ambiguity is still unresolved and no longer concurrently active — the case
-    // `species_active_elsewhere_on_side`'s cross-slot guard above cannot catch,
-    // since only one slot shows `species` at a time here) finds nothing on the
-    // bench and falls through to the "not found" branch below, fabricating a
-    // phantom duplicate roster entry — the root cause traced via a live fuzz-test
-    // run to a `Known(ZoroarkHisui)` slot being fed a decoy's move.
-    //
-    // Eagerly restore a hypothesis-less placeholder now, symmetric to what
-    // `restore_discarded_primary_to_bench` already does LAZILY at promotion time
-    // (reusing that same function — it already handles the template-preferring
-    // rebuild, the S49 mon_idx-shift purge, and the "already active elsewhere"
-    // defensive guard). Removed again if the hypothesis is later confirmed
-    // `HypothesisRejected` (this active slot really IS `species`, not Zoroark) —
-    // see the `apply_with_illusion_mirroring` call sites, which mirror this same
-    // discard on that outcome.
-    if back_mon.as_ref().is_some_and(|m| m.possible_illusion_state.is_some()) {
-        // seed_hypothesis=false: this runs BEFORE any resolution (the side's one
-        // Zoroark is still unresolved) — see the parameter's doc comment for why
-        // reseeding here would risk double-promotion.
-        restore_discarded_primary_to_bench(state, *player, species.clone(), ctx.dex, ctx.config, false);
-    }
+    // S52 (fix later REVERTED, S53): a prior session added an eager bench-
+    // restore here whenever the just-consumed entry carried a live Zoroark
+    // hypothesis, reasoning that consuming it stranded "the real `species`,
+    // if this slot turns out to be Zoroark" with no placeholder. That
+    // reasoning doesn't hold: `seed_illusion_hypotheses` attaches a hypothesis
+    // to EVERY non-Illusion roster member unconditionally whenever the side
+    // has an unresolved Zoroark (unknowns.rs) — not just to whichever one a
+    // disguise happens to be wearing — so this condition was true on nearly
+    // every ordinary switch-in on any Zoroark-inclusive team, not just the
+    // narrow decoy-consumption case. Since `pass1_switch` always moves the
+    // WHOLE `UnknownPokemonState` (hypothesis included) rather than rebuilding
+    // it, an ordinary re-entry of the SAME physical individual is already
+    // fully represented by one continuous bench/active entry; the eager
+    // restore fabricated a SECOND entry for a species Species Clause allows
+    // only one of. Measured impact of the eager restore: 1.4% of fuzzed
+    // battles failed with a Leftovers-exclusion-vs-reveal contradiction (this
+    // WAS the dominant `random_doubles_battles_are_sound` failure family),
+    // traced to a roster-duplication rate of ~10 hits per battle; removing it
+    // dropped both to 0.2% and ~0 respectively, with no recurrence of the
+    // original S52b symptom. The LAZY restore at actual promotion time
+    // (`finish_illusion_promotion_restore` → `restore_discarded_primary_to_bench`)
+    // remains and is sufficient: it only creates a placeholder once a
+    // hypothesis is confirmed wrong, which is the only point a genuinely
+    // separate physical individual needs one.
 
     // Did this switch-in bring the real Illusion forme itself onto the field,
     // undisguised (it was the last conscious party member, so Illusion had no
@@ -6713,6 +6693,18 @@ fn is_speed_dependent_bp(move_used: &PokemonMove) -> bool {
     matches!(move_used, PokemonMove::GyroBall | PokemonMove::ElectroBall)
 }
 
+/// S54: moves whose base power is a function of the attacker's own current HP
+/// fraction (`simulator::helpers::effective_base_power`'s `M::Eruption | M::WaterSpout`
+/// and `M::Flail | M::Reversal` arms) — see the `attacker_hp_variants` extension
+/// in `compute_attacker_stat_bounds` for why the oracle needs explicit HP
+/// endpoint hypotheses for these.
+fn is_hp_dependent_bp_move(move_used: &PokemonMove) -> bool {
+    matches!(
+        move_used,
+        PokemonMove::Eruption | PokemonMove::WaterSpout | PokemonMove::Flail | PokemonMove::Reversal
+    )
+}
+
 /// Items that can boost offensive damage for a given attacker mon.
 /// We enumerate these to build the booster disjuncts in CNF clauses.
 pub(crate) fn offensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
@@ -7759,7 +7751,7 @@ fn compute_attacker_stat_bounds(
     // computed against). Thresholds are widened by 1% on each side of the exact
     // 33.33% bucket edge so display-rounding jitter can never drop a possible
     // hypothesis (extra variants only widen the union — sound).
-    let attacker_hp_variants: Vec<Option<PokemonHP>> = match &attacker_unk.hp {
+    let mut attacker_hp_variants: Vec<Option<PokemonHP>> = match &attacker_unk.hp {
         // Exact HP (or full HP): the gate is already evaluated correctly.
         PokemonHP::Number(_) | PokemonHP::Percent(100) => vec![None],
         PokemonHP::Percent(p) => {
@@ -7773,6 +7765,31 @@ fn compute_attacker_stat_bounds(
             }
         }
     };
+    // S54: for Eruption/Water Spout/Flail/Reversal, base power is a continuous
+    // (Eruption/Water Spout) or step (Flail/Reversal) function of the ATTACKER's
+    // own current HP fraction — but that fraction is exactly the same materialize
+    // sentinel the S25 pinch-gate fix above already found unsound (any non-100
+    // display percent collapses to a fixed 0.5×max), so left alone the oracle
+    // silently computes damage from the WRONG base power whenever the true attacker
+    // isn't near that 50% sentinel, over/under-narrowing the derived stat bound.
+    // Union in Number(hp) variants at both ends of the range of exact HP values the
+    // tracked display percent admits (±0.5% of the rounding, matching
+    // `hp_to_percent`'s round-half-up definition, widened outward — never inward —
+    // for safety against integer-rounding edge cases): damage is monotone in BP and
+    // BP is monotone in hp for all four moves, so the two endpoints alone bound the
+    // whole achievable range, the same monotonicity argument `attacker_speed_range`
+    // already relies on for Gyro Ball/Electro Ball above.
+    if is_hp_dependent_bp_move(&move_data.name)
+        && let PokemonHP::Percent(p) = &attacker_unk.hp
+        && *p != 100
+    {
+        let max_hp = attacker_unk.min_stats[0].max(1) as f64;
+        let p = *p as f64;
+        let hp_lo = (((p - 0.5) * max_hp / 100.0).floor() as i64).clamp(1, max_hp as i64 - 1) as u16;
+        let hp_hi = (((p + 0.5) * max_hp / 100.0).ceil() as i64).clamp(1, max_hp as i64 - 1) as u16;
+        attacker_hp_variants.push(Some(PokemonHP::Number(hp_lo)));
+        attacker_hp_variants.push(Some(PokemonHP::Number(hp_hi)));
+    }
 
     // ── Unconditional tightening: union over all (nature_class, item, ability) ─
     let mut global_bsv_lo: Option<u16> = None;
