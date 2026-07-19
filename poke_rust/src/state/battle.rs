@@ -187,6 +187,19 @@ pub struct BattleState {
     /// Reset to 0 after recoil is applied.
     pub sub_damage_dealt: u32,
 
+    /// Gross HP damage dealt to an opponent this action, accumulated per hit in
+    /// `apply_single_hit_branch` (before any same-action reactive heal — e.g. the
+    /// target's own Sitrus/pinch Berry firing mid-hit — can offset it). Used by
+    /// `apply_post_damage_move_effects` for Life Orb recoil, drain, Shell Bell,
+    /// recoil moves, `last_move_failed`, rampage disruption, and Final Gambit —
+    /// all of which are decided by whether/how much a hit dealt, not by the
+    /// target's net HP change after unrelated effects resolve. A whole-action HP
+    /// snapshot diff wrongly floors to 0 when a mid-action heal fully offsets an
+    /// earlier hit's damage; this field can't be fooled that way since it only
+    /// ever accumulates. Excluded from PartialEq/Hash. Reset to 0 after being
+    /// consumed.
+    pub gross_damage_dealt: u32,
+
     /// Set to true after the first Round resolves this turn; causes subsequent Rounds
     /// to deal doubled base power. Cleared at end of turn. Excluded from PartialEq/Hash.
     pub round_used_this_turn: bool,
@@ -745,7 +758,7 @@ impl PartialEq for BattleState {
             && self.self_switch_pending == other.self_switch_pending
             && self.items_consumed_this_turn == other.items_consumed_this_turn
             && (self.event_observer.is_none() || self.pending_events == other.pending_events)
-        // last_move_on_field, sub_damage_dealt, round_used_this_turn,
+        // last_move_on_field, sub_damage_dealt, gross_damage_dealt, round_used_this_turn,
         // move_was_prevented, event_observer, double_ko intentionally excluded
     }
 }
@@ -785,7 +798,7 @@ impl std::hash::Hash for BattleState {
         if self.event_observer.is_some() {
             self.pending_events.hash(state);
         }
-        // last_move_on_field, sub_damage_dealt, round_used_this_turn,
+        // last_move_on_field, sub_damage_dealt, gross_damage_dealt, round_used_this_turn,
         // move_was_prevented, event_observer, double_ko intentionally excluded
     }
 }

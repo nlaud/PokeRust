@@ -37,12 +37,21 @@ use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, Playe
 use crate::state::dex_data::{parse_ability_dex, parse_learnset_dex};
 use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
-const TEAMSHEETS: [&str; 5] = [
+const TEAMSHEETS: [&str; 14] = [
     "../teamsheets/MA_charizard_sylveon.txt",
     "../teamsheets/MA_dragonite_rain.txt",
     "../teamsheets/MA_floette_froslass.txt",
     "../teamsheets/MA_tyranitar_zoroark.txt",
     "../teamsheets/MA_venusaur_aerodactl.txt",
+    "../teamsheets/MB_aboma_pidgeon.txt",
+    "../teamsheets/MB_barbaracle_zoroark.txt",
+    "../teamsheets/MB_espathra_scovillain.txt",
+    "../teamsheets/MB_gallade_clefable.txt",
+    "../teamsheets/MB_gyarados_volcarona.txt",
+    "../teamsheets/MB_malamar_tr.txt",
+    "../teamsheets/MB_raptor_stuff.txt",
+    "../teamsheets/MB_sand_doggo_rat.txt",
+    "../teamsheets/MB_vivillon_camerupt.txt",
 ];
 
 const ACTIVE_PER_SIDE: u8 = 2;

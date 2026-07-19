@@ -34293,6 +34293,249 @@ mod event_round_trip {
         );
     }
 
+    // ── Regression: gross_damage_dealt — a same-action target heal must not mask
+    // Life Orb recoil (and by extension drain/Shell Bell/recoil moves/etc., all of
+    // which read the same `total_dmg` value in `apply_post_damage_move_effects`).
+    //
+    // Before this fix, `total_dmg` was a whole-action HP snapshot diff against the
+    // opponent's pre-move baseline. When the target's own Sitrus Berry fires
+    // mid-hit and heals back at least as much as the hit dealt, that diff floors
+    // to 0 (`saturating_sub`) — even though the move genuinely dealt damage
+    // moments earlier — so Life Orb's `total_effective_dmg > 0` gate saw 0 and
+    // silently skipped the chip. The fix accumulates GROSS damage per hit
+    // (`BattleState::gross_damage_dealt`, mirroring the existing
+    // `sub_damage_dealt` pattern) before any reactive heal can offset it.
+
+    /// A Life Orb attacker whose weak hit gets fully out-healed by the target's
+    /// own Sitrus Berry the same action must still take Life Orb recoil.
+    #[test]
+    fn life_orb_recoil_survives_target_out_healing_the_hit() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None,
+            Some(crate::data::item::Item::LifeOrb), None, None, None, false,
+        );
+        let mut p2 = build_pokemon_state(
+            // Shuckle: huge Def, tiny max HP — Tackle deals only a few HP, well
+            // under Shuckle's own Sitrus heal (max_hp/4).
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None,
+            Some(crate::data::item::Item::SitrusBerry), None, None, None, false,
+        );
+        // Just above the 50% Sitrus threshold — any nonzero hit crosses it, and
+        // the max_hp/4 heal that follows outpaces Tackle's tiny damage roll.
+        let max_hp = p2.hp;
+        p2.hp = max_hp / 2 + 1;
+
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 must be present");
+
+        // Sanity check on the setup itself: the target's own Sitrus Berry must
+        // fire this action — its Healed nests under its own ItemLost (S5
+        // pattern), not as a top-level sibling. This same-action heal is exactly
+        // what the old whole-action HP diff wrongly floored to "no damage dealt."
+        let item_lost = mv.reactions.iter().find(|e| matches!(&e.kind,
+            EventKind::ItemLost { slot, item, consumed: true }
+            if *slot == p2s0() && *item == crate::data::item::Item::SitrusBerry));
+        let item_lost = item_lost.unwrap_or_else(|| panic!(
+            "setup invariant: Shuckle's Sitrus Berry must be consumed this turn — \
+             if it wasn't, this test isn't exercising the net-cancels-to-zero case;\n\
+             reactions = {:#?}", mv.reactions
+        ));
+        assert!(
+            item_lost.reactions.iter().any(|e| matches!(&e.kind,
+                EventKind::Healed { target, .. } if *target == p2s0())),
+            "setup invariant: Shuckle's Sitrus Berry must heal it this turn;\n\
+             item_lost reactions = {:#?}", item_lost.reactions
+        );
+
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::ItemRevealed { slot, item }
+                if *slot == p1s0() && *item == crate::data::item::Item::LifeOrb)),
+            "Life Orb recoil must still fire even though the target's own Sitrus \
+             Berry fully out-healed the hit this same action;\n\
+             reactions = {:#?}", mv.reactions
+        );
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == p1s0())),
+            "Life Orb recoil must still deal damage to the holder;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
+
+    /// Same root cause, a second gap: `gross_damage_dealt`'s first version only
+    /// accumulated damage dealt to the true opponent (mirroring the deleted
+    /// `total_damage_to_opponent`'s scope), so a doubles "friendly fire" hit — a
+    /// Pokémon deliberately targeting its own ally, which every single-target
+    /// move legally allows — was excluded from `total_dmg` entirely. Life Orb
+    /// (and drain/Shell Bell/etc.) doesn't care whose side the target is on, only
+    /// that the move dealt damage to SOME target. Found live via the fuzz sweep
+    /// (`MB_malamar_tr.txt` mirror match, Dragalge's Draco Meteor deliberately
+    /// hitting its own teammate) even after the net-cancels-to-zero fix above
+    /// landed — the sweep's failure rate barely moved (35→30/400) until this
+    /// second gap was also closed (30→1/400, the residual being the unrelated,
+    /// already-open `ItemLost`/FocusSash family).
+    #[test]
+    fn life_orb_recoil_survives_hitting_own_ally() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let attacker = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), None,
+            Some(crate::data::item::Item::LifeOrb), None, None, None, false,
+        );
+        let ally = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_a = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        let p2_b = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![attacker, ally], vec![], vec![p2_a, p2_b], vec![]),
+        );
+        // P1 slot 0 deliberately targets its own ally, P1 slot 1.
+        let p1_cmd = PlayerCommand::Battle(vec![
+            BattleCommand::Attack(crate::state::battle::AttackCommand {
+                move_slot: 0,
+                target: Some(FieldSlot { player: Player::P1, slot_index: 1 }),
+                terastallize: false,
+                mega_evolve: false,
+            }),
+            BattleCommand::Attack(crate::state::battle::AttackCommand {
+                move_slot: 0, target: None, terastallize: false, mega_evolve: false,
+            }),
+        ]);
+        let p2_cmd = PlayerCommand::Battle(vec![
+            BattleCommand::Attack(crate::state::battle::AttackCommand {
+                move_slot: 0, target: None, terastallize: false, mega_evolve: false,
+            }),
+            BattleCommand::Attack(crate::state::battle::AttackCommand {
+                move_slot: 0, target: None, terastallize: false, mega_evolve: false,
+            }),
+        ]);
+        let mut branches = run_single_turn_with_events_opts(
+            &state, &p1_cmd, &p2_cmd, md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 must be present");
+
+        // Setup invariant: the hit actually landed on the ally.
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == FieldSlot { player: Player::P1, slot_index: 1 })),
+            "setup invariant: the attack must land on the ally;\nreactions = {:#?}", mv.reactions
+        );
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::ItemRevealed { slot, item }
+                if *slot == p1s0() && *item == crate::data::item::Item::LifeOrb)),
+            "Life Orb recoil must fire on a deliberate friendly-fire hit, same as \
+             hitting an opponent;\nreactions = {:#?}", mv.reactions
+        );
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::DamageDealt { target, .. } if *target == p1s0())),
+            "Life Orb recoil must still deal damage to the holder;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
+
+    /// Same root cause, a different consumer of `total_dmg`: a drain move's heal
+    /// must be based on the hit's gross damage, not net-of-a-same-action heal on
+    /// the target. An unboosted Bulbasaur's Giga Drain against Blissey (colossal
+    /// HP/SpD) deals only a sliver of damage — far less than Blissey's own
+    /// Sitrus heal (max_hp/4) — so the target ends the action net-healed, which
+    /// is exactly the case the old whole-action HP diff floored to "no damage."
+    #[test]
+    fn drain_heal_survives_target_out_healing_the_hit() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+        let p1 = build_pokemon_state(
+            Species::Bulbasaur, pd, md, Some(50),
+            Some([Some(PokemonMove::GigaDrain), None, None, None]),
+            None, Some(Ability::None), None, None, None, None, None, false,
+        );
+        // Pre-damage the attacker so the drain heal is a visible HP change
+        // (healing an already-full-HP mon is a silent no-op — no event fires).
+        let mut p1 = p1;
+        p1.hp = p1.hp.saturating_sub(20);
+        let mut p2 = build_pokemon_state(
+            Species::Blissey, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), None,
+            Some(crate::data::item::Item::SitrusBerry), None, None, None, false,
+        );
+        let max_hp = p2.hp;
+        p2.hp = max_hp / 2 + 1;
+
+        let state = MatchState::BattleState(
+            battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]),
+        );
+        let mut branches = run_single_turn_with_events_opts(
+            &state,
+            &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+            &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+            md, pd, Player::P1, false, 1,
+        );
+        let events = branches.remove(0).1.expect("observer set — events must be Some");
+        let mv = find_move_used(&events, p1s0())
+            .expect("MoveUsed for P1 slot 0 must be present");
+
+        // Setup invariant: the target's own Sitrus Berry must fire this action —
+        // its Healed nests under its own ItemLost (S5 pattern), not as a
+        // top-level sibling.
+        let item_lost = mv.reactions.iter().find(|e| matches!(&e.kind,
+            EventKind::ItemLost { slot, item, consumed: true }
+            if *slot == p2s0() && *item == crate::data::item::Item::SitrusBerry));
+        let item_lost = item_lost.unwrap_or_else(|| panic!(
+            "setup invariant: Blissey's Sitrus Berry must be consumed this turn — \
+             if it wasn't, this test isn't exercising the net-cancels-to-zero case;\n\
+             reactions = {:#?}", mv.reactions
+        ));
+        assert!(
+            item_lost.reactions.iter().any(|e| matches!(&e.kind,
+                EventKind::Healed { target, .. } if *target == p2s0())),
+            "setup invariant: Blissey's Sitrus Berry must heal it this turn;\n\
+             item_lost reactions = {:#?}", item_lost.reactions
+        );
+
+        assert!(
+            any_kind(&mv.reactions, |k| matches!(k,
+                EventKind::Healed { target, .. } if *target == p1s0())),
+            "Giga Drain must still heal the attacker even though the target's own \
+             Sitrus Berry fully out-healed the hit this same action;\n\
+             reactions = {:#?}", mv.reactions
+        );
+    }
+
     // ── Test 13: voluntary-switch send-out effects nest under Switch ───────────
     //
     // The old emission shape pushed entry-ability reveals (and would have pushed the

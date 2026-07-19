@@ -776,6 +776,20 @@ fn apply_single_hit_branch(
         let target_env = simulator_helpers::berry_env(&bs, target_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&bs);
 
+        // Accumulate GROSS damage before any same-action reactive heal (e.g. the
+        // target's own Sitrus Berry, captured separately below as `berry_heal_hp_info`)
+        // can offset it. Must be captured here, not derived later from a net HP diff —
+        // see `gross_damage_dealt`'s doc comment. Any OTHER slot counts — Life Orb
+        // recoil (like drain/Shell Bell/etc.) doesn't care whose side the target is
+        // on; doubles legally allows targeting an ally, and that "friendly fire"
+        // damage must count too. `!= target_slot` (not `.player != .player`) only
+        // excludes literal self-targeting; confusion self-hit damage never reaches
+        // this function at all (`resolve_confusion_self_hit_outcomes` has its own
+        // separate path), so no extra guard is needed for that case.
+        if eff_damage > 0 && attack_slot != target_slot {
+            bs.gross_damage_dealt += eff_damage as u32;
+        }
+
         if let Some(target_mon) = match target_slot.player {
             Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
             Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
@@ -6269,20 +6283,6 @@ fn game_over_state_if_battle_finished(state: &BattleState) -> Option<MatchState>
     })
 }
 
-/// Measure total HP damage dealt to `opposing_player` between `baseline` and `after`.
-fn total_damage_to_opponent(baseline: &BattleState, after: &BattleState, opposing_player: Player) -> u32 {
-    let (before_active, before_back) = match opposing_player {
-        Player::P1 => (&baseline.p1_active_mons, &baseline.p1_back_mons),
-        Player::P2 => (&baseline.p2_active_mons, &baseline.p2_back_mons),
-    };
-    let (after_active, after_back) = match opposing_player {
-        Player::P1 => (&after.p1_active_mons, &after.p1_back_mons),
-        Player::P2 => (&after.p2_active_mons, &after.p2_back_mons),
-    };
-    before_active.iter().zip(after_active).map(|(b, a)| b.hp.saturating_sub(a.hp) as u32).sum::<u32>()
-        + before_back.iter().zip(after_back).map(|(b, a)| b.hp.saturating_sub(a.hp) as u32).sum::<u32>()
-}
-
 /// Returns true if `player` has at least one non-fainted Pokémon on the bench.
 fn has_healthy_bench(bs: &BattleState, player: Player) -> bool {
     match player {
@@ -6490,7 +6490,12 @@ fn apply_post_damage_move_effects(
     baseline: &BattleState,
     opposing_player: Player,
 ) -> Vec<(MatchState, f64)> {
-    let total_dmg = total_damage_to_opponent(baseline, &bs, opposing_player);
+    // gross_damage_dealt is accumulated per hit in apply_single_hit_branch, before any
+    // same-action reactive heal (e.g. a mid-hit Sitrus Berry) can offset it — see its doc
+    // comment. A whole-action HP snapshot diff against `baseline` would wrongly floor to 0
+    // when such a heal fully cancels an earlier hit's damage the same action.
+    let total_dmg = bs.gross_damage_dealt;
+    bs.gross_damage_dealt = 0; // consumed here
     // sub_damage_dealt tracks the full damage roll sent into a Substitute this action.
     // Recoil is based on all damage dealt (to HP or sub); drain and Shell Bell are not.
     let sub_dmg = bs.sub_damage_dealt;
@@ -8107,6 +8112,7 @@ fn battle_state_from_preview_branching(
         items_consumed_this_turn: vec![],
         last_move_on_field: None,
         sub_damage_dealt: 0,
+        gross_damage_dealt: 0,
         round_used_this_turn: false,
         move_was_prevented: false,
         resolved_move_targets: vec![],

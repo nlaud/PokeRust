@@ -263,6 +263,7 @@ pub fn materialize_battle(
         items_consumed_this_turn: Vec::new(),
         last_move_on_field: None,
         sub_damage_dealt: 0,
+        gross_damage_dealt: 0,
         round_used_this_turn: unk.round_used_this_turn,
         move_was_prevented: false,
         resolved_move_targets: vec![],

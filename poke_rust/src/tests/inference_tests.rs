@@ -10789,6 +10789,71 @@ mod roundtrip_soundness {
         );
     }
 
+    // ── Regression (S55): Life Orb recoil round-trip when the target's own
+    // same-action heal fully cancels the hit ──────────────────────────────────
+    //
+    // Same shape as Scenario H, but P1 (the target) holds a Sitrus Berry that
+    // fires mid-hit and heals back at least as much as P2's weak Tackle dealt.
+    // Before the fix, `apply_post_damage_move_effects` computed `total_dmg` as a
+    // whole-action HP snapshot diff against P1's pre-move baseline — net-zero
+    // (or net-healed) here — so the engine itself silently skipped the Life Orb
+    // chip. `pass2_item_from_move`'s `no-lo-recoil` absence inference then saw
+    // "P2 dealt damage, no self-DamageDealt reaction" and wrongly excluded
+    // LifeOrb from a mon that genuinely holds it — the exact shape the fuzz
+    // sweep found on `MB_malamar_tr.txt` (Dragalge + Florges's Sitrus Berry).
+    #[test]
+    fn test_s55_life_orb_recoil_survives_target_out_healing_the_hit() {
+        use crate::information::unknowns::PokemonHP;
+        let pd = pokemon_dex();
+        let md = move_dex();
+        // P1: Shuckle holding Sitrus Berry, just above the 50% threshold — its
+        // huge Def means P2's Tackle deals only a sliver, well under the
+        // max_hp/4 Sitrus heal that follows.
+        let mut p1 = build_pokemon_state(
+            Species::Shuckle, pd, md, Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), Some(Item::SitrusBerry), None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let p1_max_hp = p1.hp;
+        p1.hp = p1_max_hp / 2 + 1;
+        // P2: Snorlax holding Life Orb, attacking with Tackle.
+        let p2 = build_pokemon_state(
+            Species::Snorlax, pd, md, Some(50),
+            Some([Some(PokemonMove::Tackle), None, None, None]),
+            None, Some(Ability::None), Some(Nature::Hardy), Some(Item::LifeOrb), None,
+            Some([0u8; 6]), Some([31u8; 6]), false,
+        );
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+
+        let fog = fog_1v1(&p1, Species::Snorlax);
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+        let result = apply_roundtrip(fog, events);
+
+        let p2_fog = &result.p2_active_mons[0];
+        assert!(
+            !unknown_is_excluded(&p2_fog.item, &Item::LifeOrb),
+            "net-cancels-to-zero regression: Life Orb must not be excluded after its \
+             holder attacks, even though the target's own Sitrus Berry fully \
+             out-healed the hit this same action; item = {:?}",
+            p2_fog.item
+        );
+        assert!(
+            matches!(&p2_fog.item,
+                crate::information::unknowns::Unknown::Known(i) if *i == Item::LifeOrb),
+            "Life Orb chip reveals the item; expected Known(LifeOrb), got {:?}",
+            p2_fog.item
+        );
+        assert!(
+            matches!(&p2_fog.hp, PokemonHP::Percent(p) if *p < 100),
+            "Life Orb recoil must be visible in observed HP; hp = {:?}",
+            p2_fog.hp
+        );
+    }
+
     // ── Scenario I: switch-in reveals attribute to the INCOMING mon ───────────
     //
     // The simulator used to emit entry-ability reveals as top-level siblings BEFORE
