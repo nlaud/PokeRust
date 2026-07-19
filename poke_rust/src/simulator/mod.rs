@@ -5175,16 +5175,33 @@ fn possible_damage_outcomes_for_move(
         ) {
             // Punish a blocked CONTACT move (Spiky Shield chip / Baneful Bunker poison / King's
             // Shield −1 Atk). Deterministic, so applied once to the shared next_state per blocked
-            // target. Long Reach removes contact; Protective Pads blocks the punishment.
+            // target. Long Reach removes contact; Protective Pads blocks the punishment. This still
+            // fires on an Unseen Fist bypass below — Bulbapedia: "everything aside from the target's
+            // protective effect[ ]is still triggered," and the punishment is contingent on contact
+            // having been made, which it still was.
             if simulator_helpers::contact_effects_apply(&next_state, &attacker, move_data) {
                 simulator_helpers::apply_protect_contact_punishment(
                     &mut next_state, action.user_slot, *target_slot, kind,
                 );
             }
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: *target_slot });
-            outcomes_for_target.push((0, false, false, 1.0));
-            per_target_outcomes.push((*target_slot, outcomes_for_target));
-            continue;
+            // Unseen Fist: every protect kind this engine implements is bypassed (Protect,
+            // King's Shield, Spiky Shield, Baneful Bunker, Quick Guard, Wide Guard — see
+            // `attacker_has_active_unseen_fist`'s doc comment). The hit still resolves normally
+            // below (accuracy roll included) at ×0.25 damage via `unseen_fist_mult`, folded into
+            // the core damage formula rather than duplicated here. The ability becomes observable
+            // the instant it visibly lets a hit through, so reveal it now instead of letting the
+            // move's own AbilityRevealed machinery (which fires on other triggers) skip this case.
+            if simulator_helpers::attacker_has_active_unseen_fist(&next_state, &attacker, move_data) {
+                simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed {
+                    slot: action.user_slot,
+                    ability: Ability::UnseenFist,
+                });
+            } else {
+                simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: *target_slot });
+                outcomes_for_target.push((0, false, false, 1.0));
+                per_target_outcomes.push((*target_slot, outcomes_for_target));
+                continue;
+            }
         }
 
         // Magic Bounce / Magic Coat: reflect opponent-targeted status moves back at the

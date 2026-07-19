@@ -1,6 +1,8 @@
 //! Engine state → DTO conversion. All display strings are produced here so the
 //! frontend never sees raw enum debug output it didn't ask for.
 
+use std::collections::HashSet;
+
 use crate::dto::*;
 use poke_rust::data::item::Item;
 use poke_rust::information::describe::{
@@ -189,8 +191,18 @@ pub fn pokemon_view(mon: &PokemonState, is_own_side: bool) -> PokemonView {
 /// HP, and typing while a species disguise is unresolved — are replaced. Status,
 /// volatiles, boosts, the (already Illusion-aware) species/sprite, gender, fainted,
 /// isTera/isMega are directly observable in a real battle regardless of information
-/// mode, so those stay ground truth.
-fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> PokemonView {
+/// mode, so those stay ground truth — with one exception: `ChoiceLock` (see
+/// `mon_volatiles`'s param doc below) is re-derived from the belief, not copied.
+fn mask_pokemon_view(
+    mut view: PokemonView,
+    unk: &UnknownPokemonState,
+    legal_items: Option<&HashSet<Item>>,
+    // Ground-truth volatiles for this same mon, re-filtered here rather than trusted
+    // from `view.volatiles` (which `pokemon_view` already populated from the same
+    // source) — see the `ChoiceLock` handling below. `VolatileDto` is a display
+    // string with no variant tag, so the filter has to happen on the raw engine type.
+    mon_volatiles: &[VolatileStatusState],
+) -> PokemonView {
     // A live Zoroark hypothesis widens every hidden-attribute display (but never
     // species/typing — those stay the shown/original identity; see this function's
     // doc comment) to the union of the primary and the hypothesis. `hyp` is `None`
@@ -218,15 +230,34 @@ fn mask_pokemon_view(mut view: PokemonView, unk: &UnknownPokemonState) -> Pokemo
     };
     view.item = match (&unk.item, hyp) {
         (Unknown::Known(Item::None), None) => None,
-        // `legal_items` (format banlists) isn't threaded to the server yet — see
-        // `InferenceConfig` construction — so this always renders against the
-        // unrestricted (~1,000-item) pool.
         (primary, _) => Some(describe_unknown_item_union(
             primary,
             hyp.map(|h| &h.item),
-            None,
+            legal_items,
         )),
     };
+    // TODO.md: Choice Lock is the one volatile in this codebase that's a SILENT
+    // consequence of a still-hidden held item — no in-game message announces "X is
+    // now locked into its move" the way Substitute/Leech Seed/Encore/Taunt/etc. all
+    // get their own announced message (see this function's doc comment on why every
+    // OTHER volatile is safe to copy from ground truth). A real opponent can only be
+    // sure of it once the item itself is confirmed as a Choice item — showing it
+    // earlier leaks information the belief hasn't actually earned. Re-derive
+    // `view.volatiles` from the raw ground truth here (rather than trust what
+    // `pokemon_view` already put there) so this is the one place that can drop it.
+    let item_is_confirmed_choice = |it: &Unknown<Item>| {
+        matches!(it, Unknown::Known(Item::ChoiceBand | Item::ChoiceSpecs | Item::ChoiceScarf))
+    };
+    let choice_lock_provable =
+        item_is_confirmed_choice(&unk.item) || hyp.is_some_and(|h| item_is_confirmed_choice(&h.item));
+    view.volatiles = mon_volatiles
+        .iter()
+        .filter(|v| {
+            choice_lock_provable
+                || !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(_), _))
+        })
+        .map(volatile_dto)
+        .collect();
     view.ability = describe_unknown_union(&unk.possible_abilities, hyp.map(|h| &h.possible_abilities));
     view.moves = (0..4)
         .map(|i| {
@@ -307,7 +338,11 @@ fn merge_evs_max(primary: &[u8; 6], hyp: Option<&[u8; 6]>) -> [u8; 6] {
 /// `fallback_id` — a caller-supplied id that must be unique across the whole side's
 /// bench render for this call (see `side_view`). Without this, every unresolved bench
 /// mon rendered `mon_id: 0` and collided on the frontend's `mon_id`-keyed rows.
-fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState, fallback_id: u8) -> PokemonView {
+fn bench_pokemon_view_from_belief(
+    unk: &UnknownPokemonState,
+    fallback_id: u8,
+    legal_items: Option<&HashSet<Item>>,
+) -> PokemonView {
     let mon_id = match unk.possible_mon_id {
         Unknown::Known(id) => id,
         _ => fallback_id,
@@ -342,7 +377,7 @@ fn bench_pokemon_view_from_belief(unk: &UnknownPokemonState, fallback_id: u8) ->
     };
     view.item = match (&unk.item, hyp) {
         (Unknown::Known(Item::None), None) => None,
-        (primary, _) => Some(describe_unknown_item_union(primary, hyp.map(|h| &h.item), None)),
+        (primary, _) => Some(describe_unknown_item_union(primary, hyp.map(|h| &h.item), legal_items)),
     };
     view.moves = (0..4)
         .map(|i| {
@@ -383,7 +418,13 @@ fn belief_battle_state(belief: Option<&UnknownMatchState>) -> Option<&UnknownBat
 /// (`belief.p1_*` for `player == P1`, `belief.p2_*` for `player == P2`) — the same
 /// `player`-keyed match already used to read ground truth above — whenever
 /// `player != perspective`.
-fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchState>, perspective: Player) -> SideView {
+fn side_view(
+    state: &BattleState,
+    player: Player,
+    belief: Option<&UnknownMatchState>,
+    perspective: Player,
+    legal_items: Option<&HashSet<Item>>,
+) -> SideView {
     let (active, back, can_tera, can_mega, conditions, condition_turns, slot_conditions) =
         match player {
             Player::P1 => (
@@ -439,7 +480,7 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
                 .map(|(i, mon)| {
                     let base = pokemon_view(mon, false); // fog is Some only when player != perspective
                     match fog_active.get(i) {
-                        Some(unk) => mask_pokemon_view(base, unk),
+                        Some(unk) => mask_pokemon_view(base, unk, legal_items, &mon.volatiles),
                         None => base,
                     }
                 })
@@ -452,19 +493,19 @@ fn side_view(state: &BattleState, player: Player, belief: Option<&UnknownMatchSt
             let back_views: Vec<PokemonView> = fog_known_back
                 .iter()
                 .enumerate()
-                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 100 + i as u8))
+                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 100 + i as u8, legal_items))
                 .collect();
             let possible_back_views: Vec<PokemonView> = fog_possible_back
                 .iter()
                 .enumerate()
-                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 150 + i as u8))
+                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 150 + i as u8, legal_items))
                 .collect();
             // Fallback id base 200+: apart from the 100+/150+ bases above so a
             // fainted-mon row can never collide with a known/possible-back row.
             let fainted_views: Vec<PokemonView> = fog_fainted
                 .iter()
                 .enumerate()
-                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 200 + i as u8))
+                .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 200 + i as u8, legal_items))
                 .collect();
             (active_views, back_views, possible_back_views, fainted_views)
         }
@@ -533,7 +574,12 @@ pub fn phase_of(state: &MatchState) -> PhaseDto {
     }
 }
 
-fn preview_view(preview: &TeamPreviewState, belief: Option<&UnknownMatchState>, perspective: Player) -> PreviewView {
+fn preview_view(
+    preview: &TeamPreviewState,
+    belief: Option<&UnknownMatchState>,
+    perspective: Player,
+    legal_items: Option<&HashSet<Item>>,
+) -> PreviewView {
     // Mirrors `side_view`: only the non-viewer physical side is ever masked, zipped
     // by index with the belief's team-preview mon list (both built from the same
     // species list in the same order — see `team_preview_open_sheet_from_perspective`).
@@ -554,7 +600,7 @@ fn preview_view(preview: &TeamPreviewState, belief: Option<&UnknownMatchState>, 
                     return base;
                 }
                 match fog_mons.and_then(|f| f.get(i)) {
-                    Some(unk) => mask_pokemon_view(base, unk),
+                    Some(unk) => mask_pokemon_view(base, unk, legal_items, &mon.volatiles),
                     None => base,
                 }
             })
@@ -579,6 +625,7 @@ pub fn battle_view(
     brought_per_side: u8,
     belief: Option<&UnknownMatchState>,
     perspective: Player,
+    legal_items: Option<&HashSet<Item>>,
 ) -> BattleView {
     let phase = phase_of(state);
     let mut view = BattleView {
@@ -597,12 +644,12 @@ pub fn battle_view(
 
     match state {
         MatchState::TeamPreviewState(preview) => {
-            view.preview = Some(preview_view(preview, belief, perspective));
+            view.preview = Some(preview_view(preview, belief, perspective, legal_items));
         }
         MatchState::BattleState(battle) => {
             view.turn_number = battle.turn_number;
-            view.p1 = Some(side_view(battle, Player::P1, belief, perspective));
-            view.p2 = Some(side_view(battle, Player::P2, belief, perspective));
+            view.p1 = Some(side_view(battle, Player::P1, belief, perspective, legal_items));
+            view.p2 = Some(side_view(battle, Player::P2, belief, perspective, legal_items));
             view.field = Some(field_view(battle));
             view.self_switch = battle
                 .self_switch_pending
@@ -616,8 +663,8 @@ pub fn battle_view(
             // Show the field as it stood when the battle ended (fainted mon,
             // final HP) behind the winner overlay.
             view.turn_number = final_state.turn_number;
-            view.p1 = Some(side_view(final_state, Player::P1, belief, perspective));
-            view.p2 = Some(side_view(final_state, Player::P2, belief, perspective));
+            view.p1 = Some(side_view(final_state, Player::P1, belief, perspective, legal_items));
+            view.p2 = Some(side_view(final_state, Player::P2, belief, perspective, legal_items));
             view.field = Some(field_view(final_state));
             // Mirror the BattleState arm: the belief is still tracked (session.rs
             // never clears belief_p1/belief_p2 at game over), so the Predicates tab's
@@ -985,7 +1032,7 @@ mod tests {
             true,
         );
 
-        let view = preview_view(&preview, Some(&belief_p2), Player::P2);
+        let view = preview_view(&preview, Some(&belief_p2), Player::P2, None);
 
         assert_eq!(view.p1_mons.len(), 1);
         let p1_mon = &view.p1_mons[0];
@@ -1070,7 +1117,7 @@ mod tests {
             &std::collections::HashMap::new(), &inference_config,
         );
 
-        let view = side_view(&battle_state, Player::P1, Some(&battle_belief_p2), Player::P2);
+        let view = side_view(&battle_state, Player::P1, Some(&battle_belief_p2), Player::P2, None);
         let possible_back_species: Vec<&str> = view.possible_back.iter().map(|m| m.species.as_str()).collect();
         assert_eq!(
             possible_back_species,
@@ -1133,11 +1180,161 @@ mod tests {
 
         // Mask P2 (the opponent) from P1's perspective — the exact call the server
         // makes to render the opponent's sidebar under fog-of-war.
-        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1);
+        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1, None);
 
         assert_eq!(view.fainted.len(), 1, "belief's p2_fainted_mons must surface as SideView.fainted");
         assert_eq!(view.fainted[0].species, "Snorlax");
         assert!(view.fainted[0].fainted, "forwarded fainted-bucket entry must keep fainted: true");
+    }
+
+    /// TODO.md: "Should not display Not of items that are not even in the current
+    /// format!" — end-to-end through the real DTO render path (`side_view` ->
+    /// `mask_pokemon_view` -> `describe_unknown_item_union`), not just the
+    /// `describe_unknown_item` unit tests. An opponent mon whose item lattice has
+    /// excluded one in-whitelist item (Choice Band) and one out-of-whitelist item
+    /// (Rocky Helmet — not in this format's pool at all) must render only the
+    /// in-format exclusion.
+    #[test]
+    fn side_view_item_text_hides_out_of_format_exclusions() {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+        );
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand { active_indices: vec![0], back_indices: vec![] };
+        let p2_tp = p1_tp.clone();
+        let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
+        let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
+
+        let (next_state, _events, _prob) = simulator::sample_turn(
+            &MatchState::TeamPreviewState(preview.clone()),
+            &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1, None,
+        );
+        let MatchState::BattleState(battle_state) = next_state else {
+            panic!("expected BattleState")
+        };
+
+        let UnknownMatchState::TeamPreview(tp_belief_p1) =
+            poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
+                Player::P1, &preview.p1_mons, &preview.p2_mons, &pokemon_dex, 1, 1, 50, true,
+            )
+        else {
+            panic!("expected TeamPreview");
+        };
+        let mut battle_belief_p1 = tp_belief_p1.into_battle_state(
+            Player::P1,
+            &p1_tp.active_indices, &p1_tp.back_indices,
+            &p2_tp.active_indices, &p2_tp.back_indices,
+        );
+        // Hand-seed the exclusion this test cares about, isolated from whatever
+        // real inference would derive — mirrors `side_view_forwards_belief_fainted_bucket`'s
+        // hand-seeding approach for the same reason (deterministic, no dependency
+        // on a specific event sequence actually producing this exact lattice).
+        // `into_battle_state` parks the whole non-viewer roster in `possible_back`
+        // until the transition's own events are replayed (see its doc comment) — P2's
+        // lead hasn't been pulled into `p2_active_mons` yet, so seed the exclusion on
+        // the roster entry that's actually populated right now.
+        battle_belief_p1.p2_possible_back_mons[0].item =
+            Unknown::Not(vec![Item::ChoiceBand, Item::RockyHelmet]);
+        let belief_p1 = UnknownMatchState::Battle(battle_belief_p1);
+
+        let legal: HashSet<Item> = [Item::ChoiceBand, Item::ChoiceScarf, Item::Leftovers].into_iter().collect();
+        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1, Some(&legal));
+
+        assert_eq!(
+            view.possible_back[0].item.as_deref(),
+            Some("not Choice Band"),
+            "Rocky Helmet was never in this format's pool, so it must not appear in the rendered exclusion list"
+        );
+    }
+
+    /// Shared setup for the two `choice_lock_masking_*` tests below: a real
+    /// ground-truth battle where P2's active mon has been hand-seeded with a
+    /// `ChoiceLock` volatile (mirroring exactly how `simulator/mod.rs` sets it —
+    /// `TurnStatus(ChoiceLock(move), 0)` — the instant a Choice-item holder's move
+    /// resolves), and a fresh battle-phase belief for P1 about P2 with P2's only
+    /// mon already sitting in `p2_active_mons` at the matching index (skipping the
+    /// team-preview -> battle event replay `into_battle_state` normally expects —
+    /// this test only needs a belief mon AT the active slot, not a fully-populated
+    /// send-in sequence).
+    fn choice_lock_test_fixture() -> (BattleState, poke_rust::information::unknowns::UnknownBattleState) {
+        let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
+        let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
+
+        let preview = simulator::team_preview_state_from_team_strings(
+            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+        );
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand { active_indices: vec![0], back_indices: vec![] };
+        let p2_tp = p1_tp.clone();
+        let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
+        let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
+
+        let (next_state, _events, _prob) = simulator::sample_turn(
+            &MatchState::TeamPreviewState(preview.clone()),
+            &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1, None,
+        );
+        let MatchState::BattleState(mut battle_state) = next_state else {
+            panic!("expected BattleState")
+        };
+        battle_state.p2_active_mons[0].volatiles.push(VolatileStatusState::TurnStatus(
+            VolatileStatus::ChoiceLock(poke_rust::data::pokemon_move::PokemonMove::ExtremeSpeed),
+            0,
+        ));
+
+        let UnknownMatchState::TeamPreview(tp_belief_p1) =
+            poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
+                Player::P1, &preview.p1_mons, &preview.p2_mons, &pokemon_dex, 1, 1, 50, true,
+            )
+        else {
+            panic!("expected TeamPreview");
+        };
+        let mut battle_belief_p1 = tp_belief_p1.into_battle_state(
+            Player::P1,
+            &p1_tp.active_indices, &p1_tp.back_indices,
+            &p2_tp.active_indices, &p2_tp.back_indices,
+        );
+        let p2_mon_belief = battle_belief_p1.p2_possible_back_mons.remove(0);
+        battle_belief_p1.p2_active_mons.push(p2_mon_belief);
+
+        (battle_state, battle_belief_p1)
+    }
+
+    /// TODO.md: "You can see Choice Lock volatile on your opponents mons even when
+    /// you don't have enough information to be able to know they are choice
+    /// locked." — with the belief still fully unsure about P2's item, the ground
+    /// truth's `ChoiceLock` volatile must NOT leak into the masked opponent view.
+    #[test]
+    fn choice_lock_masking_hidden_when_item_unconfirmed() {
+        let (battle_state, mut battle_belief_p1) = choice_lock_test_fixture();
+        battle_belief_p1.p2_active_mons[0].item = Unknown::Not(vec![]);
+        let belief_p1 = UnknownMatchState::Battle(battle_belief_p1);
+
+        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1, None);
+
+        let names: Vec<&str> = view.active[0].volatiles.iter().map(|v| v.name.as_str()).collect();
+        assert!(
+            !names.iter().any(|n| n.starts_with("Choice Lock")),
+            "Choice Lock must not be visible while the belief hasn't confirmed a Choice item; got {names:?}"
+        );
+    }
+
+    /// Companion case: once the belief HAS confirmed the held item is a Choice
+    /// item (its state can now be guaranteed, per the TODO's own wording), Choice
+    /// Lock must render normally like any other observable volatile.
+    #[test]
+    fn choice_lock_masking_shown_when_item_confirmed_choice() {
+        let (battle_state, mut battle_belief_p1) = choice_lock_test_fixture();
+        battle_belief_p1.p2_active_mons[0].item = Unknown::Known(Item::ChoiceBand);
+        let belief_p1 = UnknownMatchState::Battle(battle_belief_p1);
+
+        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1, None);
+
+        let names: Vec<&str> = view.active[0].volatiles.iter().map(|v| v.name.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.starts_with("Choice Lock")),
+            "Choice Lock must render once the belief has confirmed a Choice item; got {names:?}"
+        );
     }
 
     /// Closed Team Sheet mode (the traditional VGC/Champions competitive format):
@@ -1164,7 +1361,7 @@ mod tests {
             true,
         );
 
-        let view = preview_view(&preview, Some(&belief_p2), Player::P2);
+        let view = preview_view(&preview, Some(&belief_p2), Player::P2, None);
 
         let p1_mon = &view.p1_mons[0];
         assert_eq!(p1_mon.species, "Aerodactyl", "species must still be visible at team preview");
@@ -1224,8 +1421,8 @@ mod tests {
             Player::P2, &preview.p2_mons, &preview.p1_mons, &pokemon_dex, 1, 1, 50, false,
         );
 
-        let view_pinned = preview_view(&preview, Some(&belief_pinned), Player::P2);
-        let view_unpinned = preview_view(&preview, Some(&belief_unpinned), Player::P2);
+        let view_pinned = preview_view(&preview, Some(&belief_pinned), Player::P2, None);
+        let view_unpinned = preview_view(&preview, Some(&belief_unpinned), Player::P2, None);
 
         let stats_pinned = view_pinned.p1_mons[0].stats;
         let stats_unpinned = view_unpinned.p1_mons[0].stats;

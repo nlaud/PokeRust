@@ -486,6 +486,15 @@ pub struct CreateBattleRequest {
     /// format: only the opponent's species are visible at team preview.
     #[serde(default = "default_info_mode")]
     pub information_mode: String,
+    /// Format item whitelist, as PokeAPI item slugs (`frontend/src/lib/items.ts`'s
+    /// `CatalogItem.name`) — the selected format's full catalog minus its banned
+    /// items (`StoredFormat.bannedItems`), resolved client-side. Empty means no
+    /// restriction (`InferenceConfig::legal_items` stays `None`) — the default for
+    /// any client that doesn't send this. Each entry must resolve via `Item::from_str`;
+    /// an unresolvable slug is a client bug (stale catalog, typo) and is rejected
+    /// with 422 rather than silently treated as "no such item is legal."
+    #[serde(default)]
+    pub legal_items: Vec<String>,
 }
 
 fn default_true() -> bool {

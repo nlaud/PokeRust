@@ -2151,6 +2151,53 @@ fn filter_solidrock_mult(
     }
 }
 
+/// True if `attacker`'s active, unsuppressed ability is Unseen Fist and `move_data`
+/// still counts as contact for this attacker specifically — reuses
+/// `contact_effects_apply`'s own Long Reach / Protective Pads handling so "does this
+/// hit make contact" is decided in exactly one place. Bulbapedia: Unseen Fist lets
+/// contact moves connect through Protect, Detect, King's Shield, Spiky Shield,
+/// Baneful Bunker, Quick Guard, and Wide Guard — every `ProtectKind` this engine
+/// implements. The one documented exception is Max Guard, which this engine has no
+/// mechanic for, so there is nothing to exempt.
+pub(crate) fn attacker_has_active_unseen_fist(
+    state: &BattleState,
+    attacker: &PokemonState,
+    move_data: &MoveData,
+) -> bool {
+    !pokemon_ability_is_suppressed(state, attacker)
+        && attacker.ability == Ability::UnseenFist
+        && contact_effects_apply(state, attacker, move_data)
+}
+
+/// Pokémon Champions-specific Unseen Fist damage: a contact move that would
+/// otherwise be blocked by the target's active protection still connects, but for
+/// only 1/4 of its normal damage — NOT full damage like older generations (see
+/// Unseen Fist's Bulbapedia "In battle" notes, which call out Champions
+/// specifically). Re-derives the same block decision the per-target loop in
+/// `simulator/mod.rs` already made (`protect_blocks_move`) rather than threading a
+/// new parameter through this function's ~40 call sites; the check is pure and
+/// deterministic so recomputing it here is safe. Returns `1.0` whenever the target
+/// isn't actually protected right now (including every non-Unseen-Fist attacker),
+/// so this is safe to fold unconditionally into the multiplier chain for every hit.
+fn unseen_fist_mult(
+    state: &BattleState,
+    attacker: &PokemonState,
+    attacker_slot: FieldSlot,
+    target: &PokemonState,
+    target_slot: FieldSlot,
+    move_data: &MoveData,
+) -> f64 {
+    if !attacker_has_active_unseen_fist(state, attacker, move_data) {
+        return 1.0;
+    }
+    let is_spread = move_is_spread_target(&move_data.target);
+    if protect_blocks_move(state, attacker_slot, target_slot, target, move_data, is_spread).is_some() {
+        0.25
+    } else {
+        1.0
+    }
+}
+
 /// Multiscale / Shadow Shield: ×0.5 damage when the holder is at full HP.
 fn multiscale_mult(state: &BattleState, target: &PokemonState, mold_breaker: bool) -> f64 {
     if !pokemon_ability_is_suppressed(state, target)
@@ -2943,6 +2990,10 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     );
     // Friend Guard: ×0.75 per unsuppressed, non-fainted ally carrying the ability.
     let friend_guard_mult = friend_guard_mult(_state, _target_slot);
+    // Unseen Fist (Pokémon Champions): ×0.25 when this contact hit is only landing
+    // because it bypassed the target's active protection.
+    let unseen_fist_mult =
+        unseen_fist_mult(_state, attacker, _user_slot, target, _target_slot, move_data);
 
     let rolls = forced_damage_roll
         .map(|r| vec![r])
@@ -3049,6 +3100,7 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
             dmg = (dmg * defender_type_mult).floor(); // Heatproof / Thick Fat / Water Bubble / Purifying Salt
             dmg = (dmg * fluffy_mult).floor(); // Fluffy: ×0.5 contact, ×2 Fire
             dmg = (dmg * friend_guard_mult).floor(); // Friend Guard
+            dmg = (dmg * unseen_fist_mult).floor(); // Unseen Fist: ×0.25 bypassing protection
 
             let mut damage = dmg.max(0.0) as u16;
             if damage == 0

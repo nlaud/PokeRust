@@ -24,10 +24,12 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use crate::data::ability::Ability;
+use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::inference::{apply_information, InferenceConfig};
 use crate::information::information::mask_events_for;
+use crate::information::subset_check::assert_true_state_subset_of_belief;
 use crate::information::unknowns::UnknownMatchState;
 use crate::simulator::{
     get_possible_commands_for_active_slot, sample_turn_raw, team_preview_state_from_teamsheets,
@@ -69,6 +71,63 @@ fn ability_dex() -> &'static HashMap<Ability, crate::state::dex_data::AbilityDat
 static LEARNSET_DEX: OnceLock<HashMap<Species, std::collections::HashSet<PokemonMove>>> = OnceLock::new();
 fn learnset_dex() -> &'static HashMap<Species, std::collections::HashSet<PokemonMove>> {
     LEARNSET_DEX.get_or_init(|| parse_learnset_dex("../pokemon_info/showdownLearnsets.txt"))
+}
+
+/// The Champions ruleset's item whitelist, mirroring `frontend/src/lib/items.ts`'s
+/// `CATALOG` (general items + Mega Stones + berries) exactly — same label list,
+/// parsed here via `Item::from_str` instead of TS's `slugify`, since `Item::from_str`
+/// normalizes to alphanumeric-lowercase the same way regardless of hyphenation.
+/// Every item held by any of the 14 checked-in `TEAMSHEETS` is in this list
+/// (verified by hand when this catalog was wired into the server for the
+/// legal-items TODO.md fix) — matching the server's real `InferenceConfig`
+/// (rather than leaving `legal_items: None`, an unrestricted ~1,000-item pool no
+/// real battle ever actually has) tests the engine under the same, tighter
+/// item-possibility space production battles run under.
+fn champions_legal_items() -> std::collections::HashSet<Item> {
+    const GENERAL: &[&str] = &[
+        "Big Root", "Black Belt", "Black Glasses", "Bright Powder", "Charcoal",
+        "Choice Scarf", "Damp Rock", "Dragon Fang", "Expert Belt", "Fairy Feather",
+        "Focus Band", "Focus Sash", "Hard Stone", "Heat Rock", "Icy Rock",
+        "Iron Ball", "King's Rock", "Leftovers", "Life Orb", "Light Ball",
+        "Light Clay", "Magnet", "Mental Herb", "Metal Coat", "Metronome",
+        "Miracle Seed", "Muscle Band", "Mystic Water", "Never-Melt Ice",
+        "Poison Barb", "Quick Claw", "Scope Lens", "Sharp Beak", "Shed Shell",
+        "Shell Bell", "Silk Scarf", "Silver Powder", "Smooth Rock", "Soft Sand",
+        "Spell Tag", "Twisted Spoon", "White Herb", "Wide Lens", "Wise Glasses",
+        "Zoom Lens",
+    ];
+    const MEGA_STONES: &[&str] = &[
+        "Abomasite", "Absolite", "Aerodactylite", "Aggronite", "Alakazite",
+        "Altarianite", "Ampharosite", "Audinite", "Banettite", "Barbaracite",
+        "Beedrillite", "Blastoisinite", "Blazikenite", "Cameruptite", "Chandelurite",
+        "Charizardite X", "Charizardite Y", "Chesnaughtite", "Chimechite",
+        "Clefablite", "Crabominite", "Delphoxite", "Dragalgite", "Dragoninite",
+        "Drampanite", "Eelektrossite", "Emboarite", "Excadrite", "Falinksite",
+        "Feraligite", "Floettite", "Froslassite", "Galladite", "Garchompite",
+        "Gardevoirite", "Gengarite", "Glalitite", "Glimmoranite", "Golurkite",
+        "Greninjite", "Gyaradosite", "Hawluchanite", "Heracronite", "Houndoominite",
+        "Kangaskhanite", "Lopunnite", "Lucarionite", "Malamarite", "Manectite",
+        "Mawilite", "Medichamite", "Meganiumite", "Meowsticite", "Metagrossite",
+        "Pidgeotite", "Pinsirite", "Pyroarite", "Raichunite X", "Raichunite Y",
+        "Sablenite", "Sceptilite", "Scizorite", "Scolipite", "Scovillainite",
+        "Scraftinite", "Sharpedonite", "Skarmorite", "Slowbronite", "Staraptite",
+        "Starminite", "Steelixite", "Swampertite", "Tyranitarite", "Venusaurite",
+        "Victreebelite",
+    ];
+    const BERRIES: &[&str] = &[
+        "Aspear Berry", "Babiri Berry", "Charti Berry", "Cheri Berry", "Chesto Berry",
+        "Chilan Berry", "Chople Berry", "Coba Berry", "Colbur Berry", "Haban Berry",
+        "Kasib Berry", "Kebia Berry", "Leppa Berry", "Lum Berry", "Occa Berry",
+        "Oran Berry", "Passho Berry", "Payapa Berry", "Pecha Berry", "Persim Berry",
+        "Rawst Berry", "Rindo Berry", "Roseli Berry", "Shuca Berry", "Sitrus Berry",
+        "Tanga Berry", "Wacan Berry", "Yache Berry",
+    ];
+    GENERAL
+        .iter()
+        .chain(MEGA_STONES)
+        .chain(BERRIES)
+        .map(|label| Item::from_str(label))
+        .collect()
 }
 
 /// Picks a random legal team-preview pick: `BROUGHT_PER_SIDE` distinct roster
@@ -176,8 +235,34 @@ fn reseed_for_battle(
     ))
 }
 
+/// The contradiction-only soundness sweep: fails only if `apply_information`
+/// finds an observed event stream jointly impossible under the tracked belief.
+/// This is the ORIGINAL oracle, with a long, low (~0.14%) historical failure
+/// rate — kept fast and reliable for the everyday `cargo test` suite.
 #[test]
 fn random_doubles_battles_are_sound() {
+    run_sweep(ITERATIONS, false);
+}
+
+/// The stronger "truth ⊆ belief" sweep (see `subset_check`'s module doc):
+/// additionally asserts the true state never falls outside what each belief
+/// admits. Currently fails at a MUCH higher rate (~30-36% per 100-iteration
+/// sweep as of 2026-07-19 — see TODO.md's "truth ⊆ belief subset oracle" entry
+/// for the open bug families this surfaces) because it catches real,
+/// previously-undiscovered over-narrowing bugs the contradiction oracle above
+/// cannot see. Deliberately `#[ignore]`d rather than folded into the default
+/// test above: gating the everyday suite on these still-open bugs would make
+/// ordinary `cargo test` runs fail on unrelated work far more often than not.
+/// Run explicitly (`cargo test -- --ignored random_doubles_beliefs_stay_sound_subset`)
+/// when working on the fog-of-war engine, or fold it back into the default
+/// sweep once the families in TODO.md are fixed.
+#[test]
+#[ignore]
+fn random_doubles_beliefs_stay_sound_subset() {
+    run_sweep(ITERATIONS, true);
+}
+
+fn run_sweep(iterations: u64, check_subset: bool) {
     let pdex = pokemon_dex();
     let mdex = move_dex();
     let adex = ability_dex();
@@ -186,11 +271,12 @@ fn random_doubles_battles_are_sound() {
     let config = InferenceConfig {
         use_stat_points: true,
         force_max_ivs: true,
+        legal_items: Some(champions_legal_items()),
         learnset_dex: ldex.clone(),
         ..Default::default()
     };
 
-    for iter in 0..ITERATIONS {
+    for iter in 0..iterations {
         let mut rng = StdRng::seed_from_u64(iter);
 
         let p1_path = TEAMSHEETS[rng.gen_range(0..TEAMSHEETS.len())];
@@ -259,6 +345,19 @@ fn random_doubles_battles_are_sound() {
                     break;
                 }
                 MatchState::BattleState(bs) => {
+                    // The second soundness oracle (opt-in — see
+                    // `random_doubles_beliefs_stay_sound_subset`'s doc comment):
+                    // the true state must stay a member of what each belief
+                    // admits — panics on a value the belief has wrongly excluded,
+                    // catching over-narrowing bugs the contradiction oracle above
+                    // (soundness against self-contradiction only) cannot. See
+                    // `subset_check`'s module doc for the full design.
+                    if check_subset {
+                        let context = format!("iter={iter} turn={turn} matchup=({p1_path} vs {p2_path})");
+                        assert_true_state_subset_of_belief(bs, &belief_p1, Player::P1, pdex, mdex, &context);
+                        assert_true_state_subset_of_belief(bs, &belief_p2, Player::P2, pdex, mdex, &context);
+                    }
+
                     p1_cmd = PlayerCommand::Battle(random_commands_for_player(bs, Player::P1, &mut rng));
                     p2_cmd = PlayerCommand::Battle(random_commands_for_player(bs, Player::P2, &mut rng));
                 }

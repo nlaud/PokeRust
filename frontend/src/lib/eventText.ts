@@ -149,12 +149,19 @@ function renderEvent(event: EventNode, depth: number, resolver: NameResolver, ou
         'danger',
       )
       break
-    case 'statusCured':
-      line(
-        `${resolver.name(event.target)} was cured of ${STATUS_NAMES[event.status.code] ?? event.status.code}!`,
-        'success',
-      )
+    case 'statusCured': {
+      // Sleep/freeze recovery reads as "woke up"/"thawed out" in-game (this fires for
+      // BOTH a natural timer expiry and a cure effect — Champions has no separate event
+      // for the two), while the other four statuses keep the generic "cured of" phrasing.
+      const text =
+        event.status.code === 'SLP'
+          ? `${resolver.name(event.target)} woke up!`
+          : event.status.code === 'FRZ'
+            ? `${resolver.name(event.target)} thawed out!`
+            : `${resolver.name(event.target)} was cured of ${STATUS_NAMES[event.status.code] ?? event.status.code}!`
+      line(text, 'success')
       break
+    }
     case 'teamStatusCured':
       line(`${playerLabel(event.side)}'s team was cured of status conditions!`, 'success')
       break

@@ -64,7 +64,11 @@ const BERRIES = items(
   ].map((n) => `${n} Berry`),
 )
 
-const CATALOG: CatalogItem[] = [...GENERAL, ...MEGA_STONES, ...BERRIES]
+/** The full held-item pool of the current Champions ruleset. Exported directly
+ * (not just via `fetchItemCatalog`) so callers that need it synchronously —
+ * e.g. `SetupPanel` resolving a format's legal-items list at battle-start —
+ * don't have to thread a promise through just to read a static array. */
+export const CATALOG: CatalogItem[] = [...GENERAL, ...MEGA_STONES, ...BERRIES]
 
 export function fetchItemCatalog(): Promise<CatalogItem[]> {
   return Promise.resolve(CATALOG)

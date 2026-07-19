@@ -85,12 +85,14 @@ impl BattleSession {
             Player::P1 => self.belief_p1.as_ref(),
             Player::P2 => self.belief_p2.as_ref(),
         };
+        let legal_items = self.inference_config.as_ref().and_then(|c| c.legal_items.as_ref());
         mapping::battle_view(
             &self.state,
             self.config.active_per_side,
             self.config.brought_per_side,
             belief,
             perspective,
+            legal_items,
         )
     }
 }

@@ -60,8 +60,20 @@ pub fn describe_unknown_item(u: &Unknown<Item>, legal_items: Option<&HashSet<Ite
                 Some(pool) => {
                     let possible: Vec<&Item> =
                         pool.iter().filter(|i| !excluded.contains(i)).collect();
-                    if excluded.len() <= possible.len() {
-                        excluded
+                    // Only exclusions that were ever actually possible under this
+                    // format's pool are worth naming — an item banned outright was
+                    // never a candidate to begin with, so listing it as "not X"
+                    // alongside genuine deductions is just noise (and, worse, is
+                    // misleading: it reads as "we ruled this out," not "this was
+                    // never legal here"). Restrict the "not X" rendering to
+                    // `excluded ∩ pool` before comparing list lengths.
+                    let in_format_excluded: Vec<&Item> =
+                        excluded.iter().filter(|i| pool.contains(i)).collect();
+                    if in_format_excluded.is_empty() {
+                        return "Unknown".to_string();
+                    }
+                    if in_format_excluded.len() <= possible.len() {
+                        in_format_excluded
                             .iter()
                             .map(|i| format!("not {}", display_name(i)))
                             .collect::<Vec<_>>()

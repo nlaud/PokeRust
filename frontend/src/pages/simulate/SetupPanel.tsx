@@ -1,8 +1,16 @@
 import { useEffect, useState } from 'react'
 import Select from '../../components/common/Select'
 import type { InformationMode } from '../../api/types'
-import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetup } from '../../lib/storage'
+import { CATALOG } from '../../lib/items'
+import { favoritesFirst, loadBattleSetup, loadFormats, loadTeams, saveBattleSetup, type StoredFormat } from '../../lib/storage'
 import { useBattle } from '../../store/battleStore'
+
+/** The format's legal-items whitelist: its full catalog minus whatever it bans.
+ * Sent as-is to `CreateBattleRequest.legalItems` — see that field's doc comment. */
+function legalItemsFor(format: StoredFormat): string[] {
+  const banned = new Set(format.bannedItems)
+  return CATALOG.filter((item) => !banned.has(item.name)).map((item) => item.name)
+}
 
 const INFO_MODE_OPTIONS: { value: InformationMode; label: string }[] = [
   { value: 'closedSheet', label: 'Closed Team Sheet' },
@@ -55,6 +63,7 @@ export default function SetupPanel() {
       forceMaxIvs: format.forceMaxIvs,
       damageRolls: 16,
       informationMode,
+      legalItems: legalItemsFor(format),
     })
   }
 

@@ -255,6 +255,11 @@ export interface CreateBattleRequest {
   forceMaxIvs?: boolean
   damageRolls?: number
   informationMode?: InformationMode
+  /** The selected format's full item catalog minus its banned items (slugs from
+   * `lib/items.ts`'s `CATALOG`, filtered by `StoredFormat.bannedItems`). Empty/
+   * omitted means no restriction. Mirrors `CreateBattleRequest::legal_items` in
+   * `dto.rs` — an unrecognized slug is rejected with 422. */
+  legalItems?: string[]
 }
 
 export interface CreateBattleResponse {

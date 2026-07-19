@@ -1,25 +1,140 @@
 # TODO
 ### Fixes
-- Unseen fist not working??: P1 sent out Gengar-Mega (147 HP)
-
-P1's Ninetales-Alola used Protect!
-
-P1's Ninetales-Alola protected itself!
-
-P1's Gengar-Mega used Protect!
-
-P1's Gengar-Mega protected itself!
-
-P2's Golurk-Mega used Headlong Rush!
-
-P1's Gengar-Mega blocked the attack! (Mega Golurk has unseen fist? This also probbably needs inference fixing so that the unseen fist protect 1/4 gets accounted for...)
-- "P2's Incineroar was cured of put to sleep!" Should say woke up not cured of put to sleep lol
-- You can see Choice Lock volatile on your opponents mons even when you don't have enough information to be able to know they are choice locked. Fix this. Yous hould only be able to see this volatile (check for other volatiles that could be hidden / unknown) when you can guarantee its state.
-- Should not display Not of items that are not even in the current format!
+- ~~Unseen Fist not working~~ **Fixed.** Researched on Bulbapedia: Unseen Fist lets
+  contact moves bypass Protect/Detect/King's Shield/Spiky Shield/Baneful
+  Bunker/Quick Guard/Wide Guard (every `ProtectKind` this engine implements — the
+  sole documented exception, Max Guard, has no implementation here), but in
+  Pokémon Champions specifically the bypassed hit deals only 1/4 damage, not full
+  damage like older generations. Implemented as `unseen_fist_mult` folded into the
+  core damage formula (`simulator/helpers.rs`), with the per-target protect-block
+  loop in `simulator/mod.rs` letting the hit fall through (still applying the
+  blocking move's own contact punishment — Spiky Shield chip / Baneful Bunker
+  poison / King's Shield −1 Atk — since that's independent of the block itself)
+  and emitting `AbilityRevealed`. Also added `pass2_unseen_fist_absence`
+  (`information/inference.rs`) so a genuine, unrevealed `Blocked` on a contact
+  move excludes Unseen Fist from the attacker's belief (gated on ability
+  suppression, mirroring `pass2_contact_absence`). Tests: `protect_moves` module
+  in `simulator_tests.rs` (4 tests) + `inference_tests.rs` (2 tests).
+- ~~"P2's Incineroar was cured of put to sleep!" should say woke up~~ **Fixed** —
+  `frontend/src/lib/eventText.ts`'s `statusCured` case now special-cases
+  SLP→"woke up" / FRZ→"thawed out"; other statuses keep "was cured of X".
+- ~~Choice Lock volatile visible on opponents without enough information~~
+  **Fixed.** Unlike every other volatile in this engine, Choice Lock is a silent
+  consequence of a still-hidden held item (no in-game message announces it).
+  `mask_pokemon_view` (`bin/server/mapping.rs`) now re-derives an opponent's
+  rendered volatiles from ground truth and drops `ChoiceLock` unless the belief's
+  item is `Known` to a Choice item (or its live Illusion hypothesis is). Tests:
+  `choice_lock_masking_hidden_when_item_unconfirmed` /
+  `..._shown_when_item_confirmed_choice` in `mapping.rs`.
+- ~~Renders "not &lt;item&gt;" for items not in the current format~~ **Fixed** —
+  two parts: (1) `describe_unknown_item`'s `Some(pool)` branch
+  (`information/describe.rs`) now intersects the excluded list with the format's
+  pool before rendering "not X", falling back to "Unknown" if nothing in-format
+  was actually excluded. (2) The format's legal-items whitelist wasn't threaded to
+  the server at all (`legal_items: None` hardcoded) — `StoredFormat.bannedItems`
+  is now resolved against the catalog (`lib/items.ts`) into
+  `CreateBattleRequest.legalItems` (`SetupPanel.tsx`), parsed server-side into
+  `InferenceConfig.legal_items` (`routes.rs`, validated up front — an
+  out-of-catalog item on either team now 422s at battle creation instead of
+  panicking mid-battle), and threaded through `mapping.rs`'s whole render chain
+  (`battle_view`→`side_view`/`preview_view`→`mask_pokemon_view`). Tests: 2 new
+  `describe_unknown_item` unit tests + `side_view_item_text_hides_out_of_format_exclusions`
+  in `mapping.rs`.
 - `random_doubles_battles_are_sound` (poke_rust/src/tests/random_battle_tests.rs): fog-of-war soundness fuzz test. Long fix history (S1–S54) in memory `project_random_battle_fuzz_test_findings.md` — not reproduced here. A 10,000-battle sweep (2026-07-18) measured the current failure rate at **0.14% (14/10,000)**, split across three open families:
   - **pass5 "every candidate nature is infeasible" panic** (57% of failures, 8/14). Some derivation narrowed a mon's stat window past what any nature/IV/EV combo can produce. Confirmed NOT caused by the already-fixed S54 mechanism (HP-dependent base power) — stats/moves vary each instance (Spe, SpA, SpD; LastRespects, IcyWind, ExtremeSpeed, FlipTurn, MegaEvolution turns), no single pattern yet. Not root-caused.
   - **`ItemLost` "clause has no explanation" panic** (36%, 5/14) — an item gets consumed/lost but the belief's tracked exclusion set names only *other* items, none matching. 4/5 involve FocusSash specifically (excluded sets `[QuickClaw, ChoiceScarf]` or `[KingsRock, RazorFang]`); reads like one real mechanism recurring, not five coincidences. Not root-caused; next target if picking this up again.
   - **Leftovers item-Known-conflict** (7%, 1/14) — the family S53 mostly closed; down to noise level.
+  - **NEW (2026-07-19): "truth ⊆ belief" subset oracle.** The failure rates above are
+    all from the pre-existing oracle, which only asserts the belief never becomes
+    self-contradictory — it says nothing about whether the belief has silently
+    *narrowed past the true value* without ever going empty. Added a second,
+    independent oracle (`information/subset_check.rs::assert_true_state_subset_of_belief`,
+    wired into this same fuzz loop after every turn for both observers) that
+    asserts the real concrete state is always a member of the set the belief
+    admits — every hidden field's true value stays inside its bound, and every CNF
+    predicate clause is satisfiable by the real assignment. A 100-iteration sweep
+    (2026-07-19) measured a **36% failure rate (36/100)** — dramatically higher
+    than the contradiction oracle's 0.14%, meaning the belief's *precision* has far
+    more soundness gaps than its *consistency* does. Four overlapping families
+    (bucketed qualitatively, not mutually exclusive — several failures show more
+    than one symptom at once):
+    - **Nature/stat-window over-narrowing** (~20/36, the dominant family). The
+      belief's `possible_natures` and/or `min/max_stats` / `min/max_pre_nature_stat`
+      windows exclude the Pokémon's real nature or real stat value outright (e.g.
+      `nature: belief excludes true value Adamant`, `stats[2]: true=162 not in
+      [108,133]`). Almost always co-occurs with the Pass 3/5 back-solve pipeline
+      (`pass3_direction_a`/`pass3_direction_b`/`pass5_back_solve`) — the engine's
+      own `[pass3-direction-* self-heal]` log lines fire constantly during the
+      sweep, confirming this pipeline is already known to produce internally
+      inconsistent bounds sometimes; self-heal only catches a NEW derivation that
+      would cross an EXISTING bound, not an original bound that was simply
+      computed wrong from the start (which is what this family shows: the
+      violating bound is often the *first* one narrowing that field, no crossing
+      event visible). Not root-caused; verified by hand for one instance
+      (Kingambit, `MA_venusaur_aerodactl.txt`) — pre-nature Def BSV independently
+      recomputed as 155 (base 120, IV 31, EV 116 post `--stat-points` scaling,
+      level 50) against a derived bound of ≤143, confirming this is a genuine
+      engine bug, not an oracle bug.
+    - **Def-specific 3-literal clause violations** (~7/36) — clauses of the exact
+      shape `[NatureBoostsStat{Def}, NatureNerfsStat{Def}, EVIVStatGE|LE{Def,
+      value}]`, all unsatisfiable by the true nature+BSV. This is
+      `emit_nature_conditional_bounds`'s neutral-nature-class branch
+      (`information/inference.rs`) — very likely the SAME root mechanism as the
+      family above (the per-nature-class BSV bound derivation it emits), just
+      caught here as a predicate-clause violation instead of a direct field-bound
+      violation. Disproportionately `Def` in this sample; unclear yet whether
+      that's a real pattern or sampling noise. Not root-caused.
+    - **Speed-order alternate-item escape clauses** (~7/36) — clauses like
+      `[HasItem{QuickClaw}, HasItem{ChoiceScarf}]`, `[HasItem{KingsRock},
+      HasItem{RazorFang}]`, `[HasItem{IronBall}, HasItem{LaggingTail},
+      HasItem{FullIncense}]` (sometimes bundled with a `SpeedComparison` literal),
+      all unsatisfiable — the true holder's real item isn't among the clause's
+      named alternatives. **Same item sets as the already-documented `ItemLost`
+      contradiction-panic family above** (QuickClaw/ChoiceScarf,
+      KingsRock/RazorFang) — strong signal this is one shared root cause
+      manifesting as a hard panic in some trajectories and a silent
+      over-narrowing in others. Not root-caused; if picked up again, start from
+      whatever emits these "alternate speed/priority-item explanation"
+      disjunctions rather than treating the two failure modes separately.
+    - **Illusion/Zoroark disguise tracking** (~6/36, highest-priority to
+      investigate given how central Illusion handling is to this engine's
+      fog-of-war design). The primary belief entry (matching the *displayed*
+      disguise species) AND its `possible_illusion_state` hypothesis both fail to
+      admit the true, underlying disguised Pokémon — species, ability, weight, and
+      all six stats simultaneously out of bounds. In more than one instance the
+      belief had *already* resolved Zoroark's location to a different, fully
+      `Known` roster slot (e.g. a bench mon) while the true Zoroark was actually
+      active and disguised elsewhere — i.e. the belief committed to the wrong
+      resolution. Not root-caused; needs `information/README.md`'s Zoroark
+      lifecycle section re-read before touching this (see `rearm_zoroark_on_side`,
+      `resolve_zoroark_globally`, `promote_illusion_to_primary`).
+    - **Tested and ruled out as the primary driver**: whether an unrealistically
+      wide item-possibility space was inflating the failure rate. The fuzz
+      test's `InferenceConfig` previously left `legal_items: None` (~1,000 items
+      possible) even though every checked-in teamsheet only ever holds the
+      curated Champions catalog (`frontend/src/lib/items.ts`'s `CATALOG` —
+      general items + Mega Stones + berries). Added `champions_legal_items()`
+      (mirrors that catalog exactly) and wired it into the fuzz config
+      permanently, matching what real battles actually run under. Re-swept:
+      31/100 vs. the original 36/100 — a marginal, likely noise-level
+      difference (the two 100-iteration runs aren't even a clean A/B — `sample_turn_raw`
+      isn't seeded by the test's own RNG, so identical seeds don't replay
+      identical trajectories run-to-run; see the methodology notes in memory
+      `project_random_battle_fuzz_test_findings.md`). Kept anyway as a more
+      realistic default, but the four families above are NOT primarily caused
+      by item-pool width.
+    - **Test suite structure**: because the subset-check families above are
+      real, unfixed, and hit at a much higher rate than the contradiction
+      oracle's historical 0.14%, wiring the check into the default (non-`#[ignore]`d)
+      `random_doubles_battles_are_sound` — as originally done — made ordinary
+      `cargo test` runs fail on unrelated work roughly a third of the time.
+      Split into two tests instead: `random_doubles_battles_are_sound` (default,
+      contradiction oracle only, matches its historical reliability) and
+      `random_doubles_beliefs_stay_sound_subset` (`#[ignore]`d, both oracles —
+      run explicitly with `cargo test -- --ignored` when working on the
+      fog-of-war engine, or a temporary wider sweep as above for frequency data).
+      Fold the subset check back into the default test once the four families
+      are fixed.
 ### New features
 - Link all the READMEs to the main project README.
 - Frontend features

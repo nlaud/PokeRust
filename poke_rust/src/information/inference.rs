@@ -1766,6 +1766,7 @@ fn process_battle_event(
         let user_slot_for_order = *user;
         pass2_item_from_move(state, event, ctx);
         pass2_contact_absence(state, event, ctx);
+        pass2_unseen_fist_absence(state, event, ctx);
         pass2_prankster_immunity(state, event, ctx);
         pass2_powder_immunity(state, event, ctx);
         pass2_guaranteed_status_absence(state, event, ctx);
@@ -5435,6 +5436,68 @@ fn pass2_contact_absence(
                 "no-iron-barbs-chip",
             );
         }
+    }
+}
+
+// ── Pass 2b': Unseen Fist absence inference ────────────────────────────────────
+
+/// Infer the *absence* of Unseen Fist on the ATTACKER when a contact move visibly
+/// failed to bypass a target's active protection (`EventKind::Blocked` for that
+/// target, anywhere in this event's reaction tree).
+///
+/// A Pokémon with an active, unsuppressed Unseen Fist never produces a bare
+/// `Blocked` outcome for a contact move against a protect volatile / Quick Guard /
+/// Wide Guard — the hit always connects (at 1/4 damage in Champions — see
+/// `simulator::helpers::unseen_fist_mult`) and reveals the ability the instant it
+/// does (`simulator/mod.rs`'s protect-blocking branch emits `AbilityRevealed`
+/// before falling through). So an unrevealed, genuine block is sound evidence the
+/// attacker does not have Unseen Fist active right now.
+///
+/// Presence is handled entirely by that same `AbilityRevealed` emission (Pass 1's
+/// existing generic reveal handling) and needs no bespoke code here — this pass is
+/// the absence half only, mirroring `pass2_contact_absence`'s shape.
+fn pass2_unseen_fist_absence(
+    state: &mut UnknownBattleState,
+    event: &InformationEvent,
+    ctx: &BattleContext,
+) {
+    let EventKind::MoveUsed { user, targets, move_used } = &event.kind else {
+        return;
+    };
+    let Some(move_data) = ctx.move_dex.get(move_used) else {
+        return;
+    };
+    if !move_has_flag(move_data, &MoveFlag::Contact) {
+        return;
+    }
+    let Some(attacker_idx) = mon_idx_for_active_slot(state, user) else {
+        return;
+    };
+    // Sound gates, mirroring every other conditional-ability absence pass in this
+    // module: a possibly-suppressed ability proves nothing about what's held, and
+    // excluding from an already-`Known` value can only be a no-op or an unsound
+    // contradiction (see `pass1_ability_absence_inference`'s identical guard).
+    if unknown_ability_might_be_suppressed(state, user) {
+        return;
+    }
+    let already_known = matches!(
+        get_mon_by_idx(state, attacker_idx).map(|m| &m.possible_abilities),
+        Some(Unknown::Known(_))
+    );
+    if already_known {
+        return;
+    }
+    // Any blocked target is sufficient: Unseen Fist is a static per-attacker check,
+    // not per-target, so if it were active every protect-blockable target this move
+    // hit would have bypassed.
+    let blocked_any_target = targets.iter().any(|target| {
+        reaction_contains(event, &|k| matches!(k, EventKind::Blocked { target: t } if t == target))
+    });
+    if !blocked_any_target {
+        return;
+    }
+    if let Some(mon) = get_mon_mut_by_idx(state, attacker_idx) {
+        unknown_exclude(&mut mon.possible_abilities, &Ability::UnseenFist, "no-unseen-fist-bypass");
     }
 }
 

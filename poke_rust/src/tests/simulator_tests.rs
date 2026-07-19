@@ -20807,6 +20807,89 @@ mod priority_abilities {
             assert_eq!(after.p1_active_mons[0].boosts[1], -1, "status move passes through King's Shield");
         }
 
+        // ── Unseen Fist (TODO.md: Golurk-Mega's Headlong Rush blocked by Protect when it
+        // shouldn't have been) ────────────────────────────────────────────────────────────────
+        // Bulbapedia: Unseen Fist lets contact moves connect through Protect, Detect, King's
+        // Shield, Spiky Shield, Baneful Bunker, Quick Guard, and Wide Guard, but in Pokémon
+        // Champions specifically the bypassed hit deals only 1/4 damage (not full damage like
+        // older generations), and "everything aside from the target's protective effect is
+        // still triggered" — so contact punishments (Spiky Shield chip / Baneful Bunker poison /
+        // King's Shield −1 Atk) still fire. `run`/`run_on` force a single deterministic damage
+        // roll (`run_single_turn` → `damage_rolls=1`), so the quarter-damage comparisons below
+        // are exact, not fuzzy.
+
+        #[test]
+        fn unseen_fist_bypasses_protect_at_quarter_damage() {
+            // Baseline: same matchup, no Protect — establishes what Tackle would deal unblocked.
+            let p1_open = mon(Species::Clefable, Ability::Pressure, PokemonMove::Splash, PokemonMove::Splash);
+            let p2_baseline = mon(Species::Snorlax, Ability::UnseenFist, PokemonMove::Tackle, PokemonMove::Splash);
+            let baseline_after = extract_battle_state(run(p1_open, p2_baseline, 0, 0)).0;
+            let full_damage = baseline_after.p1_active_mons[0].stats[0] - baseline_after.p1_active_mons[0].hp;
+            assert!(full_damage > 0, "sanity: Tackle must deal nonzero damage unblocked");
+
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::UnseenFist, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            let bypass_damage = after.p1_active_mons[0].stats[0] - after.p1_active_mons[0].hp;
+
+            assert!(bypass_damage > 0, "Unseen Fist must let the contact move connect through Protect");
+            assert_eq!(
+                bypass_damage,
+                (full_damage / 4).max(1),
+                "Champions Unseen Fist deals exactly 1/4 damage when bypassing protection, not full damage"
+            );
+        }
+
+        #[test]
+        fn unseen_fist_does_not_help_non_contact_moves() {
+            // Water Gun makes no contact — Unseen Fist has nothing to bypass, so Protect blocks
+            // it fully, same as any other attacker.
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::UnseenFist, PokemonMove::WaterGun, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert_eq!(
+                after.p1_active_mons[0].hp, after.p1_active_mons[0].stats[0],
+                "Unseen Fist only bypasses protection for CONTACT moves"
+            );
+        }
+
+        #[test]
+        fn unseen_fist_kings_shield_still_lowers_attack_despite_bypass() {
+            // The hit still connects (King's Shield only blocks the damage, not Unseen Fist's
+            // bypass) AND the contact punishment still fires — both effects are independent.
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::KingsShield, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::UnseenFist, PokemonMove::Tackle, PokemonMove::Splash);
+            let after = extract_battle_state(run(p1, p2, 0, 0)).0;
+            assert!(after.p1_active_mons[0].hp < after.p1_active_mons[0].stats[0], "damage got through");
+            assert_eq!(after.p2_active_mons[0].boosts[0], -1, "contact punishment still applies to the attacker");
+        }
+
+        #[test]
+        fn unseen_fist_reveals_ability_when_it_bypasses_protect() {
+            use crate::information::information::EventKind;
+            use crate::tests::simuilator_test_helpers::run_single_turn_with_events;
+
+            fn tree_contains(events: &[crate::information::information::InformationEvent], pred: &impl Fn(&EventKind) -> bool) -> bool {
+                events.iter().any(|e| pred(&e.kind) || tree_contains(&e.reactions, pred))
+            }
+
+            let p1 = mon(Species::Clefable, Ability::Pressure, PokemonMove::Protect, PokemonMove::Splash);
+            let p2 = mon(Species::Snorlax, Ability::UnseenFist, PokemonMove::Tackle, PokemonMove::Splash);
+            let state = battle_state_from_lists(vec![p1], vec![], vec![p2], vec![]);
+            let outcomes = run_single_turn_with_events(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex(), pokemon_dex(), Player::P1,
+            );
+            let revealed = outcomes.iter().any(|(_, events, _)| {
+                events.as_ref().is_some_and(|events| tree_contains(events, &|k| matches!(
+                    k, EventKind::AbilityRevealed { ability: Ability::UnseenFist, .. }
+                )))
+            });
+            assert!(revealed, "bypassing Protect must reveal Unseen Fist, exactly like any other ability activation");
+        }
+
         // ── Endure ──────────────────────────────────────────────────────────────────────────
 
         #[test]

@@ -12045,6 +12045,85 @@ fn test_contact_absence_skipped_when_defender_may_be_suppressed() {
     );
 }
 
+/// TODO.md: Unseen Fist absence inference. A contact move that's genuinely
+/// `Blocked` (not bypassed) is sound evidence the attacker doesn't have an
+/// active, unsuppressed Unseen Fist — mirrors `pass2_contact_absence`'s shape but
+/// on the ATTACKER's own ability rather than a defender-side reaction.
+#[test]
+fn test_unseen_fist_absence_excluded_on_genuine_block() {
+    use crate::state::dex_data::MoveFlag;
+
+    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    p1_mon.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+
+    let mut p2_mon = unknown_mon();
+    p2_mon.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    let mut contact_move = normal_physical_move(PokemonMove::Tackle, 40);
+    contact_move.flags.push(MoveFlag::Contact);
+    move_dex.insert(PokemonMove::Tackle, contact_move);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::Blocked { target: p2(0) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        unknown_is_excluded(&result.p1_active_mons[0].possible_abilities, &Ability::UnseenFist),
+        "a genuine Blocked outcome for a contact move must exclude Unseen Fist on the attacker"
+    );
+}
+
+/// Suppression gate: while the attacker's own ability might be suppressed
+/// (Neutralizing Gas possibly on the field), a block proves nothing about what's
+/// actually held — the exclusion must be skipped, exactly like every other
+/// conditional-ability absence pass in this module.
+#[test]
+fn test_unseen_fist_absence_skipped_when_attacker_may_be_suppressed() {
+    use crate::state::dex_data::MoveFlag;
+
+    // NeutralizingGas left possible on the attacker itself — the suppression gate
+    // under test.
+    let p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let p2_mon = unknown_mon();
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    let mut contact_move = normal_physical_move(PokemonMove::Tackle, 40);
+    contact_move.flags.push(MoveFlag::Contact);
+    move_dex.insert(PokemonMove::Tackle, contact_move);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::Blocked { target: p2(0) })],
+        )],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        !unknown_is_excluded(&result.p1_active_mons[0].possible_abilities, &Ability::UnseenFist),
+        "Unseen Fist must stay possible while the attacker's own ability suppression (NGas) is possible"
+    );
+}
+
 /// Minimal dex for C2 tests: a single species whose known ability pool includes
 /// Intimidate (and a filler) but NOT NeutralizingGas.  Using a bounded ability list
 /// is essential so that `pass1_ability_absence_inference` is not gated out by the
@@ -13031,6 +13110,31 @@ mod information_mode_tests {
         // shorter than the possible-list phrasing (3 items).
         let excl = Unknown::Not(vec![Item::ChoiceBand]);
         assert_eq!(describe_unknown_item(&excl, Some(&pool)), "not Choice Band");
+    }
+
+    #[test]
+    fn test_describe_unknown_item_whitelist_hides_out_of_format_exclusions() {
+        // TODO.md: "Should not display Not of items that are not even in the
+        // current format!" — Rocky Helmet is excluded (e.g. by a prior HasItem
+        // clause naming a different item) but was never IN the whitelist to begin
+        // with, so it must never surface as "not Rocky Helmet"; only the
+        // in-format exclusion (Choice Band) should render.
+        let pool: HashSet<Item> =
+            [Item::Leftovers, Item::BlackSludge, Item::ChoiceBand, Item::ChoiceSpecs]
+                .into_iter()
+                .collect();
+        let excl = Unknown::Not(vec![Item::ChoiceBand, Item::RockyHelmet]);
+        assert_eq!(describe_unknown_item(&excl, Some(&pool)), "not Choice Band");
+    }
+
+    #[test]
+    fn test_describe_unknown_item_whitelist_all_exclusions_out_of_format_renders_unknown() {
+        // Every excluded item lies outside the whitelist — from this format's
+        // perspective nothing has actually been ruled out, so this must read the
+        // same as a totally uninformative belief ("Unknown"), not an empty string.
+        let pool: HashSet<Item> = [Item::Leftovers, Item::BlackSludge].into_iter().collect();
+        let excl = Unknown::Not(vec![Item::RockyHelmet, Item::ChoiceBand]);
+        assert_eq!(describe_unknown_item(&excl, Some(&pool)), "Unknown");
     }
 
     #[test]

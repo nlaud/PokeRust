@@ -13,6 +13,7 @@ use axum::Json;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use poke_rust::data::item::Item;
 use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::simulator;
@@ -75,6 +76,25 @@ pub async fn create_battle(
         return unprocessable("damageRolls must be between 1 and 16");
     }
 
+    // `req.legal_items` is the selected format's resolved catalog-minus-banned slug
+    // list (see `CreateBattleRequest::legal_items`'s doc comment); empty means no
+    // restriction. Reject up front on an unresolvable slug (stale frontend catalog,
+    // typo) rather than letting it surface later as a confusing mid-battle
+    // `inference_contradiction!` panic the first time that "item" would be revealed.
+    let legal_items: Option<std::collections::HashSet<Item>> = if req.legal_items.is_empty() {
+        None
+    } else {
+        let mut set = std::collections::HashSet::with_capacity(req.legal_items.len());
+        for slug in &req.legal_items {
+            let item = Item::from_str(slug);
+            if matches!(item, Item::Unknown(_)) {
+                return unprocessable(format!("legalItems: unrecognized item {slug:?}"));
+            }
+            set.insert(item);
+        }
+        Some(set)
+    };
+
     let preview = simulator::team_preview_state_from_team_strings(
         &req.p1_team,
         &req.p2_team,
@@ -97,6 +117,23 @@ pub async fn create_battle(
                 req.brought_per_side
             ));
         }
+        // Reject up front rather than letting the first in-battle reveal of this
+        // item panic deep inside `apply_information` (`inference_contradiction!` —
+        // see `EventKind::ItemRevealed`'s legal-whitelist check). A team's own held
+        // item is seeded as `Known` from turn 0, but the SAME unconditional check
+        // also runs when a later event re-confirms it (e.g. eating a held Berry),
+        // so an out-of-format item on your OWN team is just as fatal there as an
+        // opponent's — validating here turns that into a clean 422 instead.
+        if let Some(legal) = &legal_items {
+            for mon in mons.iter() {
+                if mon.item != Item::None && !legal.contains(&mon.item) {
+                    return unprocessable(format!(
+                        "{}: {:?} holds {:?}, which is not legal in this format",
+                        label, mon.species, mon.item
+                    ));
+                }
+            }
+        }
     }
 
     let information_mode = match req.information_mode.as_str() {
@@ -116,6 +153,7 @@ pub async fn create_battle(
         let config = InferenceConfig {
             use_stat_points: req.stat_points,
             force_max_ivs: req.force_max_ivs,
+            legal_items,
             learnset_dex: app.dexes.learnset_dex.clone(),
             ..InferenceConfig::default()
         };
