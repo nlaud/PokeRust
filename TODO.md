@@ -119,7 +119,61 @@
       family above (the per-nature-class BSV bound derivation it emits), just
       caught here as a predicate-clause violation instead of a direct field-bound
       violation. Disproportionately `Def` in this sample; unclear yet whether
-      that's a real pattern or sampling noise. Not root-caused.
+      that's a real pattern or sampling noise.
+      **Investigated further (2026-07-19, session 13, phase 2 of a 3-phase plan) —
+      STILL NOT ROOT-CAUSED, but substantially narrowed.** Reproduced the exact
+      Kingambit repro from the S56 entry above (`MA_venusaur_aerodactl.txt` vs
+      `MA_charizard_sylveon.txt`, iter=5 turn=6) with fresh instrumentation
+      (`[NATURE-CLASS-TRACE]` inside `emit_nature_conditional_bounds`, dumping
+      each `NatureClassBound`'s `bsv_lo_neutral`/`bsv_hi_neutral`; a
+      `[CLAUSE-TRUTH-DUMP]` at the clause-unsatisfiable panic site in
+      `subset_check.rs`, extracting every `mon_idx` a failing clause references
+      and dumping that mon's raw ground truth). Confirmed byte-exact: true
+      Kingambit is `Adamant` (Def-neutral), `evs=[252,124,116,0,0,20]` (Def
+      EV=116, a legitimately single-scaled value, NOT an S56 instance — see the
+      family-1 entry above), true pre-nature Def BSV=150, post-nature (neutral
+      mult=1.0) stat=155 (base 120). The derivation that produced the panic's
+      `EVIVStatLE{Def,143}` clause came from `Ariados`'s `Knock Off` hitting
+      Kingambit for only `pre_pct=100 → post_pct=93` (~7% of max HP, itemless
+      Kingambit) — `[NATURE-CLASS-TRACE]` showed the **neutral class's own**
+      `bsv_hi_neutral=143` for that exact hit (mod=1.0, i.e. this IS the true
+      nature's class, and its own bound already excludes the true value before
+      any cross-class union happens). **Ruled out**: Knock Off's target-item
+      1.5× base-power boost — confirmed via `neutral_item()` (returns
+      `Item::None` for an unresolved item field) that the neutral-gear search
+      correctly assumes no item, matching Kingambit's real (itemless) state, so
+      this is NOT a missing-modifier bug in the oracle's Knock Off handling.
+      **Also confirmed**: `mon_violation`'s direct field check did NOT flag
+      `stats[2]`/`max_stats[2]` for this same mon at this same moment (only the
+      separate CNF clause panicked) — meaning the FIELD-level bound (fed by the
+      union `global_stat_hi` across all three nature classes across the WHOLE
+      game's accumulated hits) still correctly admitted 155, while the
+      NEUTRAL-CLASS-SPECIFIC bound emitted by THIS one hit into the CNF clause
+      did not. This confirms the two write sites (`apply_unconditional_tightening`
+      → `min_stats`/`max_stats`, vs. `emit_nature_conditional_bounds` → the CNF
+      clause) are tracking meaningfully different information across the game's
+      full hit history, and the CNF clause's neutral-class value here is
+      strictly tighter (and wrong) relative to what the field-level bound
+      independently established. **Not yet root-caused**: didn't reach a
+      conclusive explanation for why THIS SPECIFIC hit's neutral-class
+      `find_feasible_bsv_range_a` search returns an upper bound (143) below the
+      true value (150) for a small (~7%), non-crit, itemless, unboosted hit —
+      the oracle's own damage formula, target types, and item assumption are
+      all confirmed correct in isolation; the remaining suspects are (a) whether
+      `achievable_defender_hp_values`/the per-hp_cand loop is missing Kingambit's
+      TRUE max HP (207) as a tested candidate for THIS specific hit (not yet
+      checked — `mon_violation` not flagging `stats[0]` only proves the FIELD's
+      HP window is fine, not that this hit's own HP-candidate enumeration tested
+      207), or (b) a rounding/truncation edge case specific to very-low observed
+      damage magnitudes in `percent_delta_damage_band`/`bracketed_feasible_bsv_range`'s
+      binary search when the true damage sits very close to a display-percent
+      boundary. Next session: instrument `achievable_defender_hp_values` and the
+      per-`hp_cand` loop directly (dump which HP values actually get tried for
+      the Knock Off hit above) before re-deriving anything else — this is the
+      one concrete branch not yet ruled in or out. Reuse `survey_subset_violations`
+      (checked in permanently) plus the two trace patterns above (removed after
+      this session, easy to re-add — see the exact code shape in this session's
+      commit history if needed).
     - **Speed-order alternate-item escape clauses** (~7/36).
       **ROOT-CAUSED AND FIXED (2026-07-19, S57)** for the dominant instance of this
       family: a mon whose OWN move changes its OWN priority-lifting ability mid-move
