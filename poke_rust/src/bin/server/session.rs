@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use poke_rust::data::ability::Ability;
 use poke_rust::data::pokemon_move::PokemonMove;
 use poke_rust::data::species::Species;
-use poke_rust::information::inference::{apply_information, InferenceConfig};
-use poke_rust::information::information::{mask_events_for, InformationEvent};
+use poke_rust::information::inference::{InferenceConfig, apply_information};
+use poke_rust::information::information::{InformationEvent, mask_events_for};
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::simulator;
 use poke_rust::state::battle::{
@@ -85,7 +85,10 @@ impl BattleSession {
             Player::P1 => self.belief_p1.as_ref(),
             Player::P2 => self.belief_p2.as_ref(),
         };
-        let legal_items = self.inference_config.as_ref().and_then(|c| c.legal_items.as_ref());
+        let legal_items = self
+            .inference_config
+            .as_ref()
+            .and_then(|c| c.legal_items.as_ref());
         mapping::battle_view(
             &self.state,
             self.config.active_per_side,
@@ -97,7 +100,10 @@ impl BattleSession {
     }
 }
 
-fn active_mons(state: &BattleState, player: Player) -> &Vec<poke_rust::state::pokemon::PokemonState> {
+fn active_mons(
+    state: &BattleState,
+    player: Player,
+) -> &Vec<poke_rust::state::pokemon::PokemonState> {
     match player {
         Player::P1 => &state.p1_active_mons,
         Player::P2 => &state.p2_active_mons,
@@ -120,11 +126,7 @@ fn healthy_bench_switches(state: &BattleState, player: Player) -> Vec<BattleComm
 /// Enumerate the legal commands for every slot of `player`, mirroring the phase
 /// dispatch in `user::choose_battle_commands_for_player`. Slots whose only legal
 /// action is Pass are marked `forced` so the frontend can auto-fill them.
-pub fn legal_commands(
-    session: &BattleSession,
-    dexes: &Dexes,
-    player: Player,
-) -> LegalCommandsView {
+pub fn legal_commands(session: &BattleSession, dexes: &Dexes, player: Player) -> LegalCommandsView {
     let phase = mapping::phase_of(&session.state);
     let mut slots = Vec::new();
 
@@ -180,8 +182,7 @@ pub fn legal_commands(
                     );
                     // A Pass-only slot (fainted mon with an empty bench, or a
                     // recharge turn) offers no real choice — let the UI skip it.
-                    let forced =
-                        commands.len() == 1 && matches!(commands[0], BattleCommand::Pass);
+                    let forced = commands.len() == 1 && matches!(commands[0], BattleCommand::Pass);
                     (commands, forced)
                 }
             };
@@ -209,7 +210,13 @@ pub fn reconstruct_player_command(
     dto: &PlayerCommandDto,
 ) -> Result<PlayerCommand, String> {
     match (&session.state, dto) {
-        (MatchState::TeamPreviewState(preview), PlayerCommandDto::TeamPreview { active_indices, back_indices }) => {
+        (
+            MatchState::TeamPreviewState(preview),
+            PlayerCommandDto::TeamPreview {
+                active_indices,
+                back_indices,
+            },
+        ) => {
             let mons = match player {
                 Player::P1 => &preview.p1_mons,
                 Player::P2 => &preview.p2_mons,
@@ -218,18 +225,31 @@ pub fn reconstruct_player_command(
             let brought = (preview.brought_per_side as usize).min(total);
             let active_n = (preview.active_per_side as usize).min(brought);
 
-            let mut all: Vec<usize> = active_indices.iter().chain(back_indices.iter()).copied().collect();
+            let mut all: Vec<usize> = active_indices
+                .iter()
+                .chain(back_indices.iter())
+                .copied()
+                .collect();
             all.sort_unstable();
             let distinct = all.windows(2).all(|w| w[0] != w[1]);
 
             if active_indices.len() != active_n {
-                return Err(format!("{:?} must pick exactly {} lead(s)", player, active_n));
+                return Err(format!(
+                    "{:?} must pick exactly {} lead(s)",
+                    player, active_n
+                ));
             }
             if active_indices.len() + back_indices.len() != brought {
-                return Err(format!("{:?} must bring exactly {} Pokemon", player, brought));
+                return Err(format!(
+                    "{:?} must bring exactly {} Pokemon",
+                    player, brought
+                ));
             }
             if !distinct || all.iter().any(|&i| i >= total) {
-                return Err(format!("{:?} team preview picks must be distinct and in range", player));
+                return Err(format!(
+                    "{:?} team preview picks must be distinct and in range",
+                    player
+                ));
             }
 
             Ok(PlayerCommand::TeamPreview(TeamPreviewCommand {
@@ -252,8 +272,10 @@ pub fn reconstruct_player_command(
             }
 
             let legal = legal_commands(session, dexes, player);
-            let rebuilt: Vec<BattleCommand> =
-                commands.iter().map(mapping::battle_command_from_dto).collect();
+            let rebuilt: Vec<BattleCommand> = commands
+                .iter()
+                .map(mapping::battle_command_from_dto)
+                .collect();
 
             for (slot_idx, command) in rebuilt.iter().enumerate() {
                 let slot_legal = &legal.slots[slot_idx].options;
@@ -271,7 +293,12 @@ pub fn reconstruct_player_command(
             let phase = mapping::phase_of(&session.state);
             match phase {
                 PhaseDto::Replacement => {
-                    if !replacement_commands_are_valid(state, player, active_mons(state, player), &rebuilt) {
+                    if !replacement_commands_are_valid(
+                        state,
+                        player,
+                        active_mons(state, player),
+                        &rebuilt,
+                    ) {
                         return Err(format!("{:?}: invalid replacement command set", player));
                     }
                 }
@@ -285,9 +312,10 @@ pub fn reconstruct_player_command(
             Ok(PlayerCommand::Battle(rebuilt))
         }
         (MatchState::BattleState(_), PlayerCommandDto::Pass) => Ok(PlayerCommand::Pass),
-        (MatchState::BattleState(_), PlayerCommandDto::TeamPreview { .. }) => {
-            Err(format!("{:?}: teamPreview command outside team preview", player))
-        }
+        (MatchState::BattleState(_), PlayerCommandDto::TeamPreview { .. }) => Err(format!(
+            "{:?}: teamPreview command outside team preview",
+            player
+        )),
         (MatchState::GameOverState { .. }, _) => Err("battle is already over".to_string()),
     }
 }

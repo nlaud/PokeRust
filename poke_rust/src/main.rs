@@ -1,11 +1,15 @@
 use clap::Parser;
 use colored::Colorize;
 use poke_rust::state::battle::MatchState;
-use poke_rust::{simulator, state, user, SHARED_MULTIHIT_DAMAGE_ROLLS, VERBOSITY};
+use poke_rust::{SHARED_MULTIHIT_DAMAGE_ROLLS, VERBOSITY, simulator, state, user};
 use std::sync::atomic::Ordering;
 
 #[derive(Parser, Debug)]
-#[command(author = "Blazestorm", version = "1.0", about = "Simulates Pokemon Battles")]
+#[command(
+    author = "Blazestorm",
+    version = "1.0",
+    about = "Simulates Pokemon Battles"
+)]
 struct Args {
     /// Path to the first player's teamsheet
     #[arg(long)]
@@ -16,19 +20,19 @@ struct Args {
     p2: String,
 
     /// Path to the showdown pokedex data
-    #[arg(long, default_value="../pokemon_info/showdownDex.txt")]
+    #[arg(long, default_value = "../pokemon_info/showdownDex.txt")]
     poke_dex: String,
 
     /// Path to the showdown move data
-    #[arg(long, default_value="../pokemon_info/showdownMoves.txt")]
+    #[arg(long, default_value = "../pokemon_info/showdownMoves.txt")]
     move_dex: String,
 
     /// Path to the showdown ability data
-    #[arg(long, default_value="../pokemon_info/showdownAbilities.txt")]
+    #[arg(long, default_value = "../pokemon_info/showdownAbilities.txt")]
     ability_dex: String,
 
     /// Path to the showdown learnset data (for Illusion narrowing)
-    #[arg(long, default_value="../pokemon_info/showdownLearnsets.txt")]
+    #[arg(long, default_value = "../pokemon_info/showdownLearnsets.txt")]
     learnset_dex: String,
 
     /// How verbose debug output is (0 = Nothing, 1 = Minimal, 2 = Debug Trace, 3 = High Debug, 4 = Max Debug)
@@ -58,7 +62,9 @@ fn main() {
     let _ = VERBOSITY.set(args.verbosity);
     SHARED_MULTIHIT_DAMAGE_ROLLS.store(args.shared_multihit_damage_rolls, Ordering::Relaxed);
 
-    if args.verbosity >= 2 { println!("{}", format!("Got paths: {}, {}", args.p1, args.p2).cyan()) }
+    if args.verbosity >= 2 {
+        println!("{}", format!("Got paths: {}, {}", args.p1, args.p2).cyan())
+    }
 
     let pokemon_dex = state::dex_data::parse_pokemon_dex(&args.poke_dex);
 
@@ -71,7 +77,17 @@ fn main() {
     let learnset_dex = state::dex_data::parse_learnset_dex(&args.learnset_dex);
 
     if args.verbosity >= 1 {
-        println!("{}", format!("Loaded {} Pokemon, {} moves, {} abilities, {} learnsets", pokemon_dex.len(), move_dex.len(), ability_dex.len(), learnset_dex.len()).bright_green());
+        println!(
+            "{}",
+            format!(
+                "Loaded {} Pokemon, {} moves, {} abilities, {} learnsets",
+                pokemon_dex.len(),
+                move_dex.len(),
+                ability_dex.len(),
+                learnset_dex.len()
+            )
+            .bright_green()
+        );
     }
 
     if args.verbosity >= 4 {
@@ -79,10 +95,26 @@ fn main() {
         println!("Move Dex: {:#?}", move_dex);
     }
 
-    let preview = simulator::team_preview_state_from_teamsheets(&args.p1, &args.p2, &pokemon_dex, &move_dex, 2, 4, args.stat_points);
+    let preview = simulator::team_preview_state_from_teamsheets(
+        &args.p1,
+        &args.p2,
+        &pokemon_dex,
+        &move_dex,
+        2,
+        4,
+        args.stat_points,
+    );
 
     if args.verbosity >= 1 {
-        println!("{}", format!("P1 team: {} Pokemon | P2 team: {} Pokemon", preview.p1_mons.len(), preview.p2_mons.len()).bright_cyan());
+        println!(
+            "{}",
+            format!(
+                "P1 team: {} Pokemon | P2 team: {} Pokemon",
+                preview.p1_mons.len(),
+                preview.p2_mons.len()
+            )
+            .bright_cyan()
+        );
     }
 
     if args.verbosity >= 3 {

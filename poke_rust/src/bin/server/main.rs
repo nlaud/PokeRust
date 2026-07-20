@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 use clap::Parser;
 use tower_http::cors::CorsLayer;
 
@@ -92,6 +92,7 @@ async fn main() {
         )
         .route("/api/battles/{id}/commands", get(routes::get_commands))
         .route("/api/battles/{id}/turn", post(routes::submit_turn))
+        .route("/api/benchmark", post(routes::run_benchmark))
         .route("/api/sprites", get(routes::get_sprite))
         .layer(CorsLayer::permissive())
         .with_state(state);

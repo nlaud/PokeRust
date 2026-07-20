@@ -40,15 +40,69 @@
 //! actionable.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
 use crate::information::inference::{get_mon_by_idx, mon_idx_legend, unknown_is_excluded};
-use crate::information::unknowns::{Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState};
+use crate::information::unknowns::{
+    Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
+};
 use crate::simulator::helpers::single_type_effectiveness;
 use crate::state::battle::{BattleState, Player};
 use crate::state::dex_data::{MoveData, PokemonData, PokemonStat};
-use crate::state::pokemon::{calc_hp, calc_stat, nature_stat_modifiers, PokemonState};
+use crate::state::pokemon::{PokemonState, calc_hp, calc_stat, nature_stat_modifiers};
+
+#[derive(Debug, Clone)]
+pub struct FieldViolation {
+    pub field: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum SubsetViolationKind {
+    Fields {
+        mon_idx: usize,
+        true_species: Species,
+        true_mon_id: u8,
+        violations: Vec<FieldViolation>,
+    },
+    Clause {
+        clause: Vec<Statement>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SubsetViolation {
+    pub observer: Player,
+    pub kind: SubsetViolationKind,
+    pub legend: String,
+}
+
+impl fmt::Display for SubsetViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            SubsetViolationKind::Fields {
+                mon_idx,
+                true_species,
+                true_mon_id,
+                violations,
+            } => {
+                let details: Vec<&str> = violations.iter().map(|v| v.detail.as_str()).collect();
+                write!(
+                    f,
+                    "observer={:?} mon_idx={mon_idx} true_species={true_species:?} true_mon_id={true_mon_id} violations={details:?} (legend: {})",
+                    self.observer, self.legend
+                )
+            }
+            SubsetViolationKind::Clause { clause } => write!(
+                f,
+                "observer={:?} clause unsatisfiable by ground truth: {clause:?} (legend: {})",
+                self.observer, self.legend
+            ),
+        }
+    }
+}
 
 /// Entry point: assert that `true_state` is a member of the set `belief` (as seen by
 /// `observer`) admits. Panics on the first violation found. `context` is prepended
@@ -67,8 +121,26 @@ pub fn assert_true_state_subset_of_belief(
     mdex: &HashMap<PokemonMove, MoveData>,
     context: &str,
 ) {
+    if let Some(violation) =
+        collect_true_state_subset_violations(true_state, belief, observer, pdex, mdex)
+            .into_iter()
+            .next()
+    {
+        panic!("[subset violation] context={context} {violation}");
+    }
+}
+
+/// Structured, non-panicking form of the subset oracle. Diagnostic sweeps use
+/// this directly so bucketing never depends on parsing a formatted panic.
+pub fn collect_true_state_subset_violations(
+    true_state: &BattleState,
+    belief: &UnknownMatchState,
+    observer: Player,
+    pdex: &HashMap<Species, PokemonData>,
+    mdex: &HashMap<PokemonMove, MoveData>,
+) -> Vec<SubsetViolation> {
     let UnknownMatchState::Battle(belief) = belief else {
-        return;
+        return Vec::new();
     };
     let opponent = match observer {
         Player::P1 => Player::P2,
@@ -76,27 +148,39 @@ pub fn assert_true_state_subset_of_belief(
     };
 
     let mapping = build_mon_idx_map(true_state, belief, opponent);
+    let legend = mon_idx_legend(belief);
+    let mut violations = Vec::new();
 
     let mut idxs: Vec<&usize> = mapping.keys().collect();
     idxs.sort();
     for idx in idxs {
         let truth = mapping[idx];
-        if let Some(violation) = mon_violation(belief, *idx, truth, pdex) {
-            panic!(
-                "[subset violation] context={context} observer={observer:?} {violation} (legend: {})",
-                mon_idx_legend(belief)
-            );
+        if let Some(field_violations) = mon_violation(belief, *idx, truth, pdex) {
+            violations.push(SubsetViolation {
+                observer,
+                kind: SubsetViolationKind::Fields {
+                    mon_idx: *idx,
+                    true_species: truth.species.clone(),
+                    true_mon_id: truth.mon_id,
+                    violations: field_violations,
+                },
+                legend: legend.clone(),
+            });
         }
     }
 
     for clause in &belief.predicates {
         if !clause_holds_under_truth(clause, &mapping, true_state, mdex, pdex) {
-            panic!(
-                "[subset violation] context={context} observer={observer:?} clause unsatisfiable by ground truth: {clause:?} (legend: {})",
-                mon_idx_legend(belief)
-            );
+            violations.push(SubsetViolation {
+                observer,
+                kind: SubsetViolationKind::Clause {
+                    clause: clause.clone(),
+                },
+                legend: legend.clone(),
+            });
         }
     }
+    violations
 }
 
 // ── B2: mon_idx -> true PokemonState mapping ────────────────────────────────────
@@ -139,7 +223,8 @@ fn build_mon_idx_map<'a>(
     opponent: Player,
 ) -> HashMap<usize, &'a PokemonState> {
     let mut map = HashMap::new();
-    let (active_start, known_back_start, possible_back_start) = opponent_segment_starts(belief, opponent);
+    let (active_start, known_back_start, possible_back_start) =
+        opponent_segment_starts(belief, opponent);
 
     let (true_active, true_back, known_back, possible_back) = match opponent {
         Player::P1 => (
@@ -164,7 +249,12 @@ fn build_mon_idx_map<'a>(
         .iter()
         .enumerate()
         .map(|(i, m)| (known_back_start + i, m))
-        .chain(possible_back.iter().enumerate().map(|(i, m)| (possible_back_start + i, m)))
+        .chain(
+            possible_back
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (possible_back_start + i, m)),
+        )
         .collect();
     let mut claimed: Vec<usize> = Vec::new();
 
@@ -173,12 +263,14 @@ fn build_mon_idx_map<'a>(
             continue;
         }
         let by_id = bench_candidates.iter().find(|(idx, m)| {
-            !claimed.contains(idx) && matches!(&m.possible_mon_id, Unknown::Known(id) if *id == true_mon.mon_id)
+            !claimed.contains(idx)
+                && matches!(&m.possible_mon_id, Unknown::Known(id) if *id == true_mon.mon_id)
         });
         let chosen = by_id.or_else(|| {
-            bench_candidates
-                .iter()
-                .find(|(idx, m)| !claimed.contains(idx) && !unknown_is_excluded(&m.possible_species, &true_mon.species))
+            bench_candidates.iter().find(|(idx, m)| {
+                !claimed.contains(idx)
+                    && !unknown_is_excluded(&m.possible_species, &true_mon.species)
+            })
         });
         match chosen {
             Some((idx, _)) => {
@@ -202,7 +294,12 @@ fn build_mon_idx_map<'a>(
 /// `None` if `truth` is admitted by `belief`'s entry at `idx` (primary alone, or its
 /// live Illusion hypothesis alone — see the module doc's union-not-per-field-mix
 /// note); `Some(description)` of the violation otherwise.
-fn mon_violation(belief: &UnknownBattleState, idx: usize, truth: &PokemonState, pdex: &HashMap<Species, PokemonData>) -> Option<String> {
+fn mon_violation(
+    belief: &UnknownBattleState,
+    idx: usize,
+    truth: &PokemonState,
+    pdex: &HashMap<Species, PokemonData>,
+) -> Option<Vec<FieldViolation>> {
     let entry = get_mon_by_idx(belief, idx)?;
     let primary = field_violations(entry, truth, pdex);
     if primary.is_empty() {
@@ -213,11 +310,14 @@ fn mon_violation(belief: &UnknownBattleState, idx: usize, truth: &PokemonState, 
         if hyp_violations.is_empty() {
             return None;
         }
+        if std::env::var("POKERUST_FUZZ_REPLAY").is_ok() {
+            eprintln!(
+                "[ILLUSION-HYP-VIOLATIONS] mon_idx={idx} true_species={:?} violations={hyp_violations:?}",
+                truth.species
+            );
+        }
     }
-    Some(format!(
-        "mon_idx={idx} true_species={:?} true_mon_id={} violations={primary:?}",
-        truth.species, truth.mon_id
-    ))
+    Some(primary)
 }
 
 /// Every field-level way `entry` could fail to admit `truth`. Empty = fully admitted.
@@ -233,13 +333,23 @@ fn mon_violation(belief: &UnknownBattleState, idx: usize, truth: &PokemonState, 
 ///   for this oracle to usefully catch there.
 /// - known move slots / `possible_original_abilities`: out of the field set this
 ///   check was scoped to cover.
-fn field_violations(entry: &UnknownPokemonState, truth: &PokemonState, pdex: &HashMap<Species, PokemonData>) -> Vec<String> {
+fn field_violations(
+    entry: &UnknownPokemonState,
+    truth: &PokemonState,
+    pdex: &HashMap<Species, PokemonData>,
+) -> Vec<FieldViolation> {
     let mut v = Vec::new();
 
     macro_rules! check {
         ($field:expr, $truth_val:expr, $name:literal) => {
             if unknown_is_excluded($field, $truth_val) {
-                v.push(format!("{}: belief excludes true value {:?}", $name, $truth_val));
+                v.push(FieldViolation {
+                    field: $name.to_string(),
+                    detail: format!(
+                        "{}: belief {:?} excludes true value {:?}",
+                        $name, $field, $truth_val
+                    ),
+                });
             }
         };
     }
@@ -256,10 +366,13 @@ fn field_violations(entry: &UnknownPokemonState, truth: &PokemonState, pdex: &Ha
 
     for i in 0..6 {
         if truth.stats[i] < entry.min_stats[i] || truth.stats[i] > entry.max_stats[i] {
-            v.push(format!(
-                "stats[{i}]: true={} not in [{},{}]",
-                truth.stats[i], entry.min_stats[i], entry.max_stats[i]
-            ));
+            v.push(FieldViolation {
+                field: format!("stats[{i}]"),
+                detail: format!(
+                    "stats[{i}]: true={} not in [{},{}]",
+                    truth.stats[i], entry.min_stats[i], entry.max_stats[i]
+                ),
+            });
         }
     }
 
@@ -275,10 +388,13 @@ fn field_violations(entry: &UnknownPokemonState, truth: &PokemonState, pdex: &Ha
         ];
         for (i, &true_val) in true_pre_nature.iter().enumerate() {
             if true_val < entry.min_pre_nature_stat[i] || true_val > entry.max_pre_nature_stat[i] {
-                v.push(format!(
-                    "pre_nature_stat[{i}]: true={true_val} not in [{},{}]",
-                    entry.min_pre_nature_stat[i], entry.max_pre_nature_stat[i]
-                ));
+                v.push(FieldViolation {
+                    field: format!("pre_nature_stat[{i}]"),
+                    detail: format!(
+                        "pre_nature_stat[{i}]: true={true_val} not in [{},{}]",
+                        entry.min_pre_nature_stat[i], entry.max_pre_nature_stat[i]
+                    ),
+                });
             }
         }
     }
@@ -315,10 +431,20 @@ fn stats_table_idx(stat: &PokemonStat) -> usize {
     }
 }
 
-fn true_pre_nature_stat(truth: &PokemonState, pdex: &HashMap<Species, PokemonData>, stat: &PokemonStat) -> Option<u16> {
+fn true_pre_nature_stat(
+    truth: &PokemonState,
+    pdex: &HashMap<Species, PokemonData>,
+    stat: &PokemonStat,
+) -> Option<u16> {
     let data = pdex.get(&truth.species)?;
     let idx = stats_table_idx(stat);
-    Some(calc_stat(data.base_stats[idx], truth.ivs[idx], truth.evs[idx], truth.level, 1.0))
+    Some(calc_stat(
+        data.base_stats[idx],
+        truth.ivs[idx],
+        truth.evs[idx],
+        truth.level,
+        1.0,
+    ))
 }
 
 /// One OHKO move away from a `KnowsThreateningMove` true-positive regardless of
@@ -326,7 +452,10 @@ fn true_pre_nature_stat(truth: &PokemonState, pdex: &HashMap<Species, PokemonDat
 fn is_ohko_move(m: &PokemonMove) -> bool {
     matches!(
         m,
-        PokemonMove::Fissure | PokemonMove::Guillotine | PokemonMove::HornDrill | PokemonMove::SheerCold
+        PokemonMove::Fissure
+            | PokemonMove::Guillotine
+            | PokemonMove::HornDrill
+            | PokemonMove::SheerCold
     )
 }
 
@@ -346,35 +475,58 @@ fn eval_literal(
     match lit {
         Statement::Not(inner) => eval_literal(inner, mapping, true_state, mdex, pdex).map(|b| !b),
         Statement::HasItem { mon_idx, item } => mapping.get(mon_idx).map(|t| t.item == *item),
-        Statement::HasAbility { mon_idx, ability } => mapping.get(mon_idx).map(|t| t.ability == *ability),
-        Statement::NatureBoostsStat { mon_idx, stat } => mapping.get(mon_idx).map(|t| {
-            nature_stat_modifiers(&t.nature)[nature_mod_idx(stat)] > 1.0
-        }),
-        Statement::NatureNerfsStat { mon_idx, stat } => mapping.get(mon_idx).map(|t| {
-            nature_stat_modifiers(&t.nature)[nature_mod_idx(stat)] < 1.0
-        }),
-        Statement::EVIVStatGE { mon_idx, stat, value } => mapping
+        Statement::HasAbility { mon_idx, ability } => {
+            mapping.get(mon_idx).map(|t| t.ability == *ability)
+        }
+        Statement::NatureBoostsStat { mon_idx, stat } => mapping
+            .get(mon_idx)
+            .map(|t| nature_stat_modifiers(&t.nature)[nature_mod_idx(stat)] > 1.0),
+        Statement::NatureNerfsStat { mon_idx, stat } => mapping
+            .get(mon_idx)
+            .map(|t| nature_stat_modifiers(&t.nature)[nature_mod_idx(stat)] < 1.0),
+        Statement::EVIVStatGE {
+            mon_idx,
+            stat,
+            value,
+        } => mapping
             .get(mon_idx)
             .and_then(|t| true_pre_nature_stat(t, pdex, stat))
             .map(|v| v >= *value),
-        Statement::EVIVStatLE { mon_idx, stat, value } => mapping
+        Statement::EVIVStatLE {
+            mon_idx,
+            stat,
+            value,
+        } => mapping
             .get(mon_idx)
             .and_then(|t| true_pre_nature_stat(t, pdex, stat))
             .map(|v| v <= *value),
-        Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
-            match (mapping.get(fast_idx), mapping.get(slow_idx)) {
-                (Some(f), Some(s)) => Some(
-                    f.stats[5] as u64 * (*fast_mult as u64) >= s.stats[5] as u64 * (*slow_mult as u64),
-                ),
-                _ => None,
-            }
-        }
+        Statement::SpeedComparison {
+            fast_idx,
+            slow_idx,
+            fast_mult,
+            slow_mult,
+        } => match (mapping.get(fast_idx), mapping.get(slow_idx)) {
+            (Some(f), Some(s)) => Some(
+                f.stats[5] as u64 * (*fast_mult as u64) >= s.stats[5] as u64 * (*slow_mult as u64),
+            ),
+            _ => None,
+        },
         Statement::WeatherTurns { turns } => true_state.weather_turns.map(|t| t as usize == *turns),
         Statement::TerrainTurns { turns } => true_state.terrain_turns.map(|t| t as usize == *turns),
-        Statement::SideConditionTurns { side, side_condition, turns } => {
+        Statement::SideConditionTurns {
+            side,
+            side_condition,
+            turns,
+        } => {
             let (conditions, turns_vec) = match side {
-                Player::P1 => (&true_state.p1_side_conditions, &true_state.p1_side_condition_turns),
-                Player::P2 => (&true_state.p2_side_conditions, &true_state.p2_side_condition_turns),
+                Player::P1 => (
+                    &true_state.p1_side_conditions,
+                    &true_state.p1_side_condition_turns,
+                ),
+                Player::P2 => (
+                    &true_state.p2_side_conditions,
+                    &true_state.p2_side_condition_turns,
+                ),
             };
             conditions
                 .iter()
@@ -382,16 +534,18 @@ fn eval_literal(
                 .and_then(|i| turns_vec.get(i))
                 .map(|t| *t as usize == *turns)
         }
-        Statement::KnowsThreateningMove { mon_idx, defender_types } => mapping.get(mon_idx).map(|t| {
+        Statement::KnowsThreateningMove {
+            mon_idx,
+            defender_types,
+        } => mapping.get(mon_idx).map(|t| {
             t.moves.iter().flatten().any(|m| {
                 if is_ohko_move(m) {
                     return true;
                 }
                 mdex.get(m).is_some_and(|data| {
-                    defender_types
-                        .iter()
-                        .fold(1.0, |acc, dt| acc * single_type_effectiveness(&data.pokemon_type, dt))
-                        > 1.0
+                    defender_types.iter().fold(1.0, |acc, dt| {
+                        acc * single_type_effectiveness(&data.pokemon_type, dt)
+                    }) > 1.0
                 })
             })
         }),

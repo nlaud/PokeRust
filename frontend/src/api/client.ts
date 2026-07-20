@@ -1,4 +1,6 @@
 import type {
+  BenchmarkRequest,
+  BenchmarkResponse,
   CreateBattleRequest,
   CreateBattleResponse,
   GetBattleResponse,
@@ -56,4 +58,8 @@ export function submitTurn(battleId: string, req: TurnRequest): Promise<TurnResp
 
 export function deleteBattle(battleId: string): Promise<void> {
   return request(`/api/battles/${battleId}`, { method: 'DELETE' })
+}
+
+export function runBenchmark(req: BenchmarkRequest = {}): Promise<BenchmarkResponse> {
+  return request('/api/benchmark', { method: 'POST', body: JSON.stringify(req) })
 }

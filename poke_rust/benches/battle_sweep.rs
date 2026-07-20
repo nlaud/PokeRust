@@ -55,12 +55,12 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use poke_rust::data::species::Species;
-use poke_rust::information::inference::{apply_information, InferenceConfig};
-use poke_rust::information::information::{mask_events_for, InformationEvent};
+use poke_rust::information::inference::{InferenceConfig, apply_information};
+use poke_rust::information::information::{InformationEvent, mask_events_for};
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
 use poke_rust::simulator::{sample_turn_raw, team_preview_state_from_teamsheets};
 use poke_rust::state::battle::{MatchState, Player, PlayerCommand};
@@ -125,18 +125,48 @@ fn seed_beliefs(
         }
         InformationMode::ClosedTeamSheet => (
             UnknownMatchState::team_preview_closed_sheet_from_perspective(
-                Player::P1, p1_mons, p2_mons, pokemon_dex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, true,
+                Player::P1,
+                p1_mons,
+                p2_mons,
+                pokemon_dex,
+                ACTIVE_PER_SIDE,
+                BROUGHT_PER_SIDE,
+                50,
+                true,
             ),
             UnknownMatchState::team_preview_closed_sheet_from_perspective(
-                Player::P2, p2_mons, p1_mons, pokemon_dex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, true,
+                Player::P2,
+                p2_mons,
+                p1_mons,
+                pokemon_dex,
+                ACTIVE_PER_SIDE,
+                BROUGHT_PER_SIDE,
+                50,
+                true,
             ),
         ),
         InformationMode::OpenTeamSheet | InformationMode::OpenTeamSheetNatures => (
             UnknownMatchState::team_preview_open_sheet_from_perspective(
-                Player::P1, p1_mons, p2_mons, pokemon_dex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, mode, true,
+                Player::P1,
+                p1_mons,
+                p2_mons,
+                pokemon_dex,
+                ACTIVE_PER_SIDE,
+                BROUGHT_PER_SIDE,
+                50,
+                mode,
+                true,
             ),
             UnknownMatchState::team_preview_open_sheet_from_perspective(
-                Player::P2, p2_mons, p1_mons, pokemon_dex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, mode, true,
+                Player::P2,
+                p2_mons,
+                p1_mons,
+                pokemon_dex,
+                ACTIVE_PER_SIDE,
+                BROUGHT_PER_SIDE,
+                50,
+                mode,
+                true,
             ),
         ),
     }
@@ -210,7 +240,10 @@ fn main() {
         ..InferenceConfig::default()
     };
 
-    let mut resolution = ResolutionStats { min_turns: usize::MAX, ..Default::default() };
+    let mut resolution = ResolutionStats {
+        min_turns: usize::MAX,
+        ..Default::default()
+    };
     let mut mode_stats: [ModeStats; 4] = Default::default();
 
     for (i, p1_path) in paths.iter().enumerate() {
@@ -221,8 +254,12 @@ fn main() {
             let mut rng = StdRng::seed_from_u64(seed);
 
             let preview = team_preview_state_from_teamsheets(
-                p1_path.to_str().expect("teamsheet path should be valid UTF-8"),
-                p2_path.to_str().expect("teamsheet path should be valid UTF-8"),
+                p1_path
+                    .to_str()
+                    .expect("teamsheet path should be valid UTF-8"),
+                p2_path
+                    .to_str()
+                    .expect("teamsheet path should be valid UTF-8"),
                 &dexes.pokemon_dex,
                 &dexes.move_dex,
                 ACTIVE_PER_SIDE,
@@ -232,8 +269,18 @@ fn main() {
             let p1_mons = preview.p1_mons.clone();
             let p2_mons = preview.p2_mons.clone();
 
-            let p1_tp = bench_common::random_team_preview_command(p1_mons.len(), ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, &mut rng);
-            let p2_tp = bench_common::random_team_preview_command(p2_mons.len(), ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, &mut rng);
+            let p1_tp = bench_common::random_team_preview_command(
+                p1_mons.len(),
+                ACTIVE_PER_SIDE,
+                BROUGHT_PER_SIDE,
+                &mut rng,
+            );
+            let p2_tp = bench_common::random_team_preview_command(
+                p2_mons.len(),
+                ACTIVE_PER_SIDE,
+                BROUGHT_PER_SIDE,
+                &mut rng,
+            );
 
             let mut state = MatchState::TeamPreviewState(preview);
             let mut p1_cmd = PlayerCommand::TeamPreview(p1_tp);
@@ -254,7 +301,14 @@ fn main() {
 
                 let resolve_start = Instant::now();
                 let (next_state, raw_events, _probability) = sample_turn_raw(
-                    &state, &p1_cmd, &p2_cmd, &dexes.move_dex, &dexes.pokemon_dex, true, 16, Some(Player::P1),
+                    &state,
+                    &p1_cmd,
+                    &p2_cmd,
+                    &dexes.move_dex,
+                    &dexes.pokemon_dex,
+                    true,
+                    16,
+                    Some(Player::P1),
                 );
                 resolution.resolve_time += resolve_start.elapsed();
 
@@ -270,13 +324,23 @@ fn main() {
                     MatchState::GameOverState { .. } => break,
                     MatchState::BattleState(bs) => {
                         p1_cmd = PlayerCommand::Battle(bench_common::random_commands_for_player(
-                            bs, Player::P1, &dexes.move_dex, &dexes.pokemon_dex, &mut rng,
+                            bs,
+                            Player::P1,
+                            &dexes.move_dex,
+                            &dexes.pokemon_dex,
+                            &mut rng,
                         ));
                         p2_cmd = PlayerCommand::Battle(bench_common::random_commands_for_player(
-                            bs, Player::P2, &dexes.move_dex, &dexes.pokemon_dex, &mut rng,
+                            bs,
+                            Player::P2,
+                            &dexes.move_dex,
+                            &dexes.pokemon_dex,
+                            &mut rng,
                         ));
                     }
-                    MatchState::TeamPreviewState(_) => unreachable!("team preview only occurs once, at turn 1"),
+                    MatchState::TeamPreviewState(_) => {
+                        unreachable!("team preview only occurs once, at turn 1")
+                    }
                 }
             }
 
@@ -294,7 +358,8 @@ fn main() {
                     continue; // zero-overhead baseline: no belief tracked, nothing to time
                 }
                 let stats = &mut mode_stats[mode_idx];
-                let (mut belief_p1, mut belief_p2) = seed_beliefs(mode, &p1_mons, &p2_mons, &dexes.pokemon_dex);
+                let (mut belief_p1, mut belief_p2) =
+                    seed_beliefs(mode, &p1_mons, &p2_mons, &dexes.pokemon_dex);
                 let mut p1_alive = true;
                 let mut p2_alive = true;
 
@@ -306,16 +371,30 @@ fn main() {
                     let events_p2 = mask_events_for(Player::P2, &rec.raw_events);
 
                     if p1_alive {
-                        let (next, contradicted) =
-                            advance_one(belief_p1, Player::P1, rec, &events_p1, &dexes, &config, stats);
+                        let (next, contradicted) = advance_one(
+                            belief_p1,
+                            Player::P1,
+                            rec,
+                            &events_p1,
+                            &dexes,
+                            &config,
+                            stats,
+                        );
                         belief_p1 = next;
                         if contradicted {
                             p1_alive = false;
                         }
                     }
                     if p2_alive {
-                        let (next, contradicted) =
-                            advance_one(belief_p2, Player::P2, rec, &events_p2, &dexes, &config, stats);
+                        let (next, contradicted) = advance_one(
+                            belief_p2,
+                            Player::P2,
+                            rec,
+                            &events_p2,
+                            &dexes,
+                            &config,
+                            stats,
+                        );
                         belief_p2 = next;
                         if contradicted {
                             p2_alive = false;
@@ -326,20 +405,29 @@ fn main() {
         }
     }
 
-    println!("=== Battle resolution ({} pairings, doubles 2/4) ===", resolution.battles);
+    println!(
+        "=== Battle resolution ({} pairings, doubles 2/4) ===",
+        resolution.battles
+    );
     println!(
         "battles={} turns={} avg_turns/battle={:.1} min={} max={} stalled={}",
         resolution.battles,
         resolution.turns,
         resolution.turns as f64 / resolution.battles.max(1) as f64,
-        if resolution.min_turns == usize::MAX { 0 } else { resolution.min_turns },
+        if resolution.min_turns == usize::MAX {
+            0
+        } else {
+            resolution.min_turns
+        },
         resolution.max_turns,
         resolution.stalled,
     );
     println!(
         "sample_turn_raw: total={} avg/turn={}",
         bench_common::fmt_time(resolution.resolve_time.as_secs_f64()),
-        bench_common::fmt_time(resolution.resolve_time.as_secs_f64() / resolution.turns.max(1) as f64),
+        bench_common::fmt_time(
+            resolution.resolve_time.as_secs_f64() / resolution.turns.max(1) as f64
+        ),
     );
 
     println!();
@@ -348,10 +436,20 @@ fn main() {
         "(a nonzero contradiction count reflects a known, already-tracked inference-engine bug \
          — see this file's header comment — not a bench defect)"
     );
-    println!("{:<20} {:>10} {:>14} {:>14} {:>15}", "mode", "calls", "total", "avg/call", "contradictions");
+    println!(
+        "{:<20} {:>10} {:>14} {:>14} {:>15}",
+        "mode", "calls", "total", "avg/call", "contradictions"
+    );
     for (mode_idx, &mode) in MODES.iter().enumerate() {
         if mode == InformationMode::PerfectInformation {
-            println!("{:<20} {:>10} {:>14} {:>14} {:>15}", mode_label(mode), 0, "n/a (baseline)", "n/a", 0);
+            println!(
+                "{:<20} {:>10} {:>14} {:>14} {:>15}",
+                mode_label(mode),
+                0,
+                "n/a (baseline)",
+                "n/a",
+                0
+            );
             continue;
         }
         let stats = &mode_stats[mode_idx];

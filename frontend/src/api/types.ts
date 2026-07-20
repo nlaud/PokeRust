@@ -295,3 +295,40 @@ export interface TurnResponse {
   eventsP2: EventNode[]
   probability: number
 }
+
+// ── Benchmarking ────────────────────────────────────────────────────────────
+// Mirrors `poke_rust::benchmarking`'s result rows via
+// `src/bin/server/dto.rs`'s `TurnSpeedRowDto`/`InferenceRowDto`/
+// `BenchmarkResponse`. See `poke_rust/benches/RESULTS.md` for the offline
+// (unbounded) sweep this endpoint runs a small, live-clickable version of.
+
+export interface BenchmarkRequest {
+  /** Ordered teamsheet pairings to time turn resolution across. Server-side
+   * hard-capped regardless of what's requested here. */
+  turnSpeedPairings?: number
+  /** Full doubles games to play + replay per information mode. Server-side
+   * hard-capped regardless of what's requested here. */
+  inferenceGames?: number
+}
+
+export interface TurnSpeedRow {
+  scenario: 'singles' | 'doubles'
+  mode: 'enumerate' | 'sample'
+  rolls: number
+  crit: boolean
+  avgTimeSecs: number
+  avgBranches: number
+  pairings: number
+}
+
+export interface InferenceRow {
+  informationMode: string
+  calls: number
+  avgTimeSecs: number
+  contradictions: number
+}
+
+export interface BenchmarkResponse {
+  turnSpeed: TurnSpeedRow[]
+  inference: InferenceRow[]
+}

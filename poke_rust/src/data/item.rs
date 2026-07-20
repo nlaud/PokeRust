@@ -590,7 +590,12 @@ pub enum Item {
 impl Item {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
-        let normalize = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect::<String>();
+        let normalize = |s: &str| {
+            s.chars()
+                .filter(|c| c.is_alphanumeric())
+                .map(|c| c.to_ascii_lowercase())
+                .collect::<String>()
+        };
         let normalized = normalize(s);
         match normalized.as_str() {
             "abilityshield" => Item::AbilityShield,
@@ -1563,181 +1568,183 @@ impl Item {
 
     /// Whether this item is a Berry.
     pub fn is_berry(&self) -> bool {
-        matches!(self,
+        matches!(
+            self,
             Item::AguavBerry
-            | Item::ApicotBerry
-            | Item::AspearBerry
-            | Item::BabiriBerry
-            | Item::BelueBerry
-            | Item::Berry
-            | Item::BitterBerry
-            | Item::BlukBerry
-            | Item::BurntBerry
-            | Item::ChartiBerry
-            | Item::CheriBerry
-            | Item::ChestoBerry
-            | Item::ChilanBerry
-            | Item::ChopleBerry
-            | Item::CobaBerry
-            | Item::ColburBerry
-            | Item::CornnBerry
-            | Item::CustapBerry
-            | Item::DurinBerry
-            | Item::EnigmaBerry
-            | Item::FigyBerry
-            | Item::GanlonBerry
-            | Item::GoldBerry
-            | Item::GrepaBerry
-            | Item::HabanBerry
-            | Item::HondewBerry
-            | Item::IapapaBerry
-            | Item::IceBerry
-            | Item::JabocaBerry
-            | Item::KasibBerry
-            | Item::KebiaBerry
-            | Item::KeeBerry
-            | Item::KelpsyBerry
-            | Item::LansatBerry
-            | Item::LeppaBerry
-            | Item::LiechiBerry
-            | Item::LumBerry
-            | Item::MagoBerry
-            | Item::MagostBerry
-            | Item::MarangaBerry
-            | Item::MicleBerry
-            | Item::MintBerry
-            | Item::MiracleBerry
-            | Item::MysteryBerry
-            | Item::NanabBerry
-            | Item::NomelBerry
-            | Item::OccaBerry
-            | Item::OranBerry
-            | Item::PRZCureBerry
-            | Item::PSNCureBerry
-            | Item::PamtreBerry
-            | Item::PasshoBerry
-            | Item::PayapaBerry
-            | Item::PechaBerry
-            | Item::PersimBerry
-            | Item::PetayaBerry
-            | Item::PinapBerry
-            | Item::PomegBerry
-            | Item::QualotBerry
-            | Item::RabutaBerry
-            | Item::RawstBerry
-            | Item::RazzBerry
-            | Item::RindoBerry
-            | Item::RoseliBerry
-            | Item::RowapBerry
-            | Item::SalacBerry
-            | Item::ShucaBerry
-            | Item::SitrusBerry
-            | Item::SpelonBerry
-            | Item::StarfBerry
-            | Item::TamatoBerry
-            | Item::TangaBerry
-            | Item::WacanBerry
-            | Item::WatmelBerry
-            | Item::WepearBerry
-            | Item::WikiBerry
-            | Item::YacheBerry
+                | Item::ApicotBerry
+                | Item::AspearBerry
+                | Item::BabiriBerry
+                | Item::BelueBerry
+                | Item::Berry
+                | Item::BitterBerry
+                | Item::BlukBerry
+                | Item::BurntBerry
+                | Item::ChartiBerry
+                | Item::CheriBerry
+                | Item::ChestoBerry
+                | Item::ChilanBerry
+                | Item::ChopleBerry
+                | Item::CobaBerry
+                | Item::ColburBerry
+                | Item::CornnBerry
+                | Item::CustapBerry
+                | Item::DurinBerry
+                | Item::EnigmaBerry
+                | Item::FigyBerry
+                | Item::GanlonBerry
+                | Item::GoldBerry
+                | Item::GrepaBerry
+                | Item::HabanBerry
+                | Item::HondewBerry
+                | Item::IapapaBerry
+                | Item::IceBerry
+                | Item::JabocaBerry
+                | Item::KasibBerry
+                | Item::KebiaBerry
+                | Item::KeeBerry
+                | Item::KelpsyBerry
+                | Item::LansatBerry
+                | Item::LeppaBerry
+                | Item::LiechiBerry
+                | Item::LumBerry
+                | Item::MagoBerry
+                | Item::MagostBerry
+                | Item::MarangaBerry
+                | Item::MicleBerry
+                | Item::MintBerry
+                | Item::MiracleBerry
+                | Item::MysteryBerry
+                | Item::NanabBerry
+                | Item::NomelBerry
+                | Item::OccaBerry
+                | Item::OranBerry
+                | Item::PRZCureBerry
+                | Item::PSNCureBerry
+                | Item::PamtreBerry
+                | Item::PasshoBerry
+                | Item::PayapaBerry
+                | Item::PechaBerry
+                | Item::PersimBerry
+                | Item::PetayaBerry
+                | Item::PinapBerry
+                | Item::PomegBerry
+                | Item::QualotBerry
+                | Item::RabutaBerry
+                | Item::RawstBerry
+                | Item::RazzBerry
+                | Item::RindoBerry
+                | Item::RoseliBerry
+                | Item::RowapBerry
+                | Item::SalacBerry
+                | Item::ShucaBerry
+                | Item::SitrusBerry
+                | Item::SpelonBerry
+                | Item::StarfBerry
+                | Item::TamatoBerry
+                | Item::TangaBerry
+                | Item::WacanBerry
+                | Item::WatmelBerry
+                | Item::WepearBerry
+                | Item::WikiBerry
+                | Item::YacheBerry
         )
     }
 
     /// Whether this item is a Z-Crystal.
     pub fn is_z_crystal(&self) -> bool {
-        matches!(self,
+        matches!(
+            self,
             Item::AloraichiumZ
-            | Item::BuginiumZ
-            | Item::DarkiniumZ
-            | Item::DecidiumZ
-            | Item::DragoniumZ
-            | Item::EeviumZ
-            | Item::ElectriumZ
-            | Item::FairiumZ
-            | Item::FightiniumZ
-            | Item::FiriumZ
-            | Item::FlyiniumZ
-            | Item::GhostiumZ
-            | Item::GrassiumZ
-            | Item::GroundiumZ
-            | Item::IciumZ
-            | Item::InciniumZ
-            | Item::KommoniumZ
-            | Item::LunaliumZ
-            | Item::LycaniumZ
-            | Item::MarshadiumZ
-            | Item::MewniumZ
-            | Item::MimikiumZ
-            | Item::NormaliumZ
-            | Item::PikaniumZ
-            | Item::PikashuniumZ
-            | Item::PoisoniumZ
-            | Item::PrimariumZ
-            | Item::PsychiumZ
-            | Item::RockiumZ
-            | Item::SnorliumZ
-            | Item::SolganiumZ
-            | Item::SteeliumZ
-            | Item::TapuniumZ
-            | Item::UltranecroziumZ
-            | Item::WateriumZ
+                | Item::BuginiumZ
+                | Item::DarkiniumZ
+                | Item::DecidiumZ
+                | Item::DragoniumZ
+                | Item::EeviumZ
+                | Item::ElectriumZ
+                | Item::FairiumZ
+                | Item::FightiniumZ
+                | Item::FiriumZ
+                | Item::FlyiniumZ
+                | Item::GhostiumZ
+                | Item::GrassiumZ
+                | Item::GroundiumZ
+                | Item::IciumZ
+                | Item::InciniumZ
+                | Item::KommoniumZ
+                | Item::LunaliumZ
+                | Item::LycaniumZ
+                | Item::MarshadiumZ
+                | Item::MewniumZ
+                | Item::MimikiumZ
+                | Item::NormaliumZ
+                | Item::PikaniumZ
+                | Item::PikashuniumZ
+                | Item::PoisoniumZ
+                | Item::PrimariumZ
+                | Item::PsychiumZ
+                | Item::RockiumZ
+                | Item::SnorliumZ
+                | Item::SolganiumZ
+                | Item::SteeliumZ
+                | Item::TapuniumZ
+                | Item::UltranecroziumZ
+                | Item::WateriumZ
         )
     }
 
     /// Whether this item is a Plate (Arceus type item).
     pub fn is_plate(&self) -> bool {
-        matches!(self,
+        matches!(
+            self,
             Item::DracoPlate
-            | Item::DreadPlate
-            | Item::EarthPlate
-            | Item::FistPlate
-            | Item::FlamePlate
-            | Item::IciclePlate
-            | Item::InsectPlate
-            | Item::IronPlate
-            | Item::MeadowPlate
-            | Item::MindPlate
-            | Item::PixiePlate
-            | Item::SkyPlate
-            | Item::SplashPlate
-            | Item::SpookyPlate
-            | Item::StonePlate
-            | Item::ToxicPlate
-            | Item::ZapPlate
+                | Item::DreadPlate
+                | Item::EarthPlate
+                | Item::FistPlate
+                | Item::FlamePlate
+                | Item::IciclePlate
+                | Item::InsectPlate
+                | Item::IronPlate
+                | Item::MeadowPlate
+                | Item::MindPlate
+                | Item::PixiePlate
+                | Item::SkyPlate
+                | Item::SplashPlate
+                | Item::SpookyPlate
+                | Item::StonePlate
+                | Item::ToxicPlate
+                | Item::ZapPlate
         )
     }
 
     /// Whether this item is a Drive (Genesect type item).
     pub fn is_drive(&self) -> bool {
-        matches!(self,
-            Item::BurnDrive
-            | Item::ChillDrive
-            | Item::DouseDrive
-            | Item::ShockDrive
+        matches!(
+            self,
+            Item::BurnDrive | Item::ChillDrive | Item::DouseDrive | Item::ShockDrive
         )
     }
 
     /// Whether this item is a Memory (Silvally type item).
     pub fn is_memory(&self) -> bool {
-        matches!(self,
+        matches!(
+            self,
             Item::BugMemory
-            | Item::DarkMemory
-            | Item::DragonMemory
-            | Item::ElectricMemory
-            | Item::FairyMemory
-            | Item::FightingMemory
-            | Item::FireMemory
-            | Item::FlyingMemory
-            | Item::GhostMemory
-            | Item::GrassMemory
-            | Item::GroundMemory
-            | Item::IceMemory
-            | Item::PoisonMemory
-            | Item::PsychicMemory
-            | Item::RockMemory
-            | Item::SteelMemory
-            | Item::WaterMemory
+                | Item::DarkMemory
+                | Item::DragonMemory
+                | Item::ElectricMemory
+                | Item::FairyMemory
+                | Item::FightingMemory
+                | Item::FireMemory
+                | Item::FlyingMemory
+                | Item::GhostMemory
+                | Item::GrassMemory
+                | Item::GroundMemory
+                | Item::IceMemory
+                | Item::PoisonMemory
+                | Item::PsychicMemory
+                | Item::RockMemory
+                | Item::SteelMemory
+                | Item::WaterMemory
         )
     }
 }

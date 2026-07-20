@@ -37,16 +37,16 @@
 //! [`crate::unknowns::PokemonHP`] so that allies report exact HP and opponents report a
 //! percentage, exactly as a real player observes.
 
-use crate::state::battle::{FieldSlot, Player};
+use super::unknowns::PokemonHP;
 use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
+use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
     PokemonType, PseudoWeather, SideCondition, SlotCondition, Status, Terrain, VolatileStatus,
     Weather,
 };
-use super::unknowns::PokemonHP;
 
 // ── Core recursive node ──────────────────────────────────────────────────────
 
@@ -108,7 +108,7 @@ pub enum CantReason {
     Torment,
     SkyDrop,
     BeakBlast,
-    FocusPunch, // Hurt before Focus Punch fires
+    FocusPunch,  // Hurt before Focus Punch fires
     Infatuation, // Attract — the Pokémon is infatuated and cannot act
     Other,
 }
@@ -408,7 +408,10 @@ pub enum EventKind {
     /// An Illusion disguise was dispelled, revealing the holder's true species.
     /// Emitted as a sibling of `DamageDealt` on the first direct-move damage hit,
     /// or alongside ability suppression/change events.
-    IllusionEnded { slot: FieldSlot, actual_species: Species },
+    IllusionEnded {
+        slot: FieldSlot,
+        actual_species: Species,
+    },
 
     /// A Pokémon Transformed into another (the Transform move or the Imposter ability).
     /// `slot` is the transformer; `into_slot` is the copied Pokémon (the directly-
@@ -456,7 +459,11 @@ pub fn mask_events_for(observer: Player, events: &[InformationEvent]) -> Vec<Inf
 
 fn mask_event(observer: Player, ev: &InformationEvent) -> InformationEvent {
     let kind = mask_event_kind(observer, &ev.kind);
-    let reactions = ev.reactions.iter().map(|r| mask_event(observer, r)).collect();
+    let reactions = ev
+        .reactions
+        .iter()
+        .map(|r| mask_event(observer, r))
+        .collect();
     InformationEvent { kind, reactions }
 }
 
@@ -479,7 +486,9 @@ fn mask_switch_state(observer: Player, raw: &SwitchState) -> SwitchState {
     let species = if raw.slot.player == observer {
         raw.species.clone()
     } else {
-        raw.disguise_species.clone().unwrap_or_else(|| raw.species.clone())
+        raw.disguise_species
+            .clone()
+            .unwrap_or_else(|| raw.species.clone())
     };
     let hp = mask_hp(observer, raw.slot.player, &raw.hp, raw.max_hp);
     SwitchState {
@@ -497,24 +506,39 @@ fn mask_switch_state(observer: Player, raw: &SwitchState) -> SwitchState {
 
 fn mask_event_kind(observer: Player, kind: &EventKind) -> EventKind {
     match kind {
-        EventKind::DamageDealt { target, new_hp, max_hp } => EventKind::DamageDealt {
+        EventKind::DamageDealt {
+            target,
+            new_hp,
+            max_hp,
+        } => EventKind::DamageDealt {
             target: *target,
             new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
             max_hp: *max_hp,
         },
-        EventKind::Healed { target, new_hp, max_hp } => EventKind::Healed {
+        EventKind::Healed {
+            target,
+            new_hp,
+            max_hp,
+        } => EventKind::Healed {
             target: *target,
             new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
             max_hp: *max_hp,
         },
-        EventKind::SetHp { target, new_hp, max_hp } => EventKind::SetHp {
+        EventKind::SetHp {
+            target,
+            new_hp,
+            max_hp,
+        } => EventKind::SetHp {
             target: *target,
             new_hp: mask_hp(observer, target.player, new_hp, *max_hp),
             max_hp: *max_hp,
         },
         EventKind::Switch(sw) => EventKind::Switch(mask_switch_state(observer, sw)),
         EventKind::SimultaneousSwitch { switches } => EventKind::SimultaneousSwitch {
-            switches: switches.iter().map(|sw| mask_switch_state(observer, sw)).collect(),
+            switches: switches
+                .iter()
+                .map(|sw| mask_switch_state(observer, sw))
+                .collect(),
         },
         // No perspective-sensitive payload — every other event category (major actions
         // sans HP, hit qualifiers, status, boosts, field effects, items, abilities,

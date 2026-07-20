@@ -897,10 +897,11 @@ fn parse_pokemon_header(
     // mega stone, exactly as a "Tyranitar @ Tyranitarite" sheet would.
     if let Some(data) = pokemon_dex.get(&species_key)
         && is_mega_dex_entry(&species_key, data)
-            && let Some(base) = data.base_species.clone()
-                && base != species_key {
-                    species_key = base;
-                }
+        && let Some(base) = data.base_species.clone()
+        && base != species_key
+    {
+        species_key = base;
+    }
     if pokemon_dex.get(&species_key).is_none() {
         eprintln!(
             "Warning: '{}' not found in dex (key: '{:?}')",
@@ -981,10 +982,11 @@ pub fn parse_team_sheet_str(
             } else if let Some(ns) = line.strip_suffix(" Nature") {
                 nature = parse_nature_str(ns);
             } else if let Some(mv) = line.strip_prefix("- ")
-                && move_count < 4 {
-                    moves[move_count] = Some(PokemonMove::from_str(mv));
-                    move_count += 1;
-                }
+                && move_count < 4
+            {
+                moves[move_count] = Some(PokemonMove::from_str(mv));
+                move_count += 1;
+            }
         }
 
         let item = if header.item_str.is_empty() {

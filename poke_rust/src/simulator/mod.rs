@@ -1,23 +1,74 @@
-use std::collections::HashMap;
-use rand::Rng;
-use colored::Colorize;
-use crate::state::battle::{
-    MatchState, BattleState, TeamPreviewState, PlayerCommand, BattleCommand,
-    AttackCommand, SwitchCommand, TeamPreviewCommand, Player, FieldSlot,
-    Action, MoveAction, SwitchAction, MegaAction, TeraAction, DoubleKo,
-};
-use crate::state::pokemon::{
-    PokemonState, parse_team_sheet_str
-};
-use crate::state::dex_data::{MoveData, MoveFlag, MoveTarget, PokemonData, MoveCategory, SelfDestructType, SelfSwitchType, SideCondition, Status, VolatileStatus, PokemonType};
 use crate::data::ability::Ability;
 use crate::data::item::Item;
-use crate::data::species::Species;
 use crate::data::pokemon_move::PokemonMove;
-use crate::information::information::{CantReason, EventKind, InformationEvent, SwitchState as InfoSwitchState};
+use crate::data::species::Species;
+use crate::information::information::{
+    CantReason, EventKind, InformationEvent, SwitchState as InfoSwitchState,
+};
 use crate::information::unknowns::PokemonHP;
+use crate::state::battle::{
+    Action, AttackCommand, BattleCommand, BattleState, DoubleKo, FieldSlot, MatchState, MegaAction,
+    MoveAction, Player, PlayerCommand, SwitchAction, SwitchCommand, TeamPreviewCommand,
+    TeamPreviewState, TeraAction,
+};
+use crate::state::dex_data::{
+    MoveCategory, MoveData, MoveFlag, MoveTarget, PokemonData, PokemonType, SelfDestructType,
+    SelfSwitchType, SideCondition, Status, VolatileStatus,
+};
+use crate::state::pokemon::{PokemonState, parse_team_sheet_str};
+use colored::Colorize;
+use rand::{Rng, RngCore};
+#[cfg(test)]
+use rand::{SeedableRng, rngs::StdRng};
+use std::cell::RefCell;
+use std::collections::HashMap;
 pub mod helpers;
 use self::helpers as simulator_helpers;
+
+thread_local! {
+    /// Deterministic RNG override for sampled simulator trajectories. Production
+    /// callers leave this as `None` and continue to use `thread_rng`; fuzz tests
+    /// install a per-match seed so a reported iteration is exactly replayable.
+    static SAMPLE_RNG_OVERRIDE: RefCell<Option<rand::rngs::StdRng>> = const { RefCell::new(None) };
+}
+
+/// Restores the previous thread-local sampled-trajectory RNG when dropped, even
+/// when a test unwinds through a simulator panic.
+#[cfg(test)]
+pub(crate) struct SampleRngGuard(Option<StdRng>);
+
+#[cfg(test)]
+impl Drop for SampleRngGuard {
+    fn drop(&mut self) {
+        SAMPLE_RNG_OVERRIDE.with(|slot| {
+            *slot.borrow_mut() = self.0.take();
+        });
+    }
+}
+
+/// Make all simulator-internal random choices on this thread deterministic
+/// until the returned guard is dropped.
+#[cfg(test)]
+pub(crate) fn scoped_sample_rng(seed: u64) -> SampleRngGuard {
+    let previous =
+        SAMPLE_RNG_OVERRIDE.with(|slot| slot.borrow_mut().replace(StdRng::seed_from_u64(seed)));
+    SampleRngGuard(previous)
+}
+
+/// Draw from the deterministic test RNG when installed, otherwise from the
+/// normal per-thread RNG. Keeping this tiny boundary is what makes a complete
+/// `sample_turn_raw` trajectory reproducible rather than only command selection.
+pub(crate) fn with_sample_rng<T>(draw: impl FnOnce(&mut dyn RngCore) -> T) -> T {
+    SAMPLE_RNG_OVERRIDE.with(|slot| {
+        let mut override_rng = slot.borrow_mut();
+        if let Some(rng) = override_rng.as_mut() {
+            draw(rng)
+        } else {
+            let mut rng = rand::thread_rng();
+            draw(&mut rng)
+        }
+    })
+}
 
 /// One target's per-hit outcome branch: `(damage, is_crit, hit, probability)`.
 type TargetHitOutcome = (u16, bool, bool, f64);
@@ -46,7 +97,11 @@ fn mon_at_slot_mut(state: &mut BattleState, slot: FieldSlot) -> Option<&mut Poke
     simulator_helpers::get_pokemon_at_slot_mut(state, slot)
 }
 
-fn write_back_volatiles(state: &mut BattleState, slot: FieldSlot, volatiles: Vec<crate::state::pokemon::VolatileStatusState>) {
+fn write_back_volatiles(
+    state: &mut BattleState,
+    slot: FieldSlot,
+    volatiles: Vec<crate::state::pokemon::VolatileStatusState>,
+) {
     if let Some(mon) = mon_at_slot_mut(state, slot) {
         mon.volatiles = volatiles;
     }
@@ -80,7 +135,8 @@ fn check_invulnerability_status(
     target: &PokemonState,
     move_name: &PokemonMove,
 ) -> (f64, bool) {
-    let invulnerability_resolution = simulator_helpers::invulnerability_resolution(attacker, target, move_name);
+    let invulnerability_resolution =
+        simulator_helpers::invulnerability_resolution(attacker, target, move_name);
     match invulnerability_resolution {
         simulator_helpers::InvulnerabilityResolution::Blocked => (0.0, false),
         simulator_helpers::InvulnerabilityResolution::ZeroDamage => (0.0, true),
@@ -89,16 +145,29 @@ fn check_invulnerability_status(
     }
 }
 
-fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_name: &PokemonMove, move_data_opt: Option<&MoveData>) {
+fn decrement_move_pp(
+    next_state: &mut BattleState,
+    user_slot: FieldSlot,
+    move_name: &PokemonMove,
+    move_data_opt: Option<&MoveData>,
+) {
     let move_index = match user_slot.player {
         Player::P1 => next_state
             .p1_active_mons
             .get(user_slot.slot_index as usize)
-            .and_then(|mon| mon.moves.iter().position(|move_entry| move_entry.as_ref() == Some(move_name))),
+            .and_then(|mon| {
+                mon.moves
+                    .iter()
+                    .position(|move_entry| move_entry.as_ref() == Some(move_name))
+            }),
         Player::P2 => next_state
             .p2_active_mons
             .get(user_slot.slot_index as usize)
-            .and_then(|mon| mon.moves.iter().position(|move_entry| move_entry.as_ref() == Some(move_name))),
+            .and_then(|mon| {
+                mon.moves
+                    .iter()
+                    .position(|move_entry| move_entry.as_ref() == Some(move_name))
+            }),
     };
 
     if let Some(move_index) = move_index {
@@ -131,22 +200,25 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
                 let self_or_ally_only = matches!(
                     md.target,
                     MoveTarget::SelfTarget
-                    | MoveTarget::AdjacentAlly
-                    | MoveTarget::AdjacentAllyOrSelf
-                    | MoveTarget::Allies
-                    | MoveTarget::AllySide
-                    | MoveTarget::AllyTeam
+                        | MoveTarget::AdjacentAlly
+                        | MoveTarget::AdjacentAllyOrSelf
+                        | MoveTarget::Allies
+                        | MoveTarget::AllySide
+                        | MoveTarget::AllyTeam
                 );
-                !self_or_ally_only
-                    || simulator_helpers::move_has_flag(md, &MoveFlag::MustPressure)
+                !self_or_ally_only || simulator_helpers::move_has_flag(md, &MoveFlag::MustPressure)
             } else {
                 // move_data unavailable (e.g. confusion self-hit, no-effect early exit): default to always-trigger.
                 true
             }
         };
         if let Some(mon) = match user_slot.player {
-            Player::P1 => next_state.p1_active_mons.get_mut(user_slot.slot_index as usize),
-            Player::P2 => next_state.p2_active_mons.get_mut(user_slot.slot_index as usize),
+            Player::P1 => next_state
+                .p1_active_mons
+                .get_mut(user_slot.slot_index as usize),
+            Player::P2 => next_state
+                .p2_active_mons
+                .get_mut(user_slot.slot_index as usize),
         } {
             if let Some(pp) = mon.move_pp.get_mut(move_index) {
                 *pp = pp.saturating_sub(1 + pressure_extra as u8);
@@ -155,14 +227,26 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
 
             // Choice items lock the holder into its first move; Struggle is excluded (a PP-depleted
             // mon shouldn't lock into it). Re-locking is a no-op if already locked this send-in.
-            let is_choice = matches!(mon.item, Item::ChoiceBand | Item::ChoiceScarf | Item::ChoiceSpecs);
-            let already_locked = mon.volatiles.iter().any(|v|
-                matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(_), _))
+            let is_choice = matches!(
+                mon.item,
+                Item::ChoiceBand | Item::ChoiceScarf | Item::ChoiceSpecs
             );
-            if !item_inactive && is_choice && !already_locked && *move_name != PokemonMove::Struggle {
-                mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(
-                    VolatileStatus::ChoiceLock(move_name.clone()), 0,
-                ));
+            let already_locked = mon.volatiles.iter().any(|v| {
+                matches!(
+                    v,
+                    crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::ChoiceLock(_),
+                        _
+                    )
+                )
+            });
+            if !item_inactive && is_choice && !already_locked && *move_name != PokemonMove::Struggle
+            {
+                mon.volatiles
+                    .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::ChoiceLock(move_name.clone()),
+                        0,
+                    ));
             }
             // Tracks the last move used (for Disable targeting); Struggle excluded.
             // consecutive_move_count is pre-updated before branching so Metronome sees the correct streak.
@@ -172,7 +256,10 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
 
             // Track which move slots have been used for Last Resort.
             if let Some(slot) = mon.moves.iter().position(|m| m.as_ref() == Some(move_name))
-                && slot < 4 { mon.used_moves_this_field[slot] = true; }
+                && slot < 4
+            {
+                mon.used_moves_this_field[slot] = true;
+            }
 
             // Destiny Bond ends on any subsequent action besides Destiny Bond itself
             // (mirrors Showdown's onBeforeMove removal).
@@ -182,10 +269,13 @@ fn decrement_move_pp(next_state: &mut BattleState, user_slot: FieldSlot, move_na
         }
         // Emit VolatileEnd for DestinyBond removal now that the mutable borrow has ended.
         if user_had_destiny_bond {
-            simulator_helpers::emit(next_state, EventKind::VolatileEnd {
-                target: user_slot,
-                volatile: VolatileStatus::DestinyBond,
-            });
+            simulator_helpers::emit(
+                next_state,
+                EventKind::VolatileEnd {
+                    target: user_slot,
+                    volatile: VolatileStatus::DestinyBond,
+                },
+            );
         }
         // Update the field-level last-move tracker for Copycat; Struggle excluded.
         if *move_name != PokemonMove::Struggle {
@@ -204,7 +294,11 @@ fn resolve_confusion_self_hit_outcomes(
         return vec![(MatchState::BattleState(state.clone()), 1.0)];
     };
 
-    let damage_outcomes = simulator_helpers::confusion_self_hit_damage_outcomes(state, &attacker, config.damage_rolls);
+    let damage_outcomes = simulator_helpers::confusion_self_hit_damage_outcomes(
+        state,
+        &attacker,
+        config.damage_rolls,
+    );
     let mut outcomes = Vec::new();
 
     for (damage, probability) in damage_outcomes {
@@ -216,19 +310,27 @@ fn resolve_confusion_self_hit_outcomes(
         // the PARENT of the self-hit damage (via `with_reactions`) instead of a flat sibling —
         // recoil / Life Orb self-damage already nests under its cause (MoveUsed); the
         // confusion self-hit should nest under Cant{Confusion} the same way.
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, user_slot) {
+        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, user_slot)
+        {
             mon.last_move_failed = true;
         }
         branch_state.move_was_prevented = true;
 
         let game_over = simulator_helpers::with_reactions(
             &mut branch_state,
-            EventKind::Cant { slot: user_slot, reason: CantReason::Confusion },
+            EventKind::Cant {
+                slot: user_slot,
+                reason: CantReason::Confusion,
+            },
             |bs| simulator_helpers::apply_damage_and_check_game_over(bs, user_slot, damage),
         );
 
         match game_over {
-            Some(MatchState::GameOverState { winner, final_state, .. }) => {
+            Some(MatchState::GameOverState {
+                winner,
+                final_state,
+                ..
+            }) => {
                 // `apply_damage_and_check_game_over` snapshots `pending_events` for the
                 // GameOverState *before* `with_reactions` finishes nesting DamageDealt/Faint
                 // under Cant (the nesting only happens once the closure returns), so that
@@ -236,11 +338,14 @@ fn resolve_confusion_self_hit_outcomes(
                 // correctly-nested version — rebuild the GameOverState with it.
                 let mut final_state = final_state;
                 final_state.pending_events = branch_state.pending_events.clone();
-                outcomes.push((MatchState::GameOverState {
-                    winner,
-                    pending_events: branch_state.pending_events.clone(),
-                    final_state,
-                }, probability));
+                outcomes.push((
+                    MatchState::GameOverState {
+                        winner,
+                        pending_events: branch_state.pending_events.clone(),
+                        final_state,
+                    },
+                    probability,
+                ));
             }
             Some(other) => outcomes.push((other, probability)),
             None => outcomes.push((MatchState::BattleState(branch_state), probability)),
@@ -261,8 +366,8 @@ fn apply_priority_charge_volatiles(bs: &mut BattleState) {
     for a in &bs.action_queue {
         if let Action::MoveAction(ma) = a {
             match ma.move_name {
-                PokemonMove::BeakBlast   => beak_blast_users.push(ma.user_slot),
-                PokemonMove::FocusPunch  => focus_punch_users.push(ma.user_slot),
+                PokemonMove::BeakBlast => beak_blast_users.push(ma.user_slot),
+                PokemonMove::FocusPunch => focus_punch_users.push(ma.user_slot),
                 _ => {}
             }
         }
@@ -271,20 +376,31 @@ fn apply_priority_charge_volatiles(bs: &mut BattleState) {
     for slot in beak_blast_users {
         let mut newly_set = false;
         if let Some(mon) = mon_at_slot_mut(bs, slot) {
-            if mon.fainted { continue; }
-            let already_has = mon.volatiles.iter().any(|v| matches!(v,
-                VolatileStatusState::TurnStatus(VolatileStatus::BeakBlastCharging, _)
-            ));
+            if mon.fainted {
+                continue;
+            }
+            let already_has = mon.volatiles.iter().any(|v| {
+                matches!(
+                    v,
+                    VolatileStatusState::TurnStatus(VolatileStatus::BeakBlastCharging, _)
+                )
+            });
             if !already_has {
-                mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::BeakBlastCharging, 1));
+                mon.volatiles.push(VolatileStatusState::TurnStatus(
+                    VolatileStatus::BeakBlastCharging,
+                    1,
+                ));
                 newly_set = true;
             }
         }
         if newly_set {
-            simulator_helpers::emit(bs, EventKind::SingleMoveOrTurn {
-                slot,
-                move_used: PokemonMove::BeakBlast,
-            });
+            simulator_helpers::emit(
+                bs,
+                EventKind::SingleMoveOrTurn {
+                    slot,
+                    move_used: PokemonMove::BeakBlast,
+                },
+            );
         }
     }
 
@@ -292,20 +408,31 @@ fn apply_priority_charge_volatiles(bs: &mut BattleState) {
     for slot in focus_punch_users {
         let mut newly_set = false;
         if let Some(mon) = mon_at_slot_mut(bs, slot) {
-            if mon.fainted { continue; }
-            let already_has = mon.volatiles.iter().any(|v| matches!(v,
-                VolatileStatusState::TurnStatus(VolatileStatus::FocusPunchCharging, _)
-            ));
+            if mon.fainted {
+                continue;
+            }
+            let already_has = mon.volatiles.iter().any(|v| {
+                matches!(
+                    v,
+                    VolatileStatusState::TurnStatus(VolatileStatus::FocusPunchCharging, _)
+                )
+            });
             if !already_has {
-                mon.volatiles.push(VolatileStatusState::TurnStatus(VolatileStatus::FocusPunchCharging, 1));
+                mon.volatiles.push(VolatileStatusState::TurnStatus(
+                    VolatileStatus::FocusPunchCharging,
+                    1,
+                ));
                 newly_set = true;
             }
         }
         if newly_set {
-            simulator_helpers::emit(bs, EventKind::SingleMoveOrTurn {
-                slot,
-                move_used: PokemonMove::FocusPunch,
-            });
+            simulator_helpers::emit(
+                bs,
+                EventKind::SingleMoveOrTurn {
+                    slot,
+                    move_used: PokemonMove::FocusPunch,
+                },
+            );
         }
     }
 }
@@ -318,14 +445,26 @@ fn resolve_charge_targets(
     move_data: &MoveData,
 ) -> Option<Vec<FieldSlot>> {
     if simulator_helpers::move_target_is_multitarget(&move_data.target) {
-        let targets = simulator_helpers::resolve_move_targets(next_state, action.user_slot, &move_data.target);
+        let targets = simulator_helpers::resolve_move_targets(
+            next_state,
+            action.user_slot,
+            &move_data.target,
+        );
         Some(targets)
     } else {
         match action.target_slot {
             Some(slot) => Some(vec![slot]),
             None => {
-                let targets = simulator_helpers::resolve_move_targets(next_state, action.user_slot, &move_data.target);
-                if targets.is_empty() { None } else { Some(targets) }
+                let targets = simulator_helpers::resolve_move_targets(
+                    next_state,
+                    action.user_slot,
+                    &move_data.target,
+                );
+                if targets.is_empty() {
+                    None
+                } else {
+                    Some(targets)
+                }
             }
         }
     }
@@ -340,23 +479,36 @@ fn handle_semi_invulnerable_first_turn(
     // Sky Drop: check that the target can be grabbed
     if action.move_name == PokemonMove::SkyDrop {
         let sky_targets = resolve_charge_targets(next_state, action, move_data).unwrap_or_default();
-        if let Some(target) = sky_targets.first().and_then(|s| simulator_helpers::get_pokemon_at_slot(next_state, *s))
-            && simulator_helpers::sky_drop_first_turn_fails(next_state, target) {
-                return Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)]);
-            }
+        if let Some(target) = sky_targets
+            .first()
+            .and_then(|s| simulator_helpers::get_pokemon_at_slot(next_state, *s))
+            && simulator_helpers::sky_drop_first_turn_fails(next_state, target)
+        {
+            return Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)]);
+        }
     }
 
     let targets = resolve_charge_targets(next_state, action, move_data)?;
 
-    simulator_helpers::add_invulnerable_volatile(attacker, action.move_name.clone(), targets.clone());
+    simulator_helpers::add_invulnerable_volatile(
+        attacker,
+        action.move_name.clone(),
+        targets.clone(),
+    );
     write_back_volatiles(next_state, action.user_slot, attacker.volatiles.clone());
 
     if action.move_name == PokemonMove::SkyDrop {
         for target_slot in &targets {
             if let Some(target_mon) = mon_at_slot_mut(next_state, *target_slot)
-                && !simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::SkyDrop) {
-                    target_mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, 2));
-                }
+                && !simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::SkyDrop)
+            {
+                target_mon
+                    .volatiles
+                    .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::SkyDrop,
+                        2,
+                    ));
+            }
         }
     }
 
@@ -370,17 +522,31 @@ fn handle_charging_first_turn(
     next_state: &mut BattleState,
 ) -> Option<Vec<(MatchState, f64)>> {
     let targets = resolve_charge_targets(next_state, action, move_data)?;
-    attacker.volatiles.push(crate::state::pokemon::VolatileStatusState::Charging(action.move_name.clone(), targets));
+    attacker
+        .volatiles
+        .push(crate::state::pokemon::VolatileStatusState::Charging(
+            action.move_name.clone(),
+            targets,
+        ));
     write_back_volatiles(next_state, action.user_slot, attacker.volatiles.clone());
 
-    if let Some(pp_idx) = attacker.moves.iter().position(|m| m.as_ref() == Some(&action.move_name))
+    if let Some(pp_idx) = attacker
+        .moves
+        .iter()
+        .position(|m| m.as_ref() == Some(&action.move_name))
         && let Some(mon) = mon_at_slot_mut(next_state, action.user_slot)
-            && let Some(pp) = mon.move_pp.get_mut(pp_idx) { *pp = pp.saturating_sub(1); }
+        && let Some(pp) = mon.move_pp.get_mut(pp_idx)
+    {
+        *pp = pp.saturating_sub(1);
+    }
 
-    simulator_helpers::emit(next_state, EventKind::ChargingMove {
-        user: action.user_slot,
-        move_used: action.move_name.clone(),
-    });
+    simulator_helpers::emit(
+        next_state,
+        EventKind::ChargingMove {
+            user: action.user_slot,
+            move_used: action.move_name.clone(),
+        },
+    );
     Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)])
 }
 
@@ -393,9 +559,12 @@ fn handle_charging_and_semi_invulnerability(
     move_data: &MoveData,
     next_state: &mut BattleState,
 ) -> Option<Vec<(MatchState, f64)>> {
-    let mut move_has_charge = simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Charge);
-    if matches!(action.move_name, PokemonMove::SolarBeam | PokemonMove::SolarBlade)
-        && simulator_helpers::weather_is_sunlight_for_slot(state, action.user_slot)
+    let mut move_has_charge =
+        simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Charge);
+    if matches!(
+        action.move_name,
+        PokemonMove::SolarBeam | PokemonMove::SolarBlade
+    ) && simulator_helpers::weather_is_sunlight_for_slot(state, action.user_slot)
     {
         move_has_charge = false;
     }
@@ -403,12 +572,19 @@ fn handle_charging_and_semi_invulnerability(
         move_has_charge = false;
     }
 
-    let move_causes_invulnerability = simulator_helpers::move_causes_invulnerability(&action.move_name);
+    let move_causes_invulnerability =
+        simulator_helpers::move_causes_invulnerability(&action.move_name);
 
     let charging_data = attacker.volatiles.iter().find_map(|v| {
         if let crate::state::pokemon::VolatileStatusState::Charging(mov, targets) = v {
-            if mov == &action.move_name { Some((v.clone(), targets.clone())) } else { None }
-        } else { None }
+            if mov == &action.move_name {
+                Some((v.clone(), targets.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     });
 
     let is_semi_invulnerable = attacker.volatiles.iter().any(|v| {
@@ -416,12 +592,28 @@ fn handle_charging_and_semi_invulnerability(
     });
 
     // ElectroShot / MeteorBeam: +1 SpA on the charge turn
-    if matches!(action.move_name, PokemonMove::ElectroShot | PokemonMove::MeteorBeam) && charging_data.is_none() {
+    if matches!(
+        action.move_name,
+        PokemonMove::ElectroShot | PokemonMove::MeteorBeam
+    ) && charging_data.is_none()
+    {
         let raised = attacker.boosts[2] < 6;
         attacker.boosts[2] = (attacker.boosts[2] + 1).clamp(-6, 6);
         if let Some(mon) = mon_at_slot_mut(next_state, action.user_slot) {
             mon.boosts = attacker.boosts;
-            if raised { mon.stats_raised_this_turn = true; }
+            if raised {
+                mon.stats_raised_this_turn = true;
+            }
+        }
+        if raised {
+            simulator_helpers::emit(
+                next_state,
+                EventKind::BoostChanged {
+                    target: action.user_slot,
+                    boost_idx: 2,
+                    stages: 1,
+                },
+            );
         }
     }
     // Skull Bash: +1 Def on the charge turn (boosts[1] = Defense).
@@ -430,7 +622,19 @@ fn handle_charging_and_semi_invulnerability(
         attacker.boosts[1] = (attacker.boosts[1] + 1).clamp(-6, 6);
         if let Some(mon) = mon_at_slot_mut(next_state, action.user_slot) {
             mon.boosts = attacker.boosts;
-            if raised { mon.stats_raised_this_turn = true; }
+            if raised {
+                mon.stats_raised_this_turn = true;
+            }
+        }
+        if raised {
+            simulator_helpers::emit(
+                next_state,
+                EventKind::BoostChanged {
+                    target: action.user_slot,
+                    boost_idx: 1,
+                    stages: 1,
+                },
+            );
         }
     }
 
@@ -451,8 +655,10 @@ fn handle_charging_and_semi_invulnerability(
         let items_suppressed = simulator_helpers::items_are_suppressed(next_state);
         let has_power_herb = !items_suppressed
             && simulator_helpers::get_pokemon_at_slot(next_state, action.user_slot)
-                .map(|m| simulator_helpers::item_is_active(next_state, m)
-                    && m.item == crate::data::item::Item::PowerHerb)
+                .map(|m| {
+                    simulator_helpers::item_is_active(next_state, m)
+                        && m.item == crate::data::item::Item::PowerHerb
+                })
                 .unwrap_or(false);
         if has_power_herb {
             // Consume the herb: clear the item slot, record for Recycle, and fire Unburden/Pickup.
@@ -460,14 +666,19 @@ fn handle_charging_and_semi_invulnerability(
                 mon.consumed_item = Some(crate::data::item::Item::PowerHerb);
                 mon.item = crate::data::item::Item::None;
                 mon.item_lost = true;
-                next_state.items_consumed_this_turn.push((action.user_slot, crate::data::item::Item::PowerHerb));
+                next_state
+                    .items_consumed_this_turn
+                    .push((action.user_slot, crate::data::item::Item::PowerHerb));
             }
             // item_lost = true bypasses the snapshot; emit directly.
-            simulator_helpers::emit(next_state, EventKind::ItemLost {
-                slot: action.user_slot,
-                item: Item::PowerHerb,
-                consumed: true,
-            });
+            simulator_helpers::emit(
+                next_state,
+                EventKind::ItemLost {
+                    slot: action.user_slot,
+                    item: Item::PowerHerb,
+                    consumed: true,
+                },
+            );
             // Fall through to damage (skip handle_charging_first_turn).
         } else {
             return handle_charging_first_turn(attacker, action, move_data, next_state);
@@ -477,10 +688,15 @@ fn handle_charging_and_semi_invulnerability(
     // Charging move's second turn: validate the stored target, then remove the volatile.
     if let Some((volatile_state, stored_targets)) = charging_data {
         if let Some(target_slot) = action.target_slot
-            && !stored_targets.contains(&target_slot) {
-                return Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)]);
-            }
-        if let Some(pos) = attacker.volatiles.iter().position(|v| std::mem::discriminant(v) == std::mem::discriminant(&volatile_state)) {
+            && !stored_targets.contains(&target_slot)
+        {
+            return Some(vec![(MatchState::BattleState(next_state.clone()), 1.0)]);
+        }
+        if let Some(pos) = attacker
+            .volatiles
+            .iter()
+            .position(|v| std::mem::discriminant(v) == std::mem::discriminant(&volatile_state))
+        {
             attacker.volatiles.remove(pos);
         }
         write_back_volatiles(next_state, action.user_slot, attacker.volatiles.clone());
@@ -498,8 +714,16 @@ fn multihit_hit_count_branches(
 ) -> Vec<(u8, f64)> {
     if *move_name == PokemonMove::BeatUp {
         let team_members: Vec<&PokemonState> = match user_slot.player {
-            Player::P1 => state.p1_active_mons.iter().chain(state.p1_back_mons.iter()).collect(),
-            Player::P2 => state.p2_active_mons.iter().chain(state.p2_back_mons.iter()).collect(),
+            Player::P1 => state
+                .p1_active_mons
+                .iter()
+                .chain(state.p1_back_mons.iter())
+                .collect(),
+            Player::P2 => state
+                .p2_active_mons
+                .iter()
+                .chain(state.p2_back_mons.iter())
+                .collect(),
         };
 
         let eligible_count = team_members
@@ -519,13 +743,19 @@ fn multihit_hit_count_branches(
         return vec![(min_hits.max(1), 1.0)];
     }
 
-    let skill_link_active = !simulator_helpers::abilities_are_suppressed(state) && attacker.ability == Ability::SkillLink;
+    let skill_link_active = !simulator_helpers::abilities_are_suppressed(state)
+        && attacker.ability == Ability::SkillLink;
     if skill_link_active {
         return vec![(5, 1.0)];
     }
 
     if min_hits == 2 && max_hits == 5 {
-        vec![(2, 7.0 / 20.0), (3, 7.0 / 20.0), (4, 3.0 / 20.0), (5, 3.0 / 20.0)]
+        vec![
+            (2, 7.0 / 20.0),
+            (3, 7.0 / 20.0),
+            (4, 3.0 / 20.0),
+            (5, 3.0 / 20.0),
+        ]
     } else {
         vec![(max_hits.max(min_hits).max(1), 1.0)]
     }
@@ -544,8 +774,16 @@ fn multihit_hit_base_power(
         PokemonMove::PopulationBomb => Some(20),
         PokemonMove::BeatUp => {
             let team_members: Vec<&PokemonState> = match user_slot.player {
-                Player::P1 => state.p1_active_mons.iter().chain(state.p1_back_mons.iter()).collect(),
-                Player::P2 => state.p2_active_mons.iter().chain(state.p2_back_mons.iter()).collect(),
+                Player::P1 => state
+                    .p1_active_mons
+                    .iter()
+                    .chain(state.p1_back_mons.iter())
+                    .collect(),
+                Player::P2 => state
+                    .p2_active_mons
+                    .iter()
+                    .chain(state.p2_back_mons.iter())
+                    .collect(),
             };
 
             let eligible_members: Vec<&PokemonState> = team_members
@@ -555,7 +793,7 @@ fn multihit_hit_base_power(
 
             let hit_mon = eligible_members.get(hit_index as usize)?;
             let species_data = pokemon_dex.get(&hit_mon.species)?;
-            Some(species_data.base_stats[1] / 10 + 5  )
+            Some(species_data.base_stats[1] / 10 + 5)
         }
         _ => None,
     }
@@ -580,11 +818,13 @@ fn apply_single_hit_branch(
     // strike — the species check fails once busted.
     if damage > 0 {
         let disguise_blocks = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
-            .map(|m| m.species == Species::Mimikyu
-                && m.ability == Ability::Disguise
-                && !m.fainted
-                && m.pre_transform.is_none()
-                && !simulator_helpers::pokemon_ability_is_suppressed(&branch_state, m))
+            .map(|m| {
+                m.species == Species::Mimikyu
+                    && m.ability == Ability::Disguise
+                    && !m.fainted
+                    && m.pre_transform.is_none()
+                    && !simulator_helpers::pokemon_ability_is_suppressed(&branch_state, m)
+            })
             .unwrap_or(false);
         if disguise_blocks {
             damage = 0;
@@ -592,7 +832,9 @@ fn apply_single_hit_branch(
             let as_ = simulator_helpers::abilities_are_suppressed(&branch_state);
             let mut busted_fainted = false;
             let mut chip_hp_max = (0u16, 1u16);
-            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, target_slot) {
+            if let Some(mon) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, target_slot)
+            {
                 mon.species = Species::MimikyuBusted;
                 let chip = (mon.stats[0] / 8).max(1);
                 simulator_helpers::take_damage(mon, chip, env, as_);
@@ -606,17 +848,34 @@ fn apply_single_hit_branch(
             // so it must be emitted (previously silent, causing observed HP to desync).
             if let Some(observer) = branch_state.event_observer {
                 let new_hp = simulator_helpers::observed_hp_value(
-                    observer, target_slot.player, chip_hp_max.0, chip_hp_max.1,
+                    observer,
+                    target_slot.player,
+                    chip_hp_max.0,
+                    chip_hp_max.1,
                 );
-                simulator_helpers::emit(&mut branch_state, EventKind::DamageDealt { target: target_slot, new_hp, max_hp: chip_hp_max.1 });
+                simulator_helpers::emit(
+                    &mut branch_state,
+                    EventKind::DamageDealt {
+                        target: target_slot,
+                        new_hp,
+                        max_hp: chip_hp_max.1,
+                    },
+                );
             }
-            simulator_helpers::emit(&mut branch_state, EventKind::FormeChange {
-                slot: target_slot,
-                into: Species::MimikyuBusted,
-                permanent: true,
-            });
+            simulator_helpers::emit(
+                &mut branch_state,
+                EventKind::FormeChange {
+                    slot: target_slot,
+                    into: Species::MimikyuBusted,
+                    permanent: true,
+                },
+            );
             if busted_fainted {
-                simulator_helpers::handle_pokemon_faint(&mut branch_state, target_slot.player, target_slot.slot_index);
+                simulator_helpers::handle_pokemon_faint(
+                    &mut branch_state,
+                    target_slot.player,
+                    target_slot.slot_index,
+                );
                 simulator_helpers::emit(&mut branch_state, EventKind::Faint { slot: target_slot });
             }
         }
@@ -630,13 +889,14 @@ fn apply_single_hit_branch(
         let sub_hp = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
             .map(simulator_helpers::get_substitute_hp)
             .unwrap_or(0);
-        let bypasses = simulator_helpers::attack_bypasses_substitute(
-            &branch_state, attack_slot, move_data,
-        );
+        let bypasses =
+            simulator_helpers::attack_bypasses_substitute(&branch_state, attack_slot, move_data);
         if sub_hp > 0 && !bypasses {
             branch_state.sub_damage_dealt += damage as u32;
             let sub_broke = damage >= sub_hp;
-            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, target_slot) {
+            if let Some(mon) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut branch_state, target_slot)
+            {
                 if sub_broke {
                     simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Substitute(0));
                 } else {
@@ -645,10 +905,13 @@ fn apply_single_hit_branch(
             }
             // Emit VolatileEnd for the broken substitute after the borrow ends.
             if sub_broke {
-                simulator_helpers::emit(&mut branch_state, EventKind::VolatileEnd {
-                    target: target_slot,
-                    volatile: VolatileStatus::Substitute(0),
-                });
+                simulator_helpers::emit(
+                    &mut branch_state,
+                    EventKind::VolatileEnd {
+                        target: target_slot,
+                        volatile: VolatileStatus::Substitute(0),
+                    },
+                );
             }
             outcomes.push((branch_state, branch_probability));
             return outcomes;
@@ -672,7 +935,11 @@ fn apply_single_hit_branch(
             (Some(atk), Some(tgt)) => {
                 let at = simulator_helpers::effective_move_type(&branch_state, atk, move_data);
                 let eff = if *move_name == PokemonMove::FlyingPress {
-                    simulator_helpers::flying_press_type_effectiveness(&branch_state, Some(atk), tgt)
+                    simulator_helpers::flying_press_type_effectiveness(
+                        &branch_state,
+                        Some(atk),
+                        tgt,
+                    )
                 } else {
                     simulator_helpers::move_type_effectiveness(&branch_state, &at, tgt)
                 };
@@ -685,10 +952,17 @@ fn apply_single_hit_branch(
     // Type-absorption abilities (Volt/Water Absorb, Earth Eater, Sap Sipper, Motor Drive,
     // Flash Fire, Dry Skin-Water) absorb the hit entirely: no secondary effects, no endure.
     // Lightning Rod / Storm Drain are draw-in abilities handled earlier (pre-accuracy gate).
-    let attacker_for_absorb = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot).cloned();
+    let attacker_for_absorb =
+        simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot).cloned();
     if let Some(atk) = attacker_for_absorb {
         let mut branch_state_absorb = branch_state.clone();
-        if simulator_helpers::try_absorb_move(&mut branch_state_absorb, target_slot, &atk, move_data, items_suppressed) {
+        if simulator_helpers::try_absorb_move(
+            &mut branch_state_absorb,
+            target_slot,
+            &atk,
+            move_data,
+            items_suppressed,
+        ) {
             // Ability absorbed the move — `try_absorb_move` itself nests the Immune event
             // (and the heal/boost/volatile it grants) as a reaction under the ability's own
             // AbilityRevealed, so nothing further to emit here.
@@ -703,8 +977,8 @@ fn apply_single_hit_branch(
     // damage) rather than the raw `damage` this function was called with.
 
     // Snapshot pre-hit HP for Innards Out, which deals back min(computed_damage, pre_hit_hp).
-    let target_pre_hit_hp = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
-        .map_or(0, |m| m.hp);
+    let target_pre_hit_hp =
+        simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot).map_or(0, |m| m.hp);
 
     // Focus Sash / Focus Band / Sturdy endure outcomes. Each entry is (eff_damage, consume_item, prob).
     // - Normal case:   one entry  (damage, false, 1.0)
@@ -715,24 +989,33 @@ fn apply_single_hit_branch(
     let target_ability_suppressed = {
         let attacker_breaks = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot)
             .is_some_and(|a| simulator_helpers::attacker_breaks_mold(&branch_state, a));
-        simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
-            .is_some_and(|t|
-                simulator_helpers::pokemon_ability_is_suppressed(&branch_state, t)
-                    || (attacker_breaks && simulator_helpers::ability_is_ignorable(&t.ability)))
+        simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot).is_some_and(|t| {
+            simulator_helpers::pokemon_ability_is_suppressed(&branch_state, t)
+                || (attacker_breaks && simulator_helpers::ability_is_ignorable(&t.ability))
+        })
     };
     let endure_outcomes = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
         .map_or_else(
             || vec![(damage, false, 1.0)],
-            |t| simulator_helpers::compute_endure_outcomes(t, damage, items_suppressed, target_ability_suppressed),
+            |t| {
+                simulator_helpers::compute_endure_outcomes(
+                    t,
+                    damage,
+                    items_suppressed,
+                    target_ability_suppressed,
+                )
+            },
         );
 
     // A Sheer Force-boosted move must not trigger the target's Berserk, which lives in the
     // generic apply_damage/take_damage HP-loss path (a deliberate broadened-trigger divergence).
     // We suppress it by snapshotting/restoring boosts[2] and stats_raised_this_turn around the hit.
     let sheer_force_boosted = simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot)
-        .is_some_and(|a| !simulator_helpers::pokemon_ability_is_suppressed(&branch_state, a)
-            && a.ability == Ability::SheerForce
-            && simulator_helpers::move_has_sheer_force_secondary(move_data));
+        .is_some_and(|a| {
+            !simulator_helpers::pokemon_ability_is_suppressed(&branch_state, a)
+                && a.ability == Ability::SheerForce
+                && simulator_helpers::move_has_sheer_force_secondary(move_data)
+        });
 
     let n = endure_outcomes.len();
     // Use Option so the last iteration can move out of branch_state without cloning.
@@ -744,6 +1027,41 @@ fn apply_single_hit_branch(
         } else {
             branch_state_opt.take().unwrap()
         };
+
+        // A successful Sturdy or Focus Band activation is public battle information.
+        // Record which mechanism produced this branch before mutating the target so
+        // the event stream can both reveal it and tell damage inference that the
+        // visible HP loss was capped at 1 rather than the move's true rolled damage.
+        // Endure takes precedence and is already public from its MoveUsed event;
+        // Focus Sash is represented by the ItemLost event emitted later.
+        let (sturdy_activated, focus_band_activated) = simulator_helpers::get_pokemon_at_slot(
+            &bs,
+            target_slot,
+        )
+        .map_or((false, false), |target| {
+            let survival_capped = eff_damage < damage;
+            let endure_active = target.volatiles.iter().any(|volatile| {
+                matches!(
+                    volatile,
+                    crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::Endure,
+                        _
+                    )
+                )
+            });
+            let sturdy = survival_capped
+                && !endure_active
+                && !target_ability_suppressed
+                && target.ability == Ability::Sturdy
+                && target.hp == target.stats[0].max(1);
+            let focus_band = survival_capped
+                && !endure_active
+                && !sturdy
+                && !items_suppressed
+                && !simulator_helpers::klutz_disables_item(target)
+                && target.item == Item::FocusBand;
+            (sturdy, focus_band)
+        });
 
         let mut sand_spit_triggered = false;
         let mut seed_sower_triggered = false;
@@ -806,7 +1124,11 @@ fn apply_single_hit_branch(
                 && !simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::GastroAcid)
                 && !as_
             {
-                Some((target_mon.hp, target_mon.stats[0].max(1), target_mon.boosts[2]))
+                Some((
+                    target_mon.hp,
+                    target_mon.stats[0].max(1),
+                    target_mon.boosts[2],
+                ))
             } else {
                 None
             };
@@ -820,14 +1142,14 @@ fn apply_single_hit_branch(
             // after this block when the BattleState borrow is free again.
             if let Some((hp_before, max_hp_b, old_boost)) = berserk_pre_for_emit
                 && !target_mon.fainted
-                    && (hp_before as u32) * 2 > (max_hp_b as u32)
-                    && (target_mon.hp as u32) * 2 <= (max_hp_b as u32)
-                {
-                    let delta = target_mon.boosts[2] - old_boost;
-                    if delta > 0 {
-                        berserk_delta_for_emit = Some(delta);
-                    }
+                && (hp_before as u32) * 2 > (max_hp_b as u32)
+                && (target_mon.hp as u32) * 2 <= (max_hp_b as u32)
+            {
+                let delta = target_mon.boosts[2] - old_boost;
+                if delta > 0 {
+                    berserk_delta_for_emit = Some(delta);
                 }
+            }
             // Capture post-damage (pre-berry) HP for DamageDealt emission below.
             if bs.event_observer.is_some() && eff_damage > 0 {
                 damage_dealt_hp_info = Some((target_mon.hp, target_mon.stats[0]));
@@ -853,7 +1175,8 @@ fn apply_single_hit_branch(
             // Substitute-absorbed hits do not reach this site so they are naturally excluded.
             if matches!(
                 move_data.category,
-                crate::state::dex_data::MoveCategory::Physical | crate::state::dex_data::MoveCategory::Special
+                crate::state::dex_data::MoveCategory::Physical
+                    | crate::state::dex_data::MoveCategory::Special
             ) {
                 target_mon.times_hit = target_mon.times_hit.saturating_add(1);
             }
@@ -888,7 +1211,10 @@ fn apply_single_hit_branch(
             }
 
             // Air Balloon pops on any hit (use original `damage` as the "was hit" signal).
-            if damage > 0 && target_item_active && matches!(target_mon.item, crate::data::item::Item::AirBalloon) {
+            if damage > 0
+                && target_item_active
+                && matches!(target_mon.item, crate::data::item::Item::AirBalloon)
+            {
                 target_mon.item = crate::data::item::Item::None;
             }
 
@@ -905,17 +1231,24 @@ fn apply_single_hit_branch(
             }
 
             let frozen_status_before = target_mon.status.clone();
-            simulator_helpers::handle_unfreeze_on_damage(target_mon, move_data.thaws_target, &move_data.pokemon_type, eff_damage);
+            simulator_helpers::handle_unfreeze_on_damage(
+                target_mon,
+                move_data.thaws_target,
+                &move_data.pokemon_type,
+                eff_damage,
+            );
             if let Some(status @ Status::Frozen(_)) = frozen_status_before
-                && target_mon.status.is_none() {
-                    frozen_thawed_by_damage = Some(status);
-                }
+                && target_mon.status.is_none()
+            {
+                frozen_thawed_by_damage = Some(status);
+            }
 
             if *move_name == PokemonMove::Uproar
-                && let Some(crate::state::dex_data::Status::Sleep(_)) = target_mon.status {
-                    target_mon.status = None;
-                    uproar_woke_target = true;
-                }
+                && let Some(crate::state::dex_data::Status::Sleep(_)) = target_mon.status
+            {
+                target_mon.status = None;
+                uproar_woke_target = true;
+            }
 
             if *move_name == PokemonMove::SkyDrop {
                 simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::SkyDrop);
@@ -935,13 +1268,20 @@ fn apply_single_hit_branch(
                     ));
                     bs.action_queue.retain(|a| {
                         if let Action::MoveAction(ma) = a {
-                            !(ma.user_slot == target_slot && matches!(ma.move_name, PokemonMove::Fly | PokemonMove::Bounce))
-                        } else { true }
+                            !(ma.user_slot == target_slot
+                                && matches!(ma.move_name, PokemonMove::Fly | PokemonMove::Bounce))
+                        } else {
+                            true
+                        }
                     });
                 }
-                smack_down_removed_magnet_rise = simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::MagnetRise);
+                smack_down_removed_magnet_rise =
+                    simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::MagnetRise);
                 simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::MagnetRise);
-                smack_down_removed_telekinesis = simulator_helpers::has_status_volatile(target_mon, &VolatileStatus::Telekinesis);
+                smack_down_removed_telekinesis = simulator_helpers::has_status_volatile(
+                    target_mon,
+                    &VolatileStatus::Telekinesis,
+                );
                 simulator_helpers::remove_status_volatile(target_mon, &VolatileStatus::Telekinesis);
             }
 
@@ -958,11 +1298,12 @@ fn apply_single_hit_branch(
                         Player::P1 => bs.p1_active_mons.get_mut(attack_slot.slot_index as usize),
                         Player::P2 => bs.p2_active_mons.get_mut(attack_slot.slot_index as usize),
                     }
-                        && !attacker.fainted {
-                            attacker.hp = 0;
-                            attacker.fainted = true;
-                            simulator_helpers::clear_pokemon_on_faint(attacker);
-                        }
+                    && !attacker.fainted
+                {
+                    attacker.hp = 0;
+                    attacker.fainted = true;
+                    simulator_helpers::clear_pokemon_on_faint(attacker);
+                }
             }
         }
 
@@ -989,7 +1330,13 @@ fn apply_single_hit_branch(
             // Only emit the event when there is an observer — the IllusionEnded event is
             // information-facing and should not surface when observability is disabled.
             if bs.event_observer.is_some() {
-                simulator_helpers::emit(&mut bs, EventKind::IllusionEnded { slot: target_slot, actual_species });
+                simulator_helpers::emit(
+                    &mut bs,
+                    EventKind::IllusionEnded {
+                        slot: target_slot,
+                        actual_species,
+                    },
+                );
             }
         }
 
@@ -1001,68 +1348,123 @@ fn apply_single_hit_branch(
         // iteration dealt no real damage — target_fainted is then never true in practice).
         let run_damage_reactions = |bs: &mut BattleState| {
             if is_crit && eff_damage > 0 {
-                simulator_helpers::emit(bs, EventKind::Crit { target: target_slot });
+                simulator_helpers::emit(
+                    bs,
+                    EventKind::Crit {
+                        target: target_slot,
+                    },
+                );
             }
 
             if target_fainted {
-                simulator_helpers::handle_pokemon_faint(bs, target_slot.player, target_slot.slot_index);
-                simulator_helpers::with_reactions(bs, EventKind::Faint { slot: target_slot }, |bs| {
-                    // Moxie: +1 Attack on a direct KO, only if the attacker survived (no
-                    // recoil-KO trigger). Stacks naturally across multi-target / multi-hit KOs.
-                    let items_suppressed = simulator_helpers::items_are_suppressed(bs);
-                    let attacker_alive = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
-                        .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(bs, m)
-                            && m.ability == Ability::Moxie)
-                        .unwrap_or(false);
-                    if attacker_alive {
-                        simulator_helpers::apply_reaction_self_boost(bs, attack_slot, Ability::Moxie, &[1, 0, 0, 0, 0, 0, 0]);
-                    }
-
-                    // Eelevate: +1 in the holder's highest non-HP base stat when it directly KOs a
-                    // target with a damaging move. Fires after Moxie for ordering consistency.
-                    let eelevate_alive = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
-                        .map(|m| !m.fainted && !simulator_helpers::pokemon_ability_is_suppressed(bs, m)
-                            && m.ability == Ability::Eelevate)
-                        .unwrap_or(false);
-                    if eelevate_alive {
-                        let boost_index = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
-                            .map(simulator_helpers::highest_boostable_stat_index);
-                        if let Some(boost_index) = boost_index {
-                            let mut boosts = [0i8; 7];
-                            boosts[boost_index] = 1;
-                            simulator_helpers::apply_reaction_self_boost(bs, attack_slot, Ability::Eelevate, &boosts);
+                simulator_helpers::handle_pokemon_faint(
+                    bs,
+                    target_slot.player,
+                    target_slot.slot_index,
+                );
+                simulator_helpers::with_reactions(
+                    bs,
+                    EventKind::Faint { slot: target_slot },
+                    |bs| {
+                        // Moxie: +1 Attack on a direct KO, only if the attacker survived (no
+                        // recoil-KO trigger). Stacks naturally across multi-target / multi-hit KOs.
+                        let items_suppressed = simulator_helpers::items_are_suppressed(bs);
+                        let attacker_alive =
+                            simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                                .map(|m| {
+                                    !m.fainted
+                                        && !simulator_helpers::pokemon_ability_is_suppressed(bs, m)
+                                        && m.ability == Ability::Moxie
+                                })
+                                .unwrap_or(false);
+                        if attacker_alive {
+                            simulator_helpers::apply_reaction_self_boost(
+                                bs,
+                                attack_slot,
+                                Ability::Moxie,
+                                &[1, 0, 0, 0, 0, 0, 0],
+                            );
                         }
-                    }
 
-                    // Fell Stinger: +3 Attack when the user directly KOs a target with this move.
-                    // Fires regardless of ability; only requires the attacker is still alive.
-                    // This is a move effect (no ability reveal), so its BoostChanged nests
-                    // directly under Faint rather than under a reveal.
-                    if *move_name == PokemonMove::FellStinger {
-                        let attacker_still_alive = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
-                            .map(|m| !m.fainted)
-                            .unwrap_or(false);
-                        if attacker_still_alive {
-                            let fs_delta = if let Some(atk) = simulator_helpers::get_pokemon_at_slot_mut(bs, attack_slot) {
-                                simulator_helpers::apply_stat_boost_external(atk, &[3, 0, 0, 0, 0, 0, 0], items_suppressed)
-                            } else { [0i8; 7] };
-                            for (boost_idx, &stages) in fs_delta.iter().enumerate() {
-                                if stages != 0 { simulator_helpers::emit(bs, EventKind::BoostChanged { target: attack_slot, boost_idx, stages }); }
+                        // Eelevate: +1 in the holder's highest non-HP base stat when it directly KOs a
+                        // target with a damaging move. Fires after Moxie for ordering consistency.
+                        let eelevate_alive =
+                            simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                                .map(|m| {
+                                    !m.fainted
+                                        && !simulator_helpers::pokemon_ability_is_suppressed(bs, m)
+                                        && m.ability == Ability::Eelevate
+                                })
+                                .unwrap_or(false);
+                        if eelevate_alive {
+                            let boost_index =
+                                simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                                    .map(simulator_helpers::highest_boostable_stat_index);
+                            if let Some(boost_index) = boost_index {
+                                let mut boosts = [0i8; 7];
+                                boosts[boost_index] = 1;
+                                simulator_helpers::apply_reaction_self_boost(
+                                    bs,
+                                    attack_slot,
+                                    Ability::Eelevate,
+                                    &boosts,
+                                );
                             }
                         }
-                    }
-                });
+
+                        // Fell Stinger: +3 Attack when the user directly KOs a target with this move.
+                        // Fires regardless of ability; only requires the attacker is still alive.
+                        // This is a move effect (no ability reveal), so its BoostChanged nests
+                        // directly under Faint rather than under a reveal.
+                        if *move_name == PokemonMove::FellStinger {
+                            let attacker_still_alive =
+                                simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                                    .map(|m| !m.fainted)
+                                    .unwrap_or(false);
+                            if attacker_still_alive {
+                                let fs_delta = if let Some(atk) =
+                                    simulator_helpers::get_pokemon_at_slot_mut(bs, attack_slot)
+                                {
+                                    simulator_helpers::apply_stat_boost_external(
+                                        atk,
+                                        &[3, 0, 0, 0, 0, 0, 0],
+                                        items_suppressed,
+                                    )
+                                } else {
+                                    [0i8; 7]
+                                };
+                                for (boost_idx, &stages) in fs_delta.iter().enumerate() {
+                                    if stages != 0 {
+                                        simulator_helpers::emit(
+                                            bs,
+                                            EventKind::BoostChanged {
+                                                target: attack_slot,
+                                                boost_idx,
+                                                stages,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    },
+                );
 
                 // Destiny Bond: if the attacker was taken down by the target's Destiny Bond,
                 // process their faint now (after all KO bonuses so Moxie/Fell Stinger can't
                 // fire on a mon that killed itself via Destiny Bond). This Faint belongs to the
                 // ATTACKER — a different Pokemon than the one whose Faint reactions we just
                 // nested above — so it stays a sibling rather than nesting further.
-                let attacker_destiny_bonded = simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
-                    .map(|m| m.fainted)
-                    .unwrap_or(false);
+                let attacker_destiny_bonded =
+                    simulator_helpers::get_pokemon_at_slot(bs, attack_slot)
+                        .map(|m| m.fainted)
+                        .unwrap_or(false);
                 if attacker_destiny_bonded {
-                    simulator_helpers::handle_pokemon_faint(bs, attack_slot.player, attack_slot.slot_index);
+                    simulator_helpers::handle_pokemon_faint(
+                        bs,
+                        attack_slot.player,
+                        attack_slot.slot_index,
+                    );
                     // A self-faint shows no damage line in-game — Faint alone conveys HP 0
                     // (the inference Faint handler zeroes HP).
                     simulator_helpers::emit(bs, EventKind::Faint { slot: attack_slot });
@@ -1070,11 +1472,40 @@ fn apply_single_hit_branch(
             }
         };
 
+        if sturdy_activated {
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::AbilityRevealed {
+                    slot: target_slot,
+                    ability: Ability::Sturdy,
+                },
+            );
+        }
+        if focus_band_activated {
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::ItemRevealed {
+                    slot: target_slot,
+                    item: Item::FocusBand,
+                },
+            );
+        }
+
         // Emit DamageDealt now that the target_mon borrow has ended, nesting Crit/Faint (and
         // Faint's own KO-triggered reactions) underneath it.
-        if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, damage_dealt_hp_info) {
-            let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
-            simulator_helpers::with_reactions(&mut bs, EventKind::DamageDealt { target: target_slot, new_hp: pokemon_hp, max_hp }, run_damage_reactions);
+        if let (Some(observer), Some((new_hp, max_hp))) = (bs.event_observer, damage_dealt_hp_info)
+        {
+            let pokemon_hp =
+                simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
+            simulator_helpers::with_reactions(
+                &mut bs,
+                EventKind::DamageDealt {
+                    target: target_slot,
+                    new_hp: pokemon_hp,
+                    max_hp,
+                },
+                run_damage_reactions,
+            );
         } else {
             run_damage_reactions(&mut bs);
         }
@@ -1083,81 +1514,162 @@ fn apply_single_hit_branch(
         // Berry!" is the popup a player sees, the heal is its consequence. The
         // early emission marks item_lost so the end-of-action ledger sweep
         // (process_item_loss_events) doesn't emit a duplicate.
-        if let (Some(observer), Some((new_hp, max_hp, berry))) = (bs.event_observer, berry_heal_hp_info) {
-            let pokemon_hp = simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
+        if let (Some(observer), Some((new_hp, max_hp, berry))) =
+            (bs.event_observer, berry_heal_hp_info)
+        {
+            let pokemon_hp =
+                simulator_helpers::observed_hp_value(observer, target_slot.player, new_hp, max_hp);
             simulator_helpers::emit_item_consumed_with(&mut bs, target_slot, berry, |bs| {
-                simulator_helpers::emit(bs, EventKind::Healed { target: target_slot, new_hp: pokemon_hp, max_hp });
+                simulator_helpers::emit(
+                    bs,
+                    EventKind::Healed {
+                        target: target_slot,
+                        new_hp: pokemon_hp,
+                        max_hp,
+                    },
+                );
             });
         }
 
         // S44: emit the Fire-move/thaws-target thaw now that the target_mon borrow has
         // ended — see `frozen_thawed_by_damage`'s doc comment above.
         if let Some(status) = frozen_thawed_by_damage {
-            simulator_helpers::emit(&mut bs, EventKind::StatusCured { target: target_slot, status });
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::StatusCured {
+                    target: target_slot,
+                    status,
+                },
+            );
         }
 
         // Uproar waking this (sleeping) target — same silent-mutation fix pattern as
         // the Frozen-thaw case just above; previously invisible to the observer
         // (masked today only by StatusInflicted's Sleep-conflict self-heal).
         if uproar_woke_target {
-            simulator_helpers::emit(&mut bs, EventKind::StatusCured { target: target_slot, status: Status::Sleep(0) });
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::StatusCured {
+                    target: target_slot,
+                    status: Status::Sleep(0),
+                },
+            );
         }
 
         // Berserk: HP crossed from above 50% to ≤ 50% — emit reveal + SpA boost nested under it.
         if let Some(delta) = berserk_delta_for_emit {
-            simulator_helpers::with_reactions(&mut bs, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::Berserk }, |bs| {
-                simulator_helpers::emit(bs, EventKind::BoostChanged { target: target_slot, boost_idx: 2, stages: delta });
-            });
+            simulator_helpers::with_reactions(
+                &mut bs,
+                EventKind::AbilityRevealed {
+                    slot: target_slot,
+                    ability: Ability::Berserk,
+                },
+                |bs| {
+                    simulator_helpers::emit(
+                        bs,
+                        EventKind::BoostChanged {
+                            target: target_slot,
+                            boost_idx: 2,
+                            stages: delta,
+                        },
+                    );
+                },
+            );
         }
 
         // Emit Smack Down's volatile removals now that the target_mon borrow has ended.
         if smack_down_removed_magnet_rise {
-            simulator_helpers::emit(&mut bs, EventKind::VolatileEnd { target: target_slot, volatile: VolatileStatus::MagnetRise });
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::VolatileEnd {
+                    target: target_slot,
+                    volatile: VolatileStatus::MagnetRise,
+                },
+            );
         }
         if smack_down_removed_telekinesis {
-            simulator_helpers::emit(&mut bs, EventKind::VolatileEnd { target: target_slot, volatile: VolatileStatus::Telekinesis });
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::VolatileEnd {
+                    target: target_slot,
+                    volatile: VolatileStatus::Telekinesis,
+                },
+            );
         }
 
         if sand_spit_triggered {
             // Sand Spit also respects Smooth Rock (8 turns instead of 5).
             let dur = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
-                .map(|m| simulator_helpers::weather_rock_duration(m, &crate::state::dex_data::Weather::Sandstorm))
+                .map(|m| {
+                    simulator_helpers::weather_rock_duration(
+                        m,
+                        &crate::state::dex_data::Weather::Sandstorm,
+                    )
+                })
                 .unwrap_or(5);
-            simulator_helpers::with_reactions(&mut bs, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::SandSpit }, |bs| {
-                simulator_helpers::set_weather(bs, crate::state::dex_data::Weather::Sandstorm, dur);
-            });
+            simulator_helpers::with_reactions(
+                &mut bs,
+                EventKind::AbilityRevealed {
+                    slot: target_slot,
+                    ability: Ability::SandSpit,
+                },
+                |bs| {
+                    simulator_helpers::set_weather(
+                        bs,
+                        crate::state::dex_data::Weather::Sandstorm,
+                        dur,
+                    );
+                },
+            );
         }
 
         if seed_sower_triggered {
-            simulator_helpers::with_reactions(&mut bs, EventKind::AbilityRevealed { slot: target_slot, ability: Ability::SeedSower }, |bs| {
-                simulator_helpers::set_terrain(bs, crate::state::dex_data::Terrain::GrassyTerrain, 5);
-            });
+            simulator_helpers::with_reactions(
+                &mut bs,
+                EventKind::AbilityRevealed {
+                    slot: target_slot,
+                    ability: Ability::SeedSower,
+                },
+                |bs| {
+                    simulator_helpers::set_terrain(
+                        bs,
+                        crate::state::dex_data::Terrain::GrassyTerrain,
+                        5,
+                    );
+                },
+            );
         }
 
-        if matches!(move_name, PokemonMove::IceSpinner | PokemonMove::SteelRoller) {
+        if matches!(
+            move_name,
+            PokemonMove::IceSpinner | PokemonMove::SteelRoller
+        ) {
             simulator_helpers::clear_terrain(&mut bs);
         }
 
         // Eerie Spell: 80 BP Psychic; on hit remove 3 PP from target's last-used move.
         // The secondary: { onHit } is a JS function body the parser skips; applied here.
-        if *move_name == PokemonMove::EerieSpell && eff_damage > 0
+        if *move_name == PokemonMove::EerieSpell
+            && eff_damage > 0
             && let Some(last_mv) = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
                 .and_then(|t| t.last_used_move.clone())
-            {
-                let slot_idx = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
-                    .and_then(|t| t.moves.iter().position(|m| m.as_ref() == Some(&last_mv)));
-                if let Some(idx) = slot_idx {
-                    let current_pp = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
-                        .map(|t| t.move_pp[idx]).unwrap_or(0);
-                    if current_pp > 0
-                        && let Some(tgt) = match target_slot.player {
-                            Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
-                            Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
-                        } {
-                            tgt.move_pp[idx] = current_pp.saturating_sub(3);
-                        }
+        {
+            let slot_idx = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+                .and_then(|t| t.moves.iter().position(|m| m.as_ref() == Some(&last_mv)));
+            if let Some(idx) = slot_idx {
+                let current_pp = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
+                    .map(|t| t.move_pp[idx])
+                    .unwrap_or(0);
+                if current_pp > 0
+                    && let Some(tgt) = match target_slot.player {
+                        Player::P1 => bs.p1_active_mons.get_mut(target_slot.slot_index as usize),
+                        Player::P2 => bs.p2_active_mons.get_mut(target_slot.slot_index as usize),
+                    }
+                {
+                    tgt.move_pp[idx] = current_pp.saturating_sub(3);
                 }
             }
+        }
 
         // A type-immune hit from a damaging move (Physical/Special, eff_damage == 0 despite
         // hit == true — see the crash-damage comment above) doesn't affect the target at
@@ -1167,17 +1679,31 @@ fn apply_single_hit_branch(
         // eff_damage == 0 here but are not gated — their self_boost must still apply and
         // emit, so the gate is scoped to the damaging categories only.
         let immune_zero_damage = eff_damage == 0
-            && matches!(move_data.category, crate::state::dex_data::MoveCategory::Physical | crate::state::dex_data::MoveCategory::Special);
+            && matches!(
+                move_data.category,
+                crate::state::dex_data::MoveCategory::Physical
+                    | crate::state::dex_data::MoveCategory::Special
+            );
         if immune_zero_damage {
             // Reached here only once every ability/item immunity gate above has already
             // been ruled out (Bulletproof, Soundproof, Overcoat, type-absorption, etc. all
             // `continue` earlier), so a 0x-effectiveness hit landing here is pure type-chart
             // immunity (Normal/Fighting → Ghost, Electric → Ground with no Volt Absorb, …) —
             // no ability to reveal, just the flat, publicly-known typing.
-            simulator_helpers::emit(&mut bs, EventKind::Immune { target: target_slot });
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::Immune {
+                    target: target_slot,
+                },
+            );
             outcomes.push((bs, branch_probability * endure_prob));
         } else {
-            let sec_branches = simulator_helpers::apply_secondary_effects(&bs, attack_slot, target_slot, move_data);
+            let sec_branches = simulator_helpers::apply_secondary_effects(
+                &bs,
+                attack_slot,
+                target_slot,
+                move_data,
+            );
             for (sec_bs, sec_prob) in sec_branches {
                 outcomes.push((sec_bs, branch_probability * endure_prob * sec_prob));
             }
@@ -1189,7 +1715,13 @@ fn apply_single_hit_branch(
     // which is what Innards Out and other "deal back damage" abilities need.
     let damage_dealt_clamped = damage.min(target_pre_hit_hp);
     outcomes = simulator_helpers::apply_contact_hit_reactions(
-        outcomes, target_slot, attack_slot, move_name, move_data, damage_dealt_clamped, is_crit,
+        outcomes,
+        target_slot,
+        attack_slot,
+        move_name,
+        move_data,
+        damage_dealt_clamped,
+        is_crit,
     );
 
     outcomes
@@ -1208,13 +1740,16 @@ fn resolve_multihit_move_for_target(
     invulnerability_multiplier: f64,
     pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Vec<(BattleState, f64)> {
-    let Some(_initial_target) = simulator_helpers::get_pokemon_at_slot(state, target_slot).cloned() else {
+    let Some(_initial_target) = simulator_helpers::get_pokemon_at_slot(state, target_slot).cloned()
+    else {
         return vec![];
     };
 
-    let skill_link_active = !simulator_helpers::abilities_are_suppressed(state) && attacker.ability == Ability::SkillLink;
+    let skill_link_active = !simulator_helpers::abilities_are_suppressed(state)
+        && attacker.ability == Ability::SkillLink;
     let shared_rolls = simulator_helpers::shared_multihit_damage_rolls_enabled();
-    let hit_count_branches = multihit_hit_count_branches(state, attacker, attack_slot, move_name, move_data);
+    let hit_count_branches =
+        multihit_hit_count_branches(state, attacker, attack_slot, move_name, move_data);
     // Gates whether HitCount is emitted after the per-hit loop.
     let is_genuinely_multihit = *move_name == PokemonMove::BeatUp
         || move_data.multihit_range[0] > 0
@@ -1227,24 +1762,48 @@ fn resolve_multihit_move_for_target(
         // early because a hit missed (a miss on any hit ends the move — all-or-nothing for
         // default multi-hit moves, "keep what already landed" for per-hit-accuracy moves like
         // Triple Kick — it must not let a later hit in the same branch auto-hit).
-        let mut sequence_branches: Vec<(BattleState, f64, Option<u8>, u32, bool)> = vec![(state.clone(), hit_probability, None, 0, false)];
+        let mut sequence_branches: Vec<(BattleState, f64, Option<u8>, u32, bool)> =
+            vec![(state.clone(), hit_probability, None, 0, false)];
 
         for hit_index in 0..hit_count {
-            let mut next_sequence_branches: Vec<(BattleState, f64, Option<u8>, u32, bool)> = Vec::new();
+            let mut next_sequence_branches: Vec<(BattleState, f64, Option<u8>, u32, bool)> =
+                Vec::new();
 
-            for (branch_state, branch_probability, shared_roll, hits_landed, stopped) in sequence_branches {
+            for (branch_state, branch_probability, shared_roll, hits_landed, stopped) in
+                sequence_branches
+            {
                 if stopped {
-                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed, stopped));
+                    next_sequence_branches.push((
+                        branch_state,
+                        branch_probability,
+                        shared_roll,
+                        hits_landed,
+                        stopped,
+                    ));
                     continue;
                 }
 
-                let Some(current_target) = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot).cloned() else {
-                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed, stopped));
+                let Some(current_target) =
+                    simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot).cloned()
+                else {
+                    next_sequence_branches.push((
+                        branch_state,
+                        branch_probability,
+                        shared_roll,
+                        hits_landed,
+                        stopped,
+                    ));
                     continue;
                 };
 
                 if current_target.fainted {
-                    next_sequence_branches.push((branch_state, branch_probability, shared_roll, hits_landed, stopped));
+                    next_sequence_branches.push((
+                        branch_state,
+                        branch_probability,
+                        shared_roll,
+                        hits_landed,
+                        stopped,
+                    ));
                     continue;
                 }
 
@@ -1262,22 +1821,35 @@ fn resolve_multihit_move_for_target(
                         attack_slot,
                         target_slot,
                         move_data,
-                    ).clamp(0.0, 1.0)
+                    )
+                    .clamp(0.0, 1.0)
                 } else {
                     1.0
                 };
 
                 if hit_accuracy_probability < 1.0 {
                     let mut miss_state = branch_state.clone();
-                    simulator_helpers::emit(&mut miss_state, EventKind::Missed { target: target_slot });
-                    next_sequence_branches.push((miss_state, branch_probability * (1.0 - hit_accuracy_probability), shared_roll, hits_landed, true));
+                    simulator_helpers::emit(
+                        &mut miss_state,
+                        EventKind::Missed {
+                            target: target_slot,
+                        },
+                    );
+                    next_sequence_branches.push((
+                        miss_state,
+                        branch_probability * (1.0 - hit_accuracy_probability),
+                        shared_roll,
+                        hits_landed,
+                        true,
+                    ));
                 }
 
                 if hit_accuracy_probability <= 0.0 {
                     continue;
                 }
 
-                let base_power_override = multihit_hit_base_power(state, attack_slot, move_name, hit_index, pokemon_dex);
+                let base_power_override =
+                    multihit_hit_base_power(state, attack_slot, move_name, hit_index, pokemon_dex);
                 let selected_rolls = if shared_rolls && shared_roll.is_none() {
                     simulator_helpers::selected_damage_rolls(config.damage_rolls)
                 } else {
@@ -1287,7 +1859,55 @@ fn resolve_multihit_move_for_target(
                 if shared_rolls && shared_roll.is_none() {
                     let roll_probability = 1.0 / selected_rolls.len() as f64;
                     for roll in selected_rolls {
-                        let hit_outcomes = simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+                        let hit_outcomes =
+                            simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+                                state,
+                                attacker,
+                                &current_target,
+                                attack_slot,
+                                target_slot,
+                                move_data,
+                                config,
+                                targets_multiplier,
+                                invulnerability_multiplier,
+                                base_power_override,
+                                Some(roll),
+                            );
+
+                        for (damage, is_crit, damage_probability) in hit_outcomes {
+                            for (next_state, next_probability) in apply_single_hit_branch(
+                                branch_state.clone(),
+                                target_slot,
+                                move_name,
+                                move_data,
+                                damage,
+                                attack_slot,
+                                branch_probability
+                                    * hit_accuracy_probability
+                                    * damage_probability
+                                    * roll_probability,
+                                is_crit,
+                            ) {
+                                // Count only damaging hits toward King's Rock combined chance.
+                                let new_hits = if damage > 0 {
+                                    hits_landed + 1
+                                } else {
+                                    hits_landed
+                                };
+                                next_sequence_branches.push((
+                                    next_state,
+                                    next_probability,
+                                    Some(roll),
+                                    new_hits,
+                                    false,
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    let forced_roll = shared_roll;
+                    let hit_outcomes =
+                        simulator_helpers::calculate_damage_outcomes_for_target_with_options(
                             state,
                             attacker,
                             &current_target,
@@ -1298,41 +1918,8 @@ fn resolve_multihit_move_for_target(
                             targets_multiplier,
                             invulnerability_multiplier,
                             base_power_override,
-                            Some(roll),
+                            forced_roll,
                         );
-
-                        for (damage, is_crit, damage_probability) in hit_outcomes {
-                            for (next_state, next_probability) in apply_single_hit_branch(
-                                branch_state.clone(),
-                                target_slot,
-                                move_name,
-                                move_data,
-                                damage,
-                                attack_slot,
-                                branch_probability * hit_accuracy_probability * damage_probability * roll_probability,
-                                is_crit,
-                            ) {
-                                // Count only damaging hits toward King's Rock combined chance.
-                                let new_hits = if damage > 0 { hits_landed + 1 } else { hits_landed };
-                                next_sequence_branches.push((next_state, next_probability, Some(roll), new_hits, false));
-                            }
-                        }
-                    }
-                } else {
-                    let forced_roll = shared_roll;
-                    let hit_outcomes = simulator_helpers::calculate_damage_outcomes_for_target_with_options(
-                        state,
-                        attacker,
-                        &current_target,
-                        attack_slot,
-                        target_slot,
-                        move_data,
-                        config,
-                        targets_multiplier,
-                        invulnerability_multiplier,
-                        base_power_override,
-                        forced_roll,
-                    );
 
                     for (damage, is_crit, damage_probability) in hit_outcomes {
                         for (next_state, next_probability) in apply_single_hit_branch(
@@ -1346,8 +1933,18 @@ fn resolve_multihit_move_for_target(
                             is_crit,
                         ) {
                             // Count only damaging hits toward King's Rock combined chance.
-                            let new_hits = if damage > 0 { hits_landed + 1 } else { hits_landed };
-                            next_sequence_branches.push((next_state, next_probability, shared_roll, new_hits, false));
+                            let new_hits = if damage > 0 {
+                                hits_landed + 1
+                            } else {
+                                hits_landed
+                            };
+                            next_sequence_branches.push((
+                                next_state,
+                                next_probability,
+                                shared_roll,
+                                new_hits,
+                                false,
+                            ));
                         }
                     }
                 }
@@ -1364,7 +1961,8 @@ fn resolve_multihit_move_for_target(
             // see `sample_one_branch_renormalized`'s doc comment for the general pattern).
             sequence_branches = if config.sample {
                 let total_weight: f64 = next_sequence_branches.iter().map(|b| b.1).sum();
-                let mut survivor = simulator_helpers::sample_one_weighted(next_sequence_branches, |b| b.1);
+                let mut survivor =
+                    simulator_helpers::sample_one_weighted(next_sequence_branches, |b| b.1);
                 if let Some(b) = survivor.first_mut() {
                     b.1 = total_weight;
                 }
@@ -1381,10 +1979,13 @@ fn resolve_multihit_move_for_target(
             // A branch where every hit missed (hits_landed == 0) already emitted `Missed`
             // when the first hit's accuracy check failed — don't also claim "Hit 0 time(s)".
             if is_genuinely_multihit && hits_landed > 0 {
-                simulator_helpers::emit(&mut branch_state, EventKind::HitCount {
-                    target: target_slot,
-                    hits: hits_landed.min(255) as u8,
-                });
+                simulator_helpers::emit(
+                    &mut branch_state,
+                    EventKind::HitCount {
+                        target: target_slot,
+                        hits: hits_landed.min(255) as u8,
+                    },
+                );
             }
             let branches = simulator_helpers::apply_kings_rock_flinch(
                 vec![(branch_state, branch_probability)],
@@ -1414,10 +2015,16 @@ fn no_effect_outcome(
     confusion_outcomes: &Option<Vec<(MatchState, f64)>>,
 ) -> Vec<(MatchState, f64)> {
     let mut no_effect_state = state.clone();
-    decrement_move_pp(&mut no_effect_state, action.user_slot, &action.move_name, None);
+    decrement_move_pp(
+        &mut no_effect_state,
+        action.user_slot,
+        &action.move_name,
+        None,
+    );
 
     if let Some(confusion) = confusion_outcomes {
-        let mut combined: Vec<(MatchState, f64)> = confusion.iter()
+        let mut combined: Vec<(MatchState, f64)> = confusion
+            .iter()
             .map(|(st, p)| (st.clone(), p * (1.0 / 3.0)))
             .collect();
         combined.push((MatchState::BattleState(no_effect_state), 2.0 / 3.0));
@@ -1438,9 +2045,14 @@ fn status_move_self_outcome(
     let has_confusion = confusion_self_hit_outcomes.is_some();
     let mut result: Vec<(MatchState, f64)> = Vec::new();
     if let Some(c) = confusion_self_hit_outcomes {
-        for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
+        for (s, p) in c {
+            result.push((s.clone(), p * (1.0 / 3.0)));
+        }
     }
-    result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
+    result.push((
+        MatchState::BattleState(next_state),
+        if has_confusion { 2.0 / 3.0 } else { 1.0 },
+    ));
     simulator_helpers::coalesce_branches(result)
 }
 
@@ -1459,26 +2071,42 @@ fn possible_damage_outcomes_for_move(
     // Reset per-action flag; a Cant from a PREVIOUS action must not bleed into this one.
     next_state.move_was_prevented = false;
 
-    let Some(mut attacker) = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).cloned() else {
+    let Some(mut attacker) =
+        simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).cloned()
+    else {
         return vec![(MatchState::BattleState(next_state), 1.0)];
     };
 
     // RandomNormal targeting (e.g. Outrage/Thrash in doubles): if no concrete target was given
     // and multiple foes are alive, fork into one equally-weighted branch per foe. The recursive
     // calls carry a concrete `target_slot`, so this block runs only once per action.
-    if move_data.target == crate::state::dex_data::MoveTarget::RandomNormal && action.target_slot.is_none() {
+    if move_data.target == crate::state::dex_data::MoveTarget::RandomNormal
+        && action.target_slot.is_none()
+    {
         let foe_player = match action.user_slot.player {
             Player::P1 => Player::P2,
             Player::P2 => Player::P1,
         };
         let live_foes: Vec<FieldSlot> = match foe_player {
-            Player::P1 => next_state.p1_active_mons.iter().enumerate()
+            Player::P1 => next_state
+                .p1_active_mons
+                .iter()
+                .enumerate()
                 .filter(|(_, m)| !m.fainted)
-                .map(|(i, _)| FieldSlot { player: foe_player, slot_index: i as u8 })
+                .map(|(i, _)| FieldSlot {
+                    player: foe_player,
+                    slot_index: i as u8,
+                })
                 .collect(),
-            Player::P2 => next_state.p2_active_mons.iter().enumerate()
+            Player::P2 => next_state
+                .p2_active_mons
+                .iter()
+                .enumerate()
                 .filter(|(_, m)| !m.fainted)
-                .map(|(i, _)| FieldSlot { player: foe_player, slot_index: i as u8 })
+                .map(|(i, _)| FieldSlot {
+                    player: foe_player,
+                    slot_index: i as u8,
+                })
                 .collect(),
         };
         if live_foes.len() > 1 {
@@ -1488,7 +2116,13 @@ fn possible_damage_outcomes_for_move(
                 let mut pinned_action = action.clone();
                 pinned_action.target_slot = Some(foe);
                 for (st, p) in possible_damage_outcomes_for_move(
-                    state, &pinned_action, move_data, config, move_dex, pokemon_dex, is_called_move,
+                    state,
+                    &pinned_action,
+                    move_data,
+                    config,
+                    move_dex,
+                    pokemon_dex,
+                    is_called_move,
                 ) {
                     out.push((st, p * weight));
                 }
@@ -1512,73 +2146,126 @@ fn possible_damage_outcomes_for_move(
             0
         };
         attacker.consecutive_move_count = new_count;
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             mon.consecutive_move_count = new_count;
         }
     }
 
     simulator_helpers::decrement_move_statuses(&mut attacker);
-    write_back_volatiles(&mut next_state, action.user_slot, attacker.volatiles.clone());
+    write_back_volatiles(
+        &mut next_state,
+        action.user_slot,
+        attacker.volatiles.clone(),
+    );
 
     // Using any non-stalling move ends a consecutive-protect streak (the stalling handler below
     // manages the counter on its own success/fail branches).
     if !move_data.stalling_move
-        && let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.stall_counter = 0;
-        }
+        && let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot)
+    {
+        mon.stall_counter = 0;
+    }
 
     // Moves with the CantUseTwice flag (Gigaton Hammer, Blood Moon) cannot be selected on
     // consecutive turns; the blocking volatile is applied on every use attempt (hit, miss, or
     // blocked) per Bulbapedia.
     if simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::CantUseTwice)
-        && let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
-            let already_blocked = mon.volatiles.iter().any(|v| matches!(
+        && let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot)
+    {
+        let already_blocked = mon.volatiles.iter().any(|v| matches!(
                 v,
                 crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::CantUseRepeatedly(m), _) if m == &action.move_name
             ));
-            if !already_blocked {
-                // Duration 1: blocks exactly the next turn's selection, then drops during
-                // that turn's decrement_move_statuses. (decrement runs after selection.)
-                mon.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(
-                    VolatileStatus::CantUseRepeatedly(action.move_name.clone()), 1,
+        if !already_blocked {
+            // Duration 1: blocks exactly the next turn's selection, then drops during
+            // that turn's decrement_move_statuses. (decrement runs after selection.)
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
+                    VolatileStatus::CantUseRepeatedly(action.move_name.clone()),
+                    1,
                 ));
-            }
         }
+    }
     // Ally Switch counter resets when any move OTHER than Ally Switch is used.
     if action.move_name != PokemonMove::AllySwitch
-        && let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.ally_switch_counter = 0;
-        }
+        && let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot)
+    {
+        mon.ally_switch_counter = 0;
+    }
 
-    if attacker.volatiles.iter().any(|v| matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Flinch, _))) {
-        if let Some(pos) = attacker.volatiles.iter().position(|v| matches!(v, crate::state::pokemon::VolatileStatusState::Charging(_, _) | crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _))) {
+    if attacker.volatiles.iter().any(|v| {
+        matches!(
+            v,
+            crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Flinch, _)
+        )
+    }) {
+        if let Some(pos) = attacker.volatiles.iter().position(|v| {
+            matches!(
+                v,
+                crate::state::pokemon::VolatileStatusState::Charging(_, _)
+                    | crate::state::pokemon::VolatileStatusState::MoveStatus(
+                        VolatileStatus::SemiInvulnerable(_),
+                        _
+                    )
+            )
+        }) {
             attacker.volatiles.remove(pos);
-            write_back_volatiles(&mut next_state, action.user_slot, attacker.volatiles.clone());
+            write_back_volatiles(
+                &mut next_state,
+                action.user_slot,
+                attacker.volatiles.clone(),
+            );
         }
         // A move prevented by flinching counts as failed (Stomping Tantrum / Micle Berry), and a
         // flinched stalling move couldn't execute, so its protect streak resets too.
-        simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Cant(CantReason::Flinch));
+        simulator_helpers::note_move_outcome(
+            &mut next_state,
+            action.user_slot,
+            simulator_helpers::MoveOutcome::Cant(CantReason::Flinch),
+        );
         if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
             mon.stall_counter = 0;
         }
         // Flinch disrupts a rampage lock. Pass attacks_completed (count-up counter) from `attacker`.
         let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
-            if let crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+            if let crate::state::pokemon::VolatileStatusState::MoveStatus(
+                VolatileStatus::LockedMove(_),
+                t,
+            ) = v
+            {
+                Some(*t)
+            } else {
+                None
+            }
         });
         if let Some(turns) = rampage_lock_turns {
-            let is_misty = matches!(next_state.terrain, Some(crate::state::dex_data::Terrain::MistyTerrain));
-            let confusion_added = if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
-                disrupt_rampage_lock(mon, turns, is_misty)
-            } else { false };
-            simulator_helpers::emit(&mut next_state, EventKind::VolatileEnd {
-                target: action.user_slot,
-                volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
-            });
-            if confusion_added {
-                simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+            let is_misty = matches!(
+                next_state.terrain,
+                Some(crate::state::dex_data::Terrain::MistyTerrain)
+            );
+            let confusion_added =
+                if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                    disrupt_rampage_lock(mon, turns, is_misty)
+                } else {
+                    false
+                };
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileEnd {
                     target: action.user_slot,
-                    volatile: VolatileStatus::Confusion,
-                });
+                    volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
+                },
+            );
+            if confusion_added {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::VolatileStart {
+                        target: action.user_slot,
+                        volatile: VolatileStatus::Confusion,
+                    },
+                );
             }
         }
         return vec![(MatchState::BattleState(next_state), 1.0)];
@@ -1592,63 +2279,107 @@ fn possible_damage_outcomes_for_move(
     if action.move_name != PokemonMove::Struggle {
         let blocked_by_taunt = matches!(move_data.category, MoveCategory::Status)
             && simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::Taunt);
-        let blocked_by_throat_chop = simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Sound)
-            && simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::ThroatChop);
+        let blocked_by_throat_chop =
+            simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Sound)
+                && simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::ThroatChop);
         let blocked_by_disable = attacker.volatiles.iter().any(|v| matches!(
             v,
             crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Disable(m), _) if *m == action.move_name
         ));
         // Imprison: if any opposing active mon holds the Imprison volatile AND knows this move,
         // the move is blocked (no PP consumed, counts as failed).
-        let opponent_player = match action.user_slot.player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+        let opponent_player = match action.user_slot.player {
+            Player::P1 => Player::P2,
+            Player::P2 => Player::P1,
+        };
         let blocked_by_imprison = {
             let opp_mons = match opponent_player {
                 Player::P1 => &next_state.p1_active_mons,
                 Player::P2 => &next_state.p2_active_mons,
             };
-            opp_mons.iter().any(|m| !m.fainted
-                && simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison)
-                && m.moves.iter().any(|slot| slot.as_ref() == Some(&action.move_name)))
+            opp_mons.iter().any(|m| {
+                !m.fainted
+                    && simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison)
+                    && m.moves
+                        .iter()
+                        .any(|slot| slot.as_ref() == Some(&action.move_name))
+            })
         };
         if blocked_by_taunt || blocked_by_throat_chop || blocked_by_disable || blocked_by_imprison {
             // Determine the most specific Cant reason (checked in priority order).
-            let cant_reason = if blocked_by_taunt { CantReason::Taunt }
-                else if blocked_by_throat_chop { CantReason::ThroatChop }
-                else if blocked_by_disable { CantReason::Disable }
-                else { CantReason::Imprison };
-            simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Cant(cant_reason));
+            let cant_reason = if blocked_by_taunt {
+                CantReason::Taunt
+            } else if blocked_by_throat_chop {
+                CantReason::ThroatChop
+            } else if blocked_by_disable {
+                CantReason::Disable
+            } else {
+                CantReason::Imprison
+            };
+            simulator_helpers::note_move_outcome(
+                &mut next_state,
+                action.user_slot,
+                simulator_helpers::MoveOutcome::Cant(cant_reason),
+            );
             if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
                 mon.stall_counter = 0;
             }
             // Disable/Taunt/ThroatChop disrupts a rampage lock.
             let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
-                if let crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+                if let crate::state::pokemon::VolatileStatusState::MoveStatus(
+                    VolatileStatus::LockedMove(_),
+                    t,
+                ) = v
+                {
+                    Some(*t)
+                } else {
+                    None
+                }
             });
             if let Some(turns) = rampage_lock_turns {
-                let is_misty = matches!(next_state.terrain, Some(crate::state::dex_data::Terrain::MistyTerrain));
-                let confusion_added = if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
-                    disrupt_rampage_lock(mon, turns, is_misty)
-                } else { false };
-                simulator_helpers::emit(&mut next_state, EventKind::VolatileEnd {
-                    target: action.user_slot,
-                    volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
-                });
-                if confusion_added {
-                    simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
+                let is_misty = matches!(
+                    next_state.terrain,
+                    Some(crate::state::dex_data::Terrain::MistyTerrain)
+                );
+                let confusion_added =
+                    if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                        disrupt_rampage_lock(mon, turns, is_misty)
+                    } else {
+                        false
+                    };
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::VolatileEnd {
                         target: action.user_slot,
-                        volatile: VolatileStatus::Confusion,
-                    });
+                        volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
+                    },
+                );
+                if confusion_added {
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::VolatileStart {
+                            target: action.user_slot,
+                            volatile: VolatileStatus::Confusion,
+                        },
+                    );
                 }
             }
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
     }
 
-    if let Some(outcomes) = handle_charging_and_semi_invulnerability(state, &mut attacker, action, move_data, &mut next_state) {
+    if let Some(outcomes) = handle_charging_and_semi_invulnerability(
+        state,
+        &mut attacker,
+        action,
+        move_data,
+        &mut next_state,
+    ) {
         return outcomes;
     }
 
-    let move_has_recharge = simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Recharge);
+    let move_has_recharge =
+        simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Recharge);
 
     // Struggle has no moveset slot — it's forced when no usable move exists.
     // For all other moves, locate the PP slot; bail if the move isn't in the moveset.
@@ -1667,8 +2398,16 @@ fn possible_damage_outcomes_for_move(
     // Verify the move still has PP (unless it's Struggle, which skips PP tracking).
     if let Some(idx) = pp_index {
         let current_pp = match action.user_slot.player {
-            Player::P1 => next_state.p1_active_mons.get(action.user_slot.slot_index as usize).map(|mon| mon.move_pp[idx]).unwrap_or(0),
-            Player::P2 => next_state.p2_active_mons.get(action.user_slot.slot_index as usize).map(|mon| mon.move_pp[idx]).unwrap_or(0),
+            Player::P1 => next_state
+                .p1_active_mons
+                .get(action.user_slot.slot_index as usize)
+                .map(|mon| mon.move_pp[idx])
+                .unwrap_or(0),
+            Player::P2 => next_state
+                .p2_active_mons
+                .get(action.user_slot.slot_index as usize)
+                .map(|mon| mon.move_pp[idx])
+                .unwrap_or(0),
         };
         if current_pp == 0 {
             // Should not be reachable — generate_commands_for_active filters 0-PP moves,
@@ -1681,13 +2420,19 @@ fn possible_damage_outcomes_for_move(
     let mut move_data = move_data;
     if move_name == PokemonMove::NaturePower
         && let Some(replacement_move) = simulator_helpers::terrain_replacement_move(&next_state)
-            && let Some(replacement_data) = move_dex.get(&replacement_move) {
-                move_name = replacement_move;
-                move_data = replacement_data;
-            }
+        && let Some(replacement_data) = move_dex.get(&replacement_move)
+    {
+        move_name = replacement_move;
+        move_data = replacement_data;
+    }
 
     if move_name == PokemonMove::Splash {
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -1697,51 +2442,93 @@ fn possible_damage_outcomes_for_move(
     if move_name != PokemonMove::Struggle {
         let protean_result = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
             .and_then(|mon| {
-                if mon.is_tera { return None; }
-                if simulator_helpers::pokemon_ability_is_suppressed(&next_state, mon) { return None; }
-                if !matches!(mon.ability, Ability::Protean | Ability::Libero) { return None; }
-                if simulator_helpers::has_status_volatile(mon, &VolatileStatus::ProteanActivated) { return None; }
+                if mon.is_tera {
+                    return None;
+                }
+                if simulator_helpers::pokemon_ability_is_suppressed(&next_state, mon) {
+                    return None;
+                }
+                if !matches!(mon.ability, Ability::Protean | Ability::Libero) {
+                    return None;
+                }
+                if simulator_helpers::has_status_volatile(mon, &VolatileStatus::ProteanActivated) {
+                    return None;
+                }
                 let move_type = simulator_helpers::effective_move_type(&next_state, mon, move_data);
                 // Skip if already a single type matching the move type
-                if mon.types.len() == 1 && mon.types[0] == move_type { return None; }
+                if mon.types.len() == 1 && mon.types[0] == move_type {
+                    return None;
+                }
                 Some(move_type)
             });
         if let Some(new_type) = protean_result {
-            let protean_ability = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-                .map(|m| m.ability.clone())
-                .unwrap_or(Ability::Protean);
-            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            let protean_ability =
+                simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                    .map(|m| m.ability.clone())
+                    .unwrap_or(Ability::Protean);
+            if let Some(mon) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+            {
                 mon.types = vec![new_type.clone()];
-                mon.volatiles.retain(|v| !matches!(v,
-                    crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ForestsCurse, _)
-                    | crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::TrickorTreat, _)
-                ));
-                mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ProteanActivated, 0));
+                mon.volatiles.retain(|v| {
+                    !matches!(
+                        v,
+                        crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            VolatileStatus::ForestsCurse,
+                            _
+                        ) | crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            VolatileStatus::TrickorTreat,
+                            _
+                        )
+                    )
+                });
+                mon.volatiles
+                    .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::ProteanActivated,
+                        0,
+                    ));
             }
             // The in-game message attributes the type change to the ability
             // ("[from] ability: Protean"), so nest the TypeChanged under the reveal.
-            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                slot: action.user_slot,
-                ability: protean_ability,
-            }, |next_state| {
-                simulator_helpers::emit(next_state, EventKind::TypeChanged {
+            simulator_helpers::with_reactions(
+                &mut next_state,
+                EventKind::AbilityRevealed {
                     slot: action.user_slot,
-                    new_types: vec![new_type],
-                });
-            });
+                    ability: protean_ability,
+                },
+                |next_state| {
+                    simulator_helpers::emit(
+                        next_state,
+                        EventKind::TypeChanged {
+                            slot: action.user_slot,
+                            new_types: vec![new_type],
+                        },
+                    );
+                },
+            );
         }
     }
 
-    if attacker.volatiles.iter().any(|volatile| matches!(volatile, crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _))) {
+    if attacker.volatiles.iter().any(|volatile| {
+        matches!(
+            volatile,
+            crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)
+        )
+    }) {
         let mut fail_state = pre_move_state.clone();
         if let Some(idx) = pp_index
             && let Some(mon) = match action.user_slot.player {
-                Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-                Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+                Player::P1 => fail_state
+                    .p1_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => fail_state
+                    .p2_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
             }
-                && let Some(pp) = mon.move_pp.get_mut(idx) {
-                    *pp = pp.saturating_sub(1);
-                }
+            && let Some(pp) = mon.move_pp.get_mut(idx)
+        {
+            *pp = pp.saturating_sub(1);
+        }
         return vec![(MatchState::BattleState(fail_state), 1.0)];
     }
 
@@ -1753,7 +2540,11 @@ fn possible_damage_outcomes_for_move(
                 matches!(pre.species, Species::Morpeko | Species::MorpekoHangry)
             });
         if !is_morpeko {
-            simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Failed);
+            simulator_helpers::note_move_outcome(
+                &mut next_state,
+                action.user_slot,
+                simulator_helpers::MoveOutcome::Failed,
+            );
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
     }
@@ -1766,15 +2557,28 @@ fn possible_damage_outcomes_for_move(
         && (simulator_helpers::weather_is_sunlight(&next_state)
             || simulator_helpers::move_thaws_user_on_use(move_data)
             || attacker.ability == Ability::MagmaArmor)
-        {
-            if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
-                mon.status = None;
-            }
-            attacker.status = None;
-            if let Some(ref s) = pre_move_status {
-                simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: action.user_slot, status: s.clone() });
-            }
+    {
+        if let Some(mon) = match action.user_slot.player {
+            Player::P1 => next_state
+                .p1_active_mons
+                .get_mut(action.user_slot.slot_index as usize),
+            Player::P2 => next_state
+                .p2_active_mons
+                .get_mut(action.user_slot.slot_index as usize),
+        } {
+            mon.status = None;
         }
+        attacker.status = None;
+        if let Some(ref s) = pre_move_status {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::StatusCured {
+                    target: action.user_slot,
+                    status: s.clone(),
+                },
+            );
+        }
+    }
 
     // Sleep/Frozen branching: determine chance to fail due to being frozen/asleep
     let mut status_fail_prob: f64 = 0.0;
@@ -1784,22 +2588,54 @@ fn possible_damage_outcomes_for_move(
                 if *n >= 2 {
                     // guaranteed thaw — copy counter before borrow is released by the mutation
                     let frozen_n_copy = *n;
-                    if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                    if let Some(mon) = match action.user_slot.player {
+                        Player::P1 => next_state
+                            .p1_active_mons
+                            .get_mut(action.user_slot.slot_index as usize),
+                        Player::P2 => next_state
+                            .p2_active_mons
+                            .get_mut(action.user_slot.slot_index as usize),
+                    } {
                         mon.status = None;
                     }
                     attacker.status = None;
-                    simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: action.user_slot, status: Status::Frozen(frozen_n_copy) });
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::StatusCured {
+                            target: action.user_slot,
+                            status: Status::Frozen(frozen_n_copy),
+                        },
+                    );
                 } else {
                     // 25% chance to thaw and execute
                     status_fail_prob = 0.75;
-                    if let Some(_mon) = match action.user_slot.player { Player::P1 => pre_move_state.p1_active_mons.get(action.user_slot.slot_index as usize), Player::P2 => pre_move_state.p2_active_mons.get(action.user_slot.slot_index as usize) } {
-                    }
+                    if let Some(_mon) = match action.user_slot.player {
+                        Player::P1 => pre_move_state
+                            .p1_active_mons
+                            .get(action.user_slot.slot_index as usize),
+                        Player::P2 => pre_move_state
+                            .p2_active_mons
+                            .get(action.user_slot.slot_index as usize),
+                    } {}
                     let frozen_status_copy = Status::Frozen(*n);
-                    if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                    if let Some(mon) = match action.user_slot.player {
+                        Player::P1 => next_state
+                            .p1_active_mons
+                            .get_mut(action.user_slot.slot_index as usize),
+                        Player::P2 => next_state
+                            .p2_active_mons
+                            .get_mut(action.user_slot.slot_index as usize),
+                    } {
                         mon.status = None;
                     }
                     attacker.status = None;
-                    simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: action.user_slot, status: frozen_status_copy });
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::StatusCured {
+                            target: action.user_slot,
+                            status: frozen_status_copy,
+                        },
+                    );
                 }
             }
             Status::Sleep(n) => {
@@ -1807,18 +2643,32 @@ fn possible_damage_outcomes_for_move(
                 // instead of n>=2 — this happens to be the correct wake_threshold for BOTH
                 // natural sleep and Rest-induced sleep under Champions' numbers (see the
                 // status_fail_prob branch below for where Rest actually differs).
-                let early_bird = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
-                    && attacker.ability == Ability::EarlyBird;
+                let early_bird =
+                    !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
+                        && attacker.ability == Ability::EarlyBird;
                 let rest_sleep = attacker.rest_sleep;
                 let wake_threshold: u8 = if early_bird { 1 } else { 2 };
                 if *n >= wake_threshold {
                     let sleep_n_copy = *n; // copy counter before borrow is released by the mutation
-                    if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                    if let Some(mon) = match action.user_slot.player {
+                        Player::P1 => next_state
+                            .p1_active_mons
+                            .get_mut(action.user_slot.slot_index as usize),
+                        Player::P2 => next_state
+                            .p2_active_mons
+                            .get_mut(action.user_slot.slot_index as usize),
+                    } {
                         mon.status = None;
                         mon.rest_sleep = false;
                     }
                     attacker.status = None;
-                    simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: action.user_slot, status: Status::Sleep(sleep_n_copy) });
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::StatusCured {
+                            target: action.user_slot,
+                            status: Status::Sleep(sleep_n_copy),
+                        },
+                    );
                 } else {
                     // If the move is usable while asleep (Snore), allow it to execute regardless of wake roll
                     if move_data.sleep_usable {
@@ -1856,12 +2706,25 @@ fn possible_damage_outcomes_for_move(
                         // (deterministic) for every mon prior to the Early Bird fix above.
                         if status_fail_prob < 1.0 {
                             let sleep_status_copy = Status::Sleep(*n);
-                            if let Some(mon) = match action.user_slot.player { Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+                            if let Some(mon) = match action.user_slot.player {
+                                Player::P1 => next_state
+                                    .p1_active_mons
+                                    .get_mut(action.user_slot.slot_index as usize),
+                                Player::P2 => next_state
+                                    .p2_active_mons
+                                    .get_mut(action.user_slot.slot_index as usize),
+                            } {
                                 mon.status = None;
                                 mon.rest_sleep = false;
                             }
                             attacker.status = None;
-                            simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: action.user_slot, status: sleep_status_copy });
+                            simulator_helpers::emit(
+                                &mut next_state,
+                                EventKind::StatusCured {
+                                    target: action.user_slot,
+                                    status: sleep_status_copy,
+                                },
+                            );
                         }
                     }
                 }
@@ -1870,7 +2733,9 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
-    if action.move_name == PokemonMove::SleepTalk && !matches!(attacker.status, Some(Status::Sleep(_))) {
+    if action.move_name == PokemonMove::SleepTalk
+        && !matches!(attacker.status, Some(Status::Sleep(_)))
+    {
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
 
@@ -1881,7 +2746,11 @@ fn possible_damage_outcomes_for_move(
         // confusion can still trigger a self-hit branch.
         if confusion_turns >= 1 {
             let mut confusion_state = next_state.clone();
-            write_back_volatiles(&mut confusion_state, action.user_slot, attacker.volatiles.clone());
+            write_back_volatiles(
+                &mut confusion_state,
+                action.user_slot,
+                attacker.volatiles.clone(),
+            );
 
             confusion_self_hit_outcomes = Some(resolve_confusion_self_hit_outcomes(
                 &confusion_state,
@@ -1893,7 +2762,11 @@ fn possible_damage_outcomes_for_move(
             next_state = confusion_state;
         } else {
             // Confusion expired; write back so the volatile is cleared in next_state too.
-            write_back_volatiles(&mut next_state, action.user_slot, attacker.volatiles.clone());
+            write_back_volatiles(
+                &mut next_state,
+                action.user_slot,
+                attacker.volatiles.clone(),
+            );
         }
     }
 
@@ -1921,14 +2794,19 @@ fn possible_damage_outcomes_for_move(
             None
         };
         if let Some(form) = new_form {
-            if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            if let Some(mon) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+            {
                 crate::state::battle::change_form(mon, form.clone(), pokemon_dex);
             }
-            simulator_helpers::emit(&mut next_state, EventKind::FormeChange {
-                slot: action.user_slot,
-                into: form.clone(),
-                permanent: false,
-            });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::FormeChange {
+                    slot: action.user_slot,
+                    into: form.clone(),
+                    permanent: false,
+                },
+            );
             // Keep the local attacker copy in sync — this move's damage must already
             // use the new forme's stats.
             crate::state::battle::change_form(&mut attacker, form, pokemon_dex);
@@ -1941,21 +2819,39 @@ fn possible_damage_outcomes_for_move(
 
         let mut candidates: Vec<PokemonMove> = Vec::new();
         for mv in attacker.moves.iter().flatten() {
-            if *mv == PokemonMove::SleepTalk { continue; }
+            if *mv == PokemonMove::SleepTalk {
+                continue;
+            }
             if let Some(md) = move_dex.get(mv) {
-                let is_charge = simulator_helpers::move_has_flag(md, &crate::state::dex_data::MoveFlag::Charge);
-                let no_sleep_talk = simulator_helpers::move_has_flag(md, &crate::state::dex_data::MoveFlag::NoSleepTalk);
-                if is_charge || no_sleep_talk { continue; }
+                let is_charge =
+                    simulator_helpers::move_has_flag(md, &crate::state::dex_data::MoveFlag::Charge);
+                let no_sleep_talk = simulator_helpers::move_has_flag(
+                    md,
+                    &crate::state::dex_data::MoveFlag::NoSleepTalk,
+                );
+                if is_charge || no_sleep_talk {
+                    continue;
+                }
             }
             candidates.push(mv.clone());
         }
 
         if candidates.is_empty() {
             let mut fail_state = next_state.clone();
-            if let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) }
-                && let Some(idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
-                    mon.move_pp[idx] = mon.move_pp[idx].saturating_sub(1);
-                }
+            if let Some(mon) = match action.user_slot.player {
+                Player::P1 => fail_state
+                    .p1_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => fail_state
+                    .p2_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
+            } && let Some(idx) = mon
+                .moves
+                .iter()
+                .position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk))
+            {
+                mon.move_pp[idx] = mon.move_pp[idx].saturating_sub(1);
+            }
             return vec![(MatchState::BattleState(fail_state), 1.0)];
         }
 
@@ -1968,24 +2864,50 @@ fn possible_damage_outcomes_for_move(
                 new_action.move_name = cand.clone();
                 let mut sleep_talk_state = next_state.clone();
                 if let Some(mon) = match action.user_slot.player {
-                    Player::P1 => sleep_talk_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-                    Player::P2 => sleep_talk_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+                    Player::P1 => sleep_talk_state
+                        .p1_active_mons
+                        .get_mut(action.user_slot.slot_index as usize),
+                    Player::P2 => sleep_talk_state
+                        .p2_active_mons
+                        .get_mut(action.user_slot.slot_index as usize),
                 } {
                     mon.status = None;
                 }
-                let branches = possible_damage_outcomes_for_move(&sleep_talk_state, &new_action, cand_data, config, move_dex, pokemon_dex, true);
+                let branches = possible_damage_outcomes_for_move(
+                    &sleep_talk_state,
+                    &new_action,
+                    cand_data,
+                    config,
+                    move_dex,
+                    pokemon_dex,
+                    true,
+                );
                 for (mut bs, p) in branches {
                     // For each returned state, revert PP consumption of the chosen move and consume SleepTalk PP instead
                     if let MatchState::BattleState(ref mut bstate) = bs
-                        && let Some(mon) = match action.user_slot.player { Player::P1 => bstate.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => bstate.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
-                            mon.status = original_sleep_status.clone();
-                            if let Some(cand_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(cand)) {
-                                mon.move_pp[cand_idx] = mon.move_pp[cand_idx].saturating_add(1);
-                            }
-                            if let Some(sleep_idx) = mon.moves.iter().position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk)) {
-                                mon.move_pp[sleep_idx] = mon.move_pp[sleep_idx].saturating_sub(1);
-                            }
+                        && let Some(mon) = match action.user_slot.player {
+                            Player::P1 => bstate
+                                .p1_active_mons
+                                .get_mut(action.user_slot.slot_index as usize),
+                            Player::P2 => bstate
+                                .p2_active_mons
+                                .get_mut(action.user_slot.slot_index as usize),
                         }
+                    {
+                        mon.status = original_sleep_status.clone();
+                        if let Some(cand_idx) =
+                            mon.moves.iter().position(|m| m.as_ref() == Some(cand))
+                        {
+                            mon.move_pp[cand_idx] = mon.move_pp[cand_idx].saturating_add(1);
+                        }
+                        if let Some(sleep_idx) = mon
+                            .moves
+                            .iter()
+                            .position(|m| m.as_ref() == Some(&PokemonMove::SleepTalk))
+                        {
+                            mon.move_pp[sleep_idx] = mon.move_pp[sleep_idx].saturating_sub(1);
+                        }
+                    }
                     combined.push((bs, p * choice_prob));
                 }
             }
@@ -1996,14 +2918,20 @@ fn possible_damage_outcomes_for_move(
                 .into_iter()
                 .map(|(state, probability)| (state, probability * (1.0 / 3.0)))
                 .collect::<Vec<_>>();
-            combined_confused.extend(combined.into_iter().map(|(state, probability)| (state, probability * (2.0 / 3.0))));
+            combined_confused.extend(
+                combined
+                    .into_iter()
+                    .map(|(state, probability)| (state, probability * (2.0 / 3.0))),
+            );
             return simulator_helpers::coalesce_branches(combined_confused);
         }
 
         return simulator_helpers::coalesce_branches(combined);
     }
 
-    if move_name == PokemonMove::SteelRoller && simulator_helpers::current_terrain(&next_state).is_none() {
+    if move_name == PokemonMove::SteelRoller
+        && simulator_helpers::current_terrain(&next_state).is_none()
+    {
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
     }
 
@@ -2012,50 +2940,74 @@ fn possible_damage_outcomes_for_move(
     // 1/3^streak, rolled here. Resolving before target/effect processing (rather than via the
     // generic self_secondary path) avoids double-adding the volatile.
     if move_data.stalling_move
-        && let Some(vol) = simulator_helpers::protect_volatile_for_move(&move_name) {
-            let counter = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-                .map(|m| m.stall_counter)
-                .unwrap_or(0);
-            let p_success = 1.0 / 3f64.powi(counter as i32);
+        && let Some(vol) = simulator_helpers::protect_volatile_for_move(&move_name)
+    {
+        let counter = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| m.stall_counter)
+            .unwrap_or(0);
+        let p_success = 1.0 / 3f64.powi(counter as i32);
 
-            let mut result: Vec<(MatchState, f64)> = Vec::new();
+        let mut result: Vec<(MatchState, f64)> = Vec::new();
 
-            // Success: set the protect volatile and grow the streak.
-            let mut succ = next_state.clone();
-            decrement_move_pp(&mut succ, action.user_slot, &action.move_name, Some(move_data));
-            if let Some(mon) = mon_at_slot_mut(&mut succ, action.user_slot) {
-                mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(vol.clone(), 1));
-                mon.stall_counter = mon.stall_counter.saturating_add(1);
-                mon.last_move_failed = false;
-            }
-            simulator_helpers::emit(&mut succ, EventKind::SingleMoveOrTurn {
+        // Success: set the protect volatile and grow the streak.
+        let mut succ = next_state.clone();
+        decrement_move_pp(
+            &mut succ,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
+        if let Some(mon) = mon_at_slot_mut(&mut succ, action.user_slot) {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    vol.clone(),
+                    1,
+                ));
+            mon.stall_counter = mon.stall_counter.saturating_add(1);
+            mon.last_move_failed = false;
+        }
+        simulator_helpers::emit(
+            &mut succ,
+            EventKind::SingleMoveOrTurn {
                 slot: action.user_slot,
                 move_used: action.move_name.clone(),
-            });
-            result.push((MatchState::BattleState(succ), p_success));
+            },
+        );
+        result.push((MatchState::BattleState(succ), p_success));
 
-            // Failure (only possible once the streak has decayed): the move does nothing and the
-            // streak resets.
-            if p_success < 1.0 {
-                let mut fail = next_state.clone();
-                decrement_move_pp(&mut fail, action.user_slot, &action.move_name, Some(move_data));
-                if let Some(mon) = mon_at_slot_mut(&mut fail, action.user_slot) {
-                    mon.stall_counter = 0;
-                }
-                simulator_helpers::note_move_outcome(&mut fail, action.user_slot, simulator_helpers::MoveOutcome::Failed);
-                result.push((MatchState::BattleState(fail), 1.0 - p_success));
+        // Failure (only possible once the streak has decayed): the move does nothing and the
+        // streak resets.
+        if p_success < 1.0 {
+            let mut fail = next_state.clone();
+            decrement_move_pp(
+                &mut fail,
+                action.user_slot,
+                &action.move_name,
+                Some(move_data),
+            );
+            if let Some(mon) = mon_at_slot_mut(&mut fail, action.user_slot) {
+                mon.stall_counter = 0;
             }
-
-            // Fold in the confusion self-hit branches, mirroring Attract/Disable.
-            if let Some(c) = &confusion_self_hit_outcomes {
-                let mut folded: Vec<(MatchState, f64)> =
-                    c.iter().map(|(s, p)| (s.clone(), p * (1.0 / 3.0))).collect();
-                folded.extend(result.into_iter().map(|(s, p)| (s, p * (2.0 / 3.0))));
-                return simulator_helpers::coalesce_branches(folded);
-            }
-            return simulator_helpers::coalesce_branches(result);
+            simulator_helpers::note_move_outcome(
+                &mut fail,
+                action.user_slot,
+                simulator_helpers::MoveOutcome::Failed,
+            );
+            result.push((MatchState::BattleState(fail), 1.0 - p_success));
         }
-        // Out-of-scope stalling move (e.g. Max Guard) — fall through to generic handling.
+
+        // Fold in the confusion self-hit branches, mirroring Attract/Disable.
+        if let Some(c) = &confusion_self_hit_outcomes {
+            let mut folded: Vec<(MatchState, f64)> = c
+                .iter()
+                .map(|(s, p)| (s.clone(), p * (1.0 / 3.0)))
+                .collect();
+            folded.extend(result.into_iter().map(|(s, p)| (s, p * (2.0 / 3.0))));
+            return simulator_helpers::coalesce_branches(folded);
+        }
+        return simulator_helpers::coalesce_branches(result);
+    }
+    // Out-of-scope stalling move (e.g. Max Guard) — fall through to generic handling.
 
     // Ally Switch: swap the user with their adjacent ally. Success decays 1/3^n per
     // consecutive use (independent from stall_counter). Fails in singles (no ally).
@@ -2067,13 +3019,22 @@ fn possible_damage_outcomes_for_move(
                 Player::P1 => &next_state.p1_active_mons,
                 Player::P2 => &next_state.p2_active_mons,
             };
-            actives.iter().enumerate()
+            actives
+                .iter()
+                .enumerate()
                 .find(|(i, m)| *i as u8 != user_slot.slot_index && !m.fainted)
-                .map(|(i, _)| FieldSlot { player: user_slot.player, slot_index: i as u8 })
+                .map(|(i, _)| FieldSlot {
+                    player: user_slot.player,
+                    slot_index: i as u8,
+                })
         };
         let Some(ally_slot) = ally_slot else {
             // Singles or no valid ally — move fails
-            simulator_helpers::note_move_outcome(&mut next_state, user_slot, simulator_helpers::MoveOutcome::Failed);
+            simulator_helpers::note_move_outcome(
+                &mut next_state,
+                user_slot,
+                simulator_helpers::MoveOutcome::Failed,
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
 
@@ -2110,10 +3071,14 @@ fn possible_damage_outcomes_for_move(
         // it now hits the ally (who slid into user_slot after the swap).
         for queued in succ.action_queue.iter_mut() {
             if let Action::MoveAction(ma) = queued
-                && let Some(ref mut ts) = ma.target_slot {
-                    if *ts == user_slot { *ts = ally_slot; }
-                    else if *ts == ally_slot { *ts = user_slot; }
+                && let Some(ref mut ts) = ma.target_slot
+            {
+                if *ts == user_slot {
+                    *ts = ally_slot;
+                } else if *ts == ally_slot {
+                    *ts = user_slot;
                 }
+            }
         }
         result.push((MatchState::BattleState(succ), p_success));
 
@@ -2124,13 +3089,19 @@ fn possible_damage_outcomes_for_move(
             if let Some(m) = mon_at_slot_mut(&mut fail, user_slot) {
                 m.ally_switch_counter = 0;
             }
-            simulator_helpers::note_move_outcome(&mut fail, user_slot, simulator_helpers::MoveOutcome::Failed);
+            simulator_helpers::note_move_outcome(
+                &mut fail,
+                user_slot,
+                simulator_helpers::MoveOutcome::Failed,
+            );
             result.push((MatchState::BattleState(fail), 1.0 - p_success));
         }
 
         if let Some(c) = &confusion_self_hit_outcomes {
-            let mut folded: Vec<(MatchState, f64)> =
-                c.iter().map(|(s, p)| (s.clone(), p * (1.0 / 3.0))).collect();
+            let mut folded: Vec<(MatchState, f64)> = c
+                .iter()
+                .map(|(s, p)| (s.clone(), p * (1.0 / 3.0)))
+                .collect();
             folded.extend(result.into_iter().map(|(s, p)| (s, p * (2.0 / 3.0))));
             return simulator_helpers::coalesce_branches(folded);
         }
@@ -2139,22 +3110,31 @@ fn possible_damage_outcomes_for_move(
 
     // Resolve target list based on move's targeting type
     let mut target_slots = if move_name == PokemonMove::ExpandingForce
-        && simulator_helpers::pokemon_is_on_terrain(&next_state, &attacker, &crate::state::dex_data::Terrain::PsychicTerrain)
-    {
+        && simulator_helpers::pokemon_is_on_terrain(
+            &next_state,
+            &attacker,
+            &crate::state::dex_data::Terrain::PsychicTerrain,
+        ) {
         match action.user_slot.player {
             Player::P1 => next_state
                 .p2_active_mons
                 .iter()
                 .enumerate()
                 .filter(|(_, mon)| !mon.fainted)
-                .map(|(idx, _)| FieldSlot { player: Player::P2, slot_index: idx as u8 })
+                .map(|(idx, _)| FieldSlot {
+                    player: Player::P2,
+                    slot_index: idx as u8,
+                })
                 .collect(),
             Player::P2 => next_state
                 .p1_active_mons
                 .iter()
                 .enumerate()
                 .filter(|(_, mon)| !mon.fainted)
-                .map(|(idx, _)| FieldSlot { player: Player::P1, slot_index: idx as u8 })
+                .map(|(idx, _)| FieldSlot {
+                    player: Player::P1,
+                    slot_index: idx as u8,
+                })
                 .collect(),
         }
     } else if simulator_helpers::move_target_is_multitarget(&move_data.target) {
@@ -2171,7 +3151,10 @@ fn possible_damage_outcomes_for_move(
                     .is_none_or(|m| m.fainted);
                 if target_fainted {
                     let redirected = simulator_helpers::resolve_move_targets(
-                        &next_state, action.user_slot, &move_data.target);
+                        &next_state,
+                        action.user_slot,
+                        &move_data.target,
+                    );
                     if redirected.is_empty() {
                         return vec![(MatchState::BattleState(next_state), 1.0)];
                     }
@@ -2182,7 +3165,11 @@ fn possible_damage_outcomes_for_move(
             }
             None => {
                 // Fallback: use resolve_move_targets
-                let targets = simulator_helpers::resolve_move_targets(&next_state, action.user_slot, &move_data.target);
+                let targets = simulator_helpers::resolve_move_targets(
+                    &next_state,
+                    action.user_slot,
+                    &move_data.target,
+                );
                 if targets.is_empty() {
                     return vec![(MatchState::BattleState(next_state), 1.0)];
                 }
@@ -2193,9 +3180,19 @@ fn possible_damage_outcomes_for_move(
 
     // Apply Follow Me / Rage Powder / Lightning Rod / Storm Drain redirection for single-target moves
     if !(simulator_helpers::move_target_is_multitarget(&move_data.target)
-        || (move_name == PokemonMove::ExpandingForce && simulator_helpers::pokemon_is_on_terrain(&next_state, &attacker, &crate::state::dex_data::Terrain::PsychicTerrain)))
+        || (move_name == PokemonMove::ExpandingForce
+            && simulator_helpers::pokemon_is_on_terrain(
+                &next_state,
+                &attacker,
+                &crate::state::dex_data::Terrain::PsychicTerrain,
+            )))
     {
-        target_slots = simulator_helpers::check_and_apply_redirection(&next_state, action.user_slot, target_slots, Some(move_data));
+        target_slots = simulator_helpers::check_and_apply_redirection(
+            &next_state,
+            action.user_slot,
+            target_slots,
+            Some(move_data),
+        );
     }
     // Record the resolved targets for the MoveUsed wrapper (the command's target_slot is
     // None for auto-targeted moves, so the wrapper cannot reconstruct them itself).
@@ -2205,13 +3202,13 @@ fn possible_damage_outcomes_for_move(
     // Fails if the user already has a Substitute, HP ≤ cost, or max HP < 4 (Shedinja / tiny).
     if move_name == PokemonMove::Substitute {
         let attacker_slot = action.user_slot;
-        let check = simulator_helpers::get_pokemon_at_slot(&next_state, attacker_slot)
-            .map(|m| {
-                let max_hp = m.stats[0].max(1);
-                let cost = max_hp / 4;
-                let already_has = simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute(0));
-                (cost, m.hp, already_has)
-            });
+        let check = simulator_helpers::get_pokemon_at_slot(&next_state, attacker_slot).map(|m| {
+            let max_hp = m.stats[0].max(1);
+            let cost = max_hp / 4;
+            let already_has =
+                simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute(0));
+            (cost, m.hp, already_has)
+        });
         if let Some((cost, hp, already_has)) = check {
             if cost == 0 || hp <= cost || already_has {
                 // Failure: last_move_failed is set by the status-move diff check below.
@@ -2222,24 +3219,46 @@ fn possible_damage_outcomes_for_move(
             let mut post = (0u16, 1u16);
             if let Some(m) = mon_at_slot_mut(&mut next_state, attacker_slot) {
                 simulator_helpers::take_damage(m, cost, attacker_env, as_);
-                m.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(
-                    VolatileStatus::Substitute(cost), 0,
-                ));
+                m.volatiles
+                    .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::Substitute(cost),
+                        0,
+                    ));
                 post = (m.hp, m.stats[0].max(1));
             }
             // "X put in a substitute!" — the ¼ HP cost and the sub are both visible.
             // The volatile payload is emitted as 0: the sub's exact HP is not
             // player-visible (it would leak max HP); inference matches the discriminant.
             if let Some(observer) = next_state.event_observer {
-                let new_hp = simulator_helpers::observed_hp_value(observer, attacker_slot.player, post.0, post.1);
-                simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: attacker_slot, new_hp, max_hp: post.1 });
+                let new_hp = simulator_helpers::observed_hp_value(
+                    observer,
+                    attacker_slot.player,
+                    post.0,
+                    post.1,
+                );
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::DamageDealt {
+                        target: attacker_slot,
+                        new_hp,
+                        max_hp: post.1,
+                    },
+                );
             }
-            simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-                target: attacker_slot,
-                volatile: VolatileStatus::Substitute(0),
-            });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileStart {
+                    target: attacker_slot,
+                    volatile: VolatileStatus::Substitute(0),
+                },
+            );
         }
-        decrement_move_pp(&mut next_state, attacker_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            attacker_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2254,18 +3273,33 @@ fn possible_damage_outcomes_for_move(
             Player::P2 => next_state.p2_active_mons.len(),
         };
         let envs: Vec<_> = (0..slot_count)
-            .map(|i| simulator_helpers::berry_env(&next_state, FieldSlot { player, slot_index: i as u8 }))
+            .map(|i| {
+                simulator_helpers::berry_env(
+                    &next_state,
+                    FieldSlot {
+                        player,
+                        slot_index: i as u8,
+                    },
+                )
+            })
             .collect();
         let actives = match player {
             Player::P1 => &mut next_state.p1_active_mons,
             Player::P2 => &mut next_state.p2_active_mons,
         };
         for (i, mon) in actives.iter_mut().enumerate() {
-            if mon.fainted || simulator_helpers::heal_is_blocked(mon) { continue; }
+            if mon.fainted || simulator_helpers::heal_is_blocked(mon) {
+                continue;
+            }
             let heal = (mon.stats[0].max(1) as u32 / 4) as u16;
             simulator_helpers::gain_hp(mon, heal, envs[i]);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2279,14 +3313,19 @@ fn possible_damage_outcomes_for_move(
     {
         let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
         let fails = match move_name {
-            PokemonMove::Counter     => user.is_none_or(|m| m.last_physical_damage_taken == 0),
-            PokemonMove::MirrorCoat  => user.is_none_or(|m| m.last_special_damage_taken == 0),
-            PokemonMove::MetalBurst | PokemonMove::Comeuppance
-                                     => user.is_none_or(|m| m.last_damage_taken == 0),
+            PokemonMove::Counter => user.is_none_or(|m| m.last_physical_damage_taken == 0),
+            PokemonMove::MirrorCoat => user.is_none_or(|m| m.last_special_damage_taken == 0),
+            PokemonMove::MetalBurst | PokemonMove::Comeuppance => {
+                user.is_none_or(|m| m.last_damage_taken == 0)
+            }
             _ => false,
         };
         if fails {
-            simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Failed);
+            simulator_helpers::note_move_outcome(
+                &mut next_state,
+                action.user_slot,
+                simulator_helpers::MoveOutcome::Failed,
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
     }
@@ -2295,13 +3334,18 @@ fn possible_damage_outcomes_for_move(
     // last damaged the user this turn, ignoring the player's chosen target.
     {
         let override_slot: Option<FieldSlot> = match move_name {
-            PokemonMove::Counter => simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-                .and_then(|m| m.last_physical_attacker),
-            PokemonMove::MirrorCoat => simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-                .and_then(|m| m.last_special_attacker),
-            PokemonMove::MetalBurst | PokemonMove::Comeuppance
-                => simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-                .and_then(|m| m.last_damage_attacker),
+            PokemonMove::Counter => {
+                simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                    .and_then(|m| m.last_physical_attacker)
+            }
+            PokemonMove::MirrorCoat => {
+                simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                    .and_then(|m| m.last_special_attacker)
+            }
+            PokemonMove::MetalBurst | PokemonMove::Comeuppance => {
+                simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                    .and_then(|m| m.last_damage_attacker)
+            }
             _ => None,
         };
         if let Some(slot) = override_slot {
@@ -2315,19 +3359,31 @@ fn possible_damage_outcomes_for_move(
     // hits do NOT break focus, since Substitute absorbs the hit before damage is recorded.
     if move_name == PokemonMove::FocusPunch {
         let focus_broken = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| m.damaged_this_turn
-                && simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusPunchCharging))
+            .map(|m| {
+                m.damaged_this_turn
+                    && simulator_helpers::has_status_volatile(
+                        m,
+                        &VolatileStatus::FocusPunchCharging,
+                    )
+            })
             .unwrap_or(false);
         if focus_broken {
             // Remove the FocusPunchCharging volatile and return — no PP cost, no damage.
             if let Some(mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
                 simulator_helpers::remove_status_volatile(mon, &VolatileStatus::FocusPunchCharging);
             }
-            simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Cant(CantReason::FocusPunch));
-            simulator_helpers::emit(&mut next_state, EventKind::VolatileEnd {
-                target: action.user_slot,
-                volatile: VolatileStatus::FocusPunchCharging,
-            });
+            simulator_helpers::note_move_outcome(
+                &mut next_state,
+                action.user_slot,
+                simulator_helpers::MoveOutcome::Cant(CantReason::FocusPunch),
+            );
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileEnd {
+                    target: action.user_slot,
+                    volatile: VolatileStatus::FocusPunchCharging,
+                },
+            );
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
     }
@@ -2341,7 +3397,11 @@ fn possible_damage_outcomes_for_move(
             .map(|m| matches!(m.status, Some(Status::Sleep(_))) || m.ability == Ability::Comatose)
             .unwrap_or(false);
         if !target_ok {
-            simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Failed);
+            simulator_helpers::note_move_outcome(
+                &mut next_state,
+                action.user_slot,
+                simulator_helpers::MoveOutcome::Failed,
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
     }
@@ -2358,17 +3418,33 @@ fn possible_damage_outcomes_for_move(
         };
         // Protect blocks Memento: user does NOT faint if the target is protected.
         if simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, target_slot, &target, move_data, false,
-        ).is_some() {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            false,
+        )
+        .is_some()
+        {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         // Apply -2 Atk / -2 Sp. Atk to the target. Respects Clear Body, White Smoke,
         // Mirror Armor, etc. The user faints even if all drops are absorbed.
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
         simulator_helpers::apply_opponent_stat_drop(
-            &mut next_state, target_slot, action.user_slot, [-2, 0, -2, 0, 0, 0, 0],
-            items_suppressed, false,
+            &mut next_state,
+            target_slot,
+            action.user_slot,
+            [-2, 0, -2, 0, 0, 0, 0],
+            items_suppressed,
+            false,
         );
         // Faint the user unconditionally now that the move has connected.
         let user_player = action.user_slot.player;
@@ -2379,8 +3455,18 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::clear_pokemon_on_faint(user_mon);
         }
         simulator_helpers::handle_pokemon_faint(&mut next_state, user_player, user_slot_index);
-        simulator_helpers::emit(&mut next_state, EventKind::Faint { slot: action.user_slot });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::Faint {
+                slot: action.user_slot,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2398,13 +3484,17 @@ fn possible_damage_outcomes_for_move(
         };
         if let Some(slot_conds) = conds.get_mut(slot_idx) {
             // Remove any pre-existing HealingWish condition on this slot (only one at a time).
-            slot_conds.retain(|sc| !matches!(sc, crate::state::dex_data::SlotCondition::HealingWish));
+            slot_conds
+                .retain(|sc| !matches!(sc, crate::state::dex_data::SlotCondition::HealingWish));
             slot_conds.push(crate::state::dex_data::SlotCondition::HealingWish);
         }
-        simulator_helpers::emit(&mut next_state, EventKind::SlotConditionStart {
-            slot: action.user_slot,
-            condition: crate::state::dex_data::SlotCondition::HealingWish,
-        });
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::SlotConditionStart {
+                slot: action.user_slot,
+                condition: crate::state::dex_data::SlotCondition::HealingWish,
+            },
+        );
         let user_player = action.user_slot.player;
         let user_slot_index = action.user_slot.slot_index;
         if let Some(user_mon) = mon_at_slot_mut(&mut next_state, action.user_slot) {
@@ -2413,8 +3503,18 @@ fn possible_damage_outcomes_for_move(
             simulator_helpers::clear_pokemon_on_faint(user_mon);
         }
         simulator_helpers::handle_pokemon_faint(&mut next_state, user_player, user_slot_index);
-        simulator_helpers::emit(&mut next_state, EventKind::Faint { slot: action.user_slot });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::Faint {
+                slot: action.user_slot,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2424,26 +3524,49 @@ fn possible_damage_outcomes_for_move(
         if target_slot.player != action.user_slot.player
             && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
         {
-            let mb = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-                .is_some_and(|t| !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t) && t.ability == Ability::MagicBounce);
+            let mb =
+                simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).is_some_and(|t| {
+                    !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t)
+                        && t.ability == Ability::MagicBounce
+                });
             if mb {
-                let applied = simulator_helpers::try_apply_attract(&mut next_state, target_slot, action.user_slot);
+                let applied = simulator_helpers::try_apply_attract(
+                    &mut next_state,
+                    target_slot,
+                    action.user_slot,
+                );
                 if applied {
-                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+                    decrement_move_pp(
+                        &mut next_state,
+                        action.user_slot,
+                        &action.move_name,
+                        Some(move_data),
+                    );
                     return vec![(MatchState::BattleState(next_state), 1.0)];
                 }
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
         }
-        let applied = simulator_helpers::try_apply_attract(&mut next_state, action.user_slot, target_slot);
+        let applied =
+            simulator_helpers::try_apply_attract(&mut next_state, action.user_slot, target_slot);
         if applied {
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+            decrement_move_pp(
+                &mut next_state,
+                action.user_slot,
+                &action.move_name,
+                Some(move_data),
+            );
             let has_confusion = confusion_self_hit_outcomes.is_some();
             let mut result = Vec::new();
             if let Some(ref c) = confusion_self_hit_outcomes {
-                for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
+                for (s, p) in c {
+                    result.push((s.clone(), p * (1.0 / 3.0)));
+                }
             }
-            result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
+            result.push((
+                MatchState::BattleState(next_state),
+                if has_confusion { 2.0 / 3.0 } else { 1.0 },
+            ));
             return simulator_helpers::coalesce_branches(result);
         }
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -2456,26 +3579,49 @@ fn possible_damage_outcomes_for_move(
         if target_slot.player != action.user_slot.player
             && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
         {
-            let mb = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-                .is_some_and(|t| !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t) && t.ability == Ability::MagicBounce);
+            let mb =
+                simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).is_some_and(|t| {
+                    !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t)
+                        && t.ability == Ability::MagicBounce
+                });
             if mb {
-                let applied = simulator_helpers::try_apply_disable(&mut next_state, target_slot, action.user_slot);
+                let applied = simulator_helpers::try_apply_disable(
+                    &mut next_state,
+                    target_slot,
+                    action.user_slot,
+                );
                 if applied {
-                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+                    decrement_move_pp(
+                        &mut next_state,
+                        action.user_slot,
+                        &action.move_name,
+                        Some(move_data),
+                    );
                     return vec![(MatchState::BattleState(next_state), 1.0)];
                 }
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
         }
-        let applied = simulator_helpers::try_apply_disable(&mut next_state, action.user_slot, target_slot);
+        let applied =
+            simulator_helpers::try_apply_disable(&mut next_state, action.user_slot, target_slot);
         if applied {
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+            decrement_move_pp(
+                &mut next_state,
+                action.user_slot,
+                &action.move_name,
+                Some(move_data),
+            );
             let has_confusion = confusion_self_hit_outcomes.is_some();
             let mut result = Vec::new();
             if let Some(ref c) = confusion_self_hit_outcomes {
-                for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
+                for (s, p) in c {
+                    result.push((s.clone(), p * (1.0 / 3.0)));
+                }
             }
-            result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
+            result.push((
+                MatchState::BattleState(next_state),
+                if has_confusion { 2.0 / 3.0 } else { 1.0 },
+            ));
             return simulator_helpers::coalesce_branches(result);
         }
         return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -2494,42 +3640,73 @@ fn possible_damage_outcomes_for_move(
             | PokemonMove::Electrify
     ) {
         let target_slot = target_slots[0];
-        let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned() else {
+        let Some(target) =
+            simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned()
+        else {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         // Protect-family blocking (all six carry the protect flag; King's Shield lets status
         // moves through, handled inside protect_blocks_move).
         if simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, target_slot, &target, move_data, false,
-        ).is_some() {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            false,
+        )
+        .is_some()
+        {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         // Magic Powder is a powder move: Grass-types, Overcoat, and Safety Goggles are immune.
         // Mold Breaker bypasses Overcoat only.
         if move_name == PokemonMove::MagicPowder
-            && simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Powder)
+            && simulator_helpers::move_has_flag(
+                move_data,
+                &crate::state::dex_data::MoveFlag::Powder,
+            )
             && simulator_helpers::is_immune_to_powder(&next_state, &target, Some(&attacker))
         {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let applied = match move_name {
             PokemonMove::Soak => simulator_helpers::try_set_single_type(
-                &mut next_state, target_slot, PokemonType::Water,
+                &mut next_state,
+                target_slot,
+                PokemonType::Water,
             ),
             PokemonMove::MagicPowder => simulator_helpers::try_set_single_type(
-                &mut next_state, target_slot, PokemonType::Psychic,
+                &mut next_state,
+                target_slot,
+                PokemonType::Psychic,
             ),
             PokemonMove::ForestsCurse => simulator_helpers::try_add_type(
-                &mut next_state, target_slot, PokemonType::Grass,
-                VolatileStatus::ForestsCurse, PokemonType::Ghost, VolatileStatus::TrickorTreat,
+                &mut next_state,
+                target_slot,
+                PokemonType::Grass,
+                VolatileStatus::ForestsCurse,
+                PokemonType::Ghost,
+                VolatileStatus::TrickorTreat,
             ),
             PokemonMove::TrickorTreat => simulator_helpers::try_add_type(
-                &mut next_state, target_slot, PokemonType::Ghost,
-                VolatileStatus::TrickorTreat, PokemonType::Grass, VolatileStatus::ForestsCurse,
+                &mut next_state,
+                target_slot,
+                PokemonType::Ghost,
+                VolatileStatus::TrickorTreat,
+                PokemonType::Grass,
+                VolatileStatus::ForestsCurse,
             ),
             PokemonMove::ReflectType => simulator_helpers::try_apply_reflect_type(
-                &mut next_state, action.user_slot, target_slot,
+                &mut next_state,
+                action.user_slot,
+                target_slot,
             ),
             PokemonMove::Electrify => {
                 simulator_helpers::apply_electrify(&mut next_state, action.user_slot, target_slot);
@@ -2542,21 +3719,41 @@ fn possible_damage_outcomes_for_move(
         }
         // Emit TypeChanged for the affected slot (user for Reflect Type, target for all others).
         {
-            let changed_slot = if move_name == PokemonMove::ReflectType { action.user_slot } else { target_slot };
+            let changed_slot = if move_name == PokemonMove::ReflectType {
+                action.user_slot
+            } else {
+                target_slot
+            };
             let new_types = simulator_helpers::get_pokemon_at_slot(&next_state, changed_slot)
                 .map(|m| m.types.clone())
                 .unwrap_or_default();
             if !new_types.is_empty() {
-                simulator_helpers::emit(&mut next_state, EventKind::TypeChanged { slot: changed_slot, new_types });
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::TypeChanged {
+                        slot: changed_slot,
+                        new_types,
+                    },
+                );
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         let has_confusion = confusion_self_hit_outcomes.is_some();
         let mut result = Vec::new();
         if let Some(ref c) = confusion_self_hit_outcomes {
-            for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
+            for (s, p) in c {
+                result.push((s.clone(), p * (1.0 / 3.0)));
+            }
         }
-        result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
+        result.push((
+            MatchState::BattleState(next_state),
+            if has_confusion { 2.0 / 3.0 } else { 1.0 },
+        ));
         return simulator_helpers::coalesce_branches(result);
     }
 
@@ -2564,21 +3761,39 @@ fn possible_damage_outcomes_for_move(
     // if the target is behind a Substitute or has Sticky Hold, or if either item is locked.
     if matches!(move_name, PokemonMove::Trick | PokemonMove::Switcheroo) {
         let target_slot = target_slots[0];
-        let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned() else {
+        let Some(target) =
+            simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned()
+        else {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         if simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, target_slot, &target, move_data, false,
-        ).is_some()
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            false,
+        )
+        .is_some()
             || simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0))
         {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         if !simulator_helpers::try_swap_items(&mut next_state, action.user_slot, target_slot) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2588,7 +3803,12 @@ fn possible_damage_outcomes_for_move(
         if !simulator_helpers::recover_consumed_item(&mut next_state, action.user_slot) {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2600,7 +3820,10 @@ fn possible_damage_outcomes_for_move(
         let n_p2 = next_state.p2_active_mons.len();
         for (player, n) in [(Player::P1, n_p1), (Player::P2, n_p2)] {
             for i in 0..n {
-                let slot = FieldSlot { player, slot_index: i as u8 };
+                let slot = FieldSlot {
+                    player,
+                    slot_index: i as u8,
+                };
                 if simulator_helpers::force_eat_held_berry(&mut next_state, slot, true) {
                     any_ate = true;
                 }
@@ -2609,7 +3832,12 @@ fn possible_damage_outcomes_for_move(
         if !any_ate {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2625,13 +3853,23 @@ fn possible_damage_outcomes_for_move(
             Player::P2 => next_state.p2_active_mons.len(),
         };
         for i in 0..n_opposing {
-            let slot = FieldSlot { player: opposing_player, slot_index: i as u8 };
-            let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, slot).cloned() else {
+            let slot = FieldSlot {
+                player: opposing_player,
+                slot_index: i as u8,
+            };
+            let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, slot).cloned()
+            else {
                 continue;
             };
             if simulator_helpers::protect_blocks_move(
-                &next_state, action.user_slot, slot, &target, move_data, false,
-            ).is_some()
+                &next_state,
+                action.user_slot,
+                slot,
+                &target,
+                move_data,
+                false,
+            )
+            .is_some()
                 || simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0))
             {
                 simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: slot });
@@ -2639,7 +3877,12 @@ fn possible_damage_outcomes_for_move(
             }
             simulator_helpers::try_remove_item(&mut next_state, slot);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2660,18 +3903,39 @@ fn possible_damage_outcomes_for_move(
             .map(|m| m.mon_id)
             .unwrap_or(u8::MAX);
         let already_locked = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| m.volatiles.iter().any(|v| matches!(v,
-                crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedOn(_), _)
-                | crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::LockedOn(_), _)
-            )))
+            .map(|m| {
+                m.volatiles.iter().any(|v| {
+                    matches!(
+                        v,
+                        crate::state::pokemon::VolatileStatusState::MoveStatus(
+                            VolatileStatus::LockedOn(_),
+                            _
+                        ) | crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            VolatileStatus::LockedOn(_),
+                            _
+                        )
+                    )
+                })
+            })
             .unwrap_or(false);
         if already_locked {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            user.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedOn(target_mon_id), 2));
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            user.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
+                    VolatileStatus::LockedOn(target_mon_id),
+                    2,
+                ));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2703,7 +3967,10 @@ fn possible_damage_outcomes_for_move(
     // Fake Out / First Impression: only usable on the user's very first move after entering
     // battle. `first_move_on_field` covers both regular switch-ins and faint-replacements
     // (unlike `entered_this_turn` which is intentionally false for faint-replacements).
-    if matches!(move_name, PokemonMove::FakeOut | PokemonMove::FirstImpression) {
+    if matches!(
+        move_name,
+        PokemonMove::FakeOut | PokemonMove::FirstImpression
+    ) {
         let eligible = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
             .map(|m| m.first_move_on_field)
             .unwrap_or(false);
@@ -2738,13 +4005,18 @@ fn possible_damage_outcomes_for_move(
     if move_name == PokemonMove::LastResort {
         let fails = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
             .map(|m| {
-                let move_slots: Vec<_> = m.moves.iter().enumerate()
+                let move_slots: Vec<_> = m
+                    .moves
+                    .iter()
+                    .enumerate()
                     .filter_map(|(i, slot)| slot.as_ref().map(|mv| (i, mv)))
                     .collect();
-                if move_slots.len() < 2 { return true; }
-                move_slots.iter().any(|(i, mv)| {
-                    **mv != PokemonMove::LastResort && !m.used_moves_this_field[*i]
-                })
+                if move_slots.len() < 2 {
+                    return true;
+                }
+                move_slots
+                    .iter()
+                    .any(|(i, mv)| **mv != PokemonMove::LastResort && !m.used_moves_this_field[*i])
             })
             .unwrap_or(true);
         if fails {
@@ -2756,16 +4028,23 @@ fn possible_damage_outcomes_for_move(
     // non-move action (switch), or has already executed their action this turn.
     if move_name == PokemonMove::SuckerPunch {
         let target_slot = target_slots[0];
-        let target_queued_move: Option<PokemonMove> = next_state.action_queue.iter().find_map(|a| {
-            if let Action::MoveAction(ma) = a {
-                if ma.user_slot == target_slot { Some(ma.move_name.clone()) } else { None }
-            } else { None }
-        });
+        let target_queued_move: Option<PokemonMove> =
+            next_state.action_queue.iter().find_map(|a| {
+                if let Action::MoveAction(ma) = a {
+                    if ma.user_slot == target_slot {
+                        Some(ma.move_name.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
         let succeeds = match &target_queued_move {
             None => false, // target already acted or chose switch
-            Some(mv) => {
-                move_dex.get(mv).is_some_and(|d| !matches!(d.category, MoveCategory::Status))
-            }
+            Some(mv) => move_dex
+                .get(mv)
+                .is_some_and(|d| !matches!(d.category, MoveCategory::Status)),
         };
         if !succeeds {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -2777,18 +4056,29 @@ fn possible_damage_outcomes_for_move(
     // Per Bulbapedia, ability-granted priority (Prankster, Gale Wings) counts.
     if move_name == PokemonMove::UpperHand {
         let target_slot = target_slots[0];
-        let target_queued_move: Option<PokemonMove> = next_state.action_queue.iter().find_map(|a| {
-            if let Action::MoveAction(ma) = a {
-                if ma.user_slot == target_slot { Some(ma.move_name.clone()) } else { None }
-            } else { None }
-        });
+        let target_queued_move: Option<PokemonMove> =
+            next_state.action_queue.iter().find_map(|a| {
+                if let Action::MoveAction(ma) = a {
+                    if ma.user_slot == target_slot {
+                        Some(ma.move_name.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
         let succeeds = match &target_queued_move {
             None => false, // target already acted
             Some(mv) => {
-                let Some(md) = move_dex.get(mv) else { return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes); };
-                if matches!(md.category, MoveCategory::Status) { false }
-                else {
-                    let target_mon = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
+                let Some(md) = move_dex.get(mv) else {
+                    return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
+                };
+                if matches!(md.category, MoveCategory::Status) {
+                    false
+                } else {
+                    let target_mon =
+                        simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
                     let eff_priority = target_mon.map_or(md.priority, |tm| {
                         simulator_helpers::effective_move_priority(&next_state, tm, md)
                     });
@@ -2806,10 +4096,25 @@ fn possible_damage_outcomes_for_move(
         let target_slot = target_slots[0];
         // Protect check: Spite is a status move and does NOT bypass Protect.
         let protected = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-            .map(|t| simulator_helpers::protect_blocks_move(&next_state, action.user_slot, target_slot, t, move_data, false).is_some())
+            .map(|t| {
+                simulator_helpers::protect_blocks_move(
+                    &next_state,
+                    action.user_slot,
+                    target_slot,
+                    t,
+                    move_data,
+                    false,
+                )
+                .is_some()
+            })
             .unwrap_or(false);
         if protected {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
 
@@ -2832,12 +4137,21 @@ fn possible_damage_outcomes_for_move(
         }
         // Apply: decrement the target's PP by 4 (saturating at 0).
         if let Some(target_mon) = match target_slot.player {
-            Player::P1 => next_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
-            Player::P2 => next_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+            Player::P1 => next_state
+                .p1_active_mons
+                .get_mut(target_slot.slot_index as usize),
+            Player::P2 => next_state
+                .p2_active_mons
+                .get_mut(target_slot.slot_index as usize),
         } {
             target_mon.move_pp[slot_idx] = current_pp.saturating_sub(4);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2860,11 +4174,24 @@ fn possible_damage_outcomes_for_move(
             for (mut bs, prob) in branches.iter().cloned() {
                 let mut delta = [0i8; 7];
                 delta[*stat_idx] = 2;
-                let contrary_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut bs, user_slot) {
+                let contrary_delta = if let Some(mon) =
+                    simulator_helpers::get_pokemon_at_slot_mut(&mut bs, user_slot)
+                {
                     simulator_helpers::apply_stat_boost_external(mon, &delta, items_suppressed)
-                } else { [0i8; 7] };
+                } else {
+                    [0i8; 7]
+                };
                 for (boost_idx, &stages) in contrary_delta.iter().enumerate() {
-                    if stages != 0 { simulator_helpers::emit(&mut bs, EventKind::BoostChanged { target: user_slot, boost_idx, stages }); }
+                    if stages != 0 {
+                        simulator_helpers::emit(
+                            &mut bs,
+                            EventKind::BoostChanged {
+                                target: user_slot,
+                                boost_idx,
+                                stages,
+                            },
+                        );
+                    }
                 }
                 new_branches.push((bs, prob * per));
             }
@@ -2873,7 +4200,8 @@ fn possible_damage_outcomes_for_move(
         for (bs, _) in &mut new_branches {
             decrement_move_pp(bs, user_slot, &action.move_name, Some(move_data));
         }
-        return new_branches.into_iter()
+        return new_branches
+            .into_iter()
             .map(|(bs, p)| (MatchState::BattleState(bs), p))
             .collect();
     }
@@ -2890,18 +4218,40 @@ fn possible_damage_outcomes_for_move(
         }
         let env = simulator_helpers::berry_env(&next_state, user_slot);
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-        let berry_atk_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, user_slot) {
+        let berry_atk_delta = if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, user_slot)
+        {
             let berry = mon.item.clone();
             mon.consumed_item = Some(berry.clone());
             mon.item = crate::data::item::Item::None;
             simulator_helpers::apply_berry_effect(mon, &berry, &env);
             simulator_helpers::on_berry_eaten(mon, &berry, &env);
-            simulator_helpers::apply_stat_boost_external(mon, &[0, 2, 0, 0, 0, 0, 0], items_suppressed)
-        } else { [0i8; 7] };
+            simulator_helpers::apply_stat_boost_external(
+                mon,
+                &[0, 2, 0, 0, 0, 0, 0],
+                items_suppressed,
+            )
+        } else {
+            [0i8; 7]
+        };
         for (boost_idx, &stages) in berry_atk_delta.iter().enumerate() {
-            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: user_slot, boost_idx, stages }); }
+            if stages != 0 {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::BoostChanged {
+                        target: user_slot,
+                        boost_idx,
+                        stages,
+                    },
+                );
+            }
         }
-        decrement_move_pp(&mut next_state, user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -2919,9 +4269,14 @@ fn possible_damage_outcomes_for_move(
             Some(ref mv) if UNCOPYABLE_EXTRA.contains(mv) => {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
-            Some(ref mv) if move_dex.get(mv).is_none_or(|d| {
-                simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::FailCopyCat)
-            }) => {
+            Some(ref mv)
+                if move_dex.get(mv).is_none_or(|d| {
+                    simulator_helpers::move_has_flag(
+                        d,
+                        &crate::state::dex_data::MoveFlag::FailCopyCat,
+                    )
+                }) =>
+            {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
             Some(mv) => mv,
@@ -2940,7 +4295,9 @@ fn possible_damage_outcomes_for_move(
                 vec![None]
             } else {
                 let slots = simulator_helpers::resolve_move_targets(
-                    &next_state, action.user_slot, &copied_move_data.target,
+                    &next_state,
+                    action.user_slot,
+                    &copied_move_data.target,
                 );
                 if slots.is_empty() {
                     return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -2949,7 +4306,12 @@ fn possible_damage_outcomes_for_move(
             };
 
         // Decrement Copycat's own PP before branching.
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
 
         let n = valid_targets.len();
         let per_prob = 1.0 / n as f64;
@@ -3003,12 +4365,17 @@ fn possible_damage_outcomes_for_move(
             let md = move_dex.get(mv);
             if md.is_none_or(|d| {
                 simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::FailInstruct)
-                    || simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::Recharge)
+                    || simulator_helpers::move_has_flag(
+                        d,
+                        &crate::state::dex_data::MoveFlag::Recharge,
+                    )
             }) {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
             let slot_idx = tgt.moves.iter().position(|m| m.as_ref() == Some(mv));
-            let pp = slot_idx.and_then(|i| tgt.move_pp.get(i).copied()).unwrap_or(0);
+            let pp = slot_idx
+                .and_then(|i| tgt.move_pp.get(i).copied())
+                .unwrap_or(0);
             if pp == 0 {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
@@ -3020,18 +4387,26 @@ fn possible_damage_outcomes_for_move(
         };
 
         // Debit Instruct's own PP
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
 
         // Debit one PP from the target's instructed move slot
         if let Some(idx) = pp_slot_idx
             && let Some(tgt_mon) = mon_at_slot_mut(&mut next_state, target_slot)
-                && let Some(pp) = tgt_mon.move_pp.get_mut(idx) {
-                    *pp = pp.saturating_sub(1);
-                }
+            && let Some(pp) = tgt_mon.move_pp.get_mut(idx)
+        {
+            *pp = pp.saturating_sub(1);
+        }
 
         // Build a synthetic action: the TARGET executes the instructed move
         let target_of_instructed = simulator_helpers::resolve_move_targets(
-            &next_state, target_slot, &instructed_data.target,
+            &next_state,
+            target_slot,
+            &instructed_data.target,
         );
         let target_of_instructed_slot = target_of_instructed.first().copied();
         let synthetic_action = MoveAction {
@@ -3060,7 +4435,9 @@ fn possible_damage_outcomes_for_move(
     // move whose power and added effect come from the thrown item.
     if move_name == PokemonMove::Fling {
         let can_fling = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| simulator_helpers::item_is_active(&next_state, m) && m.item.fling_power().is_some())
+            .map(|m| {
+                simulator_helpers::item_is_active(&next_state, m) && m.item.fling_power().is_some()
+            })
             .unwrap_or(false);
         if !can_fling {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -3076,30 +4453,60 @@ fn possible_damage_outcomes_for_move(
         if target_slot.player != action.user_slot.player
             && !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
         {
-            let mb = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-                .is_some_and(|t| !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t) && t.ability == Ability::MagicBounce);
+            let mb =
+                simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).is_some_and(|t| {
+                    !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t)
+                        && t.ability == Ability::MagicBounce
+                });
             if mb {
-                match simulator_helpers::try_apply_encore(&mut next_state, target_slot, action.user_slot, move_dex) {
+                match simulator_helpers::try_apply_encore(
+                    &mut next_state,
+                    target_slot,
+                    action.user_slot,
+                    move_dex,
+                ) {
                     Some(_) => {
-                        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+                        decrement_move_pp(
+                            &mut next_state,
+                            action.user_slot,
+                            &action.move_name,
+                            Some(move_data),
+                        );
                         return vec![(MatchState::BattleState(next_state), 1.0)];
                     }
-                    None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
+                    None => {
+                        return no_effect_outcome(
+                            &next_state,
+                            action,
+                            &confusion_self_hit_outcomes,
+                        );
+                    }
                 }
             }
         }
-        match simulator_helpers::try_apply_encore(&mut next_state, action.user_slot, target_slot, move_dex) {
+        match simulator_helpers::try_apply_encore(
+            &mut next_state,
+            action.user_slot,
+            target_slot,
+            move_dex,
+        ) {
             Some(encored_move) => {
                 // Mid-turn replacement: rewrite the target's still-queued MoveAction.
                 let new_priority = move_dex.get(&encored_move).map(|d| d.priority).unwrap_or(0);
                 for queued in next_state.action_queue.iter_mut() {
                     if let Action::MoveAction(ma) = queued
-                        && ma.user_slot == target_slot {
-                            ma.move_name = encored_move.clone();
-                            ma.priority = new_priority;
-                        }
+                        && ma.user_slot == target_slot
+                    {
+                        ma.move_name = encored_move.clone();
+                        ma.priority = new_priority;
+                    }
                 }
-                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+                decrement_move_pp(
+                    &mut next_state,
+                    action.user_slot,
+                    &action.move_name,
+                    Some(move_data),
+                );
                 return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
             }
             None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
@@ -3111,25 +4518,51 @@ fn possible_damage_outcomes_for_move(
     // acted or is semi-invulnerable.
     if move_name == PokemonMove::AfterYou {
         let target_slot = target_slots[0];
-        let target_is_invulnerable = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-            .map(|m| m.volatiles.iter().any(|v| matches!(v,
-                crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _)
-                | crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _))))
-            .unwrap_or(false);
+        let target_is_invulnerable =
+            simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map(|m| {
+                    m.volatiles.iter().any(|v| {
+                        matches!(
+                            v,
+                            crate::state::pokemon::VolatileStatusState::MoveStatus(
+                                VolatileStatus::SemiInvulnerable(_),
+                                _
+                            ) | crate::state::pokemon::VolatileStatusState::TurnStatus(
+                                VolatileStatus::SkyDrop,
+                                _
+                            )
+                        )
+                    })
+                })
+                .unwrap_or(false);
         let target_has_queued_move = next_state.action_queue.iter().any(|a| {
-            if let Action::MoveAction(ma) = a { ma.user_slot == target_slot } else { false }
+            if let Action::MoveAction(ma) = a {
+                ma.user_slot == target_slot
+            } else {
+                false
+            }
         });
         if target_is_invulnerable || !target_has_queued_move {
-            simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Failed);
+            simulator_helpers::note_move_outcome(
+                &mut next_state,
+                action.user_slot,
+                simulator_helpers::MoveOutcome::Failed,
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         for queued in next_state.action_queue.iter_mut() {
             if let Action::MoveAction(ma) = queued
-                && ma.user_slot == target_slot {
-                    ma.moves_first = true;
-                }
+                && ma.user_slot == target_slot
+            {
+                ma.moves_first = true;
+            }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3140,19 +4573,33 @@ fn possible_damage_outcomes_for_move(
     if move_name == PokemonMove::Quash {
         let target_slot = target_slots[0];
         let target_has_queued_move = next_state.action_queue.iter().any(|a| {
-            if let Action::MoveAction(ma) = a { ma.user_slot == target_slot } else { false }
+            if let Action::MoveAction(ma) = a {
+                ma.user_slot == target_slot
+            } else {
+                false
+            }
         });
         if !target_has_queued_move {
-            simulator_helpers::note_move_outcome(&mut next_state, action.user_slot, simulator_helpers::MoveOutcome::Failed);
+            simulator_helpers::note_move_outcome(
+                &mut next_state,
+                action.user_slot,
+                simulator_helpers::MoveOutcome::Failed,
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         for queued in next_state.action_queue.iter_mut() {
             if let Action::MoveAction(ma) = queued
-                && ma.user_slot == target_slot {
-                    ma.moves_last = true;
-                }
+                && ma.user_slot == target_slot
+            {
+                ma.moves_last = true;
+            }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3171,7 +4618,11 @@ fn possible_damage_outcomes_for_move(
         };
         let already_pending = target_conds
             .get(target_idx)
-            .map(|c| c.iter().any(|sc| matches!(sc, crate::state::dex_data::SlotCondition::FutureMove { .. })))
+            .map(|c| {
+                c.iter().any(|sc| {
+                    matches!(sc, crate::state::dex_data::SlotCondition::FutureMove { .. })
+                })
+            })
             .unwrap_or(false);
         if already_pending {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -3179,12 +4630,29 @@ fn possible_damage_outcomes_for_move(
         // Snapshot the attacker's relevant state for the damage calc at impact time.
         let user_slot = action.user_slot;
         let user_player = user_slot.player;
-        let (snapshot_raw_spa, snapshot_spa_boost, snapshot_level, snapshot_type1, snapshot_type2, snapshot_ability, snapshot_item, attacker_mon_id) =
-            simulator_helpers::get_pokemon_at_slot(&next_state, user_slot)
+        let (
+            snapshot_raw_spa,
+            snapshot_spa_boost,
+            snapshot_level,
+            snapshot_type1,
+            snapshot_type2,
+            snapshot_ability,
+            snapshot_item,
+            attacker_mon_id,
+        ) = simulator_helpers::get_pokemon_at_slot(&next_state, user_slot)
             .map(|u| {
                 let t1 = u.types.first().cloned();
                 let t2 = u.types.get(1).cloned();
-                (u.stats[3], u.boosts[2], u.level, t1, t2, u.ability.clone(), u.item.clone(), u.mon_id)
+                (
+                    u.stats[3],
+                    u.boosts[2],
+                    u.level,
+                    t1,
+                    t2,
+                    u.ability.clone(),
+                    u.item.clone(),
+                    u.mon_id,
+                )
             })
             .unwrap_or((0, 0, 1, None, None, Ability::None, Item::None, 0));
         // Build the condition once; clone it into slot_conds, emit the original.
@@ -3211,11 +4679,19 @@ fn possible_damage_outcomes_for_move(
                 slot_conds.push(future_condition.clone());
             }
         } // conds_mut borrow ends here — next_state is free for emit
-        simulator_helpers::emit(&mut next_state, EventKind::SlotConditionStart {
-            slot: target_slot,
-            condition: future_condition,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::SlotConditionStart {
+                slot: target_slot,
+                condition: future_condition,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3231,18 +4707,27 @@ fn possible_damage_outcomes_for_move(
             Player::P2 => (&mut next_state.p2_active_mons, &mut next_state.p2_back_mons),
         };
         for (i, mon) in actives.iter_mut().enumerate() {
-            if mon.fainted { continue; }
+            if mon.fainted {
+                continue;
+            }
             let soundproof = !abilities_suppressed && mon.ability == Ability::Soundproof;
             if i == user_idx || !soundproof {
                 mon.status = None;
             }
         }
         for mon in backs.iter_mut() {
-            if !mon.fainted { mon.status = None; }
+            if !mon.fainted {
+                mon.status = None;
+            }
         }
         // Emit TeamStatusCured: the entire side was cured at once.
         simulator_helpers::emit(&mut next_state, EventKind::TeamStatusCured { side: player });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3258,7 +4743,8 @@ fn possible_damage_outcomes_for_move(
             && target_slot.slot_index != action.user_slot.slot_index
         {
             let user_hb = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-                .map(simulator_helpers::heal_is_blocked).unwrap_or(false);
+                .map(simulator_helpers::heal_is_blocked)
+                .unwrap_or(false);
             if user_hb {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
@@ -3266,22 +4752,43 @@ fn possible_damage_outcomes_for_move(
             if let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot) {
                 let max_hp = target.stats[0].max(1);
                 let full = target.hp >= max_hp;
-                let sub = simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute(0));
+                let sub =
+                    simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute(0));
                 let target_hb = simulator_helpers::heal_is_blocked(target);
                 if !full && !sub && !target_hb {
                     let amount = (max_hp as u32 / 2) as u16;
-                    let heal_result = if let Some(t) = mon_at_slot_mut(&mut next_state, target_slot) {
+                    let heal_result = if let Some(t) = mon_at_slot_mut(&mut next_state, target_slot)
+                    {
                         let before = t.hp;
                         simulator_helpers::gain_hp(t, amount, target_env);
-                        if t.hp != before { Some((t.hp, t.stats[0])) } else { None }
-                    } else { None };
-                    if let Some((post_hp, mx)) = heal_result
-                        && next_state.event_observer.is_some() {
-                            simulator_helpers::emit(&mut next_state, EventKind::Healed { target: target_slot, new_hp: PokemonHP::Number(post_hp), max_hp: mx });
+                        if t.hp != before {
+                            Some((t.hp, t.stats[0]))
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    };
+                    if let Some((post_hp, mx)) = heal_result
+                        && next_state.event_observer.is_some()
+                    {
+                        simulator_helpers::emit(
+                            &mut next_state,
+                            EventKind::Healed {
+                                target: target_slot,
+                                new_hp: PokemonHP::Number(post_hp),
+                                max_hp: mx,
+                            },
+                        );
+                    }
                 }
             }
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+            decrement_move_pp(
+                &mut next_state,
+                action.user_slot,
+                &action.move_name,
+                Some(move_data),
+            );
             return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
         }
         // Foe-targeting falls through to the normal damage pipeline.
@@ -3291,7 +4798,9 @@ fn possible_damage_outcomes_for_move(
         let target_slot = target_slots[0];
         let abilities_suppressed = simulator_helpers::abilities_are_suppressed(&next_state);
         let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
-        let user_hb = user.map(simulator_helpers::heal_is_blocked).unwrap_or(false);
+        let user_hb = user
+            .map(simulator_helpers::heal_is_blocked)
+            .unwrap_or(false);
         let mega_launcher = user
             .map(|m| !abilities_suppressed && m.ability == Ability::MegaLauncher)
             .unwrap_or(false);
@@ -3300,7 +4809,8 @@ fn possible_damage_outcomes_for_move(
         if let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot) {
             let max_hp = target.stats[0].max(1);
             let full = target.hp >= max_hp;
-            let sub = simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute(0));
+            let sub =
+                simulator_helpers::has_status_volatile(target, &VolatileStatus::Substitute(0));
             if !user_hb && !simulator_helpers::heal_is_blocked(target) && !full && !sub {
                 heal = Some(if mega_launcher {
                     (max_hp as u32 * 3 / 4) as u16
@@ -3314,13 +4824,32 @@ fn possible_damage_outcomes_for_move(
                 let heal_result = if let Some(t) = mon_at_slot_mut(&mut next_state, target_slot) {
                     let before = t.hp;
                     simulator_helpers::gain_hp(t, amount, target_env);
-                    if t.hp != before { Some((t.hp, t.stats[0])) } else { None }
-                } else { None };
-                if let Some((post_hp, mx)) = heal_result
-                    && next_state.event_observer.is_some() {
-                        simulator_helpers::emit(&mut next_state, EventKind::Healed { target: target_slot, new_hp: PokemonHP::Number(post_hp), max_hp: mx });
+                    if t.hp != before {
+                        Some((t.hp, t.stats[0]))
+                    } else {
+                        None
                     }
-                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+                } else {
+                    None
+                };
+                if let Some((post_hp, mx)) = heal_result
+                    && next_state.event_observer.is_some()
+                {
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::Healed {
+                            target: target_slot,
+                            new_hp: PokemonHP::Number(post_hp),
+                            max_hp: mx,
+                        },
+                    );
+                }
+                decrement_move_pp(
+                    &mut next_state,
+                    action.user_slot,
+                    &action.move_name,
+                    Some(move_data),
+                );
                 return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
             }
             None => return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes),
@@ -3339,34 +4868,65 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let user_hp = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| m.hp).unwrap_or(0);
+            .map(|m| m.hp)
+            .unwrap_or(0);
         let target_hp = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-            .map(|m| m.hp).unwrap_or(0);
+            .map(|m| m.hp)
+            .unwrap_or(0);
         let avg = (((user_hp as u32 + target_hp as u32) / 2).max(1)) as u16;
         let user_new_hp = {
             let u = mon_at_slot_mut(&mut next_state, action.user_slot);
             if let Some(u) = u {
                 u.hp = avg.min(u.stats[0]);
                 (u.hp, u.stats[0])
-            } else { (0, 1) }
+            } else {
+                (0, 1)
+            }
         };
         let target_new_hp = {
             let t = mon_at_slot_mut(&mut next_state, target_slot);
             if let Some(t) = t {
                 t.hp = avg.min(t.stats[0]);
                 (t.hp, t.stats[0])
-            } else { (0, 1) }
+            } else {
+                (0, 1)
+            }
         };
         // Emit SetHp for both slots (borrows ended above; NLL safe).
         if let Some(observer) = next_state.event_observer {
             let (u_hp, u_max) = user_new_hp;
-            let user_new_hp_ev = simulator_helpers::observed_hp_value(observer, action.user_slot.player, u_hp, u_max);
-            simulator_helpers::emit(&mut next_state, EventKind::SetHp { target: action.user_slot, new_hp: user_new_hp_ev, max_hp: u_max });
+            let user_new_hp_ev = simulator_helpers::observed_hp_value(
+                observer,
+                action.user_slot.player,
+                u_hp,
+                u_max,
+            );
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::SetHp {
+                    target: action.user_slot,
+                    new_hp: user_new_hp_ev,
+                    max_hp: u_max,
+                },
+            );
             let (t_hp, t_max) = target_new_hp;
-            let target_new_hp_ev = simulator_helpers::observed_hp_value(observer, target_slot.player, t_hp, t_max);
-            simulator_helpers::emit(&mut next_state, EventKind::SetHp { target: target_slot, new_hp: target_new_hp_ev, max_hp: t_max });
+            let target_new_hp_ev =
+                simulator_helpers::observed_hp_value(observer, target_slot.player, t_hp, t_max);
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::SetHp {
+                    target: target_slot,
+                    new_hp: target_new_hp_ev,
+                    max_hp: t_max,
+                },
+            );
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3385,29 +4945,62 @@ fn possible_damage_outcomes_for_move(
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
         let target_ref = target.expect("checked above");
         let target_atk = simulator_helpers::effective_stat(
-            &next_state, target_ref, crate::state::dex_data::PokemonStat::Atk, false, false,
-        ).round().max(1.0) as u16;
+            &next_state,
+            target_ref,
+            crate::state::dex_data::PokemonStat::Atk,
+            false,
+            false,
+        )
+        .round()
+        .max(1.0) as u16;
         let liquid_ooze = !abilities_suppressed && target_ref.ability == Ability::LiquidOoze;
         let user_env = simulator_helpers::berry_env(&next_state, action.user_slot);
-        let strength_sap_heal = if let Some(user) = mon_at_slot_mut(&mut next_state, action.user_slot) {
-            let amount = simulator_helpers::apply_big_root(user, target_atk, items_suppressed);
-            if liquid_ooze {
-                simulator_helpers::take_damage(user, amount, user_env, abilities_suppressed);
+        let strength_sap_heal =
+            if let Some(user) = mon_at_slot_mut(&mut next_state, action.user_slot) {
+                let amount = simulator_helpers::apply_big_root(user, target_atk, items_suppressed);
+                if liquid_ooze {
+                    simulator_helpers::take_damage(user, amount, user_env, abilities_suppressed);
+                    None
+                } else if !simulator_helpers::heal_is_blocked(user) {
+                    let before = user.hp;
+                    simulator_helpers::gain_hp(user, amount, user_env);
+                    if user.hp != before {
+                        Some((user.hp, user.stats[0]))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
                 None
-            } else if !simulator_helpers::heal_is_blocked(user) {
-                let before = user.hp;
-                simulator_helpers::gain_hp(user, amount, user_env);
-                if user.hp != before { Some((user.hp, user.stats[0])) } else { None }
-            } else { None }
-        } else { None };
+            };
         if let Some((post_hp, mx)) = strength_sap_heal
-            && next_state.event_observer.is_some() {
-                simulator_helpers::emit(&mut next_state, EventKind::Healed { target: action.user_slot, new_hp: PokemonHP::Number(post_hp), max_hp: mx });
-            }
+            && next_state.event_observer.is_some()
+        {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Healed {
+                    target: action.user_slot,
+                    new_hp: PokemonHP::Number(post_hp),
+                    max_hp: mx,
+                },
+            );
+        }
         simulator_helpers::apply_opponent_stat_drop(
-            &mut next_state, target_slot, action.user_slot, [-1, 0, 0, 0, 0, 0, 0], items_suppressed, false,
+            &mut next_state,
+            target_slot,
+            action.user_slot,
+            [-1, 0, 0, 0, 0, 0, 0],
+            items_suppressed,
+            false,
         );
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3418,14 +5011,19 @@ fn possible_damage_outcomes_for_move(
         let slot_idx = action.user_slot.slot_index as usize;
         let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
         let user_max_hp = user.map(|m| m.stats[0].max(1)).unwrap_or(1);
-        let heal_blocked = user.map(simulator_helpers::heal_is_blocked).unwrap_or(false);
+        let heal_blocked = user
+            .map(simulator_helpers::heal_is_blocked)
+            .unwrap_or(false);
         let conds = match action.user_slot.player {
             Player::P1 => &mut next_state.p1_slot_conditions,
             Player::P2 => &mut next_state.p2_slot_conditions,
         };
         let already_pending = conds
             .get(slot_idx)
-            .map(|c| c.iter().any(|sc| matches!(sc, crate::state::dex_data::SlotCondition::Wish { .. })))
+            .map(|c| {
+                c.iter()
+                    .any(|sc| matches!(sc, crate::state::dex_data::SlotCondition::Wish { .. }))
+            })
             .unwrap_or(false);
         if heal_blocked || already_pending {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
@@ -3437,20 +5035,33 @@ fn possible_damage_outcomes_for_move(
             });
         }
         // conds no longer used — NLL releases the borrow; next_state is free for emit.
-        simulator_helpers::emit(&mut next_state, EventKind::SlotConditionStart {
-            slot: action.user_slot,
-            condition: crate::state::dex_data::SlotCondition::Wish {
-                heal: (user_max_hp / 2).max(1),
-                turns_remaining: 2,
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::SlotConditionStart {
+                slot: action.user_slot,
+                condition: crate::state::dex_data::SlotCondition::Wish {
+                    heal: (user_max_hp / 2).max(1),
+                    turns_remaining: 2,
+                },
             },
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         let has_confusion = confusion_self_hit_outcomes.is_some();
         let mut result = Vec::new();
         if let Some(ref c) = confusion_self_hit_outcomes {
-            for (s, p) in c { result.push((s.clone(), p * (1.0 / 3.0))); }
+            for (s, p) in c {
+                result.push((s.clone(), p * (1.0 / 3.0)));
+            }
         }
-        result.push((MatchState::BattleState(next_state), if has_confusion { 2.0 / 3.0 } else { 1.0 }));
+        result.push((
+            MatchState::BattleState(next_state),
+            if has_confusion { 2.0 / 3.0 } else { 1.0 },
+        ));
         return simulator_helpers::coalesce_branches(result);
     }
 
@@ -3462,8 +5073,12 @@ fn possible_damage_outcomes_for_move(
         let user_slot_idx = action.user_slot.slot_index as usize;
         let user_player = action.user_slot.player;
         let all_slots: Vec<(Player, usize)> = {
-            let p1_slots: Vec<_> = (0..next_state.p1_active_mons.len()).map(|i| (Player::P1, i)).collect();
-            let p2_slots: Vec<_> = (0..next_state.p2_active_mons.len()).map(|i| (Player::P2, i)).collect();
+            let p1_slots: Vec<_> = (0..next_state.p1_active_mons.len())
+                .map(|i| (Player::P1, i))
+                .collect();
+            let p2_slots: Vec<_> = (0..next_state.p2_active_mons.len())
+                .map(|i| (Player::P2, i))
+                .collect();
             p1_slots.into_iter().chain(p2_slots).collect()
         };
         let state_snapshot = next_state.clone();
@@ -3474,24 +5089,47 @@ fn possible_damage_outcomes_for_move(
                 Player::P1 => &mut next_state.p1_active_mons,
                 Player::P2 => &mut next_state.p2_active_mons,
             };
-            let Some(mon) = mons.get_mut(idx) else { continue };
-            if mon.fainted { continue; }
+            let Some(mon) = mons.get_mut(idx) else {
+                continue;
+            };
+            if mon.fainted {
+                continue;
+            }
             // Soundproof blocks Perish Song for non-users.
-            if !is_user && !abilities_suppressed && mon.ability == Ability::Soundproof { continue; }
+            if !is_user && !abilities_suppressed && mon.ability == Ability::Soundproof {
+                continue;
+            }
             // Skip if already afflicted.
-            if simulator_helpers::has_status_volatile(mon, &VolatileStatus::PerishSong) { continue; }
-            simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, mon, &VolatileStatus::PerishSong);
+            if simulator_helpers::has_status_volatile(mon, &VolatileStatus::PerishSong) {
+                continue;
+            }
+            simulator_helpers::apply_volatile_to_pokemon_pub(
+                &state_snapshot,
+                mon,
+                &VolatileStatus::PerishSong,
+            );
             // Collect for post-loop emission (borrow of mons ends here; NLL safe).
-            perish_song_slots.push(FieldSlot { player, slot_index: idx as u8 });
+            perish_song_slots.push(FieldSlot {
+                player,
+                slot_index: idx as u8,
+            });
         }
         // Emit VolatileStart for every slot that newly received Perish Song.
         for slot in perish_song_slots {
-            simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-                target: slot,
-                volatile: VolatileStatus::PerishSong,
-            });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileStart {
+                    target: slot,
+                    volatile: VolatileStatus::PerishSong,
+                },
+            );
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3504,30 +5142,53 @@ fn possible_damage_outcomes_for_move(
         if already_has {
             // Clear the stale volatile — consecutive use fails and leaves no DB flag active.
             if let Some(user) = match action.user_slot.player {
-                Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-                Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+                Player::P1 => next_state
+                    .p1_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => next_state
+                    .p2_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
             } {
                 simulator_helpers::remove_status_volatile(user, &VolatileStatus::DestinyBond);
             }
-            simulator_helpers::emit(&mut next_state, EventKind::VolatileEnd {
-                target: action.user_slot,
-                volatile: VolatileStatus::DestinyBond,
-            });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileEnd {
+                    target: action.user_slot,
+                    volatile: VolatileStatus::DestinyBond,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let state_snapshot = next_state.clone();
         if let Some(user) = match action.user_slot.player {
-            Player::P1 => next_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-            Player::P2 => next_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+            Player::P1 => next_state
+                .p1_active_mons
+                .get_mut(action.user_slot.slot_index as usize),
+            Player::P2 => next_state
+                .p2_active_mons
+                .get_mut(action.user_slot.slot_index as usize),
         } {
-            simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, user, &VolatileStatus::DestinyBond);
+            simulator_helpers::apply_volatile_to_pokemon_pub(
+                &state_snapshot,
+                user,
+                &VolatileStatus::DestinyBond,
+            );
         }
         // Borrow ended; emit VolatileStart.
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::DestinyBond,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::DestinyBond,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3536,15 +5197,29 @@ fn possible_damage_outcomes_for_move(
     if move_name == PokemonMove::Haze {
         // Collect slots that actually have non-zero boosts (to emit BoostsCleared only for them).
         let haze_slots: Vec<FieldSlot> = {
-            let p1_slots = next_state.p1_active_mons.iter().enumerate()
+            let p1_slots = next_state
+                .p1_active_mons
+                .iter()
+                .enumerate()
                 .filter(|(_, m)| !m.fainted && m.boosts.iter().any(|&b| b != 0))
-                .map(|(i, _)| FieldSlot { player: Player::P1, slot_index: i as u8 });
-            let p2_slots = next_state.p2_active_mons.iter().enumerate()
+                .map(|(i, _)| FieldSlot {
+                    player: Player::P1,
+                    slot_index: i as u8,
+                });
+            let p2_slots = next_state
+                .p2_active_mons
+                .iter()
+                .enumerate()
                 .filter(|(_, m)| !m.fainted && m.boosts.iter().any(|&b| b != 0))
-                .map(|(i, _)| FieldSlot { player: Player::P2, slot_index: i as u8 });
+                .map(|(i, _)| FieldSlot {
+                    player: Player::P2,
+                    slot_index: i as u8,
+                });
             p1_slots.chain(p2_slots).collect()
         };
-        for mon in next_state.p1_active_mons.iter_mut()
+        for mon in next_state
+            .p1_active_mons
+            .iter_mut()
             .chain(next_state.p2_active_mons.iter_mut())
         {
             mon.boosts = [0; 7];
@@ -3552,7 +5227,12 @@ fn possible_damage_outcomes_for_move(
         for slot in haze_slots {
             simulator_helpers::emit(&mut next_state, EventKind::BoostsCleared { target: slot });
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3560,9 +5240,10 @@ fn possible_damage_outcomes_for_move(
     // or less, or if Attack is already at +6. (Contrary inversion is not modelled until the
     // ability itself is implemented.)
     if move_name == PokemonMove::BellyDrum {
-        let (hp, max_hp, atk_boost) = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| (m.hp, m.stats[0].max(1), m.boosts[0]))
-            .unwrap_or((0, 1, 0));
+        let (hp, max_hp, atk_boost) =
+            simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| (m.hp, m.stats[0].max(1), m.boosts[0]))
+                .unwrap_or((0, 1, 0));
         if max_hp <= 1 || 2 * hp <= max_hp || atk_boost >= 6 {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
@@ -3570,35 +5251,66 @@ fn possible_damage_outcomes_for_move(
         let env = simulator_helpers::berry_env(&next_state, action.user_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&next_state);
         let mut post = (0u16, 1u16, 0i8);
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             simulator_helpers::take_damage(mon, cost, env, as_);
             let before = mon.boosts[0];
-            if mon.boosts[0] < 6 { mon.stats_raised_this_turn = true; }
+            if mon.boosts[0] < 6 {
+                mon.stats_raised_this_turn = true;
+            }
             mon.boosts[0] = 6;
             post = (mon.hp, mon.stats[0].max(1), 6 - before);
         }
         // "X cut its own HP and maximized its Attack!" — both effects are visible.
         if let Some(observer) = next_state.event_observer {
-            let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, post.0, post.1);
-            simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp, max_hp: post.1 });
+            let new_hp = simulator_helpers::observed_hp_value(
+                observer,
+                action.user_slot.player,
+                post.0,
+                post.1,
+            );
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::DamageDealt {
+                    target: action.user_slot,
+                    new_hp,
+                    max_hp: post.1,
+                },
+            );
         }
         if post.2 != 0 {
-            simulator_helpers::emit(&mut next_state, EventKind::BoostChanged {
-                target: action.user_slot,
-                boost_idx: 0,
-                stages: post.2,
-            });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::BoostChanged {
+                    target: action.user_slot,
+                    boost_idx: 0,
+                    stages: post.2,
+                },
+            );
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
     // Clangorous Soul: +1 to Atk/Def/SpA/SpD/Spe at the cost of ⅓ max HP. Fails if the user
     // has ⅓ max HP or less, or if all five of those stats are already at +6.
     if move_name == PokemonMove::ClangorousSoul {
-        let (hp, max_hp, all_maxed) = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| (m.hp, m.stats[0].max(1), m.boosts[0..5].iter().all(|&b| b >= 6)))
-            .unwrap_or((0, 1, true));
+        let (hp, max_hp, all_maxed) =
+            simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| {
+                    (
+                        m.hp,
+                        m.stats[0].max(1),
+                        m.boosts[0..5].iter().all(|&b| b >= 6),
+                    )
+                })
+                .unwrap_or((0, 1, true));
         if max_hp <= 1 || 3 * hp <= max_hp || all_maxed {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
@@ -3607,20 +5319,54 @@ fn possible_damage_outcomes_for_move(
         let env = simulator_helpers::berry_env(&next_state, action.user_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&next_state);
         let mut cs_post = (0u16, 1u16);
-        let belly_drum_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        let belly_drum_delta = if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             simulator_helpers::take_damage(mon, cost, env, as_);
             cs_post = (mon.hp, mon.stats[0].max(1));
-            simulator_helpers::apply_stat_boost_external(mon, &[1, 1, 1, 1, 1, 0, 0], items_suppressed)
-        } else { [0i8; 7] };
+            simulator_helpers::apply_stat_boost_external(
+                mon,
+                &[1, 1, 1, 1, 1, 0, 0],
+                items_suppressed,
+            )
+        } else {
+            [0i8; 7]
+        };
         // The ⅓ HP cost is visible in-game (the boosts are emitted below).
         if let Some(observer) = next_state.event_observer {
-            let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, cs_post.0, cs_post.1);
-            simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp, max_hp: cs_post.1 });
+            let new_hp = simulator_helpers::observed_hp_value(
+                observer,
+                action.user_slot.player,
+                cs_post.0,
+                cs_post.1,
+            );
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::DamageDealt {
+                    target: action.user_slot,
+                    new_hp,
+                    max_hp: cs_post.1,
+                },
+            );
         }
         for (boost_idx, &stages) in belly_drum_delta.iter().enumerate() {
-            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+            if stages != 0 {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::BoostChanged {
+                        target: action.user_slot,
+                        boost_idx,
+                        stages,
+                    },
+                );
+            }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3628,16 +5374,42 @@ fn possible_damage_outcomes_for_move(
     // Non-cumulative — re-using it just refreshes the volatile while still raising Sp. Def.
     if move_name == PokemonMove::Charge {
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-        let charge_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            let d = simulator_helpers::apply_stat_boost_external(mon, &[0, 0, 0, 1, 0, 0, 0], items_suppressed);
+        let charge_delta = if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            let d = simulator_helpers::apply_stat_boost_external(
+                mon,
+                &[0, 0, 0, 1, 0, 0, 0],
+                items_suppressed,
+            );
             simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Charge);
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Charge, 0));
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Charge,
+                    0,
+                ));
             d
-        } else { [0i8; 7] };
+        } else {
+            [0i8; 7]
+        };
         for (boost_idx, &stages) in charge_delta.iter().enumerate() {
-            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+            if stages != 0 {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::BoostChanged {
+                        target: action.user_slot,
+                        boost_idx,
+                        stages,
+                    },
+                );
+            }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3645,16 +5417,29 @@ fn possible_damage_outcomes_for_move(
     // already under Focus Energy or Dragon Cheer.
     if move_name == PokemonMove::FocusEnergy {
         let blocked = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusEnergy)
-                || simulator_helpers::has_status_volatile(m, &VolatileStatus::DragonCheer(0)))
+            .map(|m| {
+                simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusEnergy)
+                    || simulator_helpers::has_status_volatile(m, &VolatileStatus::DragonCheer(0))
+            })
             .unwrap_or(true);
         if blocked {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::FocusEnergy, 0));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::FocusEnergy,
+                    0,
+                ));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3670,29 +5455,55 @@ fn possible_damage_outcomes_for_move(
         };
         let ally_idx = (0..actives_len).find(|&i| {
             i != user_idx
-                && simulator_helpers::get_pokemon_at_slot(&next_state, FieldSlot { player: user_player, slot_index: i as u8 })
-                    .map(|m| !m.fainted)
-                    .unwrap_or(false)
+                && simulator_helpers::get_pokemon_at_slot(
+                    &next_state,
+                    FieldSlot {
+                        player: user_player,
+                        slot_index: i as u8,
+                    },
+                )
+                .map(|m| !m.fainted)
+                .unwrap_or(false)
         });
         let Some(ally_idx) = ally_idx else {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
-        let ally_slot = FieldSlot { player: user_player, slot_index: ally_idx as u8 };
+        let ally_slot = FieldSlot {
+            player: user_player,
+            slot_index: ally_idx as u8,
+        };
         let ally = simulator_helpers::get_pokemon_at_slot(&next_state, ally_slot);
         let blocked = ally
-            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusEnergy)
-                || simulator_helpers::has_status_volatile(m, &VolatileStatus::DragonCheer(0)))
+            .map(|m| {
+                simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusEnergy)
+                    || simulator_helpers::has_status_volatile(m, &VolatileStatus::DragonCheer(0))
+            })
             .unwrap_or(true);
         if blocked {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let amount = ally
-            .map(|m| if simulator_helpers::pokemon_has_type(m, &PokemonType::Dragon) { 2 } else { 1 })
+            .map(|m| {
+                if simulator_helpers::pokemon_has_type(m, &PokemonType::Dragon) {
+                    2
+                } else {
+                    1
+                }
+            })
             .unwrap_or(1);
         if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, ally_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::DragonCheer(amount), 0));
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::DragonCheer(amount),
+                    0,
+                ));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3707,18 +5518,40 @@ fn possible_damage_outcomes_for_move(
         };
         let mut any = false;
         for i in 0..actives_len {
-            let slot = FieldSlot { player: user_player, slot_index: i as u8 };
+            let slot = FieldSlot {
+                player: user_player,
+                slot_index: i as u8,
+            };
             let eligible = simulator_helpers::get_pokemon_at_slot(&next_state, slot)
-                .map(|m| !m.fainted
-                    && matches!(m.ability, Ability::Plus | Ability::Minus)
-                    && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, m))
+                .map(|m| {
+                    !m.fainted
+                        && matches!(m.ability, Ability::Plus | Ability::Minus)
+                        && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, m)
+                })
                 .unwrap_or(false);
             if eligible {
-                let dl = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, slot) {
-                    simulator_helpers::apply_stat_boost_external(mon, &[0, 1, 0, 1, 0, 0, 0], items_suppressed)
-                } else { [0i8; 7] };
+                let dl = if let Some(mon) =
+                    simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, slot)
+                {
+                    simulator_helpers::apply_stat_boost_external(
+                        mon,
+                        &[0, 1, 0, 1, 0, 0, 0],
+                        items_suppressed,
+                    )
+                } else {
+                    [0i8; 7]
+                };
                 for (boost_idx, &stages) in dl.iter().enumerate() {
-                    if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: slot, boost_idx, stages }); }
+                    if stages != 0 {
+                        simulator_helpers::emit(
+                            &mut next_state,
+                            EventKind::BoostChanged {
+                                target: slot,
+                                boost_idx,
+                                stages,
+                            },
+                        );
+                    }
                 }
                 any = true;
             }
@@ -3726,7 +5559,12 @@ fn possible_damage_outcomes_for_move(
         if !any {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3734,17 +5572,43 @@ fn possible_damage_outcomes_for_move(
     // power for the entire run while the user holds this volatile).
     if move_name == PokemonMove::DefenseCurl {
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-        let def_curl_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            let d = simulator_helpers::apply_stat_boost_external(mon, &[0, 1, 0, 0, 0, 0, 0], items_suppressed);
+        let def_curl_delta = if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            let d = simulator_helpers::apply_stat_boost_external(
+                mon,
+                &[0, 1, 0, 0, 0, 0, 0],
+                items_suppressed,
+            );
             if !simulator_helpers::has_status_volatile(mon, &VolatileStatus::DefenseCurl) {
-                mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::DefenseCurl, 0));
+                mon.volatiles
+                    .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::DefenseCurl,
+                        0,
+                    ));
             }
             d
-        } else { [0i8; 7] };
+        } else {
+            [0i8; 7]
+        };
         for (boost_idx, &stages) in def_curl_delta.iter().enumerate() {
-            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+            if stages != 0 {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::BoostChanged {
+                        target: action.user_slot,
+                        boost_idx,
+                        stages,
+                    },
+                );
+            }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3766,14 +5630,28 @@ fn possible_damage_outcomes_for_move(
     // volatile). No fail condition beyond the standard doubles/triples-only restriction, which
     // is enforced by `get_possible_commands_for_active_slot` rather than here.
     if move_name == PokemonMove::FollowMe {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::FollowMe, 1));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::FollowMe,
+                    1,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::FollowMe,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::FollowMe,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3781,14 +5659,28 @@ fn possible_damage_outcomes_for_move(
     // Goggles holders are immune to being redirected by it (checked on the attacker's side in
     // `check_and_apply_redirection`, not here).
     if move_name == PokemonMove::RagePowder {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::RagePowder, 1));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::RagePowder,
+                    1,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::RagePowder,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::RagePowder,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3796,14 +5688,28 @@ fn possible_damage_outcomes_for_move(
     // Persists indefinitely (TurnStatus duration 0), matching the Focus Energy / Defense Curl
     // "permanent until removed" convention. The end-of-turn heal already keys off this volatile.
     if move_name == PokemonMove::AquaRing {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::AquaRing, 0));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::AquaRing,
+                    0,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::AquaRing,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::AquaRing,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3811,14 +5717,28 @@ fn possible_damage_outcomes_for_move(
     // or voluntarily switch) until it faints, and grounds it, until it switches out. Persists
     // indefinitely. The end-of-turn heal and forced-switch immunity already key off this volatile.
     if move_name == PokemonMove::Ingrain {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, 0));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Ingrain,
+                    0,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::Ingrain,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::Ingrain,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3826,39 +5746,78 @@ fn possible_damage_outcomes_for_move(
     // Magnet Rise, is Ingrained, is under Smack Down/Ground'd-by-gravity, or Gravity is active.
     if move_name == PokemonMove::MagnetRise {
         let blocked = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::MagnetRise)
-                || simulator_helpers::has_status_volatile(m, &VolatileStatus::Ingrain)
-                || simulator_helpers::has_status_volatile(m, &VolatileStatus::SmackDown))
+            .map(|m| {
+                simulator_helpers::has_status_volatile(m, &VolatileStatus::MagnetRise)
+                    || simulator_helpers::has_status_volatile(m, &VolatileStatus::Ingrain)
+                    || simulator_helpers::has_status_volatile(m, &VolatileStatus::SmackDown)
+            })
             .unwrap_or(true)
             || simulator_helpers::is_gravity_active(&next_state);
         if blocked {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, 5));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::MagnetRise,
+                    5,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::MagnetRise,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::MagnetRise,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
     // Laser Focus: the user's moves are guaranteed critical hits for the rest of this turn and
     // all of the next (duration 2; the crit-ratio override already keys off this volatile).
     if move_name == PokemonMove::LaserFocus {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.retain(|v| !matches!(v,
-                crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::LaserFocus, _)
-                    | crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LaserFocus, _)));
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::LaserFocus, 2));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles.retain(|v| {
+                !matches!(
+                    v,
+                    crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::LaserFocus,
+                        _
+                    ) | crate::state::pokemon::VolatileStatusState::MoveStatus(
+                        VolatileStatus::LaserFocus,
+                        _
+                    )
+                )
+            });
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::LaserFocus,
+                    2,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::LaserFocus,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::LaserFocus,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3875,22 +5834,55 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-        let delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            let d = simulator_helpers::apply_stat_boost_external(mon, &[1, 1, 1, 1, 1, 0, 0], items_suppressed);
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::NoRetreat, 0));
+        let delta = if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            let d = simulator_helpers::apply_stat_boost_external(
+                mon,
+                &[1, 1, 1, 1, 1, 0, 0],
+                items_suppressed,
+            );
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::NoRetreat,
+                    0,
+                ));
             // Trapped(0) is the generic voluntary-switch-prevention volatile checked by
             // `simulator_helpers::is_trapped` (already used for Mean Look / Block / Spider Web).
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Trapped(0), 0));
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Trapped(0),
+                    0,
+                ));
             d
-        } else { [0i8; 7] };
+        } else {
+            [0i8; 7]
+        };
         for (boost_idx, &stages) in delta.iter().enumerate() {
-            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+            if stages != 0 {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::BoostChanged {
+                        target: action.user_slot,
+                        boost_idx,
+                        stages,
+                    },
+                );
+            }
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::NoRetreat,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::NoRetreat,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3898,14 +5890,28 @@ fn possible_damage_outcomes_for_move(
     // bounced back at their source — reuses the same reflection branch as the Magic Bounce
     // ability (see the `target_has_magic_coat` check alongside `target_has_mb` below).
     if move_name == PokemonMove::MagicCoat {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MagicCoat, 1));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::MagicCoat,
+                    1,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::MagicCoat,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::MagicCoat,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3917,36 +5923,78 @@ fn possible_damage_outcomes_for_move(
     // Tracked as follow-up work; these are all `isNonstandard: "Past"` moves in the current
     // generation's data (lower priority than the Follow Me / Rage Powder fix above).
     if move_name == PokemonMove::Grudge {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Grudge, 1));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Grudge,
+                    1,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::Grudge,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::Grudge,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
     if move_name == PokemonMove::Snatch {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Snatch, 1));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Snatch,
+                    1,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::Snatch,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::Snatch,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
     if move_name == PokemonMove::Bide {
-        if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Bide, 3));
+        if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
+                    VolatileStatus::Bide,
+                    3,
+                ));
         }
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: action.user_slot,
-            volatile: VolatileStatus::Bide,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: action.user_slot,
+                volatile: VolatileStatus::Bide,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3954,17 +6002,43 @@ fn possible_damage_outcomes_for_move(
     // and never miss — handled in the damage calculation).
     if move_name == PokemonMove::Minimize {
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-        let minimize_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            let d = simulator_helpers::apply_stat_boost_external(mon, &[0, 0, 0, 0, 0, 0, 2], items_suppressed);
+        let minimize_delta = if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            let d = simulator_helpers::apply_stat_boost_external(
+                mon,
+                &[0, 0, 0, 0, 0, 0, 2],
+                items_suppressed,
+            );
             if !simulator_helpers::has_status_volatile(mon, &VolatileStatus::Minimize) {
-                mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Minimize, 0));
+                mon.volatiles
+                    .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::Minimize,
+                        0,
+                    ));
             }
             d
-        } else { [0i8; 7] };
+        } else {
+            [0i8; 7]
+        };
         for (boost_idx, &stages) in minimize_delta.iter().enumerate() {
-            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+            if stages != 0 {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::BoostChanged {
+                        target: action.user_slot,
+                        boost_idx,
+                        stages,
+                    },
+                );
+            }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -3977,43 +6051,103 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-        let stockpile_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            let d = simulator_helpers::apply_stat_boost_external(mon, &[0, 1, 0, 1, 0, 0, 0], items_suppressed);
+        let stockpile_delta = if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            let d = simulator_helpers::apply_stat_boost_external(
+                mon,
+                &[0, 1, 0, 1, 0, 0, 0],
+                items_suppressed,
+            );
             simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Stockpile(0));
-            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Stockpile(level + 1), 0));
+            mon.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Stockpile(level + 1),
+                    0,
+                ));
             d
-        } else { [0i8; 7] };
+        } else {
+            [0i8; 7]
+        };
         for (boost_idx, &stages) in stockpile_delta.iter().enumerate() {
-            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+            if stages != 0 {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::BoostChanged {
+                        target: action.user_slot,
+                        boost_idx,
+                        stages,
+                    },
+                );
+            }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
     // Swallow: heal ¼ / ½ / full max HP for Stockpile level 1 / 2 / 3, then consume the Stockpile
     // charge and the Def/Sp. Def boosts it granted. Fails if the user has not used Stockpile.
     if move_name == PokemonMove::Swallow {
-        let (level, max_hp, heal_blocked) = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| (simulator_helpers::stockpile_level(m), m.stats[0].max(1), simulator_helpers::heal_is_blocked(m)))
-            .unwrap_or((0, 1, true));
+        let (level, max_hp, heal_blocked) =
+            simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| {
+                    (
+                        simulator_helpers::stockpile_level(m),
+                        m.stats[0].max(1),
+                        simulator_helpers::heal_is_blocked(m),
+                    )
+                })
+                .unwrap_or((0, 1, true));
         if level == 0 {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        let heal = (match level { 1 => max_hp / 4, 2 => max_hp / 2, _ => max_hp }).max(1);
+        let heal = (match level {
+            1 => max_hp / 4,
+            2 => max_hp / 2,
+            _ => max_hp,
+        })
+        .max(1);
         let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
         let env = simulator_helpers::berry_env(&next_state, action.user_slot);
-        let swallow_delta = if let Some(mon) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        let swallow_delta = if let Some(mon) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             if !heal_blocked {
                 simulator_helpers::gain_hp(mon, heal, env);
             }
             simulator_helpers::remove_status_volatile(mon, &VolatileStatus::Stockpile(0));
             let drop = -(level as i8);
-            simulator_helpers::apply_stat_boost_external(mon, &[0, drop, 0, drop, 0, 0, 0], items_suppressed)
-        } else { [0i8; 7] };
+            simulator_helpers::apply_stat_boost_external(
+                mon,
+                &[0, drop, 0, drop, 0, 0, 0],
+                items_suppressed,
+            )
+        } else {
+            [0i8; 7]
+        };
         for (boost_idx, &stages) in swallow_delta.iter().enumerate() {
-            if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+            if stages != 0 {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::BoostChanged {
+                        target: action.user_slot,
+                        boost_idx,
+                        stages,
+                    },
+                );
+            }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4046,11 +6180,17 @@ fn possible_damage_outcomes_for_move(
         let user_had_focus = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
             .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::FocusEnergy))
             .unwrap_or(false);
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             user.boosts = target_boosts;
             if target_has_focus {
                 if !simulator_helpers::has_status_volatile(user, &VolatileStatus::FocusEnergy) {
-                    simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, user, &VolatileStatus::FocusEnergy);
+                    simulator_helpers::apply_volatile_to_pokemon_pub(
+                        &state_snapshot,
+                        user,
+                        &VolatileStatus::FocusEnergy,
+                    );
                 }
             } else {
                 simulator_helpers::remove_status_volatile(user, &VolatileStatus::FocusEnergy);
@@ -4058,23 +6198,37 @@ fn possible_damage_outcomes_for_move(
         }
         // Emit VolatileStart if FocusEnergy was newly added via Psych Up.
         if target_has_focus && !user_had_focus {
-            simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-                target: action.user_slot,
-                volatile: VolatileStatus::FocusEnergy,
-            });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileStart {
+                    target: action.user_slot,
+                    volatile: VolatileStatus::FocusEnergy,
+                },
+            );
         }
         // Emit VolatileEnd if Psych Up cleared FocusEnergy (target did not have it).
         if !target_has_focus && user_had_focus {
-            simulator_helpers::emit(&mut next_state, EventKind::VolatileEnd {
-                target: action.user_slot,
-                volatile: VolatileStatus::FocusEnergy,
-            });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileEnd {
+                    target: action.user_slot,
+                    volatile: VolatileStatus::FocusEnergy,
+                },
+            );
         }
-        simulator_helpers::emit(&mut next_state, EventKind::BoostsCopied {
-            source: target_slot,
-            target: action.user_slot,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::BoostsCopied {
+                source: target_slot,
+                target: action.user_slot,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4088,22 +6242,39 @@ fn possible_damage_outcomes_for_move(
             .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute(0)))
             .unwrap_or(false);
         if !target_has_sub {
-            let user_def = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[2]).unwrap_or(0);
-            let user_spd = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[4]).unwrap_or(0);
-            let target_def = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[2]).unwrap_or(0);
-            let target_spd = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[4]).unwrap_or(0);
+            let user_def = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| m.stats[2])
+                .unwrap_or(0);
+            let user_spd = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| m.stats[4])
+                .unwrap_or(0);
+            let target_def = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map(|m| m.stats[2])
+                .unwrap_or(0);
+            let target_spd = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map(|m| m.stats[4])
+                .unwrap_or(0);
             let new_def = ((user_def as u32 + target_def as u32) / 2) as u16;
             let new_spd = ((user_spd as u32 + target_spd as u32) / 2) as u16;
-            if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            if let Some(user) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+            {
                 user.stats[2] = new_def;
                 user.stats[4] = new_spd;
             }
-            if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            if let Some(target) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+            {
                 target.stats[2] = new_def;
                 target.stats[4] = new_spd;
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4116,24 +6287,38 @@ fn possible_damage_outcomes_for_move(
         let (user_def_b, user_spd_b, target_def_b, target_spd_b) = {
             let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
             let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
-            (user.map(|m| m.boosts[1]).unwrap_or(0),
-             user.map(|m| m.boosts[3]).unwrap_or(0),
-             target.map(|m| m.boosts[1]).unwrap_or(0),
-             target.map(|m| m.boosts[3]).unwrap_or(0))
+            (
+                user.map(|m| m.boosts[1]).unwrap_or(0),
+                user.map(|m| m.boosts[3]).unwrap_or(0),
+                target.map(|m| m.boosts[1]).unwrap_or(0),
+                target.map(|m| m.boosts[3]).unwrap_or(0),
+            )
         };
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             user.boosts[1] = target_def_b;
             user.boosts[3] = target_spd_b;
         }
-        if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+        if let Some(target) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
             target.boosts[1] = user_def_b;
             target.boosts[3] = user_spd_b;
         }
-        simulator_helpers::emit(&mut next_state, EventKind::BoostsSwapped {
-            source: action.user_slot,
-            target: target_slot,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::BoostsSwapped {
+                source: action.user_slot,
+                target: target_slot,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4147,22 +6332,39 @@ fn possible_damage_outcomes_for_move(
             .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Substitute(0)))
             .unwrap_or(false);
         if !target_has_sub {
-            let user_atk = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[1]).unwrap_or(0);
-            let user_spa = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[3]).unwrap_or(0);
-            let target_atk = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[1]).unwrap_or(0);
-            let target_spa = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[3]).unwrap_or(0);
+            let user_atk = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| m.stats[1])
+                .unwrap_or(0);
+            let user_spa = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| m.stats[3])
+                .unwrap_or(0);
+            let target_atk = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map(|m| m.stats[1])
+                .unwrap_or(0);
+            let target_spa = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                .map(|m| m.stats[3])
+                .unwrap_or(0);
             let new_atk = ((user_atk as u32 + target_atk as u32) / 2) as u16;
             let new_spa = ((user_spa as u32 + target_spa as u32) / 2) as u16;
-            if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+            if let Some(user) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+            {
                 user.stats[1] = new_atk;
                 user.stats[3] = new_spa;
             }
-            if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+            if let Some(target) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+            {
                 target.stats[1] = new_atk;
                 target.stats[3] = new_spa;
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4175,24 +6377,38 @@ fn possible_damage_outcomes_for_move(
         let (user_atk_b, user_spa_b, target_atk_b, target_spa_b) = {
             let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
             let target = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot);
-            (user.map(|m| m.boosts[0]).unwrap_or(0),
-             user.map(|m| m.boosts[2]).unwrap_or(0),
-             target.map(|m| m.boosts[0]).unwrap_or(0),
-             target.map(|m| m.boosts[2]).unwrap_or(0))
+            (
+                user.map(|m| m.boosts[0]).unwrap_or(0),
+                user.map(|m| m.boosts[2]).unwrap_or(0),
+                target.map(|m| m.boosts[0]).unwrap_or(0),
+                target.map(|m| m.boosts[2]).unwrap_or(0),
+            )
         };
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             user.boosts[0] = target_atk_b;
             user.boosts[2] = target_spa_b;
         }
-        if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+        if let Some(target) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
             target.boosts[0] = user_atk_b;
             target.boosts[2] = user_spa_b;
         }
-        simulator_helpers::emit(&mut next_state, EventKind::BoostsSwapped {
-            source: action.user_slot,
-            target: target_slot,
-        });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::BoostsSwapped {
+                source: action.user_slot,
+                target: target_slot,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4202,19 +6418,41 @@ fn possible_damage_outcomes_for_move(
         let Some(&target_slot) = target_slots.first() else {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
-        let user_spe = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot).map(|m| m.stats[5]).unwrap_or(0);
-        let target_spe = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).map(|m| m.stats[5]).unwrap_or(0);
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        let user_spe = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+            .map(|m| m.stats[5])
+            .unwrap_or(0);
+        let target_spe = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+            .map(|m| m.stats[5])
+            .unwrap_or(0);
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             simulator_helpers::remove_status_volatile(user, &VolatileStatus::SpeedSwap(0));
-            user.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpeedSwap(user_spe), 0));
+            user.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::SpeedSwap(user_spe),
+                    0,
+                ));
             user.stats[5] = target_spe;
         }
-        if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+        if let Some(target) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
             simulator_helpers::remove_status_volatile(target, &VolatileStatus::SpeedSwap(0));
-            target.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpeedSwap(target_spe), 0));
+            target
+                .volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::SpeedSwap(target_spe),
+                    0,
+                ));
             target.stats[5] = user_spe;
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4230,9 +6468,10 @@ fn possible_damage_outcomes_for_move(
             let Some(&target_slot) = target_slots.first() else {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             };
-            let target_already_cursed = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
-                .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Curse))
-                .unwrap_or(true);
+            let target_already_cursed =
+                simulator_helpers::get_pokemon_at_slot(&next_state, target_slot)
+                    .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Curse))
+                    .unwrap_or(true);
             if target_already_cursed {
                 return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
             }
@@ -4245,42 +6484,97 @@ fn possible_damage_outcomes_for_move(
                     let cost = (user.stats[0].max(1) / 2).max(1);
                     simulator_helpers::take_damage(user, cost, user_env, abilities_suppressed);
                     user_post = (user.hp, user.stats[0].max(1), user.fainted);
-                    if user.fainted { simulator_helpers::clear_pokemon_on_faint(user); }
+                    if user.fainted {
+                        simulator_helpers::clear_pokemon_on_faint(user);
+                    }
                 }
             }
             // "X cut its own HP and laid a curse on Y!" — the cost (and a self-KO) is
             // visible; run the faint hooks the bare take_damage skipped.
             if user_post.2 {
-                simulator_helpers::handle_pokemon_faint(&mut next_state, action.user_slot.player, action.user_slot.slot_index);
+                simulator_helpers::handle_pokemon_faint(
+                    &mut next_state,
+                    action.user_slot.player,
+                    action.user_slot.slot_index,
+                );
             }
             if let Some(observer) = next_state.event_observer {
                 let shown = if user_post.2 { 0 } else { user_post.0 };
-                let new_hp = simulator_helpers::observed_hp_value(observer, action.user_slot.player, shown, user_post.1);
-                simulator_helpers::emit(&mut next_state, EventKind::DamageDealt { target: action.user_slot, new_hp, max_hp: user_post.1 });
+                let new_hp = simulator_helpers::observed_hp_value(
+                    observer,
+                    action.user_slot.player,
+                    shown,
+                    user_post.1,
+                );
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::DamageDealt {
+                        target: action.user_slot,
+                        new_hp,
+                        max_hp: user_post.1,
+                    },
+                );
                 if user_post.2 {
-                    simulator_helpers::emit(&mut next_state, EventKind::Faint { slot: action.user_slot });
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::Faint {
+                            slot: action.user_slot,
+                        },
+                    );
                 }
             }
             // Apply Curse volatile to the target (TurnStatus, permanent — Baton Pass carries TurnStatus(Curse,_)).
-            if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
-                target.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Curse, 0));
+            if let Some(target) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+            {
+                target
+                    .volatiles
+                    .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::Curse,
+                        0,
+                    ));
             }
-            simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-                target: target_slot,
-                volatile: VolatileStatus::Curse,
-            });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::VolatileStart {
+                    target: target_slot,
+                    volatile: VolatileStatus::Curse,
+                },
+            );
         } else {
             // Non-Ghost: +1 Atk / +1 Def / −1 Spe — routed through the normal boost helpers so
             // Contrary / Simple apply, but does NOT require a target.
             let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-            let curse_delta = if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-                simulator_helpers::apply_stat_boost_external(user, &[1, 1, 0, 0, -1, 0, 0], items_suppressed)
-            } else { [0i8; 7] };
+            let curse_delta = if let Some(user) =
+                simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+            {
+                simulator_helpers::apply_stat_boost_external(
+                    user,
+                    &[1, 1, 0, 0, -1, 0, 0],
+                    items_suppressed,
+                )
+            } else {
+                [0i8; 7]
+            };
             for (boost_idx, &stages) in curse_delta.iter().enumerate() {
-                if stages != 0 { simulator_helpers::emit(&mut next_state, EventKind::BoostChanged { target: action.user_slot, boost_idx, stages }); }
+                if stages != 0 {
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::BoostChanged {
+                            target: action.user_slot,
+                            boost_idx,
+                            stages,
+                        },
+                    );
+                }
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4289,16 +6583,28 @@ fn possible_damage_outcomes_for_move(
     // Gen V+: succeeds even if no opponent shares a move (the volatile is still applied).
     // Not Baton-Passable — the volatile stays on the user until they switch out.
     if move_name == PokemonMove::Imprison {
-        let already_imprisoned = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
-            .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison))
-            .unwrap_or(false);
+        let already_imprisoned =
+            simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot)
+                .map(|m| simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison))
+                .unwrap_or(false);
         if already_imprisoned {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            user.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Imprison, 0));
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            user.volatiles
+                .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Imprison,
+                    0,
+                ));
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4317,13 +6623,25 @@ fn possible_damage_outcomes_for_move(
         if all_zero {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if let Some(target) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+        if let Some(target) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
             for b in target.boosts.iter_mut() {
                 *b = -*b;
             }
         }
-        simulator_helpers::emit(&mut next_state, EventKind::BoostsInverted { target: target_slot });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::BoostsInverted {
+                target: target_slot,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4339,14 +6657,29 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         if simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, target_slot, &target, move_data, false,
-        ).is_some() {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            false,
+        )
+        .is_some()
+        {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let (user_ability, target_ability) = {
             let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
-            (user.map(|m| m.ability.clone()).unwrap_or(Ability::None), target.ability.clone())
+            (
+                user.map(|m| m.ability.clone()).unwrap_or(Ability::None),
+                target.ability.clone(),
+            )
         };
         if simulator_helpers::ability_excluded_from_skill_swap(&user_ability)
             || simulator_helpers::ability_excluded_from_skill_swap(&target_ability)
@@ -4356,22 +6689,49 @@ fn possible_damage_outcomes_for_move(
         // Save copies for the AbilityRevealed events before values are moved into the swap.
         let user_ability_ev = user_ability.clone();
         let target_ability_ev = target_ability.clone();
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            if user.original_ability.is_none() { user.original_ability = Some(user_ability.clone()); }
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            if user.original_ability.is_none() {
+                user.original_ability = Some(user_ability.clone());
+            }
             user.ability = target_ability.clone();
         }
-        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
-            if tgt.original_ability.is_none() { tgt.original_ability = Some(target_ability); }
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
+            if tgt.original_ability.is_none() {
+                tgt.original_ability = Some(target_ability);
+            }
             tgt.ability = user_ability;
         }
         // Illusion break: either mon may have lost Illusion in the swap.
-        simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, action.user_slot);
+        simulator_helpers::maybe_break_illusion_on_ability_change(
+            &mut next_state,
+            action.user_slot,
+        );
         simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, action.user_slot);
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, target_slot);
-        simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed { slot: action.user_slot, ability: target_ability_ev });
-        simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed { slot: target_slot, ability: user_ability_ev });
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::AbilityRevealed {
+                slot: action.user_slot,
+                ability: target_ability_ev,
+            },
+        );
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::AbilityRevealed {
+                slot: target_slot,
+                ability: user_ability_ev,
+            },
+        );
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4396,14 +6756,26 @@ fn possible_damage_outcomes_for_move(
         {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
-            if user.original_ability.is_none() { user.original_ability = Some(user_ability); }
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
+            if user.original_ability.is_none() {
+                user.original_ability = Some(user_ability);
+            }
             user.ability = target_ability;
         }
         // Illusion break: user may have lost Illusion (gained a new ability).
-        simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, action.user_slot);
+        simulator_helpers::maybe_break_illusion_on_ability_change(
+            &mut next_state,
+            action.user_slot,
+        );
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, action.user_slot);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4419,9 +6791,21 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         if simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, target_slot, &target, move_data, false,
-        ).is_some() {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            false,
+        )
+        .is_some()
+        {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0)) {
@@ -4429,7 +6813,10 @@ fn possible_damage_outcomes_for_move(
         }
         let (user_ability, target_ability) = {
             let user = simulator_helpers::get_pokemon_at_slot(&next_state, action.user_slot);
-            (user.map(|m| m.ability.clone()).unwrap_or(Ability::None), target.ability.clone())
+            (
+                user.map(|m| m.ability.clone()).unwrap_or(Ability::None),
+                target.ability.clone(),
+            )
         };
         if user_ability == target_ability
             || simulator_helpers::ability_cannot_be_suppressed(&target_ability)
@@ -4438,14 +6825,22 @@ fn possible_damage_outcomes_for_move(
         {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
-            if tgt.original_ability.is_none() { tgt.original_ability = Some(target_ability); }
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
+            if tgt.original_ability.is_none() {
+                tgt.original_ability = Some(target_ability);
+            }
             tgt.ability = user_ability;
         }
         // Illusion break: target may have lost Illusion (gained a new ability).
         simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
         simulator_helpers::process_pokemon_gain_ability(&mut next_state, target_slot);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4462,9 +6857,21 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         if simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, target_slot, &target, move_data, false,
-        ).is_some() {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            false,
+        )
+        .is_some()
+        {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0)) {
@@ -4474,18 +6881,31 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         let state_snapshot = next_state.clone();
-        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
             // apply_volatile_to_pokemon_pub skips if already present, so no duplicate guard needed.
-            simulator_helpers::apply_volatile_to_pokemon_pub(&state_snapshot, tgt, &VolatileStatus::GastroAcid);
+            simulator_helpers::apply_volatile_to_pokemon_pub(
+                &state_snapshot,
+                tgt,
+                &VolatileStatus::GastroAcid,
+            );
         }
         // Borrow ended; GastroAcid blocks a protected ability (checked above), so it always lands.
-        simulator_helpers::emit(&mut next_state, EventKind::VolatileStart {
-            target: target_slot,
-            volatile: VolatileStatus::GastroAcid,
-        });
+        simulator_helpers::emit(
+            &mut next_state,
+            EventKind::VolatileStart {
+                target: target_slot,
+                volatile: VolatileStatus::GastroAcid,
+            },
+        );
         // Illusion break: GastroAcid suppresses the target's ability, including Illusion.
         simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4501,9 +6921,21 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         if simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, target_slot, &target, move_data, false,
-        ).is_some() {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            false,
+        )
+        .is_some()
+        {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0)) {
@@ -4520,8 +6952,11 @@ fn possible_damage_outcomes_for_move(
         // Previously silent: Worry Seed's Insomnia grant woke a sleeping target with no
         // emitted event at all.
         let mut worry_seed_woke_target = false;
-        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
-            if tgt.original_ability.is_none() { tgt.original_ability = Some(tgt.ability.clone()); }
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
+            if tgt.original_ability.is_none() {
+                tgt.original_ability = Some(tgt.ability.clone());
+            }
             tgt.ability = Ability::Insomnia;
             if matches!(tgt.status, Some(Status::Sleep(_))) {
                 tgt.status = None;
@@ -4529,11 +6964,22 @@ fn possible_damage_outcomes_for_move(
             }
         }
         if worry_seed_woke_target {
-            simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: target_slot, status: Status::Sleep(0) });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::StatusCured {
+                    target: target_slot,
+                    status: Status::Sleep(0),
+                },
+            );
         }
         // Illusion break: target may have lost Illusion (gained Insomnia).
         simulator_helpers::maybe_break_illusion_on_ability_change(&mut next_state, target_slot);
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4549,9 +6995,21 @@ fn possible_damage_outcomes_for_move(
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         };
         if simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, target_slot, &target, move_data, false,
-        ).is_some() {
-            simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: target_slot });
+            &next_state,
+            action.user_slot,
+            target_slot,
+            &target,
+            move_data,
+            false,
+        )
+        .is_some()
+        {
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Blocked {
+                    target: target_slot,
+                },
+            );
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
         if simulator_helpers::has_status_volatile(&target, &VolatileStatus::Substitute(0)) {
@@ -4563,11 +7021,19 @@ fn possible_damage_outcomes_for_move(
         {
             return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
         }
-        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot) {
-            if tgt.original_ability.is_none() { tgt.original_ability = Some(tgt.ability.clone()); }
+        if let Some(tgt) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, target_slot)
+        {
+            if tgt.original_ability.is_none() {
+                tgt.original_ability = Some(tgt.ability.clone());
+            }
             tgt.ability = Ability::Simple;
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4580,15 +7046,25 @@ fn possible_damage_outcomes_for_move(
         } else {
             VolatileStatus::PowerShift
         };
-        if let Some(user) = simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot) {
+        if let Some(user) =
+            simulator_helpers::get_pokemon_at_slot_mut(&mut next_state, action.user_slot)
+        {
             user.stats.swap(1, 2); // Swap raw Atk and Def
             if simulator_helpers::has_status_volatile(user, &volatile) {
                 simulator_helpers::remove_status_volatile(user, &volatile);
             } else {
-                user.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(volatile, 0));
+                user.volatiles
+                    .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        volatile, 0,
+                    ));
             }
         }
-        decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+        decrement_move_pp(
+            &mut next_state,
+            action.user_slot,
+            &action.move_name,
+            Some(move_data),
+        );
         return status_move_self_outcome(next_state, &confusion_self_hit_outcomes);
     }
 
@@ -4598,9 +7074,10 @@ fn possible_damage_outcomes_for_move(
     if move_name == PokemonMove::Round {
         for queued in next_state.action_queue.iter_mut() {
             if let Action::MoveAction(ma) = queued
-                && ma.move_name == PokemonMove::Round {
-                    ma.moves_first = true;
-                }
+                && ma.move_name == PokemonMove::Round
+            {
+                ma.moves_first = true;
+            }
         }
     }
 
@@ -4620,29 +7097,44 @@ fn possible_damage_outcomes_for_move(
                 Player::P1 => &next_state.p1_active_mons,
                 Player::P2 => &next_state.p2_active_mons,
             };
-            mons.iter().enumerate()
+            mons.iter()
+                .enumerate()
                 .filter(|(_, m)| !m.fainted)
-                .map(|(i, _)| FieldSlot { player: opposing_player, slot_index: i as u8 })
+                .map(|(i, _)| FieldSlot {
+                    player: opposing_player,
+                    slot_index: i as u8,
+                })
                 .collect()
         };
 
         if foe_slots.len() >= 2 {
             // Check type-effectiveness to see if either slot is immune (Fairy-immune etc.)
             let is_valid = |slot: FieldSlot| -> bool {
-                let Some(tgt) = simulator_helpers::get_pokemon_at_slot(&next_state, slot) else { return false; };
-                let eff = simulator_helpers::move_type_effectiveness(&next_state, &move_data.pokemon_type, tgt);
+                let Some(tgt) = simulator_helpers::get_pokemon_at_slot(&next_state, slot) else {
+                    return false;
+                };
+                let eff = simulator_helpers::move_type_effectiveness(
+                    &next_state,
+                    &move_data.pokemon_type,
+                    tgt,
+                );
                 eff > 0.0
             };
             let slot0_valid = is_valid(foe_slots[0]);
             let slot1_valid = is_valid(foe_slots[1]);
 
             let dart_targets: [FieldSlot; 2] = match (slot0_valid, slot1_valid) {
-                (true, true) => [foe_slots[0], foe_slots[1]], // split
+                (true, true) => [foe_slots[0], foe_slots[1]],  // split
                 (true, false) => [foe_slots[0], foe_slots[0]], // both to slot0
                 (false, true) => [foe_slots[1], foe_slots[1]], // both to slot1
                 (false, false) => {
                     // Both immune — move fails
-                    decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+                    decrement_move_pp(
+                        &mut next_state,
+                        action.user_slot,
+                        &action.move_name,
+                        Some(move_data),
+                    );
                     return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
                 }
             };
@@ -4652,20 +7144,53 @@ fn possible_damage_outcomes_for_move(
             for dart_slot in &dart_targets {
                 let mut next_outcomes = Vec::new();
                 for (bs, prob) in outcomes {
-                    let Some(current_target) = simulator_helpers::get_pokemon_at_slot(&bs, *dart_slot).cloned() else {
+                    let Some(current_target) =
+                        simulator_helpers::get_pokemon_at_slot(&bs, *dart_slot).cloned()
+                    else {
                         next_outcomes.push((bs, prob));
                         continue;
                     };
-                    let (invuln_mult, ok) = check_invulnerability_status(&attacker, &current_target, &move_name);
-                    if !ok { next_outcomes.push((bs, prob)); continue; }
-                    let hit_p = simulator_helpers::accuracy_hit_probability(&bs, &attacker, &current_target, action.user_slot, *dart_slot, move_data).clamp(0.0, 1.0);
+                    let (invuln_mult, ok) =
+                        check_invulnerability_status(&attacker, &current_target, &move_name);
+                    if !ok {
+                        next_outcomes.push((bs, prob));
+                        continue;
+                    }
+                    let hit_p = simulator_helpers::accuracy_hit_probability(
+                        &bs,
+                        &attacker,
+                        &current_target,
+                        action.user_slot,
+                        *dart_slot,
+                        move_data,
+                    )
+                    .clamp(0.0, 1.0);
                     if hit_p < 1.0 {
                         next_outcomes.push((bs.clone(), prob * (1.0 - hit_p)));
                     }
                     if hit_p > 0.0 {
-                        let dmg_outcomes = simulator_helpers::calculate_damage_outcomes_for_target(&bs, &attacker, &current_target, action.user_slot, *dart_slot, move_data, config, 1.0, invuln_mult);
+                        let dmg_outcomes = simulator_helpers::calculate_damage_outcomes_for_target(
+                            &bs,
+                            &attacker,
+                            &current_target,
+                            action.user_slot,
+                            *dart_slot,
+                            move_data,
+                            config,
+                            1.0,
+                            invuln_mult,
+                        );
                         for (dmg, is_crit, dp) in dmg_outcomes {
-                            for (new_bs, new_p) in apply_single_hit_branch(bs.clone(), *dart_slot, &move_name, move_data, dmg, action.user_slot, prob * hit_p * dp, is_crit) {
+                            for (new_bs, new_p) in apply_single_hit_branch(
+                                bs.clone(),
+                                *dart_slot,
+                                &move_name,
+                                move_data,
+                                dmg,
+                                action.user_slot,
+                                prob * hit_p * dp,
+                                is_crit,
+                            ) {
                                 next_outcomes.push((new_bs, new_p));
                             }
                         }
@@ -4674,27 +7199,46 @@ fn possible_damage_outcomes_for_move(
                 outcomes = simulator_helpers::coalesce_branches(next_outcomes);
             }
 
-            let all_outcomes: Vec<(MatchState, f64)> = outcomes.into_iter()
+            let all_outcomes: Vec<(MatchState, f64)> = outcomes
+                .into_iter()
                 .flat_map(|(bs, p)| {
-                    apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player)
-                        .into_iter()
-                        .map(move |(st, w)| (st, p * w))
-                        .collect::<Vec<_>>()
+                    apply_post_damage_move_effects(
+                        bs,
+                        action.user_slot,
+                        move_data,
+                        &next_state,
+                        opposing_player,
+                    )
+                    .into_iter()
+                    .map(move |(st, w)| (st, p * w))
+                    .collect::<Vec<_>>()
                 })
                 .collect();
 
-            let all_outcomes: Vec<(MatchState, f64)> = all_outcomes.into_iter()
-                .collect();
+            let all_outcomes: Vec<(MatchState, f64)> = all_outcomes.into_iter().collect();
 
-            let move_has_recharge = simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Recharge);
+            let move_has_recharge = simulator_helpers::move_has_flag(
+                move_data,
+                &crate::state::dex_data::MoveFlag::Recharge,
+            );
             let mut all_outcomes = all_outcomes;
             if move_has_recharge {
                 for (state, _) in &mut all_outcomes {
                     if let MatchState::BattleState(bs) = state {
                         if let Some(mon) = mon_at_slot_mut(bs, action.user_slot) {
-                            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MustRecharge, 2));
+                            mon.volatiles.push(
+                                crate::state::pokemon::VolatileStatusState::TurnStatus(
+                                    VolatileStatus::MustRecharge,
+                                    2,
+                                ),
+                            );
                         }
-                        simulator_helpers::emit(bs, EventKind::MustRecharge { slot: action.user_slot });
+                        simulator_helpers::emit(
+                            bs,
+                            EventKind::MustRecharge {
+                                slot: action.user_slot,
+                            },
+                        );
                     }
                 }
             }
@@ -4735,13 +7279,21 @@ fn possible_damage_outcomes_for_move(
         }
 
         let target_slot = target_slots[0];
-        let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned() else {
+        let Some(target) =
+            simulator_helpers::get_pokemon_at_slot(&next_state, target_slot).cloned()
+        else {
             return vec![(MatchState::BattleState(next_state), 1.0)];
         };
 
-        let (invulnerability_multiplier, should_continue) = check_invulnerability_status(&attacker, &target, &move_name);
+        let (invulnerability_multiplier, should_continue) =
+            check_invulnerability_status(&attacker, &target, &move_name);
         if !should_continue {
-            decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+            decrement_move_pp(
+                &mut next_state,
+                action.user_slot,
+                &action.move_name,
+                Some(move_data),
+            );
             return vec![(MatchState::BattleState(next_state), 1.0)];
         }
 
@@ -4769,27 +7321,47 @@ fn possible_damage_outcomes_for_move(
         let mut all_outcomes: Vec<(MatchState, f64)> = all_outcomes
             .into_iter()
             .flat_map(|(state, prob)| match state {
-                MatchState::BattleState(bs) => {
-                    apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player)
-                        .into_iter()
-                        .map(move |(st, w)| (st, prob * w))
-                        .collect::<Vec<_>>()
-                }
+                MatchState::BattleState(bs) => apply_post_damage_move_effects(
+                    bs,
+                    action.user_slot,
+                    move_data,
+                    &next_state,
+                    opposing_player,
+                )
+                .into_iter()
+                .map(move |(st, w)| (st, prob * w))
+                .collect::<Vec<_>>(),
                 other => vec![(other, prob)],
             })
             .collect();
 
-        let move_has_recharge = simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::Recharge);
+        let move_has_recharge = simulator_helpers::move_has_flag(
+            move_data,
+            &crate::state::dex_data::MoveFlag::Recharge,
+        );
         if move_has_recharge {
             for (state, _) in &mut all_outcomes {
                 if let MatchState::BattleState(bs) = state {
                     if let Some(mon) = match action.user_slot.player {
-                        Player::P1 => bs.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-                        Player::P2 => bs.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+                        Player::P1 => bs
+                            .p1_active_mons
+                            .get_mut(action.user_slot.slot_index as usize),
+                        Player::P2 => bs
+                            .p2_active_mons
+                            .get_mut(action.user_slot.slot_index as usize),
                     } {
-                        mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MustRecharge, 2));
+                        mon.volatiles
+                            .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                                VolatileStatus::MustRecharge,
+                                2,
+                            ));
                     }
-                    simulator_helpers::emit(bs, EventKind::MustRecharge { slot: action.user_slot });
+                    simulator_helpers::emit(
+                        bs,
+                        EventKind::MustRecharge {
+                            slot: action.user_slot,
+                        },
+                    );
                 }
             }
         }
@@ -4826,13 +7398,14 @@ fn possible_damage_outcomes_for_move(
     }
 
     // Attract: 50% chance to fail to act when infatuated.
-    let attract_fail_prob: f64 = if simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::Attract)
-        && attacker.ability != Ability::Oblivious
-    {
-        0.50
-    } else {
-        0.0
-    };
+    let attract_fail_prob: f64 =
+        if simulator_helpers::has_status_volatile(&attacker, &VolatileStatus::Attract)
+            && attacker.ability != Ability::Oblivious
+        {
+            0.50
+        } else {
+            0.0
+        };
 
     // Damp: any active Pokémon on either side with unsuppressed Damp causes explosive
     // moves to fail entirely. The user does NOT faint or take damage.
@@ -4851,7 +7424,9 @@ fn possible_damage_outcomes_for_move(
         let attacker_breaks = simulator_helpers::attacker_breaks_mold(&next_state, &attacker);
         let attacker_player = action.user_slot.player;
         let damp_on_field = next_state
-            .p1_active_mons.iter().map(|m| (m, Player::P1))
+            .p1_active_mons
+            .iter()
+            .map(|m| (m, Player::P1))
             .chain(next_state.p2_active_mons.iter().map(|m| (m, Player::P2)))
             .filter(|(m, _)| !m.fainted)
             .any(|(mon, side)| {
@@ -4870,8 +7445,9 @@ fn possible_damage_outcomes_for_move(
     // moves that already hit multiple times (handled above by is_multihit_move), fixed-damage
     // moves, self-destruct / explosion, charge moves, Fling, Uproar/Rollout/Ice Ball.
     let parental_bond_eligible = {
-        let attacker_has_pb = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
-            && attacker.ability == Ability::ParentalBond;
+        let attacker_has_pb =
+            !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &attacker)
+                && attacker.ability == Ability::ParentalBond;
         attacker_has_pb
             && target_slots.len() == 1  // spread moves excluded
             && matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special)
@@ -4891,24 +7467,35 @@ fn possible_damage_outcomes_for_move(
     // boosts) depends only on the attacker/move, not the target, so it's computed once and
     // shared by the Psychic Terrain and Armor Tail/Queenly Majesty/Dazzling blocks below —
     // both block based on the move's actually-resolved priority, not its raw dex value.
-    let effective_priority = simulator_helpers::effective_move_priority(&next_state, &attacker, move_data);
+    let effective_priority =
+        simulator_helpers::effective_move_priority(&next_state, &attacker, move_data);
     let attacker_breaks_mold = simulator_helpers::attacker_breaks_mold(&next_state, &attacker);
 
     for target_slot in &target_slots {
         let mut outcomes_for_target: Vec<TargetHitOutcome> = Vec::new();
 
-        let Some(target) = simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot).cloned() else {
+        let Some(target) =
+            simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot).cloned()
+        else {
             // Target doesn't exist, skip
             continue;
         };
 
-        let (invulnerability_multiplier, should_continue) = check_invulnerability_status(&attacker, &target, &move_name);
+        let (invulnerability_multiplier, should_continue) =
+            check_invulnerability_status(&attacker, &target, &move_name);
 
         if effective_priority > 0
-            && simulator_helpers::pokemon_is_on_terrain(&next_state, &target, &crate::state::dex_data::Terrain::PsychicTerrain)
+            && simulator_helpers::pokemon_is_on_terrain(
+                &next_state,
+                &target,
+                &crate::state::dex_data::Terrain::PsychicTerrain,
+            )
         {
             // Visible in-game ("X surrounds itself with psychic terrain!" / move fails).
-            simulator_helpers::emit(&mut next_state, EventKind::MoveFailed { slot: *target_slot });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::MoveFailed { slot: *target_slot },
+            );
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -4933,9 +7520,18 @@ fn possible_damage_outcomes_for_move(
             side_mons.iter().enumerate().find_map(|(idx, mon)| {
                 if !mon.fainted
                     && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, mon)
-                    && matches!(mon.ability, Ability::QueenlyMajesty | Ability::ArmorTail | Ability::Dazzling)
+                    && matches!(
+                        mon.ability,
+                        Ability::QueenlyMajesty | Ability::ArmorTail | Ability::Dazzling
+                    )
                 {
-                    Some((FieldSlot { player: target_slot.player, slot_index: idx as u8 }, mon.ability.clone()))
+                    Some((
+                        FieldSlot {
+                            player: target_slot.player,
+                            slot_index: idx as u8,
+                        },
+                        mon.ability.clone(),
+                    ))
                 } else {
                     None
                 }
@@ -4947,12 +7543,19 @@ fn possible_damage_outcomes_for_move(
             // In-game the blocking ability is announced ("X cannot use Y!"); nest the
             // resulting failure under the reveal. The reveal is on the ability holder's
             // own slot, which may differ from the move's direct target (ally protection).
-            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                slot: blocker_slot,
-                ability: blocker_ability,
-            }, |next_state| {
-                simulator_helpers::emit(next_state, EventKind::MoveFailed { slot: *target_slot });
-            });
+            simulator_helpers::with_reactions(
+                &mut next_state,
+                EventKind::AbilityRevealed {
+                    slot: blocker_slot,
+                    ability: blocker_ability,
+                },
+                |next_state| {
+                    simulator_helpers::emit(
+                        next_state,
+                        EventKind::MoveFailed { slot: *target_slot },
+                    );
+                },
+            );
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -4970,7 +7573,12 @@ fn possible_damage_outcomes_for_move(
             // "It doesn't affect X…" — the Dark-type bounce is visible in-game.
             // (Previously silent, which left the Prankster inference pass dead on
             // real event streams.)
-            simulator_helpers::emit(&mut next_state, EventKind::Immune { target: *target_slot });
+            simulator_helpers::emit(
+                &mut next_state,
+                EventKind::Immune {
+                    target: *target_slot,
+                },
+            );
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -4979,21 +7587,30 @@ fn possible_damage_outcomes_for_move(
         let target_is_semi_invulnerable = target.volatiles.iter().any(|volatile| {
             matches!(
                 volatile,
-                crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _)
-                    | crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)
+                crate::state::pokemon::VolatileStatusState::MoveStatus(
+                    VolatileStatus::SemiInvulnerable(_),
+                    _
+                ) | crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::SkyDrop,
+                    _
+                )
             )
         });
 
         if matches!(move_data.pokemon_type, PokemonType::Ground)
             && !simulator_helpers::pokemon_is_grounded(&next_state, &target)
             && !target_is_semi_invulnerable
-            && !matches!(move_name, PokemonMove::ThousandArrows | PokemonMove::ThousandWaves)
+            && !matches!(
+                move_name,
+                PokemonMove::ThousandArrows | PokemonMove::ThousandWaves
+            )
         {
             // Mold Breaker bypasses Levitate and Eelevate specifically
             // (but not Flying-type, Air Balloon, etc.)
-            let mold_breaks_levitate = simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
-                && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
-                && matches!(target.ability, Ability::Levitate | Ability::Eelevate);
+            let mold_breaks_levitate =
+                simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
+                    && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+                    && matches!(target.ability, Ability::Levitate | Ability::Eelevate);
             if !mold_breaks_levitate {
                 // `pokemon_is_grounded` collapses several distinct ungrounding causes into
                 // one bool, so attribute the specific one here: an ability or item cause is
@@ -5002,27 +7619,51 @@ fn possible_damage_outcomes_for_move(
                 // Magnet Rise / Telekinesis volatiles are already public (typing, or a
                 // VolatileStart already logged when they were applied), so those stay a flat
                 // Immune with no reveal.
-                let ability_cause = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
-                    && matches!(target.ability, Ability::Levitate | Ability::Eelevate);
+                let ability_cause =
+                    !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+                        && matches!(target.ability, Ability::Levitate | Ability::Eelevate);
                 let item_cause = !ability_cause
                     && matches!(target.item, Item::AirBalloon)
                     && simulator_helpers::item_is_active(&next_state, &target);
                 if ability_cause {
-                    simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                        slot: *target_slot,
-                        ability: target.ability.clone(),
-                    }, |ns| {
-                        simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
-                    });
+                    simulator_helpers::with_reactions(
+                        &mut next_state,
+                        EventKind::AbilityRevealed {
+                            slot: *target_slot,
+                            ability: target.ability.clone(),
+                        },
+                        |ns| {
+                            simulator_helpers::emit(
+                                ns,
+                                EventKind::Immune {
+                                    target: *target_slot,
+                                },
+                            );
+                        },
+                    );
                 } else if item_cause {
-                    simulator_helpers::with_reactions(&mut next_state, EventKind::ItemRevealed {
-                        slot: *target_slot,
-                        item: target.item.clone(),
-                    }, |ns| {
-                        simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
-                    });
+                    simulator_helpers::with_reactions(
+                        &mut next_state,
+                        EventKind::ItemRevealed {
+                            slot: *target_slot,
+                            item: target.item.clone(),
+                        },
+                        |ns| {
+                            simulator_helpers::emit(
+                                ns,
+                                EventKind::Immune {
+                                    target: *target_slot,
+                                },
+                            );
+                        },
+                    );
                 } else {
-                    simulator_helpers::emit(&mut next_state, EventKind::Immune { target: *target_slot });
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::Immune {
+                            target: *target_slot,
+                        },
+                    );
                 }
                 outcomes_for_target.push((0, false, false, 1.0));
                 per_target_outcomes.push((*target_slot, outcomes_for_target));
@@ -5038,12 +7679,21 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Bulletproof
         {
-            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                slot: *target_slot,
-                ability: Ability::Bulletproof,
-            }, |ns| {
-                simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
-            });
+            simulator_helpers::with_reactions(
+                &mut next_state,
+                EventKind::AbilityRevealed {
+                    slot: *target_slot,
+                    ability: Ability::Bulletproof,
+                },
+                |ns| {
+                    simulator_helpers::emit(
+                        ns,
+                        EventKind::Immune {
+                            target: *target_slot,
+                        },
+                    );
+                },
+            );
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5058,12 +7708,21 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Soundproof
         {
-            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                slot: *target_slot,
-                ability: Ability::Soundproof,
-            }, |ns| {
-                simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
-            });
+            simulator_helpers::with_reactions(
+                &mut next_state,
+                EventKind::AbilityRevealed {
+                    slot: *target_slot,
+                    ability: Ability::Soundproof,
+                },
+                |ns| {
+                    simulator_helpers::emit(
+                        ns,
+                        EventKind::Immune {
+                            target: *target_slot,
+                        },
+                    );
+                },
+            );
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5091,12 +7750,21 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::GoodasGold
         {
-            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                slot: *target_slot,
-                ability: Ability::GoodasGold,
-            }, |ns| {
-                simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
-            });
+            simulator_helpers::with_reactions(
+                &mut next_state,
+                EventKind::AbilityRevealed {
+                    slot: *target_slot,
+                    ability: Ability::GoodasGold,
+                },
+                |ns| {
+                    simulator_helpers::emit(
+                        ns,
+                        EventKind::Immune {
+                            target: *target_slot,
+                        },
+                    );
+                },
+            );
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5113,29 +7781,54 @@ fn possible_damage_outcomes_for_move(
             // (checked in this same priority order) — attribute the actual cause so
             // only the hidden ones (ability, item) get a reveal; Grass-typing is
             // already public and stays a flat Immune.
-            let mold_breaks_overcoat = simulator_helpers::attacker_breaks_mold(&next_state, &attacker);
-            let ability_cause = !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
-                && !mold_breaks_overcoat
-                && target.ability == Ability::Overcoat;
+            let mold_breaks_overcoat =
+                simulator_helpers::attacker_breaks_mold(&next_state, &attacker);
+            let ability_cause =
+                !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
+                    && !mold_breaks_overcoat
+                    && target.ability == Ability::Overcoat;
             let item_cause = !ability_cause
                 && matches!(target.item, Item::SafetyGoggles)
                 && simulator_helpers::item_is_active(&next_state, &target);
             if ability_cause {
-                simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                    slot: *target_slot,
-                    ability: Ability::Overcoat,
-                }, |ns| {
-                    simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
-                });
+                simulator_helpers::with_reactions(
+                    &mut next_state,
+                    EventKind::AbilityRevealed {
+                        slot: *target_slot,
+                        ability: Ability::Overcoat,
+                    },
+                    |ns| {
+                        simulator_helpers::emit(
+                            ns,
+                            EventKind::Immune {
+                                target: *target_slot,
+                            },
+                        );
+                    },
+                );
             } else if item_cause {
-                simulator_helpers::with_reactions(&mut next_state, EventKind::ItemRevealed {
-                    slot: *target_slot,
-                    item: Item::SafetyGoggles,
-                }, |ns| {
-                    simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
-                });
+                simulator_helpers::with_reactions(
+                    &mut next_state,
+                    EventKind::ItemRevealed {
+                        slot: *target_slot,
+                        item: Item::SafetyGoggles,
+                    },
+                    |ns| {
+                        simulator_helpers::emit(
+                            ns,
+                            EventKind::Immune {
+                                target: *target_slot,
+                            },
+                        );
+                    },
+                );
             } else {
-                simulator_helpers::emit(&mut next_state, EventKind::Immune { target: *target_slot });
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::Immune {
+                        target: *target_slot,
+                    },
+                );
             }
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
@@ -5154,12 +7847,21 @@ fn possible_damage_outcomes_for_move(
             && !simulator_helpers::pokemon_ability_is_suppressed(&next_state, &target)
             && target.ability == Ability::Telepathy
         {
-            simulator_helpers::with_reactions(&mut next_state, EventKind::AbilityRevealed {
-                slot: *target_slot,
-                ability: Ability::Telepathy,
-            }, |ns| {
-                simulator_helpers::emit(ns, EventKind::Immune { target: *target_slot });
-            });
+            simulator_helpers::with_reactions(
+                &mut next_state,
+                EventKind::AbilityRevealed {
+                    slot: *target_slot,
+                    ability: Ability::Telepathy,
+                },
+                |ns| {
+                    simulator_helpers::emit(
+                        ns,
+                        EventKind::Immune {
+                            target: *target_slot,
+                        },
+                    );
+                },
+            );
             outcomes_for_target.push((0, false, false, 1.0));
             per_target_outcomes.push((*target_slot, outcomes_for_target));
             continue;
@@ -5171,7 +7873,12 @@ fn possible_damage_outcomes_for_move(
         // blocking here is deterministic.
         let is_spread = simulator_helpers::move_is_spread_target(&move_data.target);
         if let Some(kind) = simulator_helpers::protect_blocks_move(
-            &next_state, action.user_slot, *target_slot, &target, move_data, is_spread,
+            &next_state,
+            action.user_slot,
+            *target_slot,
+            &target,
+            move_data,
+            is_spread,
         ) {
             // Punish a blocked CONTACT move (Spiky Shield chip / Baneful Bunker poison / King's
             // Shield −1 Atk). Deterministic, so applied once to the shared next_state per blocked
@@ -5181,7 +7888,10 @@ fn possible_damage_outcomes_for_move(
             // having been made, which it still was.
             if simulator_helpers::contact_effects_apply(&next_state, &attacker, move_data) {
                 simulator_helpers::apply_protect_contact_punishment(
-                    &mut next_state, action.user_slot, *target_slot, kind,
+                    &mut next_state,
+                    action.user_slot,
+                    *target_slot,
+                    kind,
                 );
             }
             // Unseen Fist: every protect kind this engine implements is bypassed (Protect,
@@ -5191,13 +7901,22 @@ fn possible_damage_outcomes_for_move(
             // the core damage formula rather than duplicated here. The ability becomes observable
             // the instant it visibly lets a hit through, so reveal it now instead of letting the
             // move's own AbilityRevealed machinery (which fires on other triggers) skip this case.
-            if simulator_helpers::attacker_has_active_unseen_fist(&next_state, &attacker, move_data) {
-                simulator_helpers::emit(&mut next_state, EventKind::AbilityRevealed {
-                    slot: action.user_slot,
-                    ability: Ability::UnseenFist,
-                });
+            if simulator_helpers::attacker_has_active_unseen_fist(&next_state, &attacker, move_data)
+            {
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::AbilityRevealed {
+                        slot: action.user_slot,
+                        ability: Ability::UnseenFist,
+                    },
+                );
             } else {
-                simulator_helpers::emit(&mut next_state, EventKind::Blocked { target: *target_slot });
+                simulator_helpers::emit(
+                    &mut next_state,
+                    EventKind::Blocked {
+                        target: *target_slot,
+                    },
+                );
                 outcomes_for_target.push((0, false, false, 1.0));
                 per_target_outcomes.push((*target_slot, outcomes_for_target));
                 continue;
@@ -5213,27 +7932,44 @@ fn possible_damage_outcomes_for_move(
             && simulator_helpers::move_is_reflectable(move_data)
         {
             let target_has_mb = !simulator_helpers::attacker_breaks_mold(&next_state, &attacker)
-                && simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot)
-                    .is_some_and(|t| {
+                && simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot).is_some_and(
+                    |t| {
                         !simulator_helpers::pokemon_ability_is_suppressed(&next_state, t)
-                        && t.ability == Ability::MagicBounce
-                    });
-            let target_has_magic_coat = simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot)
-                .is_some_and(|t| simulator_helpers::has_status_volatile(t, &VolatileStatus::MagicCoat));
+                            && t.ability == Ability::MagicBounce
+                    },
+                );
+            let target_has_magic_coat =
+                simulator_helpers::get_pokemon_at_slot(&next_state, *target_slot).is_some_and(
+                    |t| simulator_helpers::has_status_volatile(t, &VolatileStatus::MagicCoat),
+                );
             if target_has_mb || target_has_magic_coat {
                 // Bounce: apply the move's effects to the ATTACKER (user_slot) as if the
                 // target (defender) used them. Swap attacker ↔ target slots so that
                 // side-condition hazards land on the original attacker's side.
                 let bounce_branches = simulator_helpers::apply_secondary_effects(
-                    &next_state, *target_slot, action.user_slot, move_data,
+                    &next_state,
+                    *target_slot,
+                    action.user_slot,
+                    move_data,
                 );
-                decrement_move_pp(&mut next_state, action.user_slot, &action.move_name, Some(move_data));
+                decrement_move_pp(
+                    &mut next_state,
+                    action.user_slot,
+                    &action.move_name,
+                    Some(move_data),
+                );
                 let mut final_outcomes: Vec<(MatchState, f64)> = bounce_branches
-                    .into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect();
+                    .into_iter()
+                    .map(|(bs, p)| (MatchState::BattleState(bs), p))
+                    .collect();
                 let has_confusion = confusion_self_hit_outcomes.is_some();
                 if let Some(confusion_outcomes) = confusion_self_hit_outcomes {
-                    for (s, p) in confusion_outcomes { final_outcomes.push((s, p * (1.0 / 3.0))); }
-                    for (_, p) in &mut final_outcomes { *p *= if has_confusion { 2.0 / 3.0 } else { 1.0 }; }
+                    for (s, p) in confusion_outcomes {
+                        final_outcomes.push((s, p * (1.0 / 3.0)));
+                    }
+                    for (_, p) in &mut final_outcomes {
+                        *p *= if has_confusion { 2.0 / 3.0 } else { 1.0 };
+                    }
                 }
                 return simulator_helpers::coalesce_branches(final_outcomes);
             }
@@ -5253,42 +7989,78 @@ fn possible_damage_outcomes_for_move(
         // volatile and the target's side QuickGuard/WideGuard so follow-up moves can hit freely.
         if move_data.breaks_protect {
             if let Some(tgt_mon) = mon_at_slot_mut(&mut next_state, *target_slot) {
-                tgt_mon.volatiles.retain(|v| !matches!(v,
-                    crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Protect, _)
-                    | crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::KingsShield, _)
-                    | crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpikyShield, _)
-                    | crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::BanefulBunker, _)
-                ));
+                tgt_mon.volatiles.retain(|v| {
+                    !matches!(
+                        v,
+                        crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            VolatileStatus::Protect,
+                            _
+                        ) | crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            VolatileStatus::KingsShield,
+                            _
+                        ) | crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            VolatileStatus::SpikyShield,
+                            _
+                        ) | crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            VolatileStatus::BanefulBunker,
+                            _
+                        )
+                    )
+                });
             }
             // Remove QuickGuard and WideGuard from the target's side (Feint lifts these).
             let target_side = match target_slot.player {
                 Player::P1 => &mut next_state.p1_side_conditions,
                 Player::P2 => &mut next_state.p2_side_conditions,
             };
-            target_side.retain(|c| !matches!(c,
-                SideCondition::QuickGuard | SideCondition::WideGuard
-            ));
+            target_side
+                .retain(|c| !matches!(c, SideCondition::QuickGuard | SideCondition::WideGuard));
         }
 
-        let weather_blocks_move = matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special)
-            && ((simulator_helpers::weather_is_heavy_rain(&next_state) && matches!(move_data.pokemon_type, PokemonType::Fire))
-                || (simulator_helpers::weather_is_harsh_sunlight(&next_state) && matches!(move_data.pokemon_type, PokemonType::Water)));
+        let weather_blocks_move = matches!(
+            move_data.category,
+            MoveCategory::Physical | MoveCategory::Special
+        ) && ((simulator_helpers::weather_is_heavy_rain(&next_state)
+            && matches!(move_data.pokemon_type, PokemonType::Fire))
+            || (simulator_helpers::weather_is_harsh_sunlight(&next_state)
+                && matches!(move_data.pokemon_type, PokemonType::Water)));
 
         if weather_blocks_move {
             if move_data.thaws_target {
                 let old_target_status = match target_slot.player {
-                    Player::P1 => next_state.p1_active_mons.get(target_slot.slot_index as usize),
-                    Player::P2 => next_state.p2_active_mons.get(target_slot.slot_index as usize),
-                }.and_then(|m| if matches!(m.status, Some(Status::Frozen(_))) { m.status.clone() } else { None });
-                if let Some(target_mon) = match target_slot.player {
-                    Player::P1 => next_state.p1_active_mons.get_mut(target_slot.slot_index as usize),
-                    Player::P2 => next_state.p2_active_mons.get_mut(target_slot.slot_index as usize),
+                    Player::P1 => next_state
+                        .p1_active_mons
+                        .get(target_slot.slot_index as usize),
+                    Player::P2 => next_state
+                        .p2_active_mons
+                        .get(target_slot.slot_index as usize),
                 }
-                    && matches!(target_mon.status, Some(Status::Frozen(_))) {
-                        target_mon.status = None;
+                .and_then(|m| {
+                    if matches!(m.status, Some(Status::Frozen(_))) {
+                        m.status.clone()
+                    } else {
+                        None
                     }
+                });
+                if let Some(target_mon) = match target_slot.player {
+                    Player::P1 => next_state
+                        .p1_active_mons
+                        .get_mut(target_slot.slot_index as usize),
+                    Player::P2 => next_state
+                        .p2_active_mons
+                        .get_mut(target_slot.slot_index as usize),
+                } && matches!(target_mon.status, Some(Status::Frozen(_)))
+                {
+                    target_mon.status = None;
+                }
                 if let Some(old_status) = old_target_status {
-                    simulator_helpers::emit(&mut next_state, EventKind::StatusCured { target: *target_slot, status: old_status });
+                    simulator_helpers::emit(
+                        &mut next_state,
+                        EventKind::StatusCured {
+                            target: *target_slot,
+                            status: old_status,
+                        },
+                    );
                 }
             }
             outcomes_for_target.push((0, false, false, 1.0));
@@ -5301,7 +8073,13 @@ fn possible_damage_outcomes_for_move(
         // `try_drawin_negate` also handles the case where the target was redirected to this slot.
         {
             let items_suppressed = simulator_helpers::items_are_suppressed(&next_state);
-            if simulator_helpers::try_drawin_negate(&mut next_state, *target_slot, &attacker, move_data, items_suppressed) {
+            if simulator_helpers::try_drawin_negate(
+                &mut next_state,
+                *target_slot,
+                &attacker,
+                move_data,
+                items_suppressed,
+            ) {
                 outcomes_for_target.push((0, false, false, 1.0));
                 per_target_outcomes.push((*target_slot, outcomes_for_target));
                 continue;
@@ -5338,7 +8116,12 @@ fn possible_damage_outcomes_for_move(
         // Hit branches.
         if hit_probability > 0.0 {
             for (damage, is_crit, damage_probability) in outcomes {
-                outcomes_for_target.push((damage, is_crit, true, damage_probability * hit_probability));
+                outcomes_for_target.push((
+                    damage,
+                    is_crit,
+                    true,
+                    damage_probability * hit_probability,
+                ));
             }
         }
 
@@ -5352,13 +8135,25 @@ fn possible_damage_outcomes_for_move(
 
     // Log move info if verbosity >= 4
     if simulator_helpers::get_verbosity() >= 4 {
-        let target_names: Vec<String> = target_slots.iter().filter_map(|slot| {
-            simulator_helpers::get_pokemon_at_slot(&next_state, *slot).map(|m| simulator_helpers::species_name_sim(&m.species))
-        }).collect();
+        let target_names: Vec<String> = target_slots
+            .iter()
+            .filter_map(|slot| {
+                simulator_helpers::get_pokemon_at_slot(&next_state, *slot)
+                    .map(|m| simulator_helpers::species_name_sim(&m.species))
+            })
+            .collect();
         let pp_display = pp_index
-            .and_then(|idx| next_state.p1_active_mons.get(action.user_slot.slot_index as usize)
-                .or_else(|| next_state.p2_active_mons.get(action.user_slot.slot_index as usize))
-                .and_then(|mon| mon.move_pp.get(idx)))
+            .and_then(|idx| {
+                next_state
+                    .p1_active_mons
+                    .get(action.user_slot.slot_index as usize)
+                    .or_else(|| {
+                        next_state
+                            .p2_active_mons
+                            .get(action.user_slot.slot_index as usize)
+                    })
+                    .and_then(|mon| mon.move_pp.get(idx))
+            })
             .map(|pp| pp.to_string())
             .unwrap_or_else(|| "—".to_string());
         println!(
@@ -5376,7 +8171,8 @@ fn possible_damage_outcomes_for_move(
     }
 
     // Combine per-target outcomes via cartesian product
-    let mut all_outcomes: Vec<(MatchState, f64)> = vec![(MatchState::BattleState(next_state.clone()), 1.0)];
+    let mut all_outcomes: Vec<(MatchState, f64)> =
+        vec![(MatchState::BattleState(next_state.clone()), 1.0)];
 
     for (target_slot, target_outcomes) in &per_target_outcomes {
         let mut new_all_outcomes = Vec::new();
@@ -5391,11 +8187,32 @@ fn possible_damage_outcomes_for_move(
 
                 if *hit {
                     // Delegate to the already-extracted single-hit helper.
-                    let hit_branches = apply_single_hit_branch(branch_state, *target_slot, &move_name, move_data, *damage, action.user_slot, combined_prob, *is_crit);
+                    let hit_branches = apply_single_hit_branch(
+                        branch_state,
+                        *target_slot,
+                        &move_name,
+                        move_data,
+                        *damage,
+                        action.user_slot,
+                        combined_prob,
+                        *is_crit,
+                    );
                     // King's Rock / Stench: 10% flinch on damaging hits (combined chance = 1 - 0.9^hits).
                     let hit_branches = if *damage > 0 {
-                        let b = simulator_helpers::apply_kings_rock_flinch(hit_branches, action.user_slot, *target_slot, move_data, 1);
-                        simulator_helpers::apply_stench_flinch(b, action.user_slot, *target_slot, move_data, 1)
+                        let b = simulator_helpers::apply_kings_rock_flinch(
+                            hit_branches,
+                            action.user_slot,
+                            *target_slot,
+                            move_data,
+                            1,
+                        );
+                        simulator_helpers::apply_stench_flinch(
+                            b,
+                            action.user_slot,
+                            *target_slot,
+                            move_data,
+                            1,
+                        )
                     } else {
                         hit_branches
                     };
@@ -5406,7 +8223,14 @@ fn possible_damage_outcomes_for_move(
                     let hit_branches = if move_data.force_switch
                         && (*damage > 0 || matches!(move_data.category, MoveCategory::Status))
                     {
-                        apply_forced_switch(hit_branches, action.user_slot, *target_slot, move_data, pokemon_dex, move_dex)
+                        apply_forced_switch(
+                            hit_branches,
+                            action.user_slot,
+                            *target_slot,
+                            move_data,
+                            pokemon_dex,
+                            move_dex,
+                        )
                     } else {
                         hit_branches
                     };
@@ -5415,44 +8239,79 @@ fn possible_damage_outcomes_for_move(
                     // but damage==0). Covers Ghost vs HJK/Axe Kick and Volt Absorb / Motor Drive
                     // vs Supercell Slam. Magic Guard on the user skips the damage (handled inside
                     // apply_hp_damage_to_attacker).
-                    let hit_branches: Vec<(BattleState, f64)> = if move_data.has_crash_damage && *damage == 0 {
-                        hit_branches.into_iter().map(|(mut bs, p)| {
-                            simulator_helpers::apply_hp_damage_to_attacker(&mut bs, action.user_slot, 1, 2);
-                            (bs, p)
-                        }).collect()
-                    } else {
-                        hit_branches
-                    };
+                    let hit_branches: Vec<(BattleState, f64)> =
+                        if move_data.has_crash_damage && *damage == 0 {
+                            hit_branches
+                                .into_iter()
+                                .map(|(mut bs, p)| {
+                                    simulator_helpers::apply_hp_damage_to_attacker(
+                                        &mut bs,
+                                        action.user_slot,
+                                        1,
+                                        2,
+                                    );
+                                    (bs, p)
+                                })
+                                .collect()
+                        } else {
+                            hit_branches
+                        };
                     // Parental Bond: second hit at 25% BP. Rolls independently for damage, crit,
                     // and secondary effects. Short-circuits if the target fainted on the first hit.
                     let hit_branches: Vec<(BattleState, f64)> = if parental_bond_eligible {
                         let second_bp = Some((move_data.base_power / 4).max(1));
                         let mut pb_branches = Vec::new();
                         for (first_bs, first_prob) in hit_branches {
-                            let tgt_fainted = simulator_helpers::get_pokemon_at_slot(&first_bs, *target_slot)
-                                .is_none_or(|t| t.fainted);
+                            let tgt_fainted =
+                                simulator_helpers::get_pokemon_at_slot(&first_bs, *target_slot)
+                                    .is_none_or(|t| t.fainted);
                             if tgt_fainted {
                                 pb_branches.push((first_bs, first_prob));
                                 continue;
                             }
-                            let atk2 = simulator_helpers::get_pokemon_at_slot(&first_bs, action.user_slot).cloned();
-                            let tgt2 = simulator_helpers::get_pokemon_at_slot(&first_bs, *target_slot).cloned();
+                            let atk2 =
+                                simulator_helpers::get_pokemon_at_slot(&first_bs, action.user_slot)
+                                    .cloned();
+                            let tgt2 =
+                                simulator_helpers::get_pokemon_at_slot(&first_bs, *target_slot)
+                                    .cloned();
                             if let (Some(atk2), Some(tgt2)) = (atk2, tgt2) {
-                                let (inv2, _) = check_invulnerability_status(&atk2, &tgt2, &move_name);
-                            let second_outcomes = simulator_helpers::calculate_damage_outcomes_for_target_with_options(
+                                let (inv2, _) =
+                                    check_invulnerability_status(&atk2, &tgt2, &move_name);
+                                let second_outcomes = simulator_helpers::calculate_damage_outcomes_for_target_with_options(
                                     &first_bs, &atk2, &tgt2, action.user_slot, *target_slot,
                                     move_data, config, targets_mult, inv2,
                                     second_bp, None,
                                 );
                                 for (s_dmg, s_crit, s_prob) in second_outcomes {
                                     let second_branches = apply_single_hit_branch(
-                                        first_bs.clone(), *target_slot, &move_name, move_data,
-                                        s_dmg, action.user_slot, first_prob * s_prob, s_crit,
+                                        first_bs.clone(),
+                                        *target_slot,
+                                        &move_name,
+                                        move_data,
+                                        s_dmg,
+                                        action.user_slot,
+                                        first_prob * s_prob,
+                                        s_crit,
                                     );
                                     let second_branches = if s_dmg > 0 {
-                                        let b = simulator_helpers::apply_kings_rock_flinch(second_branches, action.user_slot, *target_slot, move_data, 1);
-                                        simulator_helpers::apply_stench_flinch(b, action.user_slot, *target_slot, move_data, 1)
-                                    } else { second_branches };
+                                        let b = simulator_helpers::apply_kings_rock_flinch(
+                                            second_branches,
+                                            action.user_slot,
+                                            *target_slot,
+                                            move_data,
+                                            1,
+                                        );
+                                        simulator_helpers::apply_stench_flinch(
+                                            b,
+                                            action.user_slot,
+                                            *target_slot,
+                                            move_data,
+                                            1,
+                                        )
+                                    } else {
+                                        second_branches
+                                    };
                                     pb_branches.extend(second_branches);
                                 }
                             } else {
@@ -5473,20 +8332,35 @@ fn possible_damage_outcomes_for_move(
                     // failures — each push a sole tuple and announce themselves via
                     // MoveFailed/Blocked/Immune before branching starts).
                     if target_outcomes.len() > 1 {
-                        simulator_helpers::emit(&mut branch_state, EventKind::Missed { target: *target_slot });
+                        simulator_helpers::emit(
+                            &mut branch_state,
+                            EventKind::Missed {
+                                target: *target_slot,
+                            },
+                        );
                     }
                     // Miss: only thaw a frozen target if a thaws_target move is used in harsh sun
                     if simulator_helpers::weather_is_harsh_sunlight(&branch_state)
                         && move_data.thaws_target
                     {
-                        let old_frozen = mon_at_slot_mut(&mut branch_state, *target_slot)
-                            .and_then(|m| if matches!(m.status, Some(Status::Frozen(_))) {
-                                let s = m.status.clone();
-                                m.status = None;
-                                s
-                            } else { None });
+                        let old_frozen =
+                            mon_at_slot_mut(&mut branch_state, *target_slot).and_then(|m| {
+                                if matches!(m.status, Some(Status::Frozen(_))) {
+                                    let s = m.status.clone();
+                                    m.status = None;
+                                    s
+                                } else {
+                                    None
+                                }
+                            });
                         if let Some(old_status) = old_frozen {
-                            simulator_helpers::emit(&mut branch_state, EventKind::StatusCured { target: *target_slot, status: old_status });
+                            simulator_helpers::emit(
+                                &mut branch_state,
+                                EventKind::StatusCured {
+                                    target: *target_slot,
+                                    status: old_status,
+                                },
+                            );
                         }
                     }
                     // Crash-damage moves (High Jump Kick, Axe Kick, Supercell Slam) take ½ max HP
@@ -5496,7 +8370,12 @@ fn possible_damage_outcomes_for_move(
                     // The no-valid-target early return above ensures there is no crash when there
                     // is no target. Magic Guard on the user skips the damage.
                     if move_data.has_crash_damage {
-                        simulator_helpers::apply_hp_damage_to_attacker(&mut branch_state, action.user_slot, 1, 2);
+                        simulator_helpers::apply_hp_damage_to_attacker(
+                            &mut branch_state,
+                            action.user_slot,
+                            1,
+                            2,
+                        );
                     }
                     new_all_outcomes.push((MatchState::BattleState(branch_state), combined_prob));
                 }
@@ -5538,12 +8417,16 @@ fn possible_damage_outcomes_for_move(
     let mut all_outcomes: Vec<(MatchState, f64)> = all_outcomes
         .into_iter()
         .flat_map(|(state, prob)| match state {
-            MatchState::BattleState(bs) => {
-                apply_post_damage_move_effects(bs, action.user_slot, move_data, &next_state, opposing_player)
-                    .into_iter()
-                    .map(move |(st, w)| (st, prob * w))
-                    .collect::<Vec<_>>()
-            }
+            MatchState::BattleState(bs) => apply_post_damage_move_effects(
+                bs,
+                action.user_slot,
+                move_data,
+                &next_state,
+                opposing_player,
+            )
+            .into_iter()
+            .map(move |(st, w)| (st, prob * w))
+            .collect::<Vec<_>>(),
             other => vec![(other, prob)],
         })
         .collect();
@@ -5570,13 +8453,26 @@ fn possible_damage_outcomes_for_move(
         for (state, _) in &mut all_outcomes {
             if let MatchState::BattleState(bs) = state {
                 if let Some(mon) = match action.user_slot.player {
-                    Player::P1 => bs.p1_active_mons.get_mut(action.user_slot.slot_index as usize),
-                    Player::P2 => bs.p2_active_mons.get_mut(action.user_slot.slot_index as usize),
+                    Player::P1 => bs
+                        .p1_active_mons
+                        .get_mut(action.user_slot.slot_index as usize),
+                    Player::P2 => bs
+                        .p2_active_mons
+                        .get_mut(action.user_slot.slot_index as usize),
                 } {
                     // Apply mustrecharge volatile for 2 turns
-                    mon.volatiles.push(crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MustRecharge, 2));
+                    mon.volatiles
+                        .push(crate::state::pokemon::VolatileStatusState::TurnStatus(
+                            VolatileStatus::MustRecharge,
+                            2,
+                        ));
                 }
-                simulator_helpers::emit(bs, EventKind::MustRecharge { slot: action.user_slot });
+                simulator_helpers::emit(
+                    bs,
+                    EventKind::MustRecharge {
+                        slot: action.user_slot,
+                    },
+                );
             }
         }
     }
@@ -5594,30 +8490,62 @@ fn possible_damage_outcomes_for_move(
     if par_fail_prob > 0.0 {
         let mut fail_state = pre_move_state.clone();
         if let Some(idx) = pp_index
-            && let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) }
-                && let Some(pp) = mon.move_pp.get_mut(idx) {
-                    *pp = pp.saturating_sub(1);
-                }
+            && let Some(mon) = match action.user_slot.player {
+                Player::P1 => fail_state
+                    .p1_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => fail_state
+                    .p2_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
+            }
+            && let Some(pp) = mon.move_pp.get_mut(idx)
+        {
+            *pp = pp.saturating_sub(1);
+        }
         // A move prevented by full paralysis.
-        simulator_helpers::note_move_outcome(&mut fail_state, action.user_slot, simulator_helpers::MoveOutcome::Cant(CantReason::Paralysis));
+        simulator_helpers::note_move_outcome(
+            &mut fail_state,
+            action.user_slot,
+            simulator_helpers::MoveOutcome::Cant(CantReason::Paralysis),
+        );
         // Paralysis disrupts a rampage lock. Use post-decrement turns from `attacker`.
         let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
-            if let crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+            if let crate::state::pokemon::VolatileStatusState::MoveStatus(
+                VolatileStatus::LockedMove(_),
+                t,
+            ) = v
+            {
+                Some(*t)
+            } else {
+                None
+            }
         });
         if let Some(turns) = rampage_lock_turns {
-            let is_misty = matches!(fail_state.terrain, Some(crate::state::dex_data::Terrain::MistyTerrain));
-            let confusion_added = if let Some(mon) = mon_at_slot_mut(&mut fail_state, action.user_slot) {
-                disrupt_rampage_lock(mon, turns, is_misty)
-            } else { false };
-            simulator_helpers::emit(&mut fail_state, EventKind::VolatileEnd {
-                target: action.user_slot,
-                volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
-            });
-            if confusion_added {
-                simulator_helpers::emit(&mut fail_state, EventKind::VolatileStart {
+            let is_misty = matches!(
+                fail_state.terrain,
+                Some(crate::state::dex_data::Terrain::MistyTerrain)
+            );
+            let confusion_added =
+                if let Some(mon) = mon_at_slot_mut(&mut fail_state, action.user_slot) {
+                    disrupt_rampage_lock(mon, turns, is_misty)
+                } else {
+                    false
+                };
+            simulator_helpers::emit(
+                &mut fail_state,
+                EventKind::VolatileEnd {
                     target: action.user_slot,
-                    volatile: VolatileStatus::Confusion,
-                });
+                    volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
+                },
+            );
+            if confusion_added {
+                simulator_helpers::emit(
+                    &mut fail_state,
+                    EventKind::VolatileStart {
+                        target: action.user_slot,
+                        volatile: VolatileStatus::Confusion,
+                    },
+                );
             }
         }
         final_outcomes.push((MatchState::BattleState(fail_state), par_fail_prob));
@@ -5626,12 +8554,20 @@ fn possible_damage_outcomes_for_move(
     // status (sleep/frozen) fail branch: increment counters and consume PP
     if status_fail_prob > 0.0 {
         let mut status_fail_state = pre_move_state.clone();
-        if let Some(mon) = match action.user_slot.player { Player::P1 => status_fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => status_fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) } {
+        if let Some(mon) = match action.user_slot.player {
+            Player::P1 => status_fail_state
+                .p1_active_mons
+                .get_mut(action.user_slot.slot_index as usize),
+            Player::P2 => status_fail_state
+                .p2_active_mons
+                .get_mut(action.user_slot.slot_index as usize),
+        } {
             // Decrement PP (Struggle has no PP slot to track)
             if let Some(idx) = pp_index
-                && let Some(pp) = mon.move_pp.get_mut(idx) {
-                    *pp = pp.saturating_sub(1);
-                }
+                && let Some(pp) = mon.move_pp.get_mut(idx)
+            {
+                *pp = pp.saturating_sub(1);
+            }
 
             if let Some(st) = &mon.status {
                 match st {
@@ -5646,36 +8582,60 @@ fn possible_damage_outcomes_for_move(
                     _ => {}
                 }
             }
-
         }
         // A move prevented by sleep/freeze — pick the right CantReason from the (now-updated) status.
-        let sleep_freeze_reason = simulator_helpers::get_pokemon_at_slot(&status_fail_state, action.user_slot)
-            .and_then(|m| m.status.as_ref())
-            .map(|st| match st {
-                crate::state::dex_data::Status::Frozen(_) => CantReason::Freeze,
-                crate::state::dex_data::Status::Sleep(_) => CantReason::Sleep,
-                _ => CantReason::Other,
-            })
-            .unwrap_or(CantReason::Other);
-        simulator_helpers::note_move_outcome(&mut status_fail_state, action.user_slot, simulator_helpers::MoveOutcome::Cant(sleep_freeze_reason));
+        let sleep_freeze_reason =
+            simulator_helpers::get_pokemon_at_slot(&status_fail_state, action.user_slot)
+                .and_then(|m| m.status.as_ref())
+                .map(|st| match st {
+                    crate::state::dex_data::Status::Frozen(_) => CantReason::Freeze,
+                    crate::state::dex_data::Status::Sleep(_) => CantReason::Sleep,
+                    _ => CantReason::Other,
+                })
+                .unwrap_or(CantReason::Other);
+        simulator_helpers::note_move_outcome(
+            &mut status_fail_state,
+            action.user_slot,
+            simulator_helpers::MoveOutcome::Cant(sleep_freeze_reason),
+        );
         // Sleep/freeze disrupts a rampage lock.
         let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
-            if let crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+            if let crate::state::pokemon::VolatileStatusState::MoveStatus(
+                VolatileStatus::LockedMove(_),
+                t,
+            ) = v
+            {
+                Some(*t)
+            } else {
+                None
+            }
         });
         if let Some(turns) = rampage_lock_turns {
-            let is_misty = matches!(status_fail_state.terrain, Some(crate::state::dex_data::Terrain::MistyTerrain));
-            let confusion_added = if let Some(mon) = mon_at_slot_mut(&mut status_fail_state, action.user_slot) {
-                disrupt_rampage_lock(mon, turns, is_misty)
-            } else { false };
-            simulator_helpers::emit(&mut status_fail_state, EventKind::VolatileEnd {
-                target: action.user_slot,
-                volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
-            });
-            if confusion_added {
-                simulator_helpers::emit(&mut status_fail_state, EventKind::VolatileStart {
+            let is_misty = matches!(
+                status_fail_state.terrain,
+                Some(crate::state::dex_data::Terrain::MistyTerrain)
+            );
+            let confusion_added =
+                if let Some(mon) = mon_at_slot_mut(&mut status_fail_state, action.user_slot) {
+                    disrupt_rampage_lock(mon, turns, is_misty)
+                } else {
+                    false
+                };
+            simulator_helpers::emit(
+                &mut status_fail_state,
+                EventKind::VolatileEnd {
                     target: action.user_slot,
-                    volatile: VolatileStatus::Confusion,
-                });
+                    volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
+                },
+            );
+            if confusion_added {
+                simulator_helpers::emit(
+                    &mut status_fail_state,
+                    EventKind::VolatileStart {
+                        target: action.user_slot,
+                        volatile: VolatileStatus::Confusion,
+                    },
+                );
             }
         }
         final_outcomes.push((MatchState::BattleState(status_fail_state), status_fail_prob));
@@ -5685,28 +8645,62 @@ fn possible_damage_outcomes_for_move(
     if attract_fail_prob > 0.0 {
         let mut fail_state = pre_move_state.clone();
         if let Some(idx) = pp_index
-            && let Some(mon) = match action.user_slot.player { Player::P1 => fail_state.p1_active_mons.get_mut(action.user_slot.slot_index as usize), Player::P2 => fail_state.p2_active_mons.get_mut(action.user_slot.slot_index as usize) }
-                && let Some(pp) = mon.move_pp.get_mut(idx) { *pp = pp.saturating_sub(1); }
+            && let Some(mon) = match action.user_slot.player {
+                Player::P1 => fail_state
+                    .p1_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
+                Player::P2 => fail_state
+                    .p2_active_mons
+                    .get_mut(action.user_slot.slot_index as usize),
+            }
+            && let Some(pp) = mon.move_pp.get_mut(idx)
+        {
+            *pp = pp.saturating_sub(1);
+        }
         // A move prevented by infatuation (Attract).
-        simulator_helpers::note_move_outcome(&mut fail_state, action.user_slot, simulator_helpers::MoveOutcome::Cant(CantReason::Infatuation));
+        simulator_helpers::note_move_outcome(
+            &mut fail_state,
+            action.user_slot,
+            simulator_helpers::MoveOutcome::Cant(CantReason::Infatuation),
+        );
         // Infatuation disrupts a rampage lock.
         let rampage_lock_turns = attacker.volatiles.iter().find_map(|v| {
-            if let crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v { Some(*t) } else { None }
+            if let crate::state::pokemon::VolatileStatusState::MoveStatus(
+                VolatileStatus::LockedMove(_),
+                t,
+            ) = v
+            {
+                Some(*t)
+            } else {
+                None
+            }
         });
         if let Some(turns) = rampage_lock_turns {
-            let is_misty = matches!(fail_state.terrain, Some(crate::state::dex_data::Terrain::MistyTerrain));
-            let confusion_added = if let Some(mon) = mon_at_slot_mut(&mut fail_state, action.user_slot) {
-                disrupt_rampage_lock(mon, turns, is_misty)
-            } else { false };
-            simulator_helpers::emit(&mut fail_state, EventKind::VolatileEnd {
-                target: action.user_slot,
-                volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
-            });
-            if confusion_added {
-                simulator_helpers::emit(&mut fail_state, EventKind::VolatileStart {
+            let is_misty = matches!(
+                fail_state.terrain,
+                Some(crate::state::dex_data::Terrain::MistyTerrain)
+            );
+            let confusion_added =
+                if let Some(mon) = mon_at_slot_mut(&mut fail_state, action.user_slot) {
+                    disrupt_rampage_lock(mon, turns, is_misty)
+                } else {
+                    false
+                };
+            simulator_helpers::emit(
+                &mut fail_state,
+                EventKind::VolatileEnd {
                     target: action.user_slot,
-                    volatile: VolatileStatus::Confusion,
-                });
+                    volatile: VolatileStatus::LockedMove(PokemonMove::Struggle),
+                },
+            );
+            if confusion_added {
+                simulator_helpers::emit(
+                    &mut fail_state,
+                    EventKind::VolatileStart {
+                        target: action.user_slot,
+                        volatile: VolatileStatus::Confusion,
+                    },
+                );
             }
         }
         final_outcomes.push((MatchState::BattleState(fail_state), attract_fail_prob));
@@ -5723,7 +8717,12 @@ fn possible_damage_outcomes_for_move(
         }
     }
 
-    let normal_scale = success_scale * if confusion_self_hit_outcomes.is_some() { 2.0 / 3.0 } else { 1.0 };
+    let normal_scale = success_scale
+        * if confusion_self_hit_outcomes.is_some() {
+            2.0 / 3.0
+        } else {
+            1.0
+        };
     for (state, prob) in all_outcomes {
         final_outcomes.push((state, prob * normal_scale));
     }
@@ -5732,7 +8731,14 @@ fn possible_damage_outcomes_for_move(
         return vec![(MatchState::BattleState(next_state), 1.0)];
     }
     if simulator_helpers::get_verbosity() >= 4 {
-        println!("{}", format!("  [Verbosity 4] {} total damage outcome combinations:", final_outcomes.len()).bright_yellow());
+        println!(
+            "{}",
+            format!(
+                "  [Verbosity 4] {} total damage outcome combinations:",
+                final_outcomes.len()
+            )
+            .bright_yellow()
+        );
         for (idx, (_, prob)) in final_outcomes.iter().enumerate() {
             println!("    Branch {}: {:.6} probability", idx + 1, prob);
         }
@@ -5752,7 +8758,15 @@ pub fn team_preview_state_from_teamsheets(
 ) -> TeamPreviewState {
     let p1_text = std::fs::read_to_string(p1_path).expect("Failed to read team sheet file");
     let p2_text = std::fs::read_to_string(p2_path).expect("Failed to read team sheet file");
-    team_preview_state_from_team_strings(&p1_text, &p2_text, pokemon_dex, move_dex, active_per_side, brought_per_side, use_stat_points)
+    team_preview_state_from_team_strings(
+        &p1_text,
+        &p2_text,
+        pokemon_dex,
+        move_dex,
+        active_per_side,
+        brought_per_side,
+        use_stat_points,
+    )
 }
 
 pub fn team_preview_state_from_team_strings(
@@ -5770,7 +8784,9 @@ pub fn team_preview_state_from_team_strings(
     // Offset P2's mon_ids so they are globally unique across both teams (P1 = 0..n, P2 = n..2n).
     // This lets a single u8 identify any Pokémon on the field, which is needed to track the
     // source of binding/trapping volatiles (ends when the trapper leaves the field).
-    for mon in &mut p2_mons { mon.mon_id += p1_size; }
+    for mon in &mut p2_mons {
+        mon.mon_id += p1_size;
+    }
     TeamPreviewState {
         active_per_side,
         brought_per_side,
@@ -5779,7 +8795,12 @@ pub fn team_preview_state_from_team_strings(
     }
 }
 
-fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleState, slot_idx: usize) -> Vec<Option<FieldSlot>> {
+fn get_valid_targets(
+    target_type: &MoveTarget,
+    player: Player,
+    state: &BattleState,
+    slot_idx: usize,
+) -> Vec<Option<FieldSlot>> {
     let mut targets: Vec<Option<FieldSlot>> = Vec::new();
     let (my_active, foe_active) = match player {
         Player::P1 => (&state.p1_active_mons, &state.p2_active_mons),
@@ -5792,15 +8813,26 @@ fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleSta
     };
 
     match target_type {
-        MoveTarget::AdjacentAlly | MoveTarget::AdjacentAllyOrSelf | MoveTarget::AdjacentFoe | MoveTarget::Normal | MoveTarget::Any | MoveTarget::Scripted => {
+        MoveTarget::AdjacentAlly
+        | MoveTarget::AdjacentAllyOrSelf
+        | MoveTarget::AdjacentFoe
+        | MoveTarget::Normal
+        | MoveTarget::Any
+        | MoveTarget::Scripted => {
             let can_target_foe = matches!(
                 target_type,
-                MoveTarget::AdjacentFoe | MoveTarget::Normal | MoveTarget::Any | MoveTarget::Scripted
+                MoveTarget::AdjacentFoe
+                    | MoveTarget::Normal
+                    | MoveTarget::Any
+                    | MoveTarget::Scripted
             );
 
             let can_target_ally = matches!(
                 target_type,
-                MoveTarget::AdjacentAlly | MoveTarget::AdjacentAllyOrSelf | MoveTarget::Normal | MoveTarget::Any
+                MoveTarget::AdjacentAlly
+                    | MoveTarget::AdjacentAllyOrSelf
+                    | MoveTarget::Normal
+                    | MoveTarget::Any
             );
 
             let can_target_self = matches!(target_type, MoveTarget::AdjacentAllyOrSelf);
@@ -5808,7 +8840,10 @@ fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleSta
             if can_target_foe {
                 for (i, foe) in foe_active.iter().enumerate() {
                     if !foe.fainted {
-                        targets.push(Some(FieldSlot { player: foe_player, slot_index: i as u8 }));
+                        targets.push(Some(FieldSlot {
+                            player: foe_player,
+                            slot_index: i as u8,
+                        }));
                     }
                 }
             }
@@ -5818,15 +8853,21 @@ fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleSta
                         if i == slot_idx && !can_target_self {
                             continue;
                         }
-                        targets.push(Some(FieldSlot { player, slot_index: i as u8 }));
+                        targets.push(Some(FieldSlot {
+                            player,
+                            slot_index: i as u8,
+                        }));
                     }
                 }
             }
 
             if targets.is_empty() {
-                targets.push(Some(FieldSlot { player: foe_player, slot_index: 0 })); // Fallback
+                targets.push(Some(FieldSlot {
+                    player: foe_player,
+                    slot_index: 0,
+                })); // Fallback
             }
-        },
+        }
         _ => {
             targets.push(None); // Multi-target and self-target moves don't select a target
         }
@@ -5836,11 +8877,26 @@ fn get_valid_targets(target_type: &MoveTarget, player: Player, state: &BattleSta
 }
 
 /// Push all (tera/mega) attack command variants for `move_slot` × `target` into `cmds`.
-fn push_attack_variants(cmds: &mut Vec<BattleCommand>, move_slot: usize, target: Option<FieldSlot>, can_tera: bool, can_mega: bool) {
+fn push_attack_variants(
+    cmds: &mut Vec<BattleCommand>,
+    move_slot: usize,
+    target: Option<FieldSlot>,
+    can_tera: bool,
+    can_mega: bool,
+) {
     for (tera, mega) in [(false, false), (true, false), (false, true), (true, true)] {
-        if tera && !can_tera { continue; }
-        if mega && !can_mega { continue; }
-        cmds.push(BattleCommand::Attack(AttackCommand { move_slot, target, terastallize: tera, mega_evolve: mega }));
+        if tera && !can_tera {
+            continue;
+        }
+        if mega && !can_mega {
+            continue;
+        }
+        cmds.push(BattleCommand::Attack(AttackCommand {
+            move_slot,
+            target,
+            terastallize: tera,
+            mega_evolve: mega,
+        }));
     }
 }
 
@@ -5848,14 +8904,18 @@ fn push_attack_variants(cmds: &mut Vec<BattleCommand>, move_slot: usize, target:
 fn locked_semi_invulnerable_commands(mon: &PokemonState, player: Player) -> Vec<BattleCommand> {
     for (i, move_opt) in mon.moves.iter().enumerate() {
         if let Some(m) = move_opt
-            && simulator_helpers::move_causes_invulnerability(m) {
-                return vec![BattleCommand::Attack(AttackCommand {
-                    move_slot: i,
-                    target: Some(FieldSlot { player, slot_index: 0 }),
-                    terastallize: false,
-                    mega_evolve: false,
-                })];
-            }
+            && simulator_helpers::move_causes_invulnerability(m)
+        {
+            return vec![BattleCommand::Attack(AttackCommand {
+                move_slot: i,
+                target: Some(FieldSlot {
+                    player,
+                    slot_index: 0,
+                }),
+                terastallize: false,
+                mega_evolve: false,
+            })];
+        }
     }
     vec![BattleCommand::Pass]
 }
@@ -5876,25 +8936,34 @@ fn disrupt_rampage_lock(
     is_misty_terrain: bool,
 ) -> bool {
     // Read the locked move before removing it so we can skip confusion for rolling moves.
-    let locked_is_rolling = mon.volatiles.iter().any(|v| matches!(
-        v,
-        crate::state::pokemon::VolatileStatusState::MoveStatus(
-            VolatileStatus::LockedMove(m), _
-        ) if matches!(m, PokemonMove::Rollout | PokemonMove::IceBall)
-    ));
-    simulator_helpers::remove_status_volatile(mon, &VolatileStatus::LockedMove(
-        crate::data::pokemon_move::PokemonMove::Tackle // payload ignored by discriminant match
-    ));
+    let locked_is_rolling = mon.volatiles.iter().any(|v| {
+        matches!(
+            v,
+            crate::state::pokemon::VolatileStatusState::MoveStatus(
+                VolatileStatus::LockedMove(m), _
+            ) if matches!(m, PokemonMove::Rollout | PokemonMove::IceBall)
+        )
+    });
+    simulator_helpers::remove_status_volatile(
+        mon,
+        &VolatileStatus::LockedMove(
+            crate::data::pokemon_move::PokemonMove::Tackle, // payload ignored by discriminant match
+        ),
+    );
     // Only confuse when the disrupted attack would have been the guaranteed-final 3rd turn,
     // and only for Thrash-family moves (Rollout/Ice Ball never confuse).
     let is_final_turn = attacks_completed >= 2;
-    let confusion_added = is_final_turn && !locked_is_rolling && !simulator_helpers::is_confused(mon) && !is_misty_terrain;
+    let confusion_added = is_final_turn
+        && !locked_is_rolling
+        && !simulator_helpers::is_confused(mon)
+        && !is_misty_terrain;
     if confusion_added {
-        let duration = rand::thread_rng().gen_range(2u16..=5u16);
-        mon.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(
-            VolatileStatus::Confusion,
-            duration,
-        ));
+        let duration = with_sample_rng(|rng| rng.gen_range(2u16..=5u16));
+        mon.volatiles
+            .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
+                VolatileStatus::Confusion,
+                duration,
+            ));
     }
     confusion_added
 }
@@ -5903,13 +8972,24 @@ fn disrupt_rampage_lock(
 /// The user must re-select that move and cannot switch. Target is left as `None` so that the
 /// RandomNormal fan-out in `possible_damage_outcomes_for_move` re-randomizes the foe each turn
 /// (relevant in doubles; in singles the sole live foe is selected by the fallback path).
-fn locked_rampage_commands(mon: &PokemonState, locked_move: &PokemonMove, player: Player, state: &BattleState, slot_idx: usize) -> Vec<BattleCommand> {
+fn locked_rampage_commands(
+    mon: &PokemonState,
+    locked_move: &PokemonMove,
+    player: Player,
+    state: &BattleState,
+    slot_idx: usize,
+) -> Vec<BattleCommand> {
     let _ = (player, state, slot_idx); // these were only used for target resolution; now None
     for (i, move_opt) in mon.moves.iter().enumerate() {
         if move_opt.as_ref() == Some(locked_move) {
             // No tera/mega variants while locked — the lock was established without them.
             // target: None → resolved by the RandomNormal fan-out (re-randomized each turn).
-            return vec![BattleCommand::Attack(AttackCommand { move_slot: i, target: None, terastallize: false, mega_evolve: false })];
+            return vec![BattleCommand::Attack(AttackCommand {
+                move_slot: i,
+                target: None,
+                terastallize: false,
+                mega_evolve: false,
+            })];
         }
     }
     // Shouldn't happen, but if the move somehow isn't in the moveset, pass.
@@ -5917,14 +8997,27 @@ fn locked_rampage_commands(mon: &PokemonState, locked_move: &PokemonMove, player
 }
 
 /// Return commands for a Pokémon locked into a charging move (or pass if move not found).
-fn locked_charging_commands(mon: &PokemonState, charged_move: &PokemonMove, charged_targets: &[FieldSlot]) -> Vec<BattleCommand> {
+fn locked_charging_commands(
+    mon: &PokemonState,
+    charged_move: &PokemonMove,
+    charged_targets: &[FieldSlot],
+) -> Vec<BattleCommand> {
     for (i, move_opt) in mon.moves.iter().enumerate() {
         if let Some(m) = move_opt
-            && m == charged_move {
-                return charged_targets.iter()
-                    .map(|t| BattleCommand::Attack(AttackCommand { move_slot: i, target: Some(*t), terastallize: false, mega_evolve: false }))
-                    .collect();
-            }
+            && m == charged_move
+        {
+            return charged_targets
+                .iter()
+                .map(|t| {
+                    BattleCommand::Attack(AttackCommand {
+                        move_slot: i,
+                        target: Some(*t),
+                        terastallize: false,
+                        mega_evolve: false,
+                    })
+                })
+                .collect();
+        }
     }
     vec![BattleCommand::Pass]
 }
@@ -5934,22 +9027,39 @@ fn generate_commands_for_active(
     slot_idx: usize,
     state: &BattleState,
     move_dex: &HashMap<PokemonMove, MoveData>,
-    pokemon_dex: &HashMap<Species, PokemonData>
+    pokemon_dex: &HashMap<Species, PokemonData>,
 ) -> Vec<BattleCommand> {
     let (my_active, my_back, has_tera, has_mega) = match player {
-        Player::P1 => (&state.p1_active_mons, &state.p1_back_mons, state.p1_has_tera, state.p1_has_mega),
-        Player::P2 => (&state.p2_active_mons, &state.p2_back_mons, state.p2_has_tera, state.p2_has_mega),
+        Player::P1 => (
+            &state.p1_active_mons,
+            &state.p1_back_mons,
+            state.p1_has_tera,
+            state.p1_has_mega,
+        ),
+        Player::P2 => (
+            &state.p2_active_mons,
+            &state.p2_back_mons,
+            state.p2_has_tera,
+            state.p2_has_mega,
+        ),
     };
 
-    if slot_idx >= my_active.len() { return Vec::new(); }
+    if slot_idx >= my_active.len() {
+        return Vec::new();
+    }
     let mon = &my_active[slot_idx];
 
     // Mid-turn self-switch: the pending slot may only switch to a healthy bench mon;
     // every other active slot must Pass.
     if let Some((pending_slot, _)) = state.self_switch_pending {
-        let this_slot = FieldSlot { player, slot_index: slot_idx as u8 };
+        let this_slot = FieldSlot {
+            player,
+            slot_index: slot_idx as u8,
+        };
         if this_slot == pending_slot {
-            return my_back.iter().enumerate()
+            return my_back
+                .iter()
+                .enumerate()
                 .filter(|(_, m)| !m.fainted)
                 .map(|(i, _)| BattleCommand::Switch(SwitchCommand { party_index: i }))
                 .collect();
@@ -5959,18 +9069,35 @@ fn generate_commands_for_active(
     }
 
     // Locked: must recharge
-    if mon.volatiles.iter().any(|v| matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MustRecharge, _))) {
+    if mon.volatiles.iter().any(|v| {
+        matches!(
+            v,
+            crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::MustRecharge, _)
+        )
+    }) {
         return vec![BattleCommand::Pass];
     }
 
     // Locked: semi-invulnerable (e.g. mid-Fly)
-    if mon.volatiles.iter().any(|v| matches!(v, crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(_), _))) {
+    if mon.volatiles.iter().any(|v| {
+        matches!(
+            v,
+            crate::state::pokemon::VolatileStatusState::MoveStatus(
+                VolatileStatus::SemiInvulnerable(_),
+                _
+            )
+        )
+    }) {
         return locked_semi_invulnerable_commands(mon, player);
     }
 
     // Locked: charging (e.g. mid-SolarBeam)
     if let Some((charged_move, charged_targets)) = mon.volatiles.iter().find_map(|v| {
-        if let crate::state::pokemon::VolatileStatusState::Charging(mov, targets) = v { Some((mov.clone(), targets.clone())) } else { None }
+        if let crate::state::pokemon::VolatileStatusState::Charging(mov, targets) = v {
+            Some((mov.clone(), targets.clone()))
+        } else {
+            None
+        }
     }) {
         return locked_charging_commands(mon, &charged_move, &charged_targets);
     }
@@ -5978,7 +9105,15 @@ fn generate_commands_for_active(
     // Locked: rampaging (Thrash / Outrage / Petal Dance / Raging Fury).
     // Cannot switch or use a different move while the LockedMove volatile is present.
     if let Some(locked_move) = mon.volatiles.iter().find_map(|v| {
-        if let crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(m), _) = v { Some(m.clone()) } else { None }
+        if let crate::state::pokemon::VolatileStatusState::MoveStatus(
+            VolatileStatus::LockedMove(m),
+            _,
+        ) = v
+        {
+            Some(m.clone())
+        } else {
+            None
+        }
     }) {
         return locked_rampage_commands(mon, &locked_move, player, state, slot_idx);
     }
@@ -5986,7 +9121,9 @@ fn generate_commands_for_active(
     // Normal turn: switches first (suppressed while the mon is trapped).
     let trapped = simulator_helpers::is_trapped(state, mon);
     let mut cmds: Vec<BattleCommand> = if !trapped {
-        my_back.iter().enumerate()
+        my_back
+            .iter()
+            .enumerate()
             .filter(|(_, m)| !m.fainted)
             .map(|(i, _)| BattleCommand::Switch(SwitchCommand { party_index: i }))
             .collect()
@@ -6006,15 +9143,19 @@ fn generate_commands_for_active(
 
     let can_tera = !has_tera && !mon.is_tera;
     let can_mega = has_mega && mon.has_mega_form && {
-        
-        mon.mega_species.as_ref()
+        mon.mega_species
+            .as_ref()
             .and_then(|sp| pokemon_dex.get(sp))
             .and_then(|data| data.required_item.as_ref())
             .is_none_or(|req| format!("{:?}", mon.item).to_lowercase() == *req)
     };
 
     let choice_locked_move: Option<PokemonMove> = mon.volatiles.iter().find_map(|v| {
-        if let crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(m), _) = v {
+        if let crate::state::pokemon::VolatileStatusState::TurnStatus(
+            VolatileStatus::ChoiceLock(m),
+            _,
+        ) = v
+        {
             Some(m.clone())
         } else {
             None
@@ -6024,15 +9165,26 @@ fn generate_commands_for_active(
     // Move-restriction volatiles. Encore forces a single move (unless that move has run out of PP,
     // in which case Encore has effectively ended); Taunt blocks status moves; Throat Chop blocks
     // sound moves; Torment blocks repeating the last move used.
-    let encored_move: Option<PokemonMove> = mon.volatiles.iter().find_map(|v| {
-        if let crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Encore(m), _) = v {
-            Some(m.clone())
-        } else {
-            None
-        }
-    }).filter(|m| {
-        mon.moves.iter().zip(mon.move_pp.iter()).any(|(slot, pp)| slot.as_ref() == Some(m) && *pp > 0)
-    });
+    let encored_move: Option<PokemonMove> = mon
+        .volatiles
+        .iter()
+        .find_map(|v| {
+            if let crate::state::pokemon::VolatileStatusState::MoveStatus(
+                VolatileStatus::Encore(m),
+                _,
+            ) = v
+            {
+                Some(m.clone())
+            } else {
+                None
+            }
+        })
+        .filter(|m| {
+            mon.moves
+                .iter()
+                .zip(mon.move_pp.iter())
+                .any(|(slot, pp)| slot.as_ref() == Some(m) && *pp > 0)
+        });
     let taunted = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Taunt);
     let throat_chopped = simulator_helpers::has_status_volatile(mon, &VolatileStatus::ThroatChop);
     let tormented = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Torment);
@@ -6040,14 +9192,20 @@ fn generate_commands_for_active(
     let uproar_locked = simulator_helpers::has_status_volatile(mon, &VolatileStatus::Uproar);
     // Imprison: collect moves that are blocked by an opponent's Imprison.
     // A move is imprisoned if any active opposing mon carries the Imprison volatile AND knows it.
-    let opponent_player = match player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+    let opponent_player = match player {
+        Player::P1 => Player::P2,
+        Player::P2 => Player::P1,
+    };
     let imprison_blocked_moves: std::collections::HashSet<PokemonMove> = {
         let opp_mons = match opponent_player {
             Player::P1 => &state.p1_active_mons,
             Player::P2 => &state.p2_active_mons,
         };
-        opp_mons.iter()
-            .filter(|m| !m.fainted && simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison))
+        opp_mons
+            .iter()
+            .filter(|m| {
+                !m.fainted && simulator_helpers::has_status_volatile(m, &VolatileStatus::Imprison)
+            })
             .flat_map(|m| m.moves.iter().filter_map(|s| s.clone()))
             .collect()
     };
@@ -6055,59 +9213,87 @@ fn generate_commands_for_active(
     // Attacks: filter by choice-lock and 0-PP, then fall back to Struggle.
     let mut emitted_attack = false;
     for (i, move_name_opt) in mon.moves.iter().enumerate() {
-        let Some(move_name) = move_name_opt else { continue; };
+        let Some(move_name) = move_name_opt else {
+            continue;
+        };
 
         // Uproar lock: only Uproar is selectable while the volatile is active.
-        if uproar_locked && *move_name != PokemonMove::Uproar { continue; }
+        if uproar_locked && *move_name != PokemonMove::Uproar {
+            continue;
+        }
 
         // Choice lock: only the locked move is selectable.
         if let Some(ref locked) = choice_locked_move
-            && move_name != locked { continue; }
+            && move_name != locked
+        {
+            continue;
+        }
 
         // Moves with 0 PP are not selectable.
-        if mon.move_pp.get(i).copied().unwrap_or(0) == 0 { continue; }
+        if mon.move_pp.get(i).copied().unwrap_or(0) == 0 {
+            continue;
+        }
 
         // Disabled moves are not selectable (Disable volatile carries the blocked move name).
         let is_disabled = mon.volatiles.iter().any(|v| matches!(
             v,
             crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Disable(m), _) if m == move_name
         ));
-        if is_disabled { continue; }
+        if is_disabled {
+            continue;
+        }
 
         // Encore: only the encored move is selectable.
         if let Some(ref enc) = encored_move
-            && move_name != enc { continue; }
+            && move_name != enc
+        {
+            continue;
+        }
 
         // Taunt: status moves cannot be selected.
-        if taunted && move_dex.get(move_name).is_some_and(|d| matches!(d.category, MoveCategory::Status)) {
+        if taunted
+            && move_dex
+                .get(move_name)
+                .is_some_and(|d| matches!(d.category, MoveCategory::Status))
+        {
             continue;
         }
 
         // Throat Chop: sound-based moves cannot be selected.
         if throat_chopped
-            && move_dex.get(move_name).is_some_and(|d| simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::Sound))
+            && move_dex.get(move_name).is_some_and(|d| {
+                simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::Sound)
+            })
         {
             continue;
         }
 
         // Heal Block: moves with the Heal flag cannot be selected.
         if simulator_helpers::heal_is_blocked(mon)
-            && move_dex.get(move_name).is_some_and(|d| simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::Heal))
+            && move_dex.get(move_name).is_some_and(|d| {
+                simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::Heal)
+            })
         {
             continue;
         }
 
         // Torment: the same move cannot be used twice in a row.
-        if tormented && mon.last_used_move.as_ref() == Some(move_name) { continue; }
+        if tormented && mon.last_used_move.as_ref() == Some(move_name) {
+            continue;
+        }
 
         // Belch: cannot be selected unless the user has eaten a Berry this battle.
-        if *move_name == PokemonMove::Belch && !mon.ate_berry_this_battle { continue; }
+        if *move_name == PokemonMove::Belch && !mon.ate_berry_this_battle {
+            continue;
+        }
 
         // Fake Out / First Impression: newest-gen behaviour — not selectable at all
         // after the user's first turn on the field (the window resets on re-entry).
         // The execution-time first_move_on_field check stays as defence in depth.
-        if matches!(move_name, PokemonMove::FakeOut | PokemonMove::FirstImpression)
-            && !mon.first_move_on_field
+        if matches!(
+            move_name,
+            PokemonMove::FakeOut | PokemonMove::FirstImpression
+        ) && !mon.first_move_on_field
         {
             continue;
         }
@@ -6118,23 +9304,35 @@ fn generate_commands_for_active(
             v,
             crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::CantUseRepeatedly(m), _) if m == move_name
         ));
-        if cant_repeat { continue; }
+        if cant_repeat {
+            continue;
+        }
 
         // Imprison: moves shared with an imprisoning opponent cannot be selected.
-        if imprison_blocked_moves.contains(move_name) { continue; }
+        if imprison_blocked_moves.contains(move_name) {
+            continue;
+        }
 
         // Gravity: moves with the Gravity flag cannot be selected while Gravity is active.
         if simulator_helpers::is_gravity_active(state)
-            && move_dex.get(move_name).is_some_and(|d| simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::Gravity))
+            && move_dex.get(move_name).is_some_and(|d| {
+                simulator_helpers::move_has_flag(d, &crate::state::dex_data::MoveFlag::Gravity)
+            })
         {
             continue;
         }
 
-        let target_type = move_dex.get(move_name).map(|d| &d.target).unwrap_or(&MoveTarget::Normal);
+        let target_type = move_dex
+            .get(move_name)
+            .map(|d| &d.target)
+            .unwrap_or(&MoveTarget::Normal);
 
         let valid_targets = if *move_name == PokemonMove::ExpandingForce
-            && simulator_helpers::pokemon_is_on_terrain(state, mon, &crate::state::dex_data::Terrain::PsychicTerrain)
-        {
+            && simulator_helpers::pokemon_is_on_terrain(
+                state,
+                mon,
+                &crate::state::dex_data::Terrain::PsychicTerrain,
+            ) {
             vec![None]
         } else {
             get_valid_targets(target_type, player, state, slot_idx)
@@ -6170,7 +9368,10 @@ fn queue_battle_commands_for_player(
     };
 
     for (slot_idx, command) in commands.iter().enumerate() {
-        let user_slot = FieldSlot { player, slot_index: slot_idx as u8 };
+        let user_slot = FieldSlot {
+            player,
+            slot_index: slot_idx as u8,
+        };
 
         match command {
             BattleCommand::Switch(s) => {
@@ -6191,18 +9392,17 @@ fn queue_battle_commands_for_player(
                 // Store raw base priority only. Dynamic boosts (Grassy Glide, Prankster,
                 // Gale Wings) are computed at compare time via effective_move_priority so
                 // that mid-turn HP changes (e.g. Fake Out) are reflected correctly.
-                let priority = move_dex.get(&move_name).map(|move_data| move_data.priority).unwrap_or(0);
+                let priority = move_dex
+                    .get(&move_name)
+                    .map(|move_data| move_data.priority)
+                    .unwrap_or(0);
 
                 if a.terastallize {
-                    action_queue.push(Action::TeraAction(TeraAction {
-                        user_slot,
-                    }));
+                    action_queue.push(Action::TeraAction(TeraAction { user_slot }));
                 }
 
                 if a.mega_evolve {
-                    action_queue.push(Action::MegaAction(MegaAction {
-                        user_slot,
-                    }));
+                    action_queue.push(Action::MegaAction(MegaAction { user_slot }));
                 }
 
                 action_queue.push(Action::MoveAction(MoveAction {
@@ -6310,9 +9510,15 @@ fn has_healthy_bench(bs: &BattleState, player: Player) -> bool {
 
 fn slot_has_substitute(bs: &BattleState, slot: FieldSlot) -> bool {
     simulator_helpers::get_pokemon_at_slot(bs, slot).is_some_and(|m| {
-        m.volatiles.iter().any(|v|
-            matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
-        )
+        m.volatiles.iter().any(|v| {
+            matches!(
+                v,
+                crate::state::pokemon::VolatileStatusState::TurnStatus(
+                    VolatileStatus::Substitute(_),
+                    _
+                )
+            )
+        })
     })
 }
 
@@ -6331,23 +9537,34 @@ fn action_user_slot(action: &Action) -> FieldSlot {
 /// `attacker_breaks` should be `attacker_breaks_mold(bs, attacker)` — Mold Breaker bypasses
 /// Suction Cups and Guard Dog (both are ignorable abilities) but NOT Ingrain.
 fn can_be_forced_out(bs: &BattleState, slot: FieldSlot, attacker_breaks: bool) -> bool {
-    let Some(mon) = simulator_helpers::get_pokemon_at_slot(bs, slot) else { return false; };
+    let Some(mon) = simulator_helpers::get_pokemon_at_slot(bs, slot) else {
+        return false;
+    };
     if !attacker_breaks
         && !simulator_helpers::pokemon_ability_is_suppressed(bs, mon)
         && matches!(mon.ability, Ability::SuctionCups | Ability::GuardDog)
     {
         return false;
     }
-    mon.volatiles.iter().all(|v| !matches!(v,
-        crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, _)
-            | crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::Ingrain, _)))
+    mon.volatiles.iter().all(|v| {
+        !matches!(
+            v,
+            crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, _)
+                | crate::state::pokemon::VolatileStatusState::MoveStatus(
+                    VolatileStatus::Ingrain,
+                    _
+                )
+        )
+    })
 }
-
 
 /// Status moves that legitimately succeed without changing any battle state (so the success-by-diff
 /// heuristic below must not mis-flag them as failures).
 fn status_move_always_succeeds(name: &PokemonMove) -> bool {
-    matches!(name, PokemonMove::Splash | PokemonMove::Celebrate | PokemonMove::HoldHands)
+    matches!(
+        name,
+        PokemonMove::Splash | PokemonMove::Celebrate | PokemonMove::HoldHands
+    )
 }
 
 /// Compare the battle-meaningful fields of two `PokemonState` lists (HP, status, boosts, volatiles,
@@ -6398,14 +9615,15 @@ fn apply_forced_switch(
     pokemon_dex: &HashMap<Species, PokemonData>,
     move_dex: &HashMap<PokemonMove, MoveData>,
 ) -> Vec<(BattleState, f64)> {
-    let bypasses_sub = simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::BypassSub);
+    let bypasses_sub =
+        simulator_helpers::move_has_flag(move_data, &crate::state::dex_data::MoveFlag::BypassSub);
     let mut out = Vec::new();
     for (bs, prob) in branches {
         // Check Mold Breaker at resolution time (ability could have changed via Mummy etc.)
         let attacker_breaks = simulator_helpers::get_pokemon_at_slot(&bs, attacker_slot)
             .is_some_and(|a| simulator_helpers::attacker_breaks_mold(&bs, a));
-        let target_fainted = simulator_helpers::get_pokemon_at_slot(&bs, target_slot)
-            .is_none_or(|m| m.fainted);
+        let target_fainted =
+            simulator_helpers::get_pokemon_at_slot(&bs, target_slot).is_none_or(|m| m.fainted);
         let switches = !target_fainted
             && can_be_forced_out(&bs, target_slot, attacker_breaks)
             && (bypasses_sub || !slot_has_substitute(&bs, target_slot))
@@ -6415,8 +9633,20 @@ fn apply_forced_switch(
             continue;
         }
         let bench: Vec<usize> = match target_slot.player {
-            Player::P1 => bs.p1_back_mons.iter().enumerate().filter(|(_, m)| !m.fainted).map(|(i, _)| i).collect(),
-            Player::P2 => bs.p2_back_mons.iter().enumerate().filter(|(_, m)| !m.fainted).map(|(i, _)| i).collect(),
+            Player::P1 => bs
+                .p1_back_mons
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| !m.fainted)
+                .map(|(i, _)| i)
+                .collect(),
+            Player::P2 => bs
+                .p2_back_mons
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| !m.fainted)
+                .map(|(i, _)| i)
+                .collect(),
         };
         let n = bench.len() as f64;
         for idx in bench {
@@ -6430,15 +9660,24 @@ fn apply_forced_switch(
             // Raw capture: true species/HP always, plus the disguise a non-owning observer
             // would see (if any) so `mask_events_for` can pick per-perspective later.
             let switch_state: Option<InfoSwitchState> = clone.event_observer.and_then(|_| {
-                simulator_helpers::get_pokemon_at_slot(&clone, target_slot).map(|mon| InfoSwitchState {
-                    slot: target_slot,
-                    species: mon.species.clone(),
-                    level: mon.level,
-                    hp: PokemonHP::Number(mon.hp),
-                    status: mon.status.clone(),
-                    tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
-                    disguise_species: simulator_helpers::compute_illusion_disguise(&clone, target_slot),
-                    max_hp: mon.stats[0],
+                simulator_helpers::get_pokemon_at_slot(&clone, target_slot).map(|mon| {
+                    InfoSwitchState {
+                        slot: target_slot,
+                        species: mon.species.clone(),
+                        level: mon.level,
+                        hp: PokemonHP::Number(mon.hp),
+                        status: mon.status.clone(),
+                        tera_type: if mon.is_tera {
+                            Some(mon.tera_type.clone())
+                        } else {
+                            None
+                        },
+                        disguise_species: simulator_helpers::compute_illusion_disguise(
+                            &clone,
+                            target_slot,
+                        ),
+                        max_hp: mon.stats[0],
+                    }
                 })
             });
             let item_snapshot = simulator_helpers::snapshot_active_items(&clone);
@@ -6454,7 +9693,9 @@ fn apply_forced_switch(
             }
             // The switched-out target's still-queued action (e.g. a slower −7 move) must not run for
             // the replacement that just entered.
-            clone.action_queue.retain(|a| action_user_slot(a) != target_slot);
+            clone
+                .action_queue
+                .retain(|a| action_user_slot(a) != target_slot);
             out.push((clone, prob / n));
         }
     }
@@ -6482,9 +9723,10 @@ fn parting_shot_connected(
     // back to every opposing active (singles: identical).
     let is_target = |slot_index: usize| {
         after.resolved_move_targets.is_empty()
-            || after.resolved_move_targets.iter().any(|s| {
-                s.player == opposing_player && s.slot_index as usize == slot_index
-            })
+            || after
+                .resolved_move_targets
+                .iter()
+                .any(|s| s.player == opposing_player && s.slot_index as usize == slot_index)
     };
     opposing_before
         .iter()
@@ -6518,7 +9760,8 @@ fn apply_post_damage_move_effects(
     let sub_dmg = bs.sub_damage_dealt;
     bs.sub_damage_dealt = 0; // consumed here
     let total_effective_dmg = total_dmg + sub_dmg; // for recoil / last_move_failed / move_connected
-    let opponent_wiped = !simulator_helpers::team_has_remaining_pokemon(&bs, opposing_player) && total_dmg > 0;
+    let opponent_wiped =
+        !simulator_helpers::team_has_remaining_pokemon(&bs, opposing_player) && total_dmg > 0;
     // Attacker HP-change events, in chronological order: (post-change hp, is_damage, reveal).
     // Collected while the attacker_mon borrow is live (NLL prevents inline emit) and emitted
     // after it ends. Order matters: a Liquid Ooze backlash can precede a Shell Bell heal, so
@@ -6545,7 +9788,10 @@ fn apply_post_damage_move_effects(
         opp_mons
             .iter()
             .position(|m| !m.fainted && m.ability == Ability::LiquidOoze)
-            .map(|i| FieldSlot { player: opposing_player, slot_index: i as u8 })
+            .map(|i| FieldSlot {
+                player: opposing_player,
+                slot_index: i as u8,
+            })
     };
     let drain_target_has_liquid_ooze = liquid_ooze_slot.is_some();
     let mut forced_winner: Option<Player> = None;
@@ -6582,7 +9828,8 @@ fn apply_post_damage_move_effects(
 
         // Unconditional self-heal
         if !heal_blocked && move_data.heal_fraction[0] > 0 && move_data.heal_fraction[1] > 0 {
-            let heal = ((max_hp as u32 * move_data.heal_fraction[0] as u32) / move_data.heal_fraction[1] as u32) as u16;
+            let heal = ((max_hp as u32 * move_data.heal_fraction[0] as u32)
+                / move_data.heal_fraction[1] as u32) as u16;
             if heal > 0 {
                 let before = attacker_mon.hp;
                 simulator_helpers::gain_hp(attacker_mon, heal, attacker_env);
@@ -6596,10 +9843,16 @@ fn apply_post_damage_move_effects(
         // Liquid Ooze on the target reverses the heal into damage on the user —
         // this mirrors the Strength Sap and Leech Seed implementations.
         if move_data.drain_fraction[0] > 0 && move_data.drain_fraction[1] > 0 {
-            let heal = ((total_dmg * move_data.drain_fraction[0] as u32) / move_data.drain_fraction[1] as u32) as u16;
+            let heal = ((total_dmg * move_data.drain_fraction[0] as u32)
+                / move_data.drain_fraction[1] as u32) as u16;
             if heal > 0 {
                 if drain_target_has_liquid_ooze {
-                    simulator_helpers::take_damage(attacker_mon, heal, attacker_env, abilities_suppressed);
+                    simulator_helpers::take_damage(
+                        attacker_mon,
+                        heal,
+                        attacker_env,
+                        abilities_suppressed,
+                    );
                     // "It sucked up the liquid ooze!" — the backlash announces the ability.
                     attacker_hp_events.push((
                         attacker_mon.hp,
@@ -6612,7 +9865,9 @@ fn apply_post_damage_move_effects(
                     if attacker_mon.fainted {
                         simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                         attacker_fainted = true;
-                        if opponent_wiped { forced_winner = Some(attacker_slot.player); }
+                        if opponent_wiped {
+                            forced_winner = Some(attacker_slot.player);
+                        }
                     }
                 } else if !heal_blocked {
                     let before = attacker_mon.hp;
@@ -6630,7 +9885,9 @@ fn apply_post_damage_move_effects(
         let shell_bell_sheer_force = !abilities_suppressed
             && attacker_mon.ability == Ability::SheerForce
             && simulator_helpers::move_has_sheer_force_secondary(move_data);
-        if !heal_blocked && !shell_bell_sheer_force && attacker_item_active
+        if !heal_blocked
+            && !shell_bell_sheer_force
+            && attacker_item_active
             && attacker_mon.item == crate::data::item::Item::ShellBell
         {
             let heal = (total_dmg / 8) as u16;
@@ -6646,8 +9903,10 @@ fn apply_post_damage_move_effects(
         // Struggle recoil (¼ max HP) ignores Rock Head and Magic Guard; ordinary recoil does not.
         // Mind Blown / Steel Beam recoil (½ max HP, rounded up) fires unconditionally — even on
         // miss, Protect, or Substitute. Only Magic Guard prevents it; Rock Head does NOT.
-        let has_normal_recoil = move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0;
-        let has_recoil = has_normal_recoil || move_data.struggle_recoil || move_data.mind_blown_recoil;
+        let has_normal_recoil =
+            move_data.recoil_fraction[0] > 0 && move_data.recoil_fraction[1] > 0;
+        let has_recoil =
+            has_normal_recoil || move_data.struggle_recoil || move_data.mind_blown_recoil;
         let ability_blocks_recoil = if move_data.mind_blown_recoil {
             attacker_mon.ability == Ability::MagicGuard
         } else if move_data.struggle_recoil {
@@ -6660,30 +9919,47 @@ fn apply_post_damage_move_effects(
         if move_data.mind_blown_recoil && !ability_blocks_recoil && !attacker_fainted {
             let recoil = (max_hp as u32).div_ceil(2) as u16; // ceil(max_hp / 2)
             if recoil > 0 {
-                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
+                simulator_helpers::take_damage(
+                    attacker_mon,
+                    recoil,
+                    attacker_env,
+                    abilities_suppressed,
+                );
                 attacker_hp_events.push((attacker_mon.hp, true, None));
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
-                    if opponent_wiped { forced_winner = Some(attacker_slot.player); }
+                    if opponent_wiped {
+                        forced_winner = Some(attacker_slot.player);
+                    }
                 }
             }
         }
         if has_recoil && !ability_blocks_recoil && !move_data.mind_blown_recoil {
             let recoil = if has_normal_recoil {
                 // Recoil is based on total damage dealt, including damage absorbed by a Substitute.
-                ((total_effective_dmg * move_data.recoil_fraction[0] as u32) / move_data.recoil_fraction[1] as u32) as u16
+                ((total_effective_dmg * move_data.recoil_fraction[0] as u32)
+                    / move_data.recoil_fraction[1] as u32) as u16
             } else if move_data.struggle_recoil {
                 (max_hp as u32 / 4) as u16
-            } else { 0 };
+            } else {
+                0
+            };
 
             if recoil > 0 {
-                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
+                simulator_helpers::take_damage(
+                    attacker_mon,
+                    recoil,
+                    attacker_env,
+                    abilities_suppressed,
+                );
                 attacker_hp_events.push((attacker_mon.hp, true, None));
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
-                    if opponent_wiped { forced_winner = Some(attacker_slot.player); }
+                    if opponent_wiped {
+                        forced_winner = Some(attacker_slot.player);
+                    }
                 }
             }
         }
@@ -6701,11 +9977,16 @@ fn apply_post_damage_move_effects(
             let sheer_force_suppresses = !abilities_suppressed
                 && attacker_mon.ability == Ability::SheerForce
                 && simulator_helpers::move_has_sheer_force_secondary(move_data);
-            let magic_guard_blocks = !abilities_suppressed
-                && attacker_mon.ability == Ability::MagicGuard;
+            let magic_guard_blocks =
+                !abilities_suppressed && attacker_mon.ability == Ability::MagicGuard;
             if !sheer_force_suppresses && !magic_guard_blocks {
                 let recoil = (max_hp as u32 / 10).max(1) as u16;
-                simulator_helpers::take_damage(attacker_mon, recoil, attacker_env, abilities_suppressed);
+                simulator_helpers::take_damage(
+                    attacker_mon,
+                    recoil,
+                    attacker_env,
+                    abilities_suppressed,
+                );
                 // "X was hurt by its Life Orb!" — the chip announces the item in-game.
                 attacker_hp_events.push((
                     attacker_mon.hp,
@@ -6718,7 +9999,9 @@ fn apply_post_damage_move_effects(
                 if attacker_mon.fainted {
                     simulator_helpers::clear_pokemon_on_faint(attacker_mon);
                     attacker_fainted = true;
-                    if opponent_wiped { forced_winner = Some(attacker_slot.player); }
+                    if opponent_wiped {
+                        forced_winner = Some(attacker_slot.player);
+                    }
                 }
             }
         }
@@ -6728,9 +10011,16 @@ fn apply_post_damage_move_effects(
         if move_data.name == PokemonMove::SpitUp {
             let level = simulator_helpers::stockpile_level(attacker_mon) as i8;
             if level > 0 {
-                simulator_helpers::remove_status_volatile(attacker_mon, &VolatileStatus::Stockpile(0));
+                simulator_helpers::remove_status_volatile(
+                    attacker_mon,
+                    &VolatileStatus::Stockpile(0),
+                );
                 let drop = -level;
-                spit_up_delta = simulator_helpers::apply_stat_boost_external(attacker_mon, &[0, drop, 0, drop, 0, 0, 0], items_suppressed);
+                spit_up_delta = simulator_helpers::apply_stat_boost_external(
+                    attacker_mon,
+                    &[0, drop, 0, drop, 0, 0, 0],
+                    items_suppressed,
+                );
             }
         }
 
@@ -6745,14 +10035,16 @@ fn apply_post_damage_move_effects(
         // was the guaranteed-final 3rd turn, which still confuses per game quirk (a
         // 2nd-turn disruption is conservatively never confused, though in-cartridge
         // it would be 50%; forking all five fail-branch sites is out of scope).
-        let is_rampaging_move = matches!(move_data.name,
-            PokemonMove::Thrash | PokemonMove::Outrage | PokemonMove::PetalDance | PokemonMove::RagingFury
+        let is_rampaging_move = matches!(
+            move_data.name,
+            PokemonMove::Thrash
+                | PokemonMove::Outrage
+                | PokemonMove::PetalDance
+                | PokemonMove::RagingFury
         );
         // Rolling moves (Rollout/Ice Ball): same LockedMove volatile as rampaging moves but with
         // deterministic 5-turn duration (never end early except on disruption) and no confusion.
-        let is_rolling_move = matches!(move_data.name,
-            PokemonMove::Rollout | PokemonMove::IceBall
-        );
+        let is_rolling_move = matches!(move_data.name, PokemonMove::Rollout | PokemonMove::IceBall);
         let is_locking_move = is_rampaging_move || is_rolling_move;
 
         // rampage_decision: Some((cur, end_prob, disrupt_now, can_confuse))
@@ -6763,7 +10055,11 @@ fn apply_post_damage_move_effects(
         //   can_confuse  — false for rolling moves; !is_confused && !misty_terrain for Thrash-family
         rampage_decision = if is_locking_move && !attacker_fainted {
             let n_before: Option<u16> = attacker_mon.volatiles.iter().find_map(|v| {
-                if let crate::state::pokemon::VolatileStatusState::MoveStatus(VolatileStatus::LockedMove(_), t) = v {
+                if let crate::state::pokemon::VolatileStatusState::MoveStatus(
+                    VolatileStatus::LockedMove(_),
+                    t,
+                ) = v
+                {
                     Some(*t)
                 } else {
                     None
@@ -6780,16 +10076,21 @@ fn apply_post_damage_move_effects(
             if cur == 1 {
                 // First use: set lock to n=1 only if move connected.
                 if total_dmg > 0 {
-                    attacker_mon.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(
-                        VolatileStatus::LockedMove(move_data.name.clone()),
-                        1,
-                    ));
+                    attacker_mon.volatiles.push(
+                        crate::state::pokemon::VolatileStatusState::MoveStatus(
+                            VolatileStatus::LockedMove(move_data.name.clone()),
+                            1,
+                        ),
+                    );
                 }
                 None // no end-timing branch on the first attack
             } else {
                 // Already locked: remove the existing lock entry now; the fork below
                 // will re-add it on the continue branch.
-                simulator_helpers::remove_status_volatile(attacker_mon, &VolatileStatus::LockedMove(move_data.name.clone()));
+                simulator_helpers::remove_status_volatile(
+                    attacker_mon,
+                    &VolatileStatus::LockedMove(move_data.name.clone()),
+                );
                 let end_prob = if is_rolling_move {
                     // Rolling: deterministic 5-turn sequence — always end at turn 5 (cur==5),
                     // never branch mid-run (unless disrupted via disrupt_now).
@@ -6814,8 +10115,8 @@ fn apply_post_damage_move_effects(
         if !attacker_fainted {
             let should_faint = match move_data.self_destruct {
                 SelfDestructType::Always => true,
-                SelfDestructType::IfHit  => total_dmg > 0,
-                SelfDestructType::None   => false,
+                SelfDestructType::IfHit => total_dmg > 0,
+                SelfDestructType::None => false,
             };
             if should_faint {
                 attacker_mon.hp = 0;
@@ -6824,13 +10125,19 @@ fn apply_post_damage_move_effects(
                 attacker_fainted = true;
                 // No damage entry: a self-faint shows no damage line in-game; the
                 // Faint emitted below (attacker_fainted) conveys HP 0.
-                if opponent_wiped { forced_winner = Some(attacker_slot.player); }
+                if opponent_wiped {
+                    forced_winner = Some(attacker_slot.player);
+                }
             }
         }
     }
 
     if attacker_fainted {
-        simulator_helpers::handle_pokemon_faint(&mut bs, attacker_slot.player, attacker_slot.slot_index);
+        simulator_helpers::handle_pokemon_faint(
+            &mut bs,
+            attacker_slot.player,
+            attacker_slot.slot_index,
+        );
     }
     // Emit the attacker's HP-change events (heals AND recoil-class damage) in chronological
     // order, now that the attacker_mon borrow is released. Faint hooks already ran above,
@@ -6843,20 +10150,53 @@ fn apply_post_damage_move_effects(
             if let Some(kind) = reveal {
                 simulator_helpers::emit(&mut bs, kind);
             }
-            let new_hp = simulator_helpers::observed_hp_value(observer, attacker_slot.player, hp, atk_max_hp);
+            let new_hp = simulator_helpers::observed_hp_value(
+                observer,
+                attacker_slot.player,
+                hp,
+                atk_max_hp,
+            );
             if is_damage {
-                simulator_helpers::emit(&mut bs, EventKind::DamageDealt { target: attacker_slot, new_hp, max_hp: atk_max_hp });
+                simulator_helpers::emit(
+                    &mut bs,
+                    EventKind::DamageDealt {
+                        target: attacker_slot,
+                        new_hp,
+                        max_hp: atk_max_hp,
+                    },
+                );
             } else {
-                simulator_helpers::emit(&mut bs, EventKind::Healed { target: attacker_slot, new_hp, max_hp: atk_max_hp });
+                simulator_helpers::emit(
+                    &mut bs,
+                    EventKind::Healed {
+                        target: attacker_slot,
+                        new_hp,
+                        max_hp: atk_max_hp,
+                    },
+                );
             }
         }
         if attacker_fainted {
-            simulator_helpers::emit(&mut bs, EventKind::Faint { slot: attacker_slot });
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::Faint {
+                    slot: attacker_slot,
+                },
+            );
         }
     }
     // Emit BoostChanged for Spit Up's Stockpile discharge (also collected while borrow was live).
     for (boost_idx, &stages) in spit_up_delta.iter().enumerate() {
-        if stages != 0 { simulator_helpers::emit(&mut bs, EventKind::BoostChanged { target: attacker_slot, boost_idx, stages }); }
+        if stages != 0 {
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::BoostChanged {
+                    target: attacker_slot,
+                    boost_idx,
+                    stages,
+                },
+            );
+        }
     }
 
     // Magician: an empty-handed attacker steals the held item of a target it damaged with
@@ -6864,10 +10204,12 @@ fn apply_post_damage_move_effects(
     // cartridge. Sticky Hold and untransferable items are handled inside try_steal_item.
     if !attacker_fainted && total_dmg > 0 {
         let magician = simulator_helpers::get_pokemon_at_slot(&bs, attacker_slot)
-            .map(|m| !m.fainted
-                && m.item == Item::None
-                && m.ability == Ability::Magician
-                && !simulator_helpers::pokemon_ability_is_suppressed(&bs, m))
+            .map(|m| {
+                !m.fainted
+                    && m.item == Item::None
+                    && m.ability == Ability::Magician
+                    && !simulator_helpers::pokemon_ability_is_suppressed(&bs, m)
+            })
             .unwrap_or(false);
         if magician {
             let n_opposing = match opposing_player {
@@ -6875,9 +10217,13 @@ fn apply_post_damage_move_effects(
                 Player::P2 => bs.p2_active_mons.len(),
             };
             for i in 0..n_opposing {
-                let slot = FieldSlot { player: opposing_player, slot_index: i as u8 };
+                let slot = FieldSlot {
+                    player: opposing_player,
+                    slot_index: i as u8,
+                };
                 let damaged = {
-                    let before = simulator_helpers::get_pokemon_at_slot(baseline, slot).map(|m| m.hp);
+                    let before =
+                        simulator_helpers::get_pokemon_at_slot(baseline, slot).map(|m| m.hp);
                     let after = simulator_helpers::get_pokemon_at_slot(&bs, slot).map(|m| m.hp);
                     matches!((before, after), (Some(b), Some(a)) if a < b)
                 };
@@ -6909,7 +10255,10 @@ fn apply_post_damage_move_effects(
             Player::P2 => bs.p2_active_mons.len(),
         };
         for i in 0..n_opposing {
-            let slot = FieldSlot { player: opposing_player, slot_index: i as u8 };
+            let slot = FieldSlot {
+                player: opposing_player,
+                slot_index: i as u8,
+            };
             let damaged = {
                 let before = simulator_helpers::get_pokemon_at_slot(baseline, slot).map(|m| m.hp);
                 let after = simulator_helpers::get_pokemon_at_slot(&bs, slot).map(|m| m.hp);
@@ -6947,20 +10296,27 @@ fn apply_post_damage_move_effects(
                 user.item_lost = true;
             }
             // item_lost = true bypasses the snapshot; emit directly.
-            simulator_helpers::emit(&mut bs, EventKind::ItemLost {
-                slot: attacker_slot,
-                item: item.clone(),
-                consumed: true,
-            });
+            simulator_helpers::emit(
+                &mut bs,
+                EventKind::ItemLost {
+                    slot: attacker_slot,
+                    item: item.clone(),
+                    consumed: true,
+                },
+            );
             if total_dmg > 0 {
                 let n_opposing = match opposing_player {
                     Player::P1 => bs.p1_active_mons.len(),
                     Player::P2 => bs.p2_active_mons.len(),
                 };
                 for i in 0..n_opposing {
-                    let slot = FieldSlot { player: opposing_player, slot_index: i as u8 };
+                    let slot = FieldSlot {
+                        player: opposing_player,
+                        slot_index: i as u8,
+                    };
                     let damaged = {
-                        let before = simulator_helpers::get_pokemon_at_slot(baseline, slot).map(|m| m.hp);
+                        let before =
+                            simulator_helpers::get_pokemon_at_slot(baseline, slot).map(|m| m.hp);
                         let after = simulator_helpers::get_pokemon_at_slot(&bs, slot).map(|m| m.hp);
                         matches!((before, after), (Some(b), Some(a)) if a < b)
                     };
@@ -6979,10 +10335,13 @@ fn apply_post_damage_move_effects(
         if let Some(user) = mon_at_slot_mut(&mut bs, attacker_slot) {
             simulator_helpers::remove_status_volatile(user, &VolatileStatus::BeakBlastCharging);
         }
-        simulator_helpers::emit(&mut bs, EventKind::VolatileEnd {
-            target: attacker_slot,
-            volatile: VolatileStatus::BeakBlastCharging,
-        });
+        simulator_helpers::emit(
+            &mut bs,
+            EventKind::VolatileEnd {
+                target: attacker_slot,
+                volatile: VolatileStatus::BeakBlastCharging,
+            },
+        );
     }
 
     let mut terminal = if let Some(winner) = forced_winner {
@@ -7002,17 +10361,30 @@ fn apply_post_damage_move_effects(
         //    (so a missed damaging self-switch like a missed U-turn does NOT trigger)
         //  - for Shed Tail specifically: the Substitute was actually created this step
         //    (user now carries a Substitute volatile)
-        if move_data.self_switch != SelfSwitchType::None && !attacker_fainted && has_healthy_bench(&bs, attacker_slot.player) {
+        if move_data.self_switch != SelfSwitchType::None
+            && !attacker_fainted
+            && has_healthy_bench(&bs, attacker_slot.player)
+        {
             let attacker_alive = match attacker_slot.player {
-                Player::P1 => bs.p1_active_mons.get(attacker_slot.slot_index as usize).map(|m| !m.fainted).unwrap_or(false),
-                Player::P2 => bs.p2_active_mons.get(attacker_slot.slot_index as usize).map(|m| !m.fainted).unwrap_or(false),
+                Player::P1 => bs
+                    .p1_active_mons
+                    .get(attacker_slot.slot_index as usize)
+                    .map(|m| !m.fainted)
+                    .unwrap_or(false),
+                Player::P2 => bs
+                    .p2_active_mons
+                    .get(attacker_slot.slot_index as usize)
+                    .map(|m| !m.fainted)
+                    .unwrap_or(false),
             };
-            let move_connected = total_effective_dmg > 0 || matches!(move_data.category, MoveCategory::Status);
+            let move_connected =
+                total_effective_dmg > 0 || matches!(move_data.category, MoveCategory::Status);
             // For ShedTail: success ⇔ attacker now has a Substitute AND did not have one before
             // the move (baseline). Using baseline comparison instead of an HP check means items
             // like Sitrus Berry healing after the HP cost cannot mask a successful switch.
             let shed_tail_sub_created = move_data.self_switch != SelfSwitchType::ShedTail
-                || (slot_has_substitute(&bs, attacker_slot) && !slot_has_substitute(baseline, attacker_slot));
+                || (slot_has_substitute(&bs, attacker_slot)
+                    && !slot_has_substitute(baseline, attacker_slot));
             // Parting Shot: no switch when the stat drop was fully repelled
             // (Clear Body, Mist, both stats at −6…); Mirror Armor still switches.
             let parting_shot_ok = move_data.name != PokemonMove::PartingShot
@@ -7046,28 +10418,39 @@ fn apply_post_damage_move_effects(
                 if should_confuse {
                     if let MatchState::BattleState(ref mut end_bs) = end_state {
                         if let Some(mon) = mon_at_slot_mut(end_bs, attacker_slot) {
-                            let duration = rand::thread_rng().gen_range(2u16..=5u16);
-                            mon.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(
-                                VolatileStatus::Confusion,
-                                duration,
-                            ));
+                            let duration = with_sample_rng(|rng| rng.gen_range(2u16..=5u16));
+                            mon.volatiles.push(
+                                crate::state::pokemon::VolatileStatusState::MoveStatus(
+                                    VolatileStatus::Confusion,
+                                    duration,
+                                ),
+                            );
                         }
                         // Emit VolatileEnd for LockedMove + VolatileStart for Confusion.
-                        simulator_helpers::emit(end_bs, EventKind::VolatileEnd {
-                            target: attacker_slot,
-                            volatile: VolatileStatus::LockedMove(move_data.name.clone()),
-                        });
-                        simulator_helpers::emit(end_bs, EventKind::VolatileStart {
-                            target: attacker_slot,
-                            volatile: VolatileStatus::Confusion,
-                        });
+                        simulator_helpers::emit(
+                            end_bs,
+                            EventKind::VolatileEnd {
+                                target: attacker_slot,
+                                volatile: VolatileStatus::LockedMove(move_data.name.clone()),
+                            },
+                        );
+                        simulator_helpers::emit(
+                            end_bs,
+                            EventKind::VolatileStart {
+                                target: attacker_slot,
+                                volatile: VolatileStatus::Confusion,
+                            },
+                        );
                     }
                 } else if let MatchState::BattleState(ref mut end_bs) = end_state {
                     // Lock ended without confusion.
-                    simulator_helpers::emit(end_bs, EventKind::VolatileEnd {
-                        target: attacker_slot,
-                        volatile: VolatileStatus::LockedMove(move_data.name.clone()),
-                    });
+                    simulator_helpers::emit(
+                        end_bs,
+                        EventKind::VolatileEnd {
+                            target: attacker_slot,
+                            volatile: VolatileStatus::LockedMove(move_data.name.clone()),
+                        },
+                    );
                 }
                 branches.push((end_state, end_prob));
             }
@@ -7078,24 +10461,29 @@ fn apply_post_damage_move_effects(
             if continue_prob > 0.0 && !disrupt_now {
                 let mut cont_state = terminal.clone();
                 if let MatchState::BattleState(ref mut cont_bs) = cont_state
-                    && let Some(mon) = mon_at_slot_mut(cont_bs, attacker_slot) {
-                        mon.volatiles.push(crate::state::pokemon::VolatileStatusState::MoveStatus(
+                    && let Some(mon) = mon_at_slot_mut(cont_bs, attacker_slot)
+                {
+                    mon.volatiles
+                        .push(crate::state::pokemon::VolatileStatusState::MoveStatus(
                             VolatileStatus::LockedMove(move_data.name.clone()),
                             cur,
                         ));
-                    }
-                    // No VolatileEnd: the lock continues — the old entry was removed and re-added
-                    // as an internal tick; from the observer's perspective the lock is still active.
+                }
+                // No VolatileEnd: the lock continues — the old entry was removed and re-added
+                // as an internal tick; from the observer's perspective the lock is still active.
                 branches.push((cont_state, continue_prob));
             }
 
             if branches.is_empty() {
                 // Disrupted mid-rampage (end_prob < 1.0, disrupt_now) — lock cleared, no confuse.
                 if let MatchState::BattleState(ref mut term_bs) = terminal {
-                    simulator_helpers::emit(term_bs, EventKind::VolatileEnd {
-                        target: attacker_slot,
-                        volatile: VolatileStatus::LockedMove(move_data.name.clone()),
-                    });
+                    simulator_helpers::emit(
+                        term_bs,
+                        EventKind::VolatileEnd {
+                            target: attacker_slot,
+                            volatile: VolatileStatus::LockedMove(move_data.name.clone()),
+                        },
+                    );
                 }
                 vec![(terminal, 1.0)]
             } else {
@@ -7107,35 +10495,77 @@ fn apply_post_damage_move_effects(
 
 /// Print a human-readable description of `action` at verbosity ≥ 4.
 fn log_action_verbose(state: &BattleState, action: &Action) {
-    if simulator_helpers::get_verbosity() < 4 { return; }
+    if simulator_helpers::get_verbosity() < 4 {
+        return;
+    }
     match action {
         Action::MoveAction(m) => {
             let attacker = simulator_helpers::get_pokemon_at_slot(state, m.user_slot)
                 .map(|p| simulator_helpers::species_name_sim(&p.species))
-                .unwrap_or_else(|| format!("{:?} slot {}", m.user_slot.player, m.user_slot.slot_index + 1));
-            let target = m.target_slot
+                .unwrap_or_else(|| {
+                    format!(
+                        "{:?} slot {}",
+                        m.user_slot.player,
+                        m.user_slot.slot_index + 1
+                    )
+                });
+            let target = m
+                .target_slot
                 .and_then(|slot| simulator_helpers::get_pokemon_at_slot(state, slot))
                 .map(|p| simulator_helpers::species_name_sim(&p.species))
                 .unwrap_or("(no specific target)".to_string());
-            println!("{}", format!("Processing Move: {} uses {} -> {}", attacker, simulator_helpers::move_name_sim(&m.move_name), target).cyan());
+            println!(
+                "{}",
+                format!(
+                    "Processing Move: {} uses {} -> {}",
+                    attacker,
+                    simulator_helpers::move_name_sim(&m.move_name),
+                    target
+                )
+                .cyan()
+            );
         }
         Action::SwitchAction(s) => {
             let user = simulator_helpers::get_pokemon_at_slot(state, s.user_slot)
                 .map(|p| simulator_helpers::species_name_sim(&p.species))
-                .unwrap_or_else(|| format!("{:?} slot {}", s.user_slot.player, s.user_slot.slot_index + 1));
-            println!("{}", format!("Processing Switch: {} (slot {})", user, s.switch_index + 1).blue());
+                .unwrap_or_else(|| {
+                    format!(
+                        "{:?} slot {}",
+                        s.user_slot.player,
+                        s.user_slot.slot_index + 1
+                    )
+                });
+            println!(
+                "{}",
+                format!("Processing Switch: {} (slot {})", user, s.switch_index + 1).blue()
+            );
         }
         Action::MegaAction(m) => {
             let mon = simulator_helpers::get_pokemon_at_slot(state, m.user_slot)
                 .map(|p| simulator_helpers::species_name_sim(&p.species))
-                .unwrap_or_else(|| format!("{:?} slot {}", m.user_slot.player, m.user_slot.slot_index + 1));
+                .unwrap_or_else(|| {
+                    format!(
+                        "{:?} slot {}",
+                        m.user_slot.player,
+                        m.user_slot.slot_index + 1
+                    )
+                });
             println!("{}", format!("Processing Mega Evolution: {}", mon).yellow());
         }
         Action::TeraAction(t) => {
             let mon = simulator_helpers::get_pokemon_at_slot(state, t.user_slot)
                 .map(|p| simulator_helpers::species_name_sim(&p.species))
-                .unwrap_or_else(|| format!("{:?} slot {}", t.user_slot.player, t.user_slot.slot_index + 1));
-            println!("{}", format!("Processing Terastallize: {}", mon).bright_magenta());
+                .unwrap_or_else(|| {
+                    format!(
+                        "{:?} slot {}",
+                        t.user_slot.player,
+                        t.user_slot.slot_index + 1
+                    )
+                });
+            println!(
+                "{}",
+                format!("Processing Terastallize: {}", mon).bright_magenta()
+            );
         }
     }
 }
@@ -7169,7 +10599,11 @@ fn send_out_with_switch_event(
             hp: PokemonHP::Number(mon.hp),
             status: mon.status.clone(),
             // Only reveal tera type if the mon has already Terastallized.
-            tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
+            tera_type: if mon.is_tera {
+                Some(mon.tera_type.clone())
+            } else {
+                None
+            },
             disguise_species: simulator_helpers::compute_illusion_disguise(state, slot),
             max_hp: mon.stats[0],
         })
@@ -7202,7 +10636,9 @@ fn execute_action(
             let Some(mon) = simulator_helpers::get_pokemon_at_slot(&state, m.user_slot) else {
                 return vec![(MatchState::BattleState(state), 1.0)];
             };
-            if mon.fainted { return vec![(MatchState::BattleState(state), 1.0)]; }
+            if mon.fainted {
+                return vec![(MatchState::BattleState(state), 1.0)];
+            }
             match move_dex.get(&m.move_name) {
                 Some(move_data) => {
                     // Item-loss ledger: diff held items across the whole action so that
@@ -7214,67 +10650,76 @@ fn execute_action(
                     let move_start_len = state.pending_events.len();
                     let move_user = m.user_slot;
                     let move_name = m.move_name.clone();
-                    let move_targets: Vec<FieldSlot> = m.target_slot.map_or_else(Vec::new, |s| vec![s]);
-                    possible_damage_outcomes_for_move(&state, &m, move_data, config, move_dex, pokemon_dex, false)
-                        .into_iter()
-                        .map(|(mut st, p)| {
-                            match &mut st {
-                                MatchState::BattleState(bs) => {
-                                    simulator_helpers::process_item_loss_events(bs, &item_snapshot);
-                                    // Weather / ability-altering moves may change Castform's form.
-                                    simulator_helpers::update_forecast_forms(bs);
-                                    // Take the engine-resolved targets (auto-targeting, redirection)
-                                    // unconditionally so the transient field never lingers; fall back
-                                    // to the command's explicit target for moves handled before the
-                                    // targeting step.
-                                    let resolved = std::mem::take(&mut bs.resolved_move_targets);
-                                    // Wrap all events emitted during this move as reactions of MoveUsed,
-                                    // UNLESS the Pokémon couldn't act (Cant) — in that case Showdown
-                                    // emits `|cant|` with no `|move|`, so we emit the children flat.
-                                    if bs.event_observer.is_some() {
-                                        let reactions = bs.pending_events.split_off(move_start_len);
-                                        if bs.move_was_prevented {
-                                            // Cant branch: the Cant event is already inside `reactions`;
-                                            // push it back flat so it appears as a top-level sibling.
-                                            bs.pending_events.extend(reactions);
+                    let move_targets: Vec<FieldSlot> =
+                        m.target_slot.map_or_else(Vec::new, |s| vec![s]);
+                    possible_damage_outcomes_for_move(
+                        &state,
+                        &m,
+                        move_data,
+                        config,
+                        move_dex,
+                        pokemon_dex,
+                        false,
+                    )
+                    .into_iter()
+                    .map(|(mut st, p)| {
+                        match &mut st {
+                            MatchState::BattleState(bs) => {
+                                simulator_helpers::process_item_loss_events(bs, &item_snapshot);
+                                // Weather / ability-altering moves may change Castform's form.
+                                simulator_helpers::update_forecast_forms(bs);
+                                // Take the engine-resolved targets (auto-targeting, redirection)
+                                // unconditionally so the transient field never lingers; fall back
+                                // to the command's explicit target for moves handled before the
+                                // targeting step.
+                                let resolved = std::mem::take(&mut bs.resolved_move_targets);
+                                // Wrap all events emitted during this move as reactions of MoveUsed,
+                                // UNLESS the Pokémon couldn't act (Cant) — in that case Showdown
+                                // emits `|cant|` with no `|move|`, so we emit the children flat.
+                                if bs.event_observer.is_some() {
+                                    let reactions = bs.pending_events.split_off(move_start_len);
+                                    if bs.move_was_prevented {
+                                        // Cant branch: the Cant event is already inside `reactions`;
+                                        // push it back flat so it appears as a top-level sibling.
+                                        bs.pending_events.extend(reactions);
+                                    } else {
+                                        let targets = if resolved.is_empty() {
+                                            move_targets.clone()
                                         } else {
-                                            let targets = if resolved.is_empty() {
-                                                move_targets.clone()
-                                            } else {
-                                                resolved
-                                            };
-                                            bs.pending_events.push(InformationEvent {
-                                                kind: EventKind::MoveUsed {
-                                                    user: move_user,
-                                                    move_used: move_name.clone(),
-                                                    targets,
-                                                },
-                                                reactions,
-                                            });
-                                        }
-                                    }
-                                }
-                                MatchState::GameOverState { pending_events, .. } => {
-                                    // The move ended the battle: wrap this move's events the same
-                                    // way so the final turn's log keeps its MoveUsed node. (Empty
-                                    // when no observer is attached — nothing to wrap then.)
-                                    if pending_events.len() > move_start_len {
-                                        let reactions = pending_events.split_off(move_start_len);
-                                        pending_events.push(InformationEvent {
+                                            resolved
+                                        };
+                                        bs.pending_events.push(InformationEvent {
                                             kind: EventKind::MoveUsed {
                                                 user: move_user,
                                                 move_used: move_name.clone(),
-                                                targets: move_targets.clone(),
+                                                targets,
                                             },
                                             reactions,
                                         });
                                     }
                                 }
-                                _ => {}
                             }
-                            (st, p)
-                        })
-                        .collect()
+                            MatchState::GameOverState { pending_events, .. } => {
+                                // The move ended the battle: wrap this move's events the same
+                                // way so the final turn's log keeps its MoveUsed node. (Empty
+                                // when no observer is attached — nothing to wrap then.)
+                                if pending_events.len() > move_start_len {
+                                    let reactions = pending_events.split_off(move_start_len);
+                                    pending_events.push(InformationEvent {
+                                        kind: EventKind::MoveUsed {
+                                            user: move_user,
+                                            move_used: move_name.clone(),
+                                            targets: move_targets.clone(),
+                                        },
+                                        reactions,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                        (st, p)
+                    })
+                    .collect()
                 }
                 None => vec![(MatchState::BattleState(state), 1.0)],
             }
@@ -7285,36 +10730,70 @@ fn execute_action(
             if simulator_helpers::get_verbosity() >= 2 {
                 let user = simulator_helpers::get_pokemon_at_slot(&state, s.user_slot)
                     .map(|p| simulator_helpers::species_name_sim(&p.species))
-                    .unwrap_or_else(|| format!("{:?} slot {}", s.user_slot.player, s.user_slot.slot_index + 1));
-                println!("{}", format!("Executed Switch: new active at slot {} is {}", s.user_slot.slot_index + 1, user).bright_green());
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{:?} slot {}",
+                            s.user_slot.player,
+                            s.user_slot.slot_index + 1
+                        )
+                    });
+                println!(
+                    "{}",
+                    format!(
+                        "Executed Switch: new active at slot {} is {}",
+                        s.user_slot.slot_index + 1,
+                        user
+                    )
+                    .bright_green()
+                );
             }
             vec![(MatchState::BattleState(state), 1.0)]
         }
         Action::MegaAction(m) => {
             let slot_idx = m.user_slot.slot_index as usize;
-            let mons = match m.user_slot.player { Player::P1 => &mut state.p1_active_mons, Player::P2 => &mut state.p2_active_mons };
-            let evolved = mons.get_mut(slot_idx).map(|mon| crate::state::battle::try_mega_evolution(mon, pokemon_dex)).unwrap_or(false);
-            match m.user_slot.player { Player::P1 => state.p1_has_mega = false, Player::P2 => state.p2_has_mega = false }
+            let mons = match m.user_slot.player {
+                Player::P1 => &mut state.p1_active_mons,
+                Player::P2 => &mut state.p2_active_mons,
+            };
+            let evolved = mons
+                .get_mut(slot_idx)
+                .map(|mon| crate::state::battle::try_mega_evolution(mon, pokemon_dex))
+                .unwrap_or(false);
+            match m.user_slot.player {
+                Player::P1 => state.p1_has_mega = false,
+                Player::P2 => state.p2_has_mega = false,
+            }
             if evolved {
                 // Emit the MegaEvolution node first, with the mega form's on-gain
                 // ability effects (weather/terrain setters, Intimidate…) nested as
                 // its reactions: Mega → AbilityRevealed(Sand Stream) → WeatherChanged.
                 // (The old order ran the effects before emitting the mega event,
                 // which put "The weather became…" in front of the mega line.)
-                if let Some(mega_mon) = simulator_helpers::get_pokemon_at_slot(&state, m.user_slot) {
+                if let Some(mega_mon) = simulator_helpers::get_pokemon_at_slot(&state, m.user_slot)
+                {
                     let mega_species = mega_mon.species.clone();
                     let mega_ability = mega_mon.ability.clone();
                     let had_mega_ability = mega_mon.mega_ability.is_some();
                     let user_slot = m.user_slot;
                     simulator_helpers::with_reactions(
                         &mut state,
-                        EventKind::MegaEvolution { slot: user_slot, into: mega_species },
+                        EventKind::MegaEvolution {
+                            slot: user_slot,
+                            into: mega_species,
+                        },
                         |bs| {
                             if had_mega_ability {
                                 simulator_helpers::with_reactions(
                                     bs,
-                                    EventKind::AbilityRevealed { slot: user_slot, ability: mega_ability },
-                                    |bs| simulator_helpers::process_pokemon_gain_ability(bs, user_slot),
+                                    EventKind::AbilityRevealed {
+                                        slot: user_slot,
+                                        ability: mega_ability,
+                                    },
+                                    |bs| {
+                                        simulator_helpers::process_pokemon_gain_ability(
+                                            bs, user_slot,
+                                        )
+                                    },
                                 );
                             } else {
                                 simulator_helpers::process_pokemon_gain_ability(bs, user_slot);
@@ -7327,13 +10806,24 @@ fn execute_action(
         }
         Action::TeraAction(t) => {
             let slot_idx = t.user_slot.slot_index as usize;
-            let mons = match t.user_slot.player { Player::P1 => &mut state.p1_active_mons, Player::P2 => &mut state.p2_active_mons };
-            if let Some(mon) = mons.get_mut(slot_idx) { mon.is_tera = true; }
-            match t.user_slot.player { Player::P1 => state.p1_has_tera = false, Player::P2 => state.p2_has_tera = false }
+            let mons = match t.user_slot.player {
+                Player::P1 => &mut state.p1_active_mons,
+                Player::P2 => &mut state.p2_active_mons,
+            };
+            if let Some(mon) = mons.get_mut(slot_idx) {
+                mon.is_tera = true;
+            }
+            match t.user_slot.player {
+                Player::P1 => state.p1_has_tera = false,
+                Player::P2 => state.p2_has_tera = false,
+            }
             if let Some(mon) = simulator_helpers::get_pokemon_at_slot(&state, t.user_slot) {
                 let slot = t.user_slot;
                 let tera_type = mon.tera_type.clone();
-                simulator_helpers::emit(&mut state, EventKind::Terastallization { slot, tera_type });
+                simulator_helpers::emit(
+                    &mut state,
+                    EventKind::Terastallization { slot, tera_type },
+                );
             }
             vec![(MatchState::BattleState(state), 1.0)]
         }
@@ -7422,11 +10912,14 @@ fn step_action_queue(
     let mut best_indices: Vec<usize> = vec![0];
     for i in 1..next_state.action_queue.len() {
         let cmp = simulator_helpers::compare_action_order(
-            &next_state.action_queue[best_indices[0]], &next_state.action_queue[i], state, move_dex,
+            &next_state.action_queue[best_indices[0]],
+            &next_state.action_queue[i],
+            state,
+            move_dex,
         );
         match cmp {
             std::cmp::Ordering::Greater => best_indices = vec![i],
-            std::cmp::Ordering::Equal  => best_indices.push(i),
+            std::cmp::Ordering::Equal => best_indices.push(i),
             _ => {}
         }
     }
@@ -7461,7 +10954,10 @@ fn step_action_queue(
 /// `crate::information::information::mask_events_for` directly per observer instead of
 /// going through `simulate_turn`/`sample_turn` twice (which would re-resolve the turn —
 /// unsound, see the same doc comment).
-fn mask_optional_events(observer: Player, events: Option<Vec<InformationEvent>>) -> Option<Vec<InformationEvent>> {
+fn mask_optional_events(
+    observer: Player,
+    events: Option<Vec<InformationEvent>>,
+) -> Option<Vec<InformationEvent>> {
     events.map(|raw| crate::information::information::mask_events_for(observer, &raw))
 }
 
@@ -7476,8 +10972,20 @@ pub fn simulate_turn(
     damage_rolls: u8,
     observer: Option<Player>,
 ) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
-    let config = DamageConfig { consider_crit, damage_rolls, sample: false };
-    let results = simulate_turn_impl(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, config, observer);
+    let config = DamageConfig {
+        consider_crit,
+        damage_rolls,
+        sample: false,
+    };
+    let results = simulate_turn_impl(
+        state,
+        p1_cmd,
+        p2_cmd,
+        move_dex,
+        pokemon_dex,
+        config,
+        observer,
+    );
     match observer {
         Some(obs) => results
             .into_iter()
@@ -7508,7 +11016,16 @@ pub fn sample_turn(
     damage_rolls: u8,
     observer: Option<Player>,
 ) -> (MatchState, Option<Vec<InformationEvent>>, f64) {
-    let (st, ev, p) = sample_turn_raw(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, observer);
+    let (st, ev, p) = sample_turn_raw(
+        state,
+        p1_cmd,
+        p2_cmd,
+        move_dex,
+        pokemon_dex,
+        consider_crit,
+        damage_rolls,
+        observer,
+    );
     let ev = match observer {
         Some(obs) => mask_optional_events(obs, ev),
         None => ev,
@@ -7541,14 +11058,28 @@ pub fn sample_turn_raw(
     damage_rolls: u8,
     observer: Option<Player>,
 ) -> (MatchState, Option<Vec<InformationEvent>>, f64) {
-    let config = DamageConfig { consider_crit, damage_rolls, sample: true };
-    let results = simulate_turn_impl(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, config, observer);
+    let config = DamageConfig {
+        consider_crit,
+        damage_rolls,
+        sample: true,
+    };
+    let results = simulate_turn_impl(
+        state,
+        p1_cmd,
+        p2_cmd,
+        move_dex,
+        pokemon_dex,
+        config,
+        observer,
+    );
 
     // The chokepoints leave exactly one branch; sample defensively if a path
     // without one slips through, and fall back to an unchanged state when the
     // engine produced nothing (mirrors the interactive drivers' behaviour).
-    let pairs: Vec<TurnOutcomePair> =
-        results.into_iter().map(|(st, ev, p)| ((st, ev), p)).collect();
+    let pairs: Vec<TurnOutcomePair> = results
+        .into_iter()
+        .map(|(st, ev, p)| ((st, ev), p))
+        .collect();
     match simulator_helpers::sample_one_branch(pairs).pop() {
         Some(((st, ev), p)) => (st, ev, p),
         None => (state.clone(), observer.map(|_| Vec::new()), 1.0),
@@ -7564,11 +11095,11 @@ fn simulate_turn_impl(
     config: DamageConfig,
     observer: Option<Player>,
 ) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
-
     // Populate the action queue; may branch due to speed-tied send-outs.
     // The observer must be installed before this step: lead send-outs (team preview)
     // and replacement/self-switch send-ins emit their events inside it.
-    let initial_branches = apply_player_commands_branching(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, observer);
+    let initial_branches =
+        apply_player_commands_branching(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, observer);
 
     // moves_first flag: combines Quick Claw (item, 20%) and Quick Draw (ability, 30%).
     //
@@ -7586,22 +11117,42 @@ fn simulate_turn_impl(
                 return vec![(st, prob)];
             };
             // Collect (queue_index, p_first) for each eligible MoveAction.
-            let eligible: Vec<(usize, f64)> = bs.action_queue.iter().enumerate()
+            let eligible: Vec<(usize, f64)> = bs
+                .action_queue
+                .iter()
+                .enumerate()
                 .filter_map(|(i, action)| {
                     if let Action::MoveAction(ma) = action {
                         let user = simulator_helpers::get_pokemon_at_slot(bs, ma.user_slot)?;
                         let move_data = move_dex.get(&ma.move_name);
                         let items_ok = simulator_helpers::item_is_active(bs, user);
-                        let abilities_ok = !simulator_helpers::pokemon_ability_is_suppressed(bs, user);
+                        let abilities_ok =
+                            !simulator_helpers::pokemon_ability_is_suppressed(bs, user);
 
-                        let p_qc = if items_ok && user.item == Item::QuickClaw { 0.2 } else { 0.0 };
+                        let p_qc = if items_ok && user.item == Item::QuickClaw {
+                            0.2
+                        } else {
+                            0.0
+                        };
                         let p_qd = if abilities_ok
                             && user.ability == Ability::QuickDraw
-                            && move_data.is_some_and(|md| matches!(md.category, MoveCategory::Physical | MoveCategory::Special))
-                        { 0.3 } else { 0.0 };
+                            && move_data.is_some_and(|md| {
+                                matches!(
+                                    md.category,
+                                    MoveCategory::Physical | MoveCategory::Special
+                                )
+                            }) {
+                            0.3
+                        } else {
+                            0.0
+                        };
 
                         let p_first = 1.0 - (1.0 - p_qc) * (1.0 - p_qd);
-                        if p_first > 0.0 { Some((i, p_first)) } else { None }
+                        if p_first > 0.0 {
+                            Some((i, p_first))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -7612,11 +11163,13 @@ fn simulate_turn_impl(
             }
             // Expand independently: cartesian product of (active, inactive) for each holder.
             let n = eligible.len();
-            let total = 1usize << n;  // 2^n combinations
+            let total = 1usize << n; // 2^n combinations
             let mut branches: Vec<(MatchState, f64)> = Vec::with_capacity(total);
             for mask in 0..total {
                 let mut branch = st.clone();
-                let MatchState::BattleState(ref mut bbs) = branch else { continue; };
+                let MatchState::BattleState(ref mut bbs) = branch else {
+                    continue;
+                };
                 let mut branch_prob = prob;
                 for (bit, &(queue_idx, p_first)) in eligible.iter().enumerate() {
                     let active = (mask >> bit) & 1 == 1;
@@ -7687,7 +11240,9 @@ fn simulate_turn_impl(
 
         let mut aggregated = Vec::new();
         for (next_state, probability) in outcomes {
-            for (final_state, final_prob) in expand_branch(&next_state, move_dex, pokemon_dex, config) {
+            for (final_state, final_prob) in
+                expand_branch(&next_state, move_dex, pokemon_dex, config)
+            {
                 aggregated.push((final_state, probability * final_prob));
             }
         }
@@ -7719,7 +11274,10 @@ fn simulate_turn_impl(
 
     // Lift to 3-tuple: drain pending_events from each BattleState.
     if observer.is_none() {
-        return all_results.into_iter().map(|(st, p)| (st, None, p)).collect();
+        return all_results
+            .into_iter()
+            .map(|(st, p)| (st, None, p))
+            .collect();
     }
 
     // Event-aware coalesce: branches with identical state but divergent event histories
@@ -7752,11 +11310,16 @@ pub fn validate_battle_command_combination(cmds: &[BattleCommand]) -> bool {
 fn clear_pokemon_for_switch_out(mon: &mut PokemonState) {
     use crate::data::species::Species;
     // Revert Power Trick / Power Shift stat swap before clearing volatiles.
-    let had_power_trick_swap = simulator_helpers::has_status_volatile(mon, &VolatileStatus::PowerTrick)
-        || simulator_helpers::has_status_volatile(mon, &VolatileStatus::PowerShift);
+    let had_power_trick_swap =
+        simulator_helpers::has_status_volatile(mon, &VolatileStatus::PowerTrick)
+            || simulator_helpers::has_status_volatile(mon, &VolatileStatus::PowerShift);
     // Revert Speed Swap: restore the original Speed stored in the volatile.
     let original_spe = mon.volatiles.iter().find_map(|v| {
-        if let crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::SpeedSwap(spe), _) = v {
+        if let crate::state::pokemon::VolatileStatusState::TurnStatus(
+            VolatileStatus::SpeedSwap(spe),
+            _,
+        ) = v
+        {
             Some(*spe)
         } else {
             None
@@ -7817,7 +11380,9 @@ fn perform_switch_out_in(
         Player::P1 => (&mut next_state.p1_active_mons, &mut next_state.p1_back_mons),
         Player::P2 => (&mut next_state.p2_active_mons, &mut next_state.p2_back_mons),
     };
-    if slot_idx >= active.len() || bench_index >= back.len() { return; }
+    if slot_idx >= active.len() || bench_index >= back.len() {
+        return;
+    }
 
     let mut leaving = active[slot_idx].clone();
     clear_pokemon_for_switch_out(&mut leaving);
@@ -7835,7 +11400,10 @@ fn perform_switch_out_in(
 
     // Zero to Hero: Palafin permanently becomes Hero Form the first time it leaves the
     // field (any switch cause). Never reverts for the rest of the battle.
-    if leaving.species == Species::Palafin && leaving.ability == Ability::ZerotoHero && !leaving.fainted {
+    if leaving.species == Species::Palafin
+        && leaving.ability == Ability::ZerotoHero
+        && !leaving.fainted
+    {
         crate::state::battle::change_form(&mut leaving, Species::PalafinHero, pokemon_dex);
     }
     // Stance Change: Aegislash reverts to Shield Forme on switch-out.
@@ -7848,7 +11416,10 @@ fn perform_switch_out_in(
     // SyrupBomb ends when the user leaves the field — remove it from all opponents.
     // (The target's SyrupBomb is on the opponent side relative to the one switching out.)
     {
-        let opp_player = match user_slot.player { Player::P1 => Player::P2, Player::P2 => Player::P1 };
+        let opp_player = match user_slot.player {
+            Player::P1 => Player::P2,
+            Player::P2 => Player::P1,
+        };
         let opp_count = match opp_player {
             Player::P1 => next_state.p1_active_mons.len(),
             Player::P2 => next_state.p2_active_mons.len(),
@@ -7860,11 +11431,20 @@ fn perform_switch_out_in(
                 Player::P2 => &mut next_state.p2_active_mons[i],
             };
             if simulator_helpers::remove_status_volatile(opp, &VolatileStatus::SyrupBomb) {
-                syrup_bomb_cleared.push(FieldSlot { player: opp_player, slot_index: i as u8 });
+                syrup_bomb_cleared.push(FieldSlot {
+                    player: opp_player,
+                    slot_index: i as u8,
+                });
             }
         }
         for slot in syrup_bomb_cleared {
-            simulator_helpers::emit(next_state, EventKind::VolatileEnd { target: slot, volatile: VolatileStatus::SyrupBomb });
+            simulator_helpers::emit(
+                next_state,
+                EventKind::VolatileEnd {
+                    target: slot,
+                    volatile: VolatileStatus::SyrupBomb,
+                },
+            );
         }
     }
 
@@ -7901,25 +11481,31 @@ fn perform_self_switch(
             if let Some(mon) = mons.get(slot_idx) {
                 let boosts = mon.boosts;
                 // Passable volatiles per Bulbapedia (newest generation).
-                let passable = mon.volatiles.iter().filter(|v| {
-                    use crate::state::pokemon::VolatileStatusState;
-                    use VolatileStatus::*;
-                    matches!(v,
-                        VolatileStatusState::TurnStatus(Confusion, _)
-                        | VolatileStatusState::TurnStatus(FocusEnergy, _)
-                        | VolatileStatusState::TurnStatus(PartiallyTrapped(_), _)
-                        | VolatileStatusState::TurnStatus(LeechSeed, _)
-                        | VolatileStatusState::TurnStatus(Curse, _)
-                        | VolatileStatusState::TurnStatus(Substitute(_), _)
-                        | VolatileStatusState::TurnStatus(Ingrain, _)
-                        | VolatileStatusState::TurnStatus(HealBlock, _)
-                        | VolatileStatusState::TurnStatus(Embargo, _)
-                        | VolatileStatusState::TurnStatus(MagnetRise, _)
-                        | VolatileStatusState::TurnStatus(Telekinesis, _)
-                        | VolatileStatusState::TurnStatus(GastroAcid, _)
-                        | VolatileStatusState::TurnStatus(PerishSong, _)
-                    )
-                }).cloned().collect::<Vec<_>>();
+                let passable = mon
+                    .volatiles
+                    .iter()
+                    .filter(|v| {
+                        use crate::state::pokemon::VolatileStatusState;
+                        use VolatileStatus::*;
+                        matches!(
+                            v,
+                            VolatileStatusState::TurnStatus(Confusion, _)
+                                | VolatileStatusState::TurnStatus(FocusEnergy, _)
+                                | VolatileStatusState::TurnStatus(PartiallyTrapped(_), _)
+                                | VolatileStatusState::TurnStatus(LeechSeed, _)
+                                | VolatileStatusState::TurnStatus(Curse, _)
+                                | VolatileStatusState::TurnStatus(Substitute(_), _)
+                                | VolatileStatusState::TurnStatus(Ingrain, _)
+                                | VolatileStatusState::TurnStatus(HealBlock, _)
+                                | VolatileStatusState::TurnStatus(Embargo, _)
+                                | VolatileStatusState::TurnStatus(MagnetRise, _)
+                                | VolatileStatusState::TurnStatus(Telekinesis, _)
+                                | VolatileStatusState::TurnStatus(GastroAcid, _)
+                                | VolatileStatusState::TurnStatus(PerishSong, _)
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 (Some(boosts), passable)
             } else {
                 (None, vec![])
@@ -7932,9 +11518,18 @@ fn perform_self_switch(
                 Player::P2 => &next_state.p2_active_mons,
             };
             let sub = mons.get(slot_idx).and_then(|mon| {
-                mon.volatiles.iter().find(|v|
-                    matches!(v, crate::state::pokemon::VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _))
-                ).cloned()
+                mon.volatiles
+                    .iter()
+                    .find(|v| {
+                        matches!(
+                            v,
+                            crate::state::pokemon::VolatileStatusState::TurnStatus(
+                                VolatileStatus::Substitute(_),
+                                _
+                            )
+                        )
+                    })
+                    .cloned()
             });
             (None, sub.into_iter().collect())
         }
@@ -7960,8 +11555,14 @@ fn perform_self_switch(
 }
 
 // Process a list of send-out slots in effective-speed order, branching on speed ties.
-fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[FieldSlot], move_dex: &HashMap<PokemonMove, MoveData>) -> Vec<(BattleState, f64)> {
-    if slots.is_empty() { return vec![(base_state.clone(), 1.0)]; }
+fn process_sendouts_in_speed_order_branching(
+    base_state: &BattleState,
+    slots: &[FieldSlot],
+    move_dex: &HashMap<PokemonMove, MoveData>,
+) -> Vec<(BattleState, f64)> {
+    if slots.is_empty() {
+        return vec![(base_state.clone(), 1.0)];
+    }
 
     // Build (slot, switch_in_priority, effective_speed) triples.
     let trick = simulator_helpers::trick_room_is_active(base_state);
@@ -7980,9 +11581,13 @@ fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[
         if a.1 != b.1 {
             return b.1.cmp(&a.1); // higher priority first
         }
-        if (a.2 - b.2).abs() < 0.01 { std::cmp::Ordering::Equal }
-        else if trick { a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal) }
-        else { b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) }
+        if (a.2 - b.2).abs() < 0.01 {
+            std::cmp::Ordering::Equal
+        } else if trick {
+            a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+        } else {
+            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+        }
     });
 
     // Group by equal (switch_in_priority, speed) key — ties within a group are random.
@@ -8040,31 +11645,44 @@ fn process_sendouts_in_speed_order_branching(base_state: &BattleState, slots: &[
         let mut st = base_state.clone();
         // Build switch list for the event (HP observed from base_state before ability mutations).
         let switches: Vec<InfoSwitchState> = if st.event_observer.is_some() {
-            order.iter().filter_map(|slot| {
-                let mon = simulator_helpers::get_pokemon_at_slot(base_state, *slot)?;
-                // Raw capture: true species/HP always; disguise (if any) computed alongside
-                // for mask_events_for. base_state is pre-send-out, so illusion_disguise is
-                // not yet set; compute the disguise species from party composition directly.
-                Some(InfoSwitchState {
-                    slot: *slot,
-                    species: mon.species.clone(),
-                    level: mon.level,
-                    hp: PokemonHP::Number(mon.hp),
-                    status: mon.status.clone(),
-                    tera_type: if mon.is_tera { Some(mon.tera_type.clone()) } else { None },
-                    disguise_species: simulator_helpers::compute_illusion_disguise(base_state, *slot),
-                    max_hp: mon.stats[0],
+            order
+                .iter()
+                .filter_map(|slot| {
+                    let mon = simulator_helpers::get_pokemon_at_slot(base_state, *slot)?;
+                    // Raw capture: true species/HP always; disguise (if any) computed alongside
+                    // for mask_events_for. base_state is pre-send-out, so illusion_disguise is
+                    // not yet set; compute the disguise species from party composition directly.
+                    Some(InfoSwitchState {
+                        slot: *slot,
+                        species: mon.species.clone(),
+                        level: mon.level,
+                        hp: PokemonHP::Number(mon.hp),
+                        status: mon.status.clone(),
+                        tera_type: if mon.is_tera {
+                            Some(mon.tera_type.clone())
+                        } else {
+                            None
+                        },
+                        disguise_species: simulator_helpers::compute_illusion_disguise(
+                            base_state, *slot,
+                        ),
+                        max_hp: mon.stats[0],
+                    })
                 })
-            }).collect()
+                .collect()
         } else {
             vec![]
         };
         // Wrap all send-out effects (abilities, hazards, etc.) as reactions of SimultaneousSwitch.
-        simulator_helpers::with_reactions(&mut st, EventKind::SimultaneousSwitch { switches }, |bs| {
-            for slot in &order {
-                simulator_helpers::process_pokemon_send_out(bs, *slot, move_dex);
-            }
-        });
+        simulator_helpers::with_reactions(
+            &mut st,
+            EventKind::SimultaneousSwitch { switches },
+            |bs| {
+                for slot in &order {
+                    simulator_helpers::process_pokemon_send_out(bs, *slot, move_dex);
+                }
+            },
+        );
         results.push((st, prob));
     }
 
@@ -8082,7 +11700,9 @@ fn perform_simultaneous_switches_branching(
         perform_switch_out_in(&mut base, *slot, *bench_index, pokemon_dex);
     }
     let slots: Vec<FieldSlot> = switches.iter().map(|(s, _)| *s).collect();
-    simulator_helpers::coalesce_branches(process_sendouts_in_speed_order_branching(&base, &slots, move_dex))
+    simulator_helpers::coalesce_branches(process_sendouts_in_speed_order_branching(
+        &base, &slots, move_dex,
+    ))
 }
 
 // Branching version of creating battle state from preview that respects speed-order send-outs and ties
@@ -8093,11 +11713,27 @@ fn battle_state_from_preview_branching(
     move_dex: &HashMap<PokemonMove, MoveData>,
     observer: Option<Player>,
 ) -> Vec<(MatchState, f64)> {
-    let p1_active_mons: Vec<PokemonState> = p1_preview.active_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
-    let p1_back_mons: Vec<PokemonState> = p1_preview.back_indices.iter().map(|&i| preview.p1_mons[i].clone()).collect();
+    let p1_active_mons: Vec<PokemonState> = p1_preview
+        .active_indices
+        .iter()
+        .map(|&i| preview.p1_mons[i].clone())
+        .collect();
+    let p1_back_mons: Vec<PokemonState> = p1_preview
+        .back_indices
+        .iter()
+        .map(|&i| preview.p1_mons[i].clone())
+        .collect();
 
-    let p2_active_mons: Vec<PokemonState> = p2_preview.active_indices.iter().map(|&i| preview.p2_mons[i].clone()).collect();
-    let p2_back_mons: Vec<PokemonState> = p2_preview.back_indices.iter().map(|&i| preview.p2_mons[i].clone()).collect();
+    let p2_active_mons: Vec<PokemonState> = p2_preview
+        .active_indices
+        .iter()
+        .map(|&i| preview.p2_mons[i].clone())
+        .collect();
+    let p2_back_mons: Vec<PokemonState> = p2_preview
+        .back_indices
+        .iter()
+        .map(|&i| preview.p2_mons[i].clone())
+        .collect();
 
     let state = BattleState {
         active_per_side: preview.active_per_side,
@@ -8140,14 +11776,25 @@ fn battle_state_from_preview_branching(
 
     let mut slots: Vec<FieldSlot> = Vec::new();
     for slot_idx in 0..state.p1_active_mons.len() {
-        slots.push(FieldSlot { player: Player::P1, slot_index: slot_idx as u8 });
+        slots.push(FieldSlot {
+            player: Player::P1,
+            slot_index: slot_idx as u8,
+        });
     }
     for slot_idx in 0..state.p2_active_mons.len() {
-        slots.push(FieldSlot { player: Player::P2, slot_index: slot_idx as u8 });
+        slots.push(FieldSlot {
+            player: Player::P2,
+            slot_index: slot_idx as u8,
+        });
     }
 
     let branches = process_sendouts_in_speed_order_branching(&state, &slots, move_dex);
-    simulator_helpers::coalesce_branches(branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect())
+    simulator_helpers::coalesce_branches(
+        branches
+            .into_iter()
+            .map(|(bs, p)| (MatchState::BattleState(bs), p))
+            .collect(),
+    )
 }
 
 fn apply_player_commands_branching(
@@ -8160,9 +11807,17 @@ fn apply_player_commands_branching(
 ) -> Vec<(MatchState, f64)> {
     match state {
         MatchState::TeamPreviewState(preview) => {
-            let p1_preview = match p1_cmd { PlayerCommand::TeamPreview(c) => c, _ => panic!("Expected TeamPreview command for P1"), };
-            let p2_preview = match p2_cmd { PlayerCommand::TeamPreview(c) => c, _ => panic!("Expected TeamPreview command for P2"), };
-            simulator_helpers::coalesce_branches(battle_state_from_preview_branching(preview, p1_preview, p2_preview, move_dex, observer))
+            let p1_preview = match p1_cmd {
+                PlayerCommand::TeamPreview(c) => c,
+                _ => panic!("Expected TeamPreview command for P1"),
+            };
+            let p2_preview = match p2_cmd {
+                PlayerCommand::TeamPreview(c) => c,
+                _ => panic!("Expected TeamPreview command for P2"),
+            };
+            simulator_helpers::coalesce_branches(battle_state_from_preview_branching(
+                preview, p1_preview, p2_preview, move_dex, observer,
+            ))
         }
         MatchState::BattleState(battle) => {
             if let Some(game_over_state) = game_over_state_if_battle_finished(battle) {
@@ -8175,10 +11830,22 @@ fn apply_player_commands_branching(
             if !battle.turn_started && !battle.turn_ended {
                 next_state.turn_started = true;
                 if let PlayerCommand::Battle(p1_battle) = p1_cmd {
-                    queue_battle_commands_for_player(battle, Player::P1, p1_battle, move_dex, &mut next_state.action_queue);
+                    queue_battle_commands_for_player(
+                        battle,
+                        Player::P1,
+                        p1_battle,
+                        move_dex,
+                        &mut next_state.action_queue,
+                    );
                 }
                 if let PlayerCommand::Battle(p2_battle) = p2_cmd {
-                    queue_battle_commands_for_player(battle, Player::P2, p2_battle, move_dex, &mut next_state.action_queue);
+                    queue_battle_commands_for_player(
+                        battle,
+                        Player::P2,
+                        p2_battle,
+                        move_dex,
+                        &mut next_state.action_queue,
+                    );
                 }
                 return vec![(MatchState::BattleState(next_state), 1.0)];
             }
@@ -8190,7 +11857,13 @@ fn apply_player_commands_branching(
                 if let PlayerCommand::Battle(cmds) = p1_cmd {
                     for (slot_idx, cmd) in cmds.iter().enumerate() {
                         if let BattleCommand::Switch(s) = cmd {
-                            queued_switches.push((FieldSlot { player: Player::P1, slot_index: slot_idx as u8, }, s.party_index,));
+                            queued_switches.push((
+                                FieldSlot {
+                                    player: Player::P1,
+                                    slot_index: slot_idx as u8,
+                                },
+                                s.party_index,
+                            ));
                         }
                     }
                 }
@@ -8198,13 +11871,29 @@ fn apply_player_commands_branching(
                 if let PlayerCommand::Battle(cmds) = p2_cmd {
                     for (slot_idx, cmd) in cmds.iter().enumerate() {
                         if let BattleCommand::Switch(s) = cmd {
-                            queued_switches.push((FieldSlot { player: Player::P2, slot_index: slot_idx as u8, }, s.party_index,));
+                            queued_switches.push((
+                                FieldSlot {
+                                    player: Player::P2,
+                                    slot_index: slot_idx as u8,
+                                },
+                                s.party_index,
+                            ));
                         }
                     }
                 }
 
-                let branches = perform_simultaneous_switches_branching(&next_state, &queued_switches, pokemon_dex, move_dex);
-                return simulator_helpers::coalesce_branches(branches.into_iter().map(|(bs, p)| (MatchState::BattleState(bs), p)).collect());
+                let branches = perform_simultaneous_switches_branching(
+                    &next_state,
+                    &queued_switches,
+                    pokemon_dex,
+                    move_dex,
+                );
+                return simulator_helpers::coalesce_branches(
+                    branches
+                        .into_iter()
+                        .map(|(bs, p)| (MatchState::BattleState(bs), p))
+                        .collect(),
+                );
             }
 
             // Self-switch pending: a self-switch move resolved mid-turn and the owning player
@@ -8217,13 +11906,24 @@ fn apply_player_commands_branching(
                     Player::P2 => p2_cmd,
                 };
                 let party_index = if let PlayerCommand::Battle(cmds) = owning_cmd {
-                    cmds.get(pending_slot.slot_index as usize)
-                        .and_then(|cmd| if let BattleCommand::Switch(s) = cmd { Some(s.party_index) } else { None })
+                    cmds.get(pending_slot.slot_index as usize).and_then(|cmd| {
+                        if let BattleCommand::Switch(s) = cmd {
+                            Some(s.party_index)
+                        } else {
+                            None
+                        }
+                    })
                 } else {
                     None
                 };
                 if let Some(bench_idx) = party_index {
-                    perform_self_switch(&mut next_state, pending_slot, bench_idx, switch_type, pokemon_dex);
+                    perform_self_switch(
+                        &mut next_state,
+                        pending_slot,
+                        bench_idx,
+                        switch_type,
+                        pokemon_dex,
+                    );
                     // Emit the entrant's Switch event (with entry effects nested) —
                     // without it the log keeps calling this slot by the pivot
                     // user's name for the rest of the battle.
@@ -8239,10 +11939,22 @@ fn apply_player_commands_branching(
             }
 
             if let PlayerCommand::Battle(p1_battle) = p1_cmd {
-                queue_battle_commands_for_player(battle, Player::P1, p1_battle, move_dex, &mut next_state.action_queue);
+                queue_battle_commands_for_player(
+                    battle,
+                    Player::P1,
+                    p1_battle,
+                    move_dex,
+                    &mut next_state.action_queue,
+                );
             }
             if let PlayerCommand::Battle(p2_battle) = p2_cmd {
-                queue_battle_commands_for_player(battle, Player::P2, p2_battle, move_dex, &mut next_state.action_queue);
+                queue_battle_commands_for_player(
+                    battle,
+                    Player::P2,
+                    p2_battle,
+                    move_dex,
+                    &mut next_state.action_queue,
+                );
             }
 
             vec![(MatchState::BattleState(next_state), 1.0)]

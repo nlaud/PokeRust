@@ -41,18 +41,23 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use rand::Rng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::Rng;
 
 use poke_rust::data::ability::Ability;
 use poke_rust::data::pokemon_move::PokemonMove;
 use poke_rust::data::species::Species;
 use poke_rust::information::unknowns::UnknownMatchState;
-use poke_rust::simulator::{get_possible_commands_for_active_slot, validate_battle_command_combination};
-use poke_rust::state::battle::{BattleCommand, BattleState, Player, PlayerCommand, TeamPreviewCommand};
+use poke_rust::simulator::{
+    get_possible_commands_for_active_slot, validate_battle_command_combination,
+};
+use poke_rust::state::battle::{
+    BattleCommand, BattleState, Player, PlayerCommand, TeamPreviewCommand,
+};
 use poke_rust::state::dex_data::{
-    parse_ability_dex, parse_learnset_dex, parse_move_dex, parse_pokemon_dex, AbilityData, MoveData, PokemonData,
+    AbilityData, MoveData, PokemonData, parse_ability_dex, parse_learnset_dex, parse_move_dex,
+    parse_pokemon_dex,
 };
 
 /// Hang guard only, not a soundness/quality property — real doubles games
@@ -111,7 +116,10 @@ pub fn random_team_preview_command(
 
     let active_indices = indices[..active].to_vec();
     let back_indices = indices[active..].to_vec();
-    TeamPreviewCommand { active_indices, back_indices }
+    TeamPreviewCommand {
+        active_indices,
+        back_indices,
+    }
 }
 
 /// Picks one random, jointly-legal `BattleCommand` set for every active slot
@@ -134,7 +142,9 @@ pub fn random_commands_for_player(
     };
 
     let per_slot_options: Vec<Vec<BattleCommand>> = (0..active_len)
-        .map(|slot_idx| get_possible_commands_for_active_slot(state, player, slot_idx, move_dex, pokemon_dex))
+        .map(|slot_idx| {
+            get_possible_commands_for_active_slot(state, player, slot_idx, move_dex, pokemon_dex)
+        })
         .collect();
 
     for _ in 0..20 {
@@ -190,8 +200,11 @@ pub fn reseed_for_battle(
     p1_cmd: &PlayerCommand,
     p2_cmd: &PlayerCommand,
 ) -> UnknownMatchState {
-    let (UnknownMatchState::TeamPreview(preview), PlayerCommand::TeamPreview(p1_tp), PlayerCommand::TeamPreview(p2_tp)) =
-        (&belief, p1_cmd, p2_cmd)
+    let (
+        UnknownMatchState::TeamPreview(preview),
+        PlayerCommand::TeamPreview(p1_tp),
+        PlayerCommand::TeamPreview(p2_tp),
+    ) = (&belief, p1_cmd, p2_cmd)
     else {
         return belief;
     };

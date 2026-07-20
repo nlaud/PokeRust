@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::state::battle::{AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player};
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::state::dex_data::{parse_move_dex, parse_pokemon_dex, VolatileStatus};
-use crate::state::pokemon::{PokemonState, VolatileStatusState};
-use crate::simulator::simulate_turn;
-use crate::simulator::helpers as simulator_helpers;
 use crate::information::information::InformationEvent;
+use crate::simulator::helpers as simulator_helpers;
+use crate::simulator::simulate_turn;
+use crate::state::battle::{
+    AttackCommand, BattleCommand, BattleState, FieldSlot, MatchState, Player,
+};
+use crate::state::dex_data::{VolatileStatus, parse_move_dex, parse_pokemon_dex};
+use crate::state::pokemon::{PokemonState, VolatileStatusState};
 
-static POKEMON_DEX: OnceLock<HashMap<Species, crate::state::dex_data::PokemonData>> = OnceLock::new();
+static POKEMON_DEX: OnceLock<HashMap<Species, crate::state::dex_data::PokemonData>> =
+    OnceLock::new();
 static MOVE_DEX: OnceLock<HashMap<PokemonMove, crate::state::dex_data::MoveData>> = OnceLock::new();
 
 pub fn pokemon_dex() -> &'static HashMap<Species, crate::state::dex_data::PokemonData> {
@@ -73,10 +76,20 @@ pub fn battle_state_from_lists(
     // P2's mon_id is offset by P1's party count so ids are globally unique across both teams,
     // which trapping-volatile source tracking (PartiallyTrapped/Trapped) relies on.
     let p1_count = state.p1_active_mons.len() + state.p1_back_mons.len();
-    for (idx, mon) in state.p1_active_mons.iter_mut().chain(state.p1_back_mons.iter_mut()).enumerate() {
+    for (idx, mon) in state
+        .p1_active_mons
+        .iter_mut()
+        .chain(state.p1_back_mons.iter_mut())
+        .enumerate()
+    {
         mon.mon_id = idx as u8;
     }
-    for (idx, mon) in state.p2_active_mons.iter_mut().chain(state.p2_back_mons.iter_mut()).enumerate() {
+    for (idx, mon) in state
+        .p2_active_mons
+        .iter_mut()
+        .chain(state.p2_back_mons.iter_mut())
+        .enumerate()
+    {
         mon.mon_id = (p1_count + idx) as u8;
     }
 
@@ -106,7 +119,11 @@ pub fn battle_state_from_lists(
     // team-preview resolution's end-of-turn has already consumed the
     // first_turn_on_field_pending marker by this point. Mirror that state,
     // or every helper-built battle would keep Fake Out legal through turn 2.
-    for mon in state.p1_active_mons.iter_mut().chain(state.p2_active_mons.iter_mut()) {
+    for mon in state
+        .p1_active_mons
+        .iter_mut()
+        .chain(state.p2_active_mons.iter_mut())
+    {
         mon.first_turn_on_field_pending = false;
     }
 
@@ -179,11 +196,24 @@ pub fn hit_probability(outcomes: &[(MatchState, f64)], initial_hp: u16) -> f64 {
 }
 
 pub fn has_sky_drop_turn_volatile(mon: &PokemonState) -> bool {
-    mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)))
+    mon.volatiles.iter().any(|volatile| {
+        matches!(
+            volatile,
+            VolatileStatusState::TurnStatus(VolatileStatus::SkyDrop, _)
+        )
+    })
 }
 
 pub fn has_sky_drop_move_volatile(mon: &PokemonState) -> bool {
-    mon.volatiles.iter().any(|volatile| matches!(volatile, VolatileStatusState::MoveStatus(VolatileStatus::SemiInvulnerable(PokemonMove::SkyDrop), _)))
+    mon.volatiles.iter().any(|volatile| {
+        matches!(
+            volatile,
+            VolatileStatusState::MoveStatus(
+                VolatileStatus::SemiInvulnerable(PokemonMove::SkyDrop),
+                _
+            )
+        )
+    })
 }
 
 pub fn has_charging_volatile(mon: &PokemonState, move_name: PokemonMove) -> bool {
@@ -219,22 +249,27 @@ pub fn normalize_battle_outcomes(outcomes: Vec<(MatchState, f64)>) -> Vec<(Match
         // than relying on outcomes_permutation.
         mon.times_hit = 0;
     }
-    outcomes.into_iter().map(|(state, prob)| {
-        let state = match state {
-            MatchState::BattleState(mut bs) => {
-                for mon in bs.p1_active_mons.iter_mut()
-                    .chain(bs.p2_active_mons.iter_mut())
-                    .chain(bs.p1_back_mons.iter_mut())
-                    .chain(bs.p2_back_mons.iter_mut())
-                {
-                    strip(mon);
+    outcomes
+        .into_iter()
+        .map(|(state, prob)| {
+            let state = match state {
+                MatchState::BattleState(mut bs) => {
+                    for mon in bs
+                        .p1_active_mons
+                        .iter_mut()
+                        .chain(bs.p2_active_mons.iter_mut())
+                        .chain(bs.p1_back_mons.iter_mut())
+                        .chain(bs.p2_back_mons.iter_mut())
+                    {
+                        strip(mon);
+                    }
+                    MatchState::BattleState(bs)
                 }
-                MatchState::BattleState(bs)
-            }
-            other => other,
-        };
-        (state, prob)
-    }).collect()
+                other => other,
+            };
+            (state, prob)
+        })
+        .collect()
 }
 
 pub fn run_single_turn(
@@ -245,7 +280,9 @@ pub fn run_single_turn(
     pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>,
 ) -> Vec<(MatchState, f64)> {
     simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1, None)
-        .into_iter().map(|(st, _ev, p)| (st, p)).collect()
+        .into_iter()
+        .map(|(st, _ev, p)| (st, p))
+        .collect()
 }
 
 pub fn run_single_turn_with_events(
@@ -256,7 +293,16 @@ pub fn run_single_turn_with_events(
     pokemon_dex: &HashMap<Species, crate::state::dex_data::PokemonData>,
     observer: Player,
 ) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
-    simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, false, 1, Some(observer))
+    simulate_turn(
+        state,
+        p1_cmd,
+        p2_cmd,
+        move_dex,
+        pokemon_dex,
+        false,
+        1,
+        Some(observer),
+    )
 }
 
 /// Like [`run_single_turn_with_events`] but exposes `consider_crit` and `damage_rolls`
@@ -272,7 +318,16 @@ pub fn run_single_turn_with_events_opts(
     consider_crit: bool,
     damage_rolls: u8,
 ) -> Vec<(MatchState, Option<Vec<InformationEvent>>, f64)> {
-    simulate_turn(state, p1_cmd, p2_cmd, move_dex, pokemon_dex, consider_crit, damage_rolls, Some(observer))
+    simulate_turn(
+        state,
+        p1_cmd,
+        p2_cmd,
+        move_dex,
+        pokemon_dex,
+        consider_crit,
+        damage_rolls,
+        Some(observer),
+    )
 }
 
 /// Like `is_permutation` but strips transient per-turn tracking fields first; use this
@@ -299,14 +354,19 @@ pub fn damage_distribution(outcomes: &[(MatchState, f64)], initial_hp: u16) -> H
     distribution
 }
 
-pub fn repeat_hit_distribution(hit_distribution: &[(u16, f64)], hit_count: usize) -> HashMap<u16, f64> {
+pub fn repeat_hit_distribution(
+    hit_distribution: &[(u16, f64)],
+    hit_count: usize,
+) -> HashMap<u16, f64> {
     let mut distribution = HashMap::from([(0u16, 1.0)]);
 
     for _ in 0..hit_count {
         let mut next = HashMap::new();
         for (damage, damage_probability) in &distribution {
             for (hit_damage, hit_probability) in hit_distribution {
-                *next.entry(damage.saturating_add(*hit_damage)).or_insert(0.0) += damage_probability * hit_probability;
+                *next
+                    .entry(damage.saturating_add(*hit_damage))
+                    .or_insert(0.0) += damage_probability * hit_probability;
             }
         }
         distribution = next;
@@ -335,11 +395,14 @@ pub fn combine_hit_distributions_with_hit_chances(
             // zero-probability entry would still create a HashMap key, inflating `finished`'s
             // length past the true number of distinct nonzero outcomes.
             if *hit_chance < 1.0 {
-                *finished.entry(*damage_so_far).or_insert(0.0) += damage_probability * (1.0 - hit_chance);
+                *finished.entry(*damage_so_far).or_insert(0.0) +=
+                    damage_probability * (1.0 - hit_chance);
             }
 
             for (hit_damage, hit_probability) in hit_distribution {
-                *next_active.entry(damage_so_far.saturating_add(*hit_damage)).or_insert(0.0) += damage_probability * hit_chance * hit_probability;
+                *next_active
+                    .entry(damage_so_far.saturating_add(*hit_damage))
+                    .or_insert(0.0) += damage_probability * hit_chance * hit_probability;
             }
         }
 

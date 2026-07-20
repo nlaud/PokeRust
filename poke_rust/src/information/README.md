@@ -549,6 +549,21 @@ fast_min × fast_mult ≥ slow_min × slow_mult  ⟹  fast.min_stats[5]  ≥ cei
 fast_max × fast_mult ≥ slow_max × slow_mult  ⟹  slow.max_stats[5]  ≤ floor(fast.max_stats[5] × fast_mult / slow_mult)
 ```
 
+Those temporary bounds feed Pass 5, but the final scalar Speed range is widened
+back to the independent BSV/nature marginal before returning. The relational
+fact remains in the CNF predicate store; keeping both a hard scalar projection
+and the relation over-constrains marginals when multiple builds satisfy the same
+ordering.
+
+**Doubles soundness envelope.** Damage inversion in doubles still has unmodeled
+cross-target and temporal interactions. As a conservative final step, doubles
+states discard clauses containing nature/EV/IV build literals and widen uncertain
+opponent nature, EV, IV, and stat fields back to the species-level theoretical
+envelope. Singles retains the full Pass 3/Pass 5 narrowing. Item, ability, move,
+identity, field, and relational speed inference remain active in doubles. This is
+an intentional precision tradeoff: an admitted build may be too broad, but it
+must not exclude the true build.
+
 ### Pass 5 — Back-Solve EV / IV / Nature
 
 **Where:** `pass5_back_solve`, run per Pokémon with a `Known` species, after

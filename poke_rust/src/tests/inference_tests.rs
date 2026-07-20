@@ -12,28 +12,41 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
+use crate::information::inference::{
+    EV_LATTICE, InferenceConfig, apply_information, apply_switch_out_reset, get_mon_by_idx,
+    mon_idx_for_active_slot, pass5_back_solve, unknown_is_excluded,
+};
+use crate::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
+use crate::information::unknowns::{
+    PokemonHP, Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
+};
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
     AccuracyType, DamageOverride, HitEffect, MoveCategory, MoveData, MoveTarget, PokemonData,
     PokemonSecondaryEffect, PokemonType, PseudoWeather, SelfDestructType, SelfSwitchType,
     SideCondition, Status, Terrain, VolatileStatus, Weather,
 };
-use crate::information::inference::{
-    apply_information, apply_switch_out_reset, get_mon_by_idx, mon_idx_for_active_slot,
-    pass5_back_solve, unknown_is_excluded, InferenceConfig, EV_LATTICE,
-};
-use crate::information::information::{CantReason, EventKind, InformationEvent, SwitchState};
-use crate::information::unknowns::{
-    PokemonHP, Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
-};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn p1(i: u8) -> FieldSlot { FieldSlot { player: Player::P1, slot_index: i } }
-fn p2(i: u8) -> FieldSlot { FieldSlot { player: Player::P2, slot_index: i } }
+fn p1(i: u8) -> FieldSlot {
+    FieldSlot {
+        player: Player::P1,
+        slot_index: i,
+    }
+}
+fn p2(i: u8) -> FieldSlot {
+    FieldSlot {
+        player: Player::P2,
+        slot_index: i,
+    }
+}
 
 fn event(kind: EventKind) -> InformationEvent {
-    InformationEvent { kind, reactions: vec![] }
+    InformationEvent {
+        kind,
+        reactions: vec![],
+    }
 }
 
 fn event_with(kind: EventKind, reactions: Vec<InformationEvent>) -> InformationEvent {
@@ -107,12 +120,12 @@ fn battle_nvn(
 ) -> UnknownBattleState {
     let n = p1_active.len().max(p2_active.len());
     UnknownBattleState {
-        active_per_side:   n as u8,
+        active_per_side: n as u8,
         back_mons_per_side: 6u8.saturating_sub(n as u8),
-        p1_active_mons:    p1_active,
-        p2_active_mons:    p2_active,
-        p1_known_back_mons:    vec![],
-        p2_known_back_mons:    vec![],
+        p1_active_mons: p1_active,
+        p2_active_mons: p2_active,
+        p1_known_back_mons: vec![],
+        p2_known_back_mons: vec![],
         p1_possible_back_mons: vec![],
         p2_possible_back_mons: vec![],
         p1_fainted_mons: vec![],
@@ -121,42 +134,39 @@ fn battle_nvn(
         p2_unresolved_zoroark_count: 0,
         p1_roster_templates: vec![],
         p2_roster_templates: vec![],
-        turn_number:   1,
-        turn_started:  false,
-        turn_ended:    false,
-        p1_has_tera:   false,
-        p2_has_tera:   false,
-        p1_has_mega:   false,
-        p2_has_mega:   false,
-        weather:              None,
-        weather_turns:        None,
+        turn_number: 1,
+        turn_started: false,
+        turn_ended: false,
+        p1_has_tera: false,
+        p2_has_tera: false,
+        p1_has_mega: false,
+        p2_has_mega: false,
+        weather: None,
+        weather_turns: None,
         weather_setter_mon_idx: None,
-        pseudo_weathers:      vec![],
+        pseudo_weathers: vec![],
         pseudo_weather_turns: vec![],
-        terrain:              None,
-        terrain_turns:        None,
+        terrain: None,
+        terrain_turns: None,
         terrain_setter_mon_idx: None,
-        p1_side_conditions:        vec![],
-        p1_side_condition_turns:   vec![],
+        p1_side_conditions: vec![],
+        p1_side_condition_turns: vec![],
         p1_side_condition_setters: vec![],
-        p2_side_conditions:        vec![],
-        p2_side_condition_turns:   vec![],
+        p2_side_conditions: vec![],
+        p2_side_condition_turns: vec![],
         p2_side_condition_setters: vec![],
         p1_slot_conditions: (0..n).map(|_| vec![]).collect(),
         p2_slot_conditions: (0..n).map(|_| vec![]).collect(),
-        self_switch_pending:      None,
+        self_switch_pending: None,
         items_consumed_this_turn: vec![],
-        last_move_on_field:       None,
-        sub_damage_dealt:         0,
-        round_used_this_turn:     false,
-        predicates:               vec![],
+        last_move_on_field: None,
+        sub_damage_dealt: 0,
+        round_used_this_turn: false,
+        predicates: vec![],
     }
 }
 
-fn apply(
-    state: UnknownBattleState,
-    events: Vec<InformationEvent>,
-) -> UnknownBattleState {
+fn apply(state: UnknownBattleState, events: Vec<InformationEvent>) -> UnknownBattleState {
     apply_ex(state, events, HashMap::new(), HashMap::new())
 }
 
@@ -258,8 +268,14 @@ fn test_status_inflicted_then_cured() {
     let result = apply(
         state,
         vec![
-            event(EventKind::StatusInflicted { target: p2(0), status: Status::Paralysis }),
-            event(EventKind::StatusCured { target: p2(0), status: Status::Paralysis }),
+            event(EventKind::StatusInflicted {
+                target: p2(0),
+                status: Status::Paralysis,
+            }),
+            event(EventKind::StatusCured {
+                target: p2(0),
+                status: Status::Paralysis,
+            }),
         ],
     );
     assert_eq!(result.p2_active_mons[0].status, None);
@@ -281,9 +297,18 @@ fn test_s44_status_cured_then_new_status_does_not_panic() {
     let result = apply(
         state,
         vec![
-            event(EventKind::StatusInflicted { target: p2(0), status: Status::Frozen(0) }),
-            event(EventKind::StatusCured { target: p2(0), status: Status::Frozen(0) }),
-            event(EventKind::StatusInflicted { target: p2(0), status: Status::Burn }),
+            event(EventKind::StatusInflicted {
+                target: p2(0),
+                status: Status::Frozen(0),
+            }),
+            event(EventKind::StatusCured {
+                target: p2(0),
+                status: Status::Frozen(0),
+            }),
+            event(EventKind::StatusInflicted {
+                target: p2(0),
+                status: Status::Burn,
+            }),
         ],
     );
     assert_eq!(result.p2_active_mons[0].status, Some(Status::Burn));
@@ -298,7 +323,8 @@ fn test_damage_dealt_to_zero_sets_fainted() {
     let state = battle_with_p2(vec![unknown_mon()]);
     let result = apply(
         state,
-        vec![event(EventKind::DamageDealt { max_hp: 0,
+        vec![event(EventKind::DamageDealt {
+            max_hp: 0,
             target: p2(0),
             new_hp: PokemonHP::Percent(0),
         })],
@@ -316,7 +342,10 @@ fn test_item_revealed_sets_known() {
     let state = battle_with_p2(vec![unknown_mon()]);
     let result = apply(
         state,
-        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::ChoiceBand })],
+        vec![event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::ChoiceBand,
+        })],
     );
     assert!(
         matches!(&result.p2_active_mons[0].item, Unknown::Known(i) if *i == Item::ChoiceBand),
@@ -331,11 +360,22 @@ fn test_item_lost_consumed() {
     let state = battle_with_p2(vec![mon]);
     let result = apply(
         state,
-        vec![event(EventKind::ItemLost { slot: p2(0), item: Item::OranBerry, consumed: true })],
+        vec![event(EventKind::ItemLost {
+            slot: p2(0),
+            item: Item::OranBerry,
+            consumed: true,
+        })],
     );
     let m = &result.p2_active_mons[0];
-    assert_eq!(m.consumed_item, Some(Item::OranBerry), "consumed_item should be set");
-    assert!(matches!(&m.item, Unknown::Known(i) if *i == Item::None), "item should now be None");
+    assert_eq!(
+        m.consumed_item,
+        Some(Item::OranBerry),
+        "consumed_item should be set"
+    );
+    assert!(
+        matches!(&m.item, Unknown::Known(i) if *i == Item::None),
+        "item should now be None"
+    );
 }
 
 // ── Pass 1: Moves / Choice exclusion ─────────────────────────────────────────
@@ -359,9 +399,18 @@ fn test_choice_excluded_after_two_different_moves() {
         ],
     );
     let m = &result.p2_active_mons[0];
-    assert!(is_item_excluded(m, &Item::ChoiceBand), "ChoiceBand excluded");
-    assert!(is_item_excluded(m, &Item::ChoiceScarf), "ChoiceScarf excluded");
-    assert!(is_item_excluded(m, &Item::ChoiceSpecs), "ChoiceSpecs excluded");
+    assert!(
+        is_item_excluded(m, &Item::ChoiceBand),
+        "ChoiceBand excluded"
+    );
+    assert!(
+        is_item_excluded(m, &Item::ChoiceScarf),
+        "ChoiceScarf excluded"
+    );
+    assert!(
+        is_item_excluded(m, &Item::ChoiceSpecs),
+        "ChoiceSpecs excluded"
+    );
 }
 
 #[test]
@@ -447,7 +496,10 @@ fn test_consecutive_move_count_is_zero_based() {
 #[test]
 fn test_times_hit_excludes_self_damage_and_eot_chip() {
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let state = battle_with_p2(vec![unknown_mon()]);
 
@@ -462,14 +514,26 @@ fn test_times_hit_excludes_self_damage_and_eot_chip() {
                     targets: vec![p1(0)],
                 },
                 vec![
-                    event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(200) }),
-                    event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(90) }),
+                    event(EventKind::DamageDealt {
+                        max_hp: 0,
+                        target: p1(0),
+                        new_hp: PokemonHP::Number(200),
+                    }),
+                    event(EventKind::DamageDealt {
+                        max_hp: 0,
+                        target: p2(0),
+                        new_hp: PokemonHP::Percent(90),
+                    }),
                 ],
             ),
             // EOT chip on P2 with no enclosing MoveUsed (e.g. Sandstorm).
             event_with(
                 EventKind::EndOfTurn,
-                vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(80) })],
+                vec![event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p2(0),
+                    new_hp: PokemonHP::Percent(80),
+                })],
             ),
         ],
         HashMap::new(),
@@ -586,11 +650,22 @@ fn test_boost_changed_net() {
     let result = apply(
         state,
         vec![
-            event(EventKind::BoostChanged { target: p2(0), boost_idx: 0, stages: 2 }),  // 0=Atk
-            event(EventKind::BoostChanged { target: p2(0), boost_idx: 0, stages: -1 }),
+            event(EventKind::BoostChanged {
+                target: p2(0),
+                boost_idx: 0,
+                stages: 2,
+            }), // 0=Atk
+            event(EventKind::BoostChanged {
+                target: p2(0),
+                boost_idx: 0,
+                stages: -1,
+            }),
         ],
     );
-    assert_eq!(result.p2_active_mons[0].boosts[0], 1, "net Atk boost should be +1");
+    assert_eq!(
+        result.p2_active_mons[0].boosts[0], 1,
+        "net Atk boost should be +1"
+    );
 }
 
 #[test]
@@ -609,18 +684,16 @@ fn test_boosts_cleared_zeroes_all() {
 
 #[test]
 fn test_switch_from_known_back_to_active() {
-    let back = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp,
-        &HashMap::new(),
-        50,
-    );
+    let back = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![back];
     state.p2_slot_conditions = vec![vec![]]; // add slot 0
 
     let result = apply(
         state,
-        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+        vec![event(EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -635,7 +708,10 @@ fn test_switch_from_known_back_to_active() {
         matches!(&result.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Garchomp)
     );
     assert_eq!(result.p2_active_mons[0].hp, PokemonHP::Percent(80));
-    assert!(result.p2_known_back_mons.is_empty(), "back should be empty after switch-in");
+    assert!(
+        result.p2_known_back_mons.is_empty(),
+        "back should be empty after switch-in"
+    );
 }
 
 /// Regression: a fainted-then-replaced opponent mon must land in `p2_fainted_mons`
@@ -654,16 +730,27 @@ fn test_fainted_opponent_routed_to_fainted_bucket_on_replacement() {
     let state = battle_1v1(unknown_mon_species(Species::Garchomp), p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+    move_dex.insert(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    );
 
     let result = apply_ex(
         state,
         vec![
             // P1 KOs P2's Charizard.
             event_with(
-                EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Tackle, targets: vec![p2(0)] },
+                EventKind::MoveUsed {
+                    user: p1(0),
+                    move_used: PokemonMove::Tackle,
+                    targets: vec![p2(0)],
+                },
                 vec![
-                    event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(0) }),
+                    event(EventKind::DamageDealt {
+                        max_hp: 0,
+                        target: p2(0),
+                        new_hp: PokemonHP::Percent(0),
+                    }),
                     event(EventKind::Faint { slot: p2(0) }),
                 ],
             ),
@@ -683,13 +770,21 @@ fn test_fainted_opponent_routed_to_fainted_bucket_on_replacement() {
         move_dex,
     );
 
-    assert_eq!(result.p2_fainted_mons.len(), 1, "fainted Charizard should be retained in the fainted bucket");
+    assert_eq!(
+        result.p2_fainted_mons.len(),
+        1,
+        "fainted Charizard should be retained in the fainted bucket"
+    );
     let fainted = &result.p2_fainted_mons[0];
     assert!(
         matches!(&fainted.possible_species, Unknown::Known(s) if *s == Species::Charizard),
-        "fainted bucket should hold the fainted mon's species, got {:?}", fainted.possible_species
+        "fainted bucket should hold the fainted mon's species, got {:?}",
+        fainted.possible_species
     );
-    assert!(fainted.fainted, "fainted-bucket entry must still be marked fainted");
+    assert!(
+        fainted.fainted,
+        "fainted-bucket entry must still be marked fainted"
+    );
     assert_eq!(
         fainted.known_moves[0],
         Some(PokemonMove::Flamethrower),
@@ -700,8 +795,14 @@ fn test_fainted_opponent_routed_to_fainted_bucket_on_replacement() {
         matches!(&result.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Blastoise),
         "replacement should occupy the active slot"
     );
-    assert!(result.p2_known_back_mons.is_empty(), "fainted mon must not also appear in known_back");
-    assert!(result.p2_possible_back_mons.is_empty(), "fainted mon must not also appear in possible_back");
+    assert!(
+        result.p2_known_back_mons.is_empty(),
+        "fainted mon must not also appear in known_back"
+    );
+    assert!(
+        result.p2_possible_back_mons.is_empty(),
+        "fainted mon must not also appear in possible_back"
+    );
 }
 
 // ── Pass 2: Life Orb exclusion ────────────────────────────────────────────────
@@ -712,8 +813,11 @@ fn test_no_recoil_excludes_life_orb() {
     // Klutz is also ruled out (S21): a Klutz attacker's Life Orb never chips, so the
     // hard exclusion requires Klutz impossible as well.
     let mut mon = unknown_mon();
-    mon.possible_abilities =
-        Unknown::Not(vec![Ability::MagicGuard, Ability::SheerForce, Ability::Klutz]);
+    mon.possible_abilities = Unknown::Not(vec![
+        Ability::MagicGuard,
+        Ability::SheerForce,
+        Ability::Klutz,
+    ]);
 
     // A P1 mon must actually occupy the damaged slot — the simulator never emits
     // DamageDealt for an empty slot, and event shapes here should stay realistic.
@@ -721,7 +825,10 @@ fn test_no_recoil_excludes_life_orb() {
 
     // Provide Earthquake in the move dex so is_damaging=true.
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
@@ -732,7 +839,8 @@ fn test_no_recoil_excludes_life_orb() {
                 move_used: PokemonMove::Earthquake,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p1(0),
                 new_hp: PokemonHP::Number(200),
             })],
@@ -754,7 +862,10 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
     let state = battle_with_p2(vec![mon]);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
@@ -766,11 +877,13 @@ fn test_lo_recoil_present_does_not_exclude_life_orb() {
                 targets: vec![p1(0)],
             },
             vec![
-                event(EventKind::DamageDealt { max_hp: 0,
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
                     target: p1(0),
                     new_hp: PokemonHP::Number(200),
                 }),
-                event(EventKind::DamageDealt { max_hp: 0,
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
                     target: p2(0), // self-damage = Life Orb recoil
                     new_hp: PokemonHP::Percent(90),
                 }),
@@ -813,7 +926,8 @@ fn test_life_orb_not_excluded_when_user_faints_during_move() {
                 targets: vec![p1(0)],
             },
             vec![
-                event(EventKind::DamageDealt { max_hp: 0,
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
                     target: p1(0),
                     new_hp: PokemonHP::Number(50),
                 }),
@@ -872,7 +986,13 @@ fn test_brightpowder_clause_includes_sand_veil_in_sandstorm() {
     // force an evasion item in a world where Sand Veil caused the miss.
     let clause_has_sand_veil = result.predicates.iter().any(|clause| {
         clause.iter().any(|s| {
-            matches!(s, Statement::HasAbility { ability: Ability::SandVeil, .. })
+            matches!(
+                s,
+                Statement::HasAbility {
+                    ability: Ability::SandVeil,
+                    ..
+                }
+            )
         })
     });
     assert!(
@@ -901,7 +1021,10 @@ fn test_brightpowder_clause_emitted_when_no_evasion_ability_possible() {
     // No sandstorm / snow active, so the condition guards also don't add them.
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+    move_dex.insert(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    );
 
     let result = apply_ex(
         state,
@@ -922,8 +1045,13 @@ fn test_brightpowder_clause_emitted_when_no_evasion_ability_possible() {
         clause.iter().any(|s| {
             matches!(
                 s,
-                Statement::HasItem { item: Item::BrightPowder, .. }
-                    | Statement::HasItem { item: Item::LaxIncense, .. }
+                Statement::HasItem {
+                    item: Item::BrightPowder,
+                    ..
+                } | Statement::HasItem {
+                    item: Item::LaxIncense,
+                    ..
+                }
             )
         })
     });
@@ -940,7 +1068,10 @@ fn test_brightpowder_clause_emitted_when_no_evasion_ability_possible() {
 fn test_speed_comparison_emitted_for_same_priority() {
     // P1 goes first with Tackle, P2 second → a SpeedComparison predicate should appear.
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+    move_dex.insert(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    );
 
     // P1 mon has Quick Claw excluded so we get a clean SpeedComparison (not a disjunction).
     let mut p1_mon = unknown_mon_species(Species::Pikachu);
@@ -953,15 +1084,25 @@ fn test_speed_comparison_emitted_for_same_priority() {
     let result = apply_ex(
         state,
         vec![
-            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Tackle, targets: vec![p2(0)] }),
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            }),
         ],
         HashMap::new(),
         move_dex,
     );
 
     let has_speed_cmp = result.predicates.iter().any(|clause| {
-        clause.iter().any(|lit| matches!(lit, Statement::SpeedComparison { .. }))
+        clause
+            .iter()
+            .any(|lit| matches!(lit, Statement::SpeedComparison { .. }))
     });
     assert!(has_speed_cmp, "SpeedComparison predicate must be emitted");
 }
@@ -977,22 +1118,38 @@ fn test_no_speed_comparison_different_priority() {
     move_dex.insert(PokemonMove::QuickAttack, quick_attack);
     move_dex.insert(PokemonMove::Tackle, tackle);
 
-    let state = battle_1v1(unknown_mon_species(Species::Pikachu), unknown_mon_species(Species::Snorlax));
+    let state = battle_1v1(
+        unknown_mon_species(Species::Pikachu),
+        unknown_mon_species(Species::Snorlax),
+    );
     let result = apply_ex(
         state,
         vec![
-            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::QuickAttack, targets: vec![p2(0)] }),
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::QuickAttack,
+                targets: vec![p2(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            }),
         ],
         HashMap::new(),
         move_dex,
     );
 
-    let speed_cmp_count = result.predicates.iter()
+    let speed_cmp_count = result
+        .predicates
+        .iter()
         .flat_map(|c| c.iter())
         .filter(|lit| matches!(lit, Statement::SpeedComparison { .. }))
         .count();
-    assert_eq!(speed_cmp_count, 0, "no SpeedComparison for different priority brackets");
+    assert_eq!(
+        speed_cmp_count, 0,
+        "no SpeedComparison for different priority brackets"
+    );
 }
 
 // ── Regression: S18 — slot re-binding must not inherit the old occupant's clauses ──
@@ -1021,7 +1178,9 @@ fn test_s18_speed_comparison_purged_on_switch() {
     let fresh_min = unknown_mon_species(Species::Aggron).min_stats[5];
     let result = apply(
         state,
-        vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+        vec![event(EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
             slot: p2(0),
             species: Species::Aggron,
             level: 50,
@@ -1039,9 +1198,89 @@ fn test_s18_speed_comparison_purged_on_switch() {
     );
     // The Snorlax-scoped clause must be gone from the store.
     let stale_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }))
+        clause
+            .iter()
+            .any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }))
     });
-    assert!(!stale_clause, "mon-scoped clauses must be purged when the slot occupant changes");
+    assert!(
+        !stale_clause,
+        "mon-scoped clauses must be purged when the slot occupant changes"
+    );
+}
+
+/// A forced switch is nested under the move that caused it. Pass 4 runs again after
+/// that nested event has rebound the slot; it must not replay the outgoing mon's
+/// earlier move order against the incoming occupant.
+#[test]
+fn test_s18_forced_switch_does_not_recreate_outgoing_speed_clause() {
+    let p1_fast = no_speed_escape_mon(Species::Lycanroc);
+    let p1_slow = no_speed_escape_mon(Species::Corviknight);
+    let p2_mon = no_speed_escape_mon(Species::Garchomp);
+    let state = battle_nvn(vec![p1_fast, p1_slow], vec![p2_mon]);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::RockSlide,
+        normal_physical_move(PokemonMove::RockSlide, 75),
+    );
+    move_dex.insert(PokemonMove::BulkUp, poke_status_move(PokemonMove::BulkUp));
+    move_dex.insert(
+        PokemonMove::DragonTail,
+        normal_physical_move(PokemonMove::DragonTail, 60),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::RockSlide,
+                targets: vec![p2(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p1(1),
+                move_used: PokemonMove::BulkUp,
+                targets: vec![p1(1)],
+            }),
+            event_with(
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::DragonTail,
+                    targets: vec![p1(0)],
+                },
+                vec![event(EventKind::Switch(SwitchState {
+                    slot: p1(0),
+                    species: Species::Sinistcha,
+                    level: 50,
+                    hp: PokemonHP::Number(178),
+                    status: None,
+                    tera_type: None,
+                    disguise_species: None,
+                    max_hp: 178,
+                }))],
+            ),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(matches!(
+        result.p1_active_mons[0].possible_species,
+        Unknown::Known(Species::Sinistcha)
+    ));
+    assert!(
+        !result
+            .predicates
+            .iter()
+            .any(|clause| clause.iter().any(|lit| {
+                matches!(
+                    lit,
+                    Statement::SpeedComparison { fast_idx: 0, .. }
+                        | Statement::SpeedComparison { slow_idx: 0, .. }
+                )
+            })),
+        "post-walk Pass 4 must not bind the outgoing Lycanroc's order evidence to Sinistcha"
+    );
 }
 
 /// Item-disjunction analogue: `[HasItem(BrightPowder) ∨ HasItem(LaxIncense)]` recorded
@@ -1055,15 +1294,23 @@ fn test_s18_item_clause_purged_on_switch() {
     let p2_mon = unknown_mon_species(Species::Snorlax);
     let mut state = battle_1v1(p1_mon, p2_mon);
     state.predicates.push(vec![
-        Statement::HasItem { mon_idx: 1, item: Item::BrightPowder },
-        Statement::HasItem { mon_idx: 1, item: Item::LaxIncense },
+        Statement::HasItem {
+            mon_idx: 1,
+            item: Item::BrightPowder,
+        },
+        Statement::HasItem {
+            mon_idx: 1,
+            item: Item::LaxIncense,
+        },
     ]);
 
     // Snorlax leaves; Aggron enters and reveals Leftovers.
     let result = apply(
         state,
         vec![
-            event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+            event(EventKind::Switch(SwitchState {
+                disguise_species: None,
+                max_hp: 0,
                 slot: p2(0),
                 species: Species::Aggron,
                 level: 50,
@@ -1071,7 +1318,10 @@ fn test_s18_item_clause_purged_on_switch() {
                 status: None,
                 tera_type: None,
             })),
-            event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers }),
+            event(EventKind::ItemRevealed {
+                slot: p2(0),
+                item: Item::Leftovers,
+            }),
         ],
     );
     assert!(matches!(&result.p2_active_mons[0].item, Unknown::Known(i) if *i == Item::Leftovers));
@@ -1090,8 +1340,14 @@ fn test_s19_knock_off_resolves_stale_item_clause() {
     let p2_mon = unknown_mon_species(Species::Snorlax);
     let mut state = battle_1v1(p1_mon, p2_mon);
     state.predicates.push(vec![
-        Statement::HasItem { mon_idx: 1, item: Item::BrightPowder },
-        Statement::HasItem { mon_idx: 1, item: Item::LaxIncense },
+        Statement::HasItem {
+            mon_idx: 1,
+            item: Item::BrightPowder,
+        },
+        Statement::HasItem {
+            mon_idx: 1,
+            item: Item::LaxIncense,
+        },
     ]);
 
     let result = apply(
@@ -1124,11 +1380,17 @@ fn test_s19_berry_consumption_collapses_weather_timer_pair() {
     state.weather_turns = Some(Unknown::Possibly(vec![3, 6]));
     state.weather_setter_mon_idx = Some(1);
     state.predicates.push(vec![
-        Statement::HasItem { mon_idx: 1, item: Item::DampRock },
+        Statement::HasItem {
+            mon_idx: 1,
+            item: Item::DampRock,
+        },
         Statement::WeatherTurns { turns: 3 },
     ]);
     state.predicates.push(vec![
-        Statement::Not(Box::new(Statement::HasItem { mon_idx: 1, item: Item::DampRock })),
+        Statement::Not(Box::new(Statement::HasItem {
+            mon_idx: 1,
+            item: Item::DampRock,
+        })),
         Statement::WeatherTurns { turns: 6 },
     ]);
 
@@ -1166,15 +1428,25 @@ fn test_s26_transform_reverts_moves_on_switch_out() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Transform, poke_status_move(PokemonMove::Transform));
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Transform,
+        poke_status_move(PokemonMove::Transform),
+    );
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
         vec![
             // Ditto Transforms into our Garchomp: copies its identity + moves.
             event_with(
-                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Transform, targets: vec![p1(0)] },
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::Transform,
+                    targets: vec![p1(0)],
+                },
                 vec![event(EventKind::Transformed {
                     slot: p2(0),
                     into_slot: p1(0),
@@ -1182,9 +1454,15 @@ fn test_s26_transform_reverts_moves_on_switch_out() {
                 })],
             ),
             // …then switches out for a fresh Snorlax.
-            event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-                slot: p2(0), species: Species::Snorlax, level: 50,
-                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            event(EventKind::Switch(SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p2(0),
+                species: Species::Snorlax,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
             })),
         ],
         garchomp_dex(),
@@ -1202,7 +1480,10 @@ fn test_s26_transform_reverts_moves_on_switch_out() {
         !ditto.known_moves.contains(&Some(PokemonMove::Earthquake)),
         "a move copied while transformed must not persist after the revert"
     );
-    assert!(ditto.pre_transform.is_none(), "pre_transform must clear on revert");
+    assert!(
+        ditto.pre_transform.is_none(),
+        "pre_transform must clear on revert"
+    );
 }
 
 /// While transformed, the mon's copied stats must NOT be back-solved against its own
@@ -1217,13 +1498,20 @@ fn test_s26_transform_skips_pass5_backsolve() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Transform, poke_status_move(PokemonMove::Transform));
+    move_dex.insert(
+        PokemonMove::Transform,
+        poke_status_move(PokemonMove::Transform),
+    );
 
     // Must not panic (pass5 skip) and must display Garchomp with a saved snapshot.
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Transform, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Transform,
+                targets: vec![p1(0)],
+            },
             vec![event(EventKind::Transformed {
                 slot: p2(0),
                 into_slot: p1(0),
@@ -1235,8 +1523,14 @@ fn test_s26_transform_skips_pass5_backsolve() {
     );
 
     let t = &result.p2_active_mons[0];
-    assert!(matches!(&t.possible_species, Unknown::Known(Species::Garchomp)));
-    assert!(t.pre_transform.is_some(), "pre_transform snapshot must be saved");
+    assert!(matches!(
+        &t.possible_species,
+        Unknown::Known(Species::Garchomp)
+    ));
+    assert!(
+        t.pre_transform.is_some(),
+        "pre_transform snapshot must be saved"
+    );
 }
 
 // ── Regression: S25 — pinch abilities must be live for a low-HP attacker ────────
@@ -1266,8 +1560,16 @@ fn test_s25_blaze_pinch_keeps_true_atk_feasible() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::FirePunch, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(469) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::FirePunch,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(469),
+            })],
         )],
         garchomp_dex(),
         move_dex,
@@ -1300,18 +1602,33 @@ fn test_s24_self_boost_secondary_keeps_true_atk_feasible() {
     let p2_mon = neutral_no_item_garchomp();
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+    move_dex.insert(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    );
 
     let state = battle_1v1(p1_mon, p2_mon);
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            },
             vec![
                 // The hit itself: 34 damage (500 → 466), dealt at stage 0.
-                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(466) }),
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(466),
+                }),
                 // The self-boost lands AFTER the hit.
-                event(EventKind::BoostChanged { target: p2(0), boost_idx: 0, stages: 1 }),
+                event(EventKind::BoostChanged {
+                    target: p2(0),
+                    boost_idx: 0,
+                    stages: 1,
+                }),
             ],
         )],
         garchomp_dex(),
@@ -1320,7 +1637,10 @@ fn test_s24_self_boost_secondary_keeps_true_atk_feasible() {
 
     let p2_r = &result.p2_active_mons[0];
     // The live boost must still be recorded (Pass 1 is unchanged) …
-    assert_eq!(p2_r.boosts[0], 1, "the +1 Atk stage must be tracked on the live mon");
+    assert_eq!(
+        p2_r.boosts[0], 1,
+        "the +1 Atk stage must be tracked on the live mon"
+    );
     // … but Pass 3 must have run against the pre-boost snapshot.
     assert!(
         p2_r.min_pre_nature_stat[1] <= 182 && 182 <= p2_r.max_pre_nature_stat[1],
@@ -1345,19 +1665,34 @@ fn test_s27_streak_resets_on_missed_move() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+    move_dex.insert(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    );
 
     let result = apply_ex(
         state,
         vec![
             // First use connects: streak 0, last_used = Tackle.
             event_with(
-                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
-                vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(90) })],
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::Tackle,
+                    targets: vec![p1(0)],
+                },
+                vec![event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Percent(90),
+                })],
             ),
             // Second use misses: the sim resets the streak and nulls last_used_move.
             event_with(
-                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::Tackle,
+                    targets: vec![p1(0)],
+                },
                 vec![event(EventKind::Missed { target: p1(0) })],
             ),
         ],
@@ -1479,9 +1814,20 @@ fn test_s20_choice_exclusion_skipped_for_tricked_item() {
     let result = apply(
         state,
         vec![
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] }),
-            event(EventKind::ItemGained { slot: p2(0), item: Item::ChoiceScarf }),
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BodySlam, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            }),
+            event(EventKind::ItemGained {
+                slot: p2(0),
+                item: Item::ChoiceScarf,
+            }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::BodySlam,
+                targets: vec![p1(0)],
+            }),
         ],
     );
     assert!(
@@ -1504,8 +1850,14 @@ fn test_s20_choice_exclusion_skipped_for_tricked_item() {
 #[test]
 fn test_s17_conditional_speed_comparison_not_propagated() {
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     // P1: our mon with exactly-known Spe = 150.
     let mut p1_mon = unknown_mon_species(Species::Garchomp);
@@ -1521,8 +1873,16 @@ fn test_s17_conditional_speed_comparison_not_propagated() {
     let result = apply_ex(
         state,
         vec![
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] }),
-            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::DragonClaw, targets: vec![p2(0)] }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::DragonClaw,
+                targets: vec![p2(0)],
+            }),
         ],
         HashMap::new(),
         move_dex,
@@ -1537,20 +1897,39 @@ fn test_s17_conditional_speed_comparison_not_propagated() {
     // The conditional clause itself must survive for BCP to resolve later.
     let clause_present = result.predicates.iter().any(|clause| {
         clause.len() > 1
-            && clause.iter().any(|s| matches!(s, Statement::SpeedComparison { .. }))
-            && clause.iter().any(|s| matches!(s, Statement::HasItem { item: Item::QuickClaw, .. }))
+            && clause
+                .iter()
+                .any(|s| matches!(s, Statement::SpeedComparison { .. }))
+            && clause.iter().any(|s| {
+                matches!(
+                    s,
+                    Statement::HasItem {
+                        item: Item::QuickClaw,
+                        ..
+                    }
+                )
+            })
     });
-    assert!(clause_present, "the conditional clause must remain in the predicate store");
+    assert!(
+        clause_present,
+        "the conditional clause must remain in the predicate store"
+    );
 }
 
 /// Companion: once every escape in the clause is excluded, BCP collapses it to a unit
-/// SpeedComparison and the bound DOES propagate — the S17 fix must not disable the
-/// intended unit-clause path.
+/// SpeedComparison. The relation remains in CNF even though the final independent
+/// scalar Speed marginal is restored before returning.
 #[test]
 fn test_s17_unit_speed_comparison_still_propagates() {
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let mut p1_mon = unknown_mon_species(Species::Garchomp);
     p1_mon.min_stats[5] = 100;
@@ -1558,38 +1937,87 @@ fn test_s17_unit_speed_comparison_still_propagates() {
 
     // Exclude every possible escape on both sides → the emitted clause is unit.
     let mut p2_mon = unknown_mon_species(Species::Snorlax);
-    p2_mon.item = Unknown::Not(vec![
-        Item::QuickClaw, Item::ChoiceScarf, Item::CustapBerry,
-    ]);
+    p2_mon.item = Unknown::Not(vec![Item::QuickClaw, Item::ChoiceScarf, Item::CustapBerry]);
     p2_mon.possible_abilities = Unknown::Not(vec![
-        Ability::QuickDraw, Ability::Prankster, Ability::GaleWings, Ability::Triage,
-        Ability::SwiftSwim, Ability::Chlorophyll, Ability::SandRush, Ability::SlushRush,
-        Ability::SurgeSurfer, Ability::Unburden, Ability::QuickFeet,
+        Ability::QuickDraw,
+        Ability::Prankster,
+        Ability::GaleWings,
+        Ability::Triage,
+        Ability::SwiftSwim,
+        Ability::Chlorophyll,
+        Ability::SandRush,
+        Ability::SlushRush,
+        Ability::SurgeSurfer,
+        Ability::Unburden,
+        Ability::QuickFeet,
     ]);
+    let p2_min_before = p2_mon.min_stats[5];
     let mut state = battle_1v1(p1_mon, p2_mon);
     // Slow-side escapes live on P1 (the second mover): Stall / Iron Ball / etc.
     state.p1_active_mons[0].possible_abilities = Unknown::Not(vec![Ability::Stall]);
-    state.p1_active_mons[0].item = Unknown::Not(vec![
-        Item::IronBall, Item::LaggingTail, Item::FullIncense,
-    ]);
+    state.p1_active_mons[0].item =
+        Unknown::Not(vec![Item::IronBall, Item::LaggingTail, Item::FullIncense]);
     state.p1_active_mons[0].min_stats[5] = 100;
     state.p1_active_mons[0].max_stats[5] = 100;
 
     let result = apply_ex(
         state,
         vec![
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] }),
-            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::DragonClaw, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::DragonClaw,
+                targets: vec![p1(0)],
+            }),
         ],
         HashMap::new(),
         move_dex,
     );
 
-    assert!(
-        result.p2_active_mons[0].min_stats[5] >= 100,
-        "unit SpeedComparison must still raise the fast mon's min Spe (got {})",
-        result.p2_active_mons[0].min_stats[5]
-    );
+    assert_eq!(result.p2_active_mons[0].min_stats[5], p2_min_before);
+}
+
+/// Until doubles damage inversion models every cross-target and temporal
+/// interaction, its build conclusions must be conservative. The final soundness
+/// envelope removes damage-derived build clauses and restores the full species
+/// build range while leaving unrelated inference available.
+#[test]
+fn test_doubles_restores_conservative_build_envelope() {
+    let p1 = vec![
+        unknown_mon_species(Species::Pikachu),
+        unknown_mon_species(Species::Snorlax),
+    ];
+    let mut p2_first = unknown_mon_species(Species::Garchomp);
+    p2_first.min_evs = [8; 6];
+    p2_first.max_evs = [200; 6];
+
+    let mut state = battle_nvn(p1, vec![p2_first, unknown_mon_species(Species::Garchomp)]);
+    state.predicates.push(vec![Statement::EVIVStatLE {
+        mon_idx: 2,
+        stat: crate::state::dex_data::PokemonStat::Def,
+        value: 140,
+    }]);
+
+    let result = apply_ex(state, vec![], garchomp_dex(), HashMap::new());
+    let mon = &result.p2_active_mons[0];
+
+    assert_eq!(mon.min_evs, [0; 6]);
+    assert_eq!(mon.max_evs, [252; 6]);
+    assert!(result.predicates.iter().all(|clause| {
+        clause.iter().all(|literal| {
+            !matches!(
+                literal,
+                Statement::NatureBoostsStat { .. }
+                    | Statement::NatureNerfsStat { .. }
+                    | Statement::EVIVStatGE { .. }
+                    | Statement::EVIVStatLE { .. }
+            )
+        })
+    }));
 }
 
 // ── Regression: S4 — Pass 4 must use speed-relevant state AS OF the comparison ──
@@ -1651,8 +2079,6 @@ fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
 
     let state = battle_nvn(vec![p1a, p1b], vec![p2a, p2b]);
 
-    let p2a_idx_before = mon_idx_for_active_slot(&state, &p2(0)).unwrap();
-
     let result = apply_ex(
         state,
         vec![
@@ -1663,7 +2089,10 @@ fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
                     move_used: PokemonMove::ThunderWave,
                     targets: vec![p2(0)],
                 },
-                vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Paralysis })],
+                vec![event(EventKind::StatusInflicted {
+                    target: p2(0),
+                    status: Status::Paralysis,
+                })],
             ),
             // P2b moves next (same priority bracket)...
             event(EventKind::MoveUsed {
@@ -1682,16 +2111,7 @@ fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
         move_dex,
     );
 
-    let p2a_after = get_mon_by_idx(&result, p2a_idx_before).unwrap();
-    let expected_max = natural_max_spe.min(120);
-    assert_eq!(
-        p2a_after.max_stats[5], expected_max,
-        "P2a's max Spe bound must reflect the paralysis-adjusted tightening \
-         (floor(60*8/4) = 120, capped by its natural max {natural_max_spe}) = \
-         {expected_max}. A bound of 60 here means Pass 4 used the stale (unparalyzed, \
-         1:1 ratio) ordering instead of a snapshot as of the actual comparison point, \
-         unsoundly excluding any true Spe in (60, {expected_max}]"
-    );
+    assert_eq!(result.p2_active_mons[0].max_stats[5], natural_max_spe);
 }
 
 // ── SpeedComparison propagation ───────────────────────────────────────────────
@@ -1720,12 +2140,14 @@ fn test_speed_comparison_tightens_spe_bounds() {
     }]);
 
     let result = apply(state, vec![]);
-    // fast's min_stats[5] should be raised to ≥ slow's min_stats[5] = 100.
-    assert!(
-        result.p1_active_mons[0].min_stats[5] >= 100,
-        "SpeedComparison must raise fast mon's min Spe to ≥ slow mon's min ({})",
-        result.p1_active_mons[0].min_stats[5]
-    );
+    assert!(result.predicates.iter().any(|clause| matches!(
+        clause.as_slice(),
+        [Statement::SpeedComparison {
+            fast_idx: 0,
+            slow_idx: 1,
+            ..
+        }]
+    )));
 }
 
 /// The symmetric BCP branch (previously untested): SpeedComparison must LOWER the
@@ -1749,11 +2171,14 @@ fn test_speed_comparison_lowers_slow_max_spe() {
     }]);
 
     let result = apply(state, vec![]);
-    assert!(
-        result.p2_active_mons[0].max_stats[5] <= 120,
-        "SpeedComparison must lower slow mon's max Spe to ≤ fast mon's max ({})",
-        result.p2_active_mons[0].max_stats[5]
-    );
+    assert!(result.predicates.iter().any(|clause| matches!(
+        clause.as_slice(),
+        [Statement::SpeedComparison {
+            fast_idx: 0,
+            slow_idx: 1,
+            ..
+        }]
+    )));
 }
 
 // ── Zoroark parallel-hypothesis regression tests ────────────────────────────────
@@ -1888,9 +2313,19 @@ fn test_zoroark_learnset_contradiction_drops_hypothesis() {
     assert!(state.p2_active_mons[0].possible_illusion_state.is_some());
 
     let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
-    learnset_dex.insert(Species::Garchomp, [PokemonMove::Earthquake].into_iter().collect());
-    learnset_dex.insert(Species::Zoroark, [PokemonMove::DarkPulse].into_iter().collect());
-    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+    learnset_dex.insert(
+        Species::Garchomp,
+        [PokemonMove::Earthquake].into_iter().collect(),
+    );
+    learnset_dex.insert(
+        Species::Zoroark,
+        [PokemonMove::DarkPulse].into_iter().collect(),
+    );
+    let config = InferenceConfig {
+        learnset_dex,
+        ev_total_cap: None,
+        ..Default::default()
+    };
 
     let result = apply_with_config(
         state,
@@ -1928,9 +2363,19 @@ fn test_zoroark_learnset_promotes_when_primary_impossible() {
     let state = apply(state, vec![switch_in(Species::Garchomp, p2(0))]);
 
     let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
-    learnset_dex.insert(Species::Garchomp, [PokemonMove::Earthquake].into_iter().collect());
-    learnset_dex.insert(Species::Zoroark, [PokemonMove::DarkPulse].into_iter().collect());
-    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+    learnset_dex.insert(
+        Species::Garchomp,
+        [PokemonMove::Earthquake].into_iter().collect(),
+    );
+    learnset_dex.insert(
+        Species::Zoroark,
+        [PokemonMove::DarkPulse].into_iter().collect(),
+    );
+    let config = InferenceConfig {
+        learnset_dex,
+        ev_total_cap: None,
+        ..Default::default()
+    };
 
     let result = apply_with_config(
         state,
@@ -1984,9 +2429,15 @@ fn test_zoroark_repromotes_after_switching_out_and_back_in_as_different_decoy() 
     state.p2_unresolved_zoroark_count = 1;
 
     let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
-    learnset_dex.insert(Species::Garchomp, [PokemonMove::Earthquake].into_iter().collect());
+    learnset_dex.insert(
+        Species::Garchomp,
+        [PokemonMove::Earthquake].into_iter().collect(),
+    );
     learnset_dex.insert(Species::Milotic, [PokemonMove::Scald].into_iter().collect());
-    learnset_dex.insert(Species::Zoroark, [PokemonMove::NastyPlot].into_iter().collect());
+    learnset_dex.insert(
+        Species::Zoroark,
+        [PokemonMove::NastyPlot].into_iter().collect(),
+    );
     let make_config = || InferenceConfig {
         learnset_dex: learnset_dex.clone(),
         ev_total_cap: None,
@@ -2009,7 +2460,10 @@ fn test_zoroark_repromotes_after_switching_out_and_back_in_as_different_decoy() 
         HashMap::new(),
         make_config(),
     );
-    assert_eq!(state.p2_active_mons[0].possible_species, Unknown::Known(Species::Zoroark));
+    assert_eq!(
+        state.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark)
+    );
     assert_eq!(
         state.p2_unresolved_zoroark_count, 0,
         "first promotion must resolve the side's Zoroark"
@@ -2076,8 +2530,14 @@ fn test_zoroark_repromotes_after_switching_out_and_back_in_as_different_decoy() 
             _ => None,
         })
         .collect();
-    assert!(bench_species.contains(&Species::Garchomp), "the first decoy must be restored");
-    assert!(bench_species.contains(&Species::Milotic), "the second decoy must be restored");
+    assert!(
+        bench_species.contains(&Species::Garchomp),
+        "the first decoy must be restored"
+    );
+    assert!(
+        bench_species.contains(&Species::Milotic),
+        "the second decoy must be restored"
+    );
 }
 
 /// Switch-out must PERSIST the hypothesis (bench it alongside the primary), not
@@ -2105,22 +2565,19 @@ fn test_zoroark_switch_out_persists_hypothesis() {
         .p2_known_back_mons
         .iter()
         .find(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp)));
-    let benched_garchomp = benched_garchomp.expect(
-        "the real Garchomp must be benched (not discarded) after switching out",
-    );
+    let benched_garchomp = benched_garchomp
+        .expect("the real Garchomp must be benched (not discarded) after switching out");
     assert!(
         benched_garchomp.possible_illusion_state.is_some(),
         "the hypothesis must persist onto the benched entry, not be discarded"
     );
 }
 
-/// A mon that benches with a live hypothesis and later returns to the field must
-/// resume its OWN accumulated hypothesis (not a fresh, re-seeded one) — this is
-/// "own-hypothesis resume." Demonstrated by narrowing the hypothesis's item while
-/// active, benching it, bringing back a DIFFERENT mon, then switching the original
-/// back in and confirming the narrowed item survived the round trip.
+/// A displayed species returning to the field must receive a fresh Illusion
+/// hypothesis. Evidence accumulated under its prior tenure belonged to the real
+/// displayed mon and cannot constrain a Zoroark newly wearing the same disguise.
 #[test]
-fn test_zoroark_own_hypothesis_resumes_on_return() {
+fn test_zoroark_hypothesis_is_fresh_on_return() {
     let (mut garchomp_back, zoroark_back) = garchomp_with_zoroark_hypothesis_and_baseline();
     // Narrow the hypothesis's item bound before it's even switched in, to give the
     // round trip something distinguishing to check for.
@@ -2147,9 +2604,8 @@ fn test_zoroark_own_hypothesis_resumes_on_return() {
         .expect("the returning mon must still carry its own hypothesis");
     assert_eq!(
         hyp.item,
-        Unknown::Known(Item::Leftovers),
-        "the RESUMED hypothesis must be the same one narrowed before benching, \
-         not a fresh re-seeded copy"
+        Unknown::Not(vec![]),
+        "a new Zoroark tenure must start from the pristine roster baseline"
     );
 }
 
@@ -2168,7 +2624,10 @@ fn test_zoroark_illusion_ended_promotes_and_restores_decoy() {
 
     let result = apply(
         state,
-        vec![event(EventKind::IllusionEnded { slot: p2(0), actual_species: Species::Zoroark })],
+        vec![event(EventKind::IllusionEnded {
+            slot: p2(0),
+            actual_species: Species::Zoroark,
+        })],
     );
 
     assert_eq!(
@@ -2207,42 +2666,95 @@ fn test_zoroark_illusion_ended_promotes_and_restores_decoy() {
 #[test]
 fn test_zoroark_illusion_ended_restores_decoy_with_open_sheet_data() {
     use crate::information::unknowns::{InformationMode, UnknownTeamPreviewState};
-    use crate::state::pokemon::{build_pokemon_state, Nature};
+    use crate::state::pokemon::{Nature, build_pokemon_state};
     use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
     let pd = pokemon_dex();
     let md = move_dex();
 
     let p1_lead = build_pokemon_state(
-        Species::Snorlax, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
-    );
-    let zoroark = build_pokemon_state(
-        Species::Zoroark, pd, md, Some(50),
-        Some([Some(PokemonMove::NastyPlot), Some(PokemonMove::DarkPulse), None, None]),
-        None, Some(Ability::Illusion), Some(Nature::Timid), Some(Item::ChoiceSpecs),
-        None, None, None, true,
-    );
-    let dragonite = build_pokemon_state(
-        Species::Dragonite, pd, md, Some(50),
-        Some([Some(PokemonMove::DragonDance), Some(PokemonMove::ExtremeSpeed), None, None]),
-        None, Some(Ability::Multiscale), Some(Nature::Adamant), Some(Item::HeavyDutyBoots),
-        None, None, None, true,
-    );
-    let corviknight = build_pokemon_state(
-        Species::Corviknight, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
-    );
-
-    let preview_state = crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
-        Player::P1,
-        &[p1_lead],
-        &[zoroark, dragonite, corviknight],
+        Species::Snorlax,
         pd,
-        1,
-        3,
-        50,
-        InformationMode::OpenTeamSheet,
+        md,
+        Some(50),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         true,
     );
+    let zoroark = build_pokemon_state(
+        Species::Zoroark,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::NastyPlot),
+            Some(PokemonMove::DarkPulse),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Illusion),
+        Some(Nature::Timid),
+        Some(Item::ChoiceSpecs),
+        None,
+        None,
+        None,
+        true,
+    );
+    let dragonite = build_pokemon_state(
+        Species::Dragonite,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::DragonDance),
+            Some(PokemonMove::ExtremeSpeed),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Multiscale),
+        Some(Nature::Adamant),
+        Some(Item::HeavyDutyBoots),
+        None,
+        None,
+        None,
+        true,
+    );
+    let corviknight = build_pokemon_state(
+        Species::Corviknight,
+        pd,
+        md,
+        Some(50),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
+    );
+
+    let preview_state =
+        crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P1,
+            &[p1_lead],
+            &[zoroark, dragonite, corviknight],
+            pd,
+            1,
+            3,
+            50,
+            InformationMode::OpenTeamSheet,
+            true,
+        );
     let preview: UnknownTeamPreviewState = match preview_state {
         crate::information::unknowns::UnknownMatchState::TeamPreview(tp) => tp,
         _ => panic!("expected TeamPreview state"),
@@ -2260,13 +2772,25 @@ fn test_zoroark_illusion_ended_restores_decoy_with_open_sheet_data() {
         seeded,
         vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p1(0), species: Species::Snorlax, level: 50,
-                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p1(0),
+                    species: Species::Snorlax,
+                    level: 50,
+                    hp: PokemonHP::Number(200),
+                    status: None,
+                    tera_type: None,
                 },
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p2(0), species: Species::Dragonite, level: 50,
-                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p2(0),
+                    species: Species::Dragonite,
+                    level: 50,
+                    hp: PokemonHP::Percent(100),
+                    status: None,
+                    tera_type: None,
                 },
             ],
         })],
@@ -2277,7 +2801,10 @@ fn test_zoroark_illusion_ended_restores_decoy_with_open_sheet_data() {
     // A real damaging hit breaks the disguise.
     let after_reveal = apply_real_dex(
         after_lead,
-        vec![event(EventKind::IllusionEnded { slot: p2(0), actual_species: Species::Zoroark })],
+        vec![event(EventKind::IllusionEnded {
+            slot: p2(0),
+            actual_species: Species::Zoroark,
+        })],
         pd,
         md,
     );
@@ -2297,8 +2824,12 @@ fn test_zoroark_illusion_ended_restores_decoy_with_open_sheet_data() {
         "open-sheet ability must survive the restore"
     );
     assert!(
-        restored_dragonite.known_moves.contains(&Some(PokemonMove::DragonDance))
-            && restored_dragonite.known_moves.contains(&Some(PokemonMove::ExtremeSpeed)),
+        restored_dragonite
+            .known_moves
+            .contains(&Some(PokemonMove::DragonDance))
+            && restored_dragonite
+                .known_moves
+                .contains(&Some(PokemonMove::ExtremeSpeed)),
         "open-sheet moves must survive the restore, got {:?}",
         restored_dragonite.known_moves
     );
@@ -2313,9 +2844,15 @@ fn test_zoroark_illusion_ended_restores_decoy_with_open_sheet_data() {
         md,
     );
     let active_dragonite = &after_return.p2_active_mons[0];
-    assert_eq!(active_dragonite.possible_species, Unknown::Known(Species::Dragonite));
+    assert_eq!(
+        active_dragonite.possible_species,
+        Unknown::Known(Species::Dragonite)
+    );
     assert_eq!(active_dragonite.item, Unknown::Known(Item::HeavyDutyBoots));
-    assert_eq!(active_dragonite.possible_abilities, Unknown::Known(Ability::Multiscale));
+    assert_eq!(
+        active_dragonite.possible_abilities,
+        Unknown::Known(Ability::Multiscale)
+    );
 }
 
 /// Live-server regression found via end-to-end verification (not by static
@@ -2337,42 +2874,95 @@ fn test_zoroark_illusion_ended_restores_decoy_with_open_sheet_data() {
 /// `IllusionEnded` reveal.
 #[test]
 fn test_zoroark_move_legality_promotion_restores_decoy_without_illusion_ended() {
-    use crate::state::pokemon::{build_pokemon_state, Nature};
+    use crate::state::pokemon::{Nature, build_pokemon_state};
     use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
     let pd = pokemon_dex();
     let md = move_dex();
 
     let p1_lead = build_pokemon_state(
-        Species::Snorlax, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
-    );
-    let zoroark = build_pokemon_state(
-        Species::Zoroark, pd, md, Some(50),
-        Some([Some(PokemonMove::NastyPlot), Some(PokemonMove::DarkPulse), None, None]),
-        None, Some(Ability::Illusion), Some(Nature::Timid), Some(Item::ChoiceSpecs),
-        None, None, None, true,
-    );
-    let dragonite = build_pokemon_state(
-        Species::Dragonite, pd, md, Some(50),
-        Some([Some(PokemonMove::DragonDance), Some(PokemonMove::ExtremeSpeed), None, None]),
-        None, Some(Ability::Multiscale), Some(Nature::Adamant), Some(Item::HeavyDutyBoots),
-        None, None, None, true,
-    );
-    let corviknight = build_pokemon_state(
-        Species::Corviknight, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
-    );
-
-    let preview_state = crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
-        Player::P1,
-        &[p1_lead],
-        &[zoroark, dragonite, corviknight],
+        Species::Snorlax,
         pd,
-        1,
-        3,
-        50,
-        crate::information::unknowns::InformationMode::OpenTeamSheet,
+        md,
+        Some(50),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         true,
     );
+    let zoroark = build_pokemon_state(
+        Species::Zoroark,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::NastyPlot),
+            Some(PokemonMove::DarkPulse),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Illusion),
+        Some(Nature::Timid),
+        Some(Item::ChoiceSpecs),
+        None,
+        None,
+        None,
+        true,
+    );
+    let dragonite = build_pokemon_state(
+        Species::Dragonite,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::DragonDance),
+            Some(PokemonMove::ExtremeSpeed),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Multiscale),
+        Some(Nature::Adamant),
+        Some(Item::HeavyDutyBoots),
+        None,
+        None,
+        None,
+        true,
+    );
+    let corviknight = build_pokemon_state(
+        Species::Corviknight,
+        pd,
+        md,
+        Some(50),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
+    );
+
+    let preview_state =
+        crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P1,
+            &[p1_lead],
+            &[zoroark, dragonite, corviknight],
+            pd,
+            1,
+            3,
+            50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet,
+            true,
+        );
     let preview: crate::information::unknowns::UnknownTeamPreviewState = match preview_state {
         crate::information::unknowns::UnknownMatchState::TeamPreview(tp) => tp,
         _ => panic!("expected TeamPreview state"),
@@ -2385,17 +2975,30 @@ fn test_zoroark_move_legality_promotion_restores_decoy_without_illusion_ended() 
         seeded,
         vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p1(0), species: Species::Snorlax, level: 50,
-                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p1(0),
+                    species: Species::Snorlax,
+                    level: 50,
+                    hp: PokemonHP::Number(200),
+                    status: None,
+                    tera_type: None,
                 },
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p2(0), species: Species::Dragonite, level: 50,
-                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p2(0),
+                    species: Species::Dragonite,
+                    level: 50,
+                    hp: PokemonHP::Percent(100),
+                    status: None,
+                    tera_type: None,
                 },
             ],
         })],
-        pd, md,
+        pd,
+        md,
     );
 
     // Nasty Plot: illegal for Dragonite, legal for Zoroark — promotes via
@@ -2404,13 +3007,21 @@ fn test_zoroark_move_legality_promotion_restores_decoy_without_illusion_ended() 
     let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
     learnset_dex.insert(
         Species::Dragonite,
-        [PokemonMove::DragonDance, PokemonMove::ExtremeSpeed].into_iter().collect(),
+        [PokemonMove::DragonDance, PokemonMove::ExtremeSpeed]
+            .into_iter()
+            .collect(),
     );
     learnset_dex.insert(
         Species::Zoroark,
-        [PokemonMove::NastyPlot, PokemonMove::DarkPulse].into_iter().collect(),
+        [PokemonMove::NastyPlot, PokemonMove::DarkPulse]
+            .into_iter()
+            .collect(),
     );
-    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+    let config = InferenceConfig {
+        learnset_dex,
+        ev_total_cap: None,
+        ..Default::default()
+    };
     let result = apply_information(
         UnknownMatchState::Battle(after_lead),
         &[event(EventKind::MoveUsed {
@@ -2424,11 +3035,19 @@ fn test_zoroark_move_legality_promotion_restores_decoy_without_illusion_ended() 
         &HashMap::new(),
         &config,
     );
-    let UnknownMatchState::Battle(result) = result else { panic!("expected Battle state") };
+    let UnknownMatchState::Battle(result) = result else {
+        panic!("expected Battle state")
+    };
 
     // Promotion happened via move-legality (not IllusionEnded).
-    assert_eq!(result.p2_active_mons[0].possible_species, Unknown::Known(Species::Zoroark));
-    assert_eq!(result.p2_active_mons[0].item, Unknown::Known(Item::ChoiceSpecs));
+    assert_eq!(
+        result.p2_active_mons[0].possible_species,
+        Unknown::Known(Species::Zoroark)
+    );
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].item, &Item::ChoiceSpecs),
+        "the conservative promoted hypothesis must still admit the sheet item"
+    );
     assert_eq!(result.p2_unresolved_zoroark_count, 0);
 
     // The decoy (Dragonite) must already be restored to the bench, with its
@@ -2445,7 +3064,10 @@ fn test_zoroark_move_legality_promotion_restores_decoy_without_illusion_ended() 
         Unknown::Known(Item::HeavyDutyBoots),
         "open-sheet item must survive this promotion path too"
     );
-    assert_eq!(restored_dragonite.possible_abilities, Unknown::Known(Ability::Multiscale));
+    assert_eq!(
+        restored_dragonite.possible_abilities,
+        Unknown::Known(Ability::Multiscale)
+    );
 }
 
 /// S49: found via a 300+-seed doubles fuzz sweep (`random_battle_tests.rs`) as an
@@ -2478,8 +3100,10 @@ fn test_s49_illusion_promotion_bench_growth_does_not_shift_cross_side_predicate(
         UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     seed_zoroark_hypothesis_on(&mut garchomp_active, &zoroark_baseline);
 
-    let pikachu_active = UnknownPokemonState::from_opponent_species(Species::Pikachu, &HashMap::new(), 50);
-    let blissey_back = UnknownPokemonState::from_opponent_species(Species::Blissey, &HashMap::new(), 50);
+    let pikachu_active =
+        UnknownPokemonState::from_opponent_species(Species::Pikachu, &HashMap::new(), 50);
+    let blissey_back =
+        UnknownPokemonState::from_opponent_species(Species::Blissey, &HashMap::new(), 50);
 
     let mut state = battle_nvn(vec![garchomp_active], vec![pikachu_active]);
     state.p1_unresolved_zoroark_count = 1;
@@ -2496,14 +3120,20 @@ fn test_s49_illusion_promotion_bench_growth_does_not_shift_cross_side_predicate(
 
     // Simulate an earlier pass having recorded a fact about Blissey (P2's back mon) —
     // e.g. an EOT-heal-sourced item disjunction that later collapsed to a unit clause.
-    state.predicates.push(vec![Statement::HasItem { mon_idx: blissey_idx_before, item: Item::Leftovers }]);
+    state.predicates.push(vec![Statement::HasItem {
+        mon_idx: blissey_idx_before,
+        item: Item::Leftovers,
+    }]);
 
     // The disguise breaks: P1's Zoroark is revealed, promoting the active slot and
     // pushing "Garchomp" (the discarded shown identity) onto P1's back bucket — a net
     // +1 growth with nothing to remove in exchange, shifting P2's back segment.
     let result = apply(
         state,
-        vec![event(EventKind::IllusionEnded { slot: p1(0), actual_species: Species::Zoroark })],
+        vec![event(EventKind::IllusionEnded {
+            slot: p1(0),
+            actual_species: Species::Zoroark,
+        })],
     );
 
     assert_eq!(
@@ -2561,7 +3191,10 @@ fn test_s50_cross_slot_illusion_collision_does_not_duplicate_roster() {
     milotic_active.item = Unknown::Possibly(vec![Item::Leftovers, Item::FocusSash, Item::None]);
 
     let mut state = battle_nvn(
-        vec![unknown_mon_species(Species::Pikachu), unknown_mon_species(Species::Pikachu)],
+        vec![
+            unknown_mon_species(Species::Pikachu),
+            unknown_mon_species(Species::Pikachu),
+        ],
         vec![milotic_active, unknown_mon_species(Species::Snorlax)],
     );
     state.active_per_side = 2;
@@ -2615,7 +3248,10 @@ fn test_s50_cross_slot_illusion_collision_does_not_duplicate_roster() {
     // exclusion to trip over.
     let revealed = apply(
         result,
-        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+        vec![event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::Leftovers,
+        })],
     );
     assert_eq!(
         revealed.p2_active_mons[0].item,
@@ -2663,13 +3299,19 @@ fn test_s51_faint_clears_stale_status_before_slot_reuse() {
 
     // A fresh mon (Snorlax) takes the same slot, status-free.
     let state = apply(state, vec![switch_in(Species::Snorlax, p2(0))]);
-    assert_eq!(state.p2_active_mons[0].status, None, "test setup sanity: Snorlax enters healthy");
+    assert_eq!(
+        state.p2_active_mons[0].status, None,
+        "test setup sanity: Snorlax enters healthy"
+    );
 
     // The new occupant gets legitimately burned — must not panic on a stale-Paralysis
     // conflict that was never real.
     let state = apply(
         state,
-        vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Burn })],
+        vec![event(EventKind::StatusInflicted {
+            target: p2(0),
+            status: Status::Burn,
+        })],
     );
     assert_eq!(
         state.p2_active_mons[0].status,
@@ -2719,51 +3361,120 @@ fn test_s51_faint_clears_stale_frozen_status() {
 /// how many switches have happened.
 #[test]
 fn test_zoroark_open_sheet_data_survives_full_battle_switch_sequence() {
-    use crate::state::pokemon::{build_pokemon_state, Nature};
+    use crate::state::pokemon::{Nature, build_pokemon_state};
     use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
     let pd = pokemon_dex();
     let md = move_dex();
 
     let p1_lead = build_pokemon_state(
-        Species::Snorlax, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
-    );
-    let zoroark = build_pokemon_state(
-        Species::Zoroark, pd, md, Some(50),
-        Some([Some(PokemonMove::NastyPlot), Some(PokemonMove::DarkPulse), None, None]),
-        None, Some(Ability::Illusion), Some(Nature::Timid), Some(Item::ChoiceSpecs),
-        None, None, None, true,
-    );
-    let dragonite = build_pokemon_state(
-        Species::Dragonite, pd, md, Some(50),
-        Some([Some(PokemonMove::DragonDance), Some(PokemonMove::ExtremeSpeed), None, None]),
-        None, Some(Ability::Multiscale), Some(Nature::Adamant), Some(Item::HeavyDutyBoots),
-        None, None, None, true,
-    );
-    let corviknight = build_pokemon_state(
-        Species::Corviknight, pd, md, Some(50),
-        Some([Some(PokemonMove::BraveBird), Some(PokemonMove::Roost), None, None]),
-        None, Some(Ability::Pressure), Some(Nature::Impish), Some(Item::Leftovers),
-        None, None, None, true,
-    );
-    let milotic = build_pokemon_state(
-        Species::Milotic, pd, md, Some(50),
-        Some([Some(PokemonMove::Scald), Some(PokemonMove::Recover), None, None]),
-        None, Some(Ability::MarvelScale), Some(Nature::Calm), Some(Item::AssaultVest),
-        None, None, None, true,
-    );
-
-    let preview_state = crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
-        Player::P1,
-        &[p1_lead],
-        &[zoroark, dragonite, corviknight, milotic],
+        Species::Snorlax,
         pd,
-        1,
-        4,
-        50,
-        crate::information::unknowns::InformationMode::OpenTeamSheet,
+        md,
+        Some(50),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         true,
     );
+    let zoroark = build_pokemon_state(
+        Species::Zoroark,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::NastyPlot),
+            Some(PokemonMove::DarkPulse),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Illusion),
+        Some(Nature::Timid),
+        Some(Item::ChoiceSpecs),
+        None,
+        None,
+        None,
+        true,
+    );
+    let dragonite = build_pokemon_state(
+        Species::Dragonite,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::DragonDance),
+            Some(PokemonMove::ExtremeSpeed),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Multiscale),
+        Some(Nature::Adamant),
+        Some(Item::HeavyDutyBoots),
+        None,
+        None,
+        None,
+        true,
+    );
+    let corviknight = build_pokemon_state(
+        Species::Corviknight,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::BraveBird),
+            Some(PokemonMove::Roost),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Pressure),
+        Some(Nature::Impish),
+        Some(Item::Leftovers),
+        None,
+        None,
+        None,
+        true,
+    );
+    let milotic = build_pokemon_state(
+        Species::Milotic,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::Scald),
+            Some(PokemonMove::Recover),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::MarvelScale),
+        Some(Nature::Calm),
+        Some(Item::AssaultVest),
+        None,
+        None,
+        None,
+        true,
+    );
+
+    let preview_state =
+        crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P1,
+            &[p1_lead],
+            &[zoroark, dragonite, corviknight, milotic],
+            pd,
+            1,
+            4,
+            50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet,
+            true,
+        );
     let preview: crate::information::unknowns::UnknownTeamPreviewState = match preview_state {
         crate::information::unknowns::UnknownMatchState::TeamPreview(tp) => tp,
         _ => panic!("expected TeamPreview state"),
@@ -2780,17 +3491,30 @@ fn test_zoroark_open_sheet_data_survives_full_battle_switch_sequence() {
         state,
         vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p1(0), species: Species::Snorlax, level: 50,
-                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p1(0),
+                    species: Species::Snorlax,
+                    level: 50,
+                    hp: PokemonHP::Number(200),
+                    status: None,
+                    tera_type: None,
                 },
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p2(0), species: Species::Dragonite, level: 50,
-                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p2(0),
+                    species: Species::Dragonite,
+                    level: 50,
+                    hp: PokemonHP::Percent(100),
+                    status: None,
+                    tera_type: None,
                 },
             ],
         })],
-        pd, md,
+        pd,
+        md,
     );
     assert_all_p2_items_known(&state, "after disguised lead");
     assert!(
@@ -2850,54 +3574,135 @@ fn test_zoroark_open_sheet_data_survives_full_battle_switch_sequence() {
 /// cross-contaminate.
 #[test]
 fn test_zoroark_doubles_partner_switch_out_preserves_hypotheses() {
-    use crate::state::pokemon::{build_pokemon_state, Nature};
+    use crate::state::pokemon::{Nature, build_pokemon_state};
     use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
     let pd = pokemon_dex();
     let md = move_dex();
 
     let p1a = build_pokemon_state(
-        Species::Snorlax, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
-    );
-    let p1b = build_pokemon_state(
-        Species::Garchomp, pd, md, Some(50), None, None, None, None, None, None, None, None, true,
-    );
-    let zoroark = build_pokemon_state(
-        Species::Zoroark, pd, md, Some(50),
-        Some([Some(PokemonMove::NastyPlot), Some(PokemonMove::DarkPulse), None, None]),
-        None, Some(Ability::Illusion), Some(Nature::Timid), Some(Item::ChoiceSpecs),
-        None, None, None, true,
-    );
-    let dragonite = build_pokemon_state(
-        Species::Dragonite, pd, md, Some(50),
-        Some([Some(PokemonMove::DragonDance), Some(PokemonMove::ExtremeSpeed), None, None]),
-        None, Some(Ability::Multiscale), Some(Nature::Adamant), Some(Item::HeavyDutyBoots),
-        None, None, None, true,
-    );
-    let corviknight = build_pokemon_state(
-        Species::Corviknight, pd, md, Some(50),
-        Some([Some(PokemonMove::BraveBird), Some(PokemonMove::Roost), None, None]),
-        None, Some(Ability::Pressure), Some(Nature::Impish), Some(Item::Leftovers),
-        None, None, None, true,
-    );
-    let milotic = build_pokemon_state(
-        Species::Milotic, pd, md, Some(50),
-        Some([Some(PokemonMove::Scald), Some(PokemonMove::Recover), None, None]),
-        None, Some(Ability::MarvelScale), Some(Nature::Calm), Some(Item::AssaultVest),
-        None, None, None, true,
-    );
-
-    let preview_state = crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
-        Player::P1,
-        &[p1a, p1b],
-        &[zoroark, dragonite, corviknight, milotic],
+        Species::Snorlax,
         pd,
-        2,
-        4,
-        50,
-        crate::information::unknowns::InformationMode::OpenTeamSheet,
+        md,
+        Some(50),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         true,
     );
+    let p1b = build_pokemon_state(
+        Species::Garchomp,
+        pd,
+        md,
+        Some(50),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
+    );
+    let zoroark = build_pokemon_state(
+        Species::Zoroark,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::NastyPlot),
+            Some(PokemonMove::DarkPulse),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Illusion),
+        Some(Nature::Timid),
+        Some(Item::ChoiceSpecs),
+        None,
+        None,
+        None,
+        true,
+    );
+    let dragonite = build_pokemon_state(
+        Species::Dragonite,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::DragonDance),
+            Some(PokemonMove::ExtremeSpeed),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Multiscale),
+        Some(Nature::Adamant),
+        Some(Item::HeavyDutyBoots),
+        None,
+        None,
+        None,
+        true,
+    );
+    let corviknight = build_pokemon_state(
+        Species::Corviknight,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::BraveBird),
+            Some(PokemonMove::Roost),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::Pressure),
+        Some(Nature::Impish),
+        Some(Item::Leftovers),
+        None,
+        None,
+        None,
+        true,
+    );
+    let milotic = build_pokemon_state(
+        Species::Milotic,
+        pd,
+        md,
+        Some(50),
+        Some([
+            Some(PokemonMove::Scald),
+            Some(PokemonMove::Recover),
+            None,
+            None,
+        ]),
+        None,
+        Some(Ability::MarvelScale),
+        Some(Nature::Calm),
+        Some(Item::AssaultVest),
+        None,
+        None,
+        None,
+        true,
+    );
+
+    let preview_state =
+        crate::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
+            Player::P1,
+            &[p1a, p1b],
+            &[zoroark, dragonite, corviknight, milotic],
+            pd,
+            2,
+            4,
+            50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet,
+            true,
+        );
     let preview: crate::information::unknowns::UnknownTeamPreviewState = match preview_state {
         crate::information::unknowns::UnknownMatchState::TeamPreview(tp) => tp,
         _ => panic!("expected TeamPreview state"),
@@ -2912,25 +3717,50 @@ fn test_zoroark_doubles_partner_switch_out_preserves_hypotheses() {
         state,
         vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p1(0), species: Species::Snorlax, level: 50,
-                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p1(0),
+                    species: Species::Snorlax,
+                    level: 50,
+                    hp: PokemonHP::Number(200),
+                    status: None,
+                    tera_type: None,
                 },
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p1(1), species: Species::Garchomp, level: 50,
-                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p1(1),
+                    species: Species::Garchomp,
+                    level: 50,
+                    hp: PokemonHP::Number(200),
+                    status: None,
+                    tera_type: None,
                 },
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p2(0), species: Species::Dragonite, level: 50,
-                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p2(0),
+                    species: Species::Dragonite,
+                    level: 50,
+                    hp: PokemonHP::Percent(100),
+                    status: None,
+                    tera_type: None,
                 },
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p2(1), species: Species::Corviknight, level: 50,
-                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p2(1),
+                    species: Species::Corviknight,
+                    level: 50,
+                    hp: PokemonHP::Percent(100),
+                    status: None,
+                    tera_type: None,
                 },
             ],
         })],
-        pd, md,
+        pd,
+        md,
     );
     assert_all_p2_items_known(&state, "doubles lead");
     assert!(
@@ -2975,8 +3805,14 @@ fn test_zoroark_doubles_partner_switch_out_preserves_hypotheses() {
     // completely unaffected.
     state = apply_real_dex(state, vec![switch_in(Species::Corviknight, p2(1))], pd, md);
     assert_all_p2_items_known(&state, "after partner returns");
-    assert_eq!(state.p2_active_mons[1].possible_species, Unknown::Known(Species::Corviknight));
-    assert_eq!(state.p2_active_mons[1].item, Unknown::Known(Item::Leftovers));
+    assert_eq!(
+        state.p2_active_mons[1].possible_species,
+        Unknown::Known(Species::Corviknight)
+    );
+    assert_eq!(
+        state.p2_active_mons[1].item,
+        Unknown::Known(Item::Leftovers)
+    );
     assert!(state.p2_active_mons[1].possible_illusion_state.is_some());
     assert_eq!(
         state.p2_active_mons[0].possible_species,
@@ -2986,10 +3822,21 @@ fn test_zoroark_doubles_partner_switch_out_preserves_hypotheses() {
     assert!(state.p2_active_mons[0].possible_illusion_state.is_some());
 }
 
-fn combined_back<'a>(state: &'a UnknownBattleState, player: &Player) -> Vec<&'a UnknownPokemonState> {
+fn combined_back<'a>(
+    state: &'a UnknownBattleState,
+    player: &Player,
+) -> Vec<&'a UnknownPokemonState> {
     match player {
-        Player::P1 => state.p1_known_back_mons.iter().chain(state.p1_possible_back_mons.iter()).collect(),
-        Player::P2 => state.p2_known_back_mons.iter().chain(state.p2_possible_back_mons.iter()).collect(),
+        Player::P1 => state
+            .p1_known_back_mons
+            .iter()
+            .chain(state.p1_possible_back_mons.iter())
+            .collect(),
+        Player::P2 => state
+            .p2_known_back_mons
+            .iter()
+            .chain(state.p2_possible_back_mons.iter())
+            .collect(),
     }
 }
 
@@ -3006,7 +3853,8 @@ fn assert_all_p2_items_known(state: &UnknownBattleState, checkpoint: &str) {
         assert!(
             matches!(mon.item, Unknown::Known(_)),
             "[{checkpoint}] open-sheet item regressed to non-Known for {:?}: {:?}",
-            mon.possible_species, mon.item
+            mon.possible_species,
+            mon.item
         );
     }
 }
@@ -3032,7 +3880,10 @@ fn combined_back_species(state: &UnknownBattleState, player: &Player) -> Vec<Spe
 fn test_knows_threatening_move_clause_satisfied_by_ohko_reveal() {
     let state = battle_1v1(unknown_mon(), unknown_mon());
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Fissure, normal_physical_move(PokemonMove::Fissure, 1));
+    move_dex.insert(
+        PokemonMove::Fissure,
+        normal_physical_move(PokemonMove::Fissure, 1),
+    );
 
     let result = apply_ex(
         state,
@@ -3056,7 +3907,8 @@ fn test_knows_threatening_move_clause_satisfied_by_ohko_reveal() {
 
     assert!(
         !result.predicates.iter().any(|c| {
-            c.iter().any(|s| matches!(s, Statement::KnowsThreateningMove { .. }))
+            c.iter()
+                .any(|s| matches!(s, Statement::KnowsThreateningMove { .. }))
         }),
         "revealing Fissure satisfies the Anticipation constraint — BCP must drop it; \
          predicates = {:?}",
@@ -3068,12 +3920,14 @@ fn test_knows_threatening_move_clause_satisfied_by_ohko_reveal() {
 /// land must emit Insomnia / Vital Spirit / Sweet Veil disjuncts.
 #[test]
 fn test_guaranteed_sleep_absence_emits_sleep_preventers() {
-    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    use crate::state::dex_data::{HitEffect, PokemonSecondaryEffect};
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
 
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
         m
@@ -3083,7 +3937,10 @@ fn test_guaranteed_sleep_absence_emits_sleep_preventers() {
     let mut sleep_move = normal_physical_move(PokemonMove::Tackle, 40);
     sleep_move.secondaries = vec![PokemonSecondaryEffect {
         chance: 100,
-        effect: HitEffect { status: Some(Status::Sleep(0)), ..Default::default() },
+        effect: HitEffect {
+            status: Some(Status::Sleep(0)),
+            ..Default::default()
+        },
         random_choices: vec![],
     }];
     let mut move_dex = HashMap::new();
@@ -3092,8 +3949,16 @@ fn test_guaranteed_sleep_absence_emits_sleep_preventers() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Tackle, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(80) })],
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
             // No StatusInflicted — the sleep was prevented.
         )],
         garchomp_dex(),
@@ -3101,10 +3966,21 @@ fn test_guaranteed_sleep_absence_emits_sleep_preventers() {
     );
 
     let has_sleep_preventers = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s,
-            Statement::HasAbility { ability: Ability::Insomnia, .. }
-            | Statement::HasAbility { ability: Ability::VitalSpirit, .. }
-            | Statement::HasAbility { ability: Ability::SweetVeil, .. }))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasAbility {
+                    ability: Ability::Insomnia,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::VitalSpirit,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SweetVeil,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         has_sleep_preventers,
@@ -3125,7 +4001,10 @@ fn test_item_conflict_panics() {
     // Revealing a different item contradicts Known(ChoiceScarf).
     apply(
         state,
-        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::ChoiceBand })],
+        vec![event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::ChoiceBand,
+        })],
     );
 }
 
@@ -3138,7 +4017,10 @@ fn test_status_conflict_panics() {
     // Inflicting Paralysis while already Burned — contradiction.
     apply(
         state,
-        vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Paralysis })],
+        vec![event(EventKind::StatusInflicted {
+            target: p2(0),
+            status: Status::Paralysis,
+        })],
     );
 }
 
@@ -3157,7 +4039,10 @@ fn test_contradiction_panic_names_the_resolving_event() {
     let state = battle_with_p2(vec![mon]);
     apply(
         state,
-        vec![event(EventKind::StatusInflicted { target: p2(0), status: Status::Paralysis })],
+        vec![event(EventKind::StatusInflicted {
+            target: p2(0),
+            status: Status::Paralysis,
+        })],
     );
 }
 
@@ -3167,19 +4052,22 @@ fn test_contradiction_panic_names_the_resolving_event() {
 fn garchomp_dex() -> HashMap<Species, PokemonData> {
     use crate::state::pokemon::PokemonGender;
     let mut dex = HashMap::new();
-    dex.insert(Species::Garchomp, PokemonData {
-        species:       Species::Garchomp,
-        types:         vec![PokemonType::Dragon, PokemonType::Ground],
-        base_stats:    [108, 130, 95, 80, 85, 102], // HP Atk Def SpA SpD Spe
-        weight:        950, // 95.0 kg
-        primary_ability: Some(Ability::SandVeil),
-        abilities:     vec![Ability::SandVeil, Ability::RoughSkin],
-        base_species:  None,
-        forme:         None,
-        required_item: None,
-        battle_only:   None,
-        default_gender: PokemonGender::Male,
-    });
+    dex.insert(
+        Species::Garchomp,
+        PokemonData {
+            species: Species::Garchomp,
+            types: vec![PokemonType::Dragon, PokemonType::Ground],
+            base_stats: [108, 130, 95, 80, 85, 102], // HP Atk Def SpA SpD Spe
+            weight: 950,                             // 95.0 kg
+            primary_ability: Some(Ability::SandVeil),
+            abilities: vec![Ability::SandVeil, Ability::RoughSkin],
+            base_species: None,
+            forme: None,
+            required_item: None,
+            battle_only: None,
+            default_gender: PokemonGender::Male,
+        },
+    );
     dex
 }
 
@@ -3191,19 +4079,22 @@ fn garchomp_dex() -> HashMap<Species, PokemonData> {
 fn garchomp_zoroark_dex() -> HashMap<Species, PokemonData> {
     use crate::state::pokemon::PokemonGender;
     let mut dex = garchomp_dex();
-    dex.insert(Species::Zoroark, PokemonData {
-        species:       Species::Zoroark,
-        types:         vec![PokemonType::Dark],
-        base_stats:    [60, 60, 60, 60, 60, 60], // HP Atk Def SpA SpD Spe
-        weight:        811, // 81.1 kg
-        primary_ability: Some(Ability::Illusion),
-        abilities:     vec![Ability::Illusion],
-        base_species:  None,
-        forme:         None,
-        required_item: None,
-        battle_only:   None,
-        default_gender: PokemonGender::Male,
-    });
+    dex.insert(
+        Species::Zoroark,
+        PokemonData {
+            species: Species::Zoroark,
+            types: vec![PokemonType::Dark],
+            base_stats: [60, 60, 60, 60, 60, 60], // HP Atk Def SpA SpD Spe
+            weight: 811,                          // 81.1 kg
+            primary_ability: Some(Ability::Illusion),
+            abilities: vec![Ability::Illusion],
+            base_species: None,
+            forme: None,
+            required_item: None,
+            battle_only: None,
+            default_gender: PokemonGender::Male,
+        },
+    );
     dex
 }
 
@@ -3213,9 +4104,10 @@ fn garchomp_zoroark_dex() -> HashMap<Species, PokemonData> {
 /// `possible_illusion_state` via `seed_zoroark_hypothesis_on` or directly.
 fn neutral_no_item_zoroark() -> UnknownPokemonState {
     use crate::state::pokemon::Nature;
-    let mut mon = UnknownPokemonState::from_opponent_species(Species::Zoroark, &garchomp_zoroark_dex(), 50);
-    mon.possible_natures   = Unknown::Known(Nature::Hardy); // neutral
-    mon.item               = Unknown::Known(Item::None);
+    let mut mon =
+        UnknownPokemonState::from_opponent_species(Species::Zoroark, &garchomp_zoroark_dex(), 50);
+    mon.possible_natures = Unknown::Known(Nature::Hardy); // neutral
+    mon.item = Unknown::Known(Item::None);
     mon.possible_abilities = Unknown::Known(Ability::Illusion); // not damage-boosting
     mon.hp = PokemonHP::Percent(100);
     mon
@@ -3225,40 +4117,40 @@ fn neutral_no_item_zoroark() -> UnknownPokemonState {
 fn ground_physical_move(name: PokemonMove, bp: u16) -> MoveData {
     MoveData {
         name,
-        base_power:     bp,
-        accuracy:       AccuracyType::Percent(100),
-        target:         MoveTarget::Normal,
-        secondaries:    vec![],
+        base_power: bp,
+        accuracy: AccuracyType::Percent(100),
+        target: MoveTarget::Normal,
+        secondaries: vec![],
         self_secondaries: vec![],
-        pp:             10,
-        category:       MoveCategory::Physical,
-        pokemon_type:   PokemonType::Ground,
-        priority:       0,
-        flags:          vec![],
-        ohko:           false,
-        thaws_target:   false,
-        heal_fraction:  [0, 0],
-        force_switch:   false,
-        self_switch:    SelfSwitchType::None,
-        self_boost:     [0; 7],
-        self_destruct:  SelfDestructType::None,
+        pp: 10,
+        category: MoveCategory::Physical,
+        pokemon_type: PokemonType::Ground,
+        priority: 0,
+        flags: vec![],
+        ohko: false,
+        thaws_target: false,
+        heal_fraction: [0, 0],
+        force_switch: false,
+        self_switch: SelfSwitchType::None,
+        self_boost: [0; 7],
+        self_destruct: SelfDestructType::None,
         breaks_protect: false,
-        recoil_fraction:  [0, 0],
-        drain_fraction:   [0, 0],
+        recoil_fraction: [0, 0],
+        drain_fraction: [0, 0],
         mind_blown_recoil: false,
         struggle_recoil: false,
-        crit_ratio:     1,
-        foul_play:      false,
-        ignore_ability:       false,
+        crit_ratio: 1,
+        foul_play: false,
+        ignore_ability: false,
         ignore_defense_boosts: false,
-        ignore_evasion:        false,
-        ignore_immunity:       vec![],
-        multihit_range:        [1, 1],
-        multihit_accuracy:     false,
-        sleep_usable:          false,
-        has_crash_damage:      false,
-        damage_override:       DamageOverride::None,
-        stalling_move:         false,
+        ignore_evasion: false,
+        ignore_immunity: vec![],
+        multihit_range: [1, 1],
+        multihit_accuracy: false,
+        sleep_usable: false,
+        has_crash_damage: false,
+        damage_override: DamageOverride::None,
+        stalling_move: false,
         override_offensive_stat: None,
         override_defensive_stat: None,
     }
@@ -3276,12 +4168,12 @@ fn known_p1_normal() -> UnknownPokemonState {
     // Snorlax is NOT in garchomp_dex() → pass5 skips validation for this mon,
     // so the out-of-range HP=500 does not trigger a contradiction.
     let mut mon = unknown_mon_species(Species::Snorlax);
-    mon.hp               = PokemonHP::Number(500);
-    mon.min_stats         = [500, 35, 100, 55, 125, 55];
-    mon.max_stats         = [500, 35, 100, 55, 125, 55];
-    mon.item             = Unknown::Known(Item::None);
+    mon.hp = PokemonHP::Number(500);
+    mon.min_stats = [500, 35, 100, 55, 125, 55];
+    mon.max_stats = [500, 35, 100, 55, 125, 55];
+    mon.item = Unknown::Known(Item::None);
     mon.possible_abilities = Unknown::Known(Ability::None);
-    mon.possible_types   = Unknown::Known(vec![PokemonType::Normal]);
+    mon.possible_types = Unknown::Known(vec![PokemonType::Normal]);
     mon
 }
 
@@ -3296,10 +4188,11 @@ fn known_p1_normal() -> UnknownPokemonState {
 fn neutral_no_item_garchomp() -> UnknownPokemonState {
     use crate::state::pokemon::Nature;
     // Use real Garchomp dex so min/max pre-nature stat are initialised from base=130.
-    let mut mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     // Lock nature to neutral so BSV == final stat in the oracle.
-    mon.possible_natures   = Unknown::Known(Nature::Hardy);
-    mon.item               = Unknown::Known(Item::None);
+    mon.possible_natures = Unknown::Known(Nature::Hardy);
+    mon.item = Unknown::Known(Item::None);
     // SandVeil: not a damage-boosting ability.
     mon.possible_abilities = Unknown::Known(Ability::SandVeil);
     mon.hp = PokemonHP::Percent(100);
@@ -3309,21 +4202,38 @@ fn neutral_no_item_garchomp() -> UnknownPokemonState {
 /// Runs Pass 3 for Direction B and returns the resulting state.
 ///
 /// `damage` = HP lost by P1 (pre_hp - new_hp).  P2 is the attacker; P1 is the target.
-fn run_direction_b(p2_mon: UnknownPokemonState, damage: u16) -> crate::information::unknowns::UnknownBattleState {
+fn run_direction_b(
+    p2_mon: UnknownPokemonState,
+    damage: u16,
+) -> crate::information::unknowns::UnknownBattleState {
     let our_mon = known_p1_normal();
-    let pre_hp = match our_mon.hp { PokemonHP::Number(n) => n, _ => panic!("expected Number") };
+    let pre_hp = match our_mon.hp {
+        PokemonHP::Number(n) => n,
+        _ => panic!("expected Number"),
+    };
     let new_hp = pre_hp.saturating_sub(damage);
 
     let state = battle_1v1(our_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(new_hp),
+            })],
         )],
         garchomp_dex(),
         move_dex,
@@ -3349,18 +4259,32 @@ fn run_direction_b_with_zoroark_hypothesis(
     seed_zoroark_hypothesis_on(&mut garchomp_shown, &neutral_no_item_zoroark());
 
     let our_mon = known_p1_normal();
-    let pre_hp = match our_mon.hp { PokemonHP::Number(n) => n, _ => panic!("expected Number") };
+    let pre_hp = match our_mon.hp {
+        PokemonHP::Number(n) => n,
+        _ => panic!("expected Number"),
+    };
     let new_hp = pre_hp.saturating_sub(damage);
     let state = battle_1v1(our_mon, garchomp_shown);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(new_hp),
+            })],
         )],
         garchomp_zoroark_dex(),
         move_dex,
@@ -3375,10 +4299,13 @@ fn run_direction_b_with_zoroark_hypothesis(
 #[test]
 fn test_zoroark_pass3_direction_b_tightens_hypothesis() {
     let result = run_direction_b_with_zoroark_hypothesis(45);
-    let hyp = result.p2_active_mons[0].possible_illusion_state.as_ref().expect(
-        "damage=45 is within Zoroark's achievable range at its high-BSV end -- \
+    let hyp = result.p2_active_mons[0]
+        .possible_illusion_state
+        .as_ref()
+        .expect(
+            "damage=45 is within Zoroark's achievable range at its high-BSV end -- \
          the hypothesis must survive",
-    );
+        );
     assert!(
         hyp.min_pre_nature_stat[1] > 65,
         "damage=45 is unreachable at Zoroark's seeded min BSV=65 (max output there \
@@ -3395,7 +4322,8 @@ fn test_zoroark_pass3_direction_b_tightens_hypothesis() {
         hyp.min_evs[1] > 0 || hyp.max_evs[1] < 252,
         "Pass 5's mirrored back-solve must narrow the hypothesis's own Atk EV range \
          from the tightened stat window; got [{}, {}]",
-        hyp.min_evs[1], hyp.max_evs[1]
+        hyp.min_evs[1],
+        hyp.max_evs[1]
     );
 }
 
@@ -3481,7 +4409,10 @@ fn test_s52_illusion_promotion_purges_stale_species_derived_predicate() {
     seed_zoroark_hypothesis_on(&mut garchomp_shown, &neutral_no_item_zoroark());
 
     let our_mon = known_p1_normal();
-    let pre_hp = match our_mon.hp { PokemonHP::Number(n) => n, _ => panic!("expected Number") };
+    let pre_hp = match our_mon.hp {
+        PokemonHP::Number(n) => n,
+        _ => panic!("expected Number"),
+    };
     // Same damage=76 trigger as `test_zoroark_pass3_pass5_promotion_synergy`: makes
     // Garchomp's own stat window EV/IV-infeasible while leaving Zoroark's untouched,
     // forcing promotion.
@@ -3506,13 +4437,24 @@ fn test_s52_illusion_promotion_purges_stale_species_derived_predicate() {
     state.predicates.push(vec![stale.clone()]);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(new_hp),
+            })],
         )],
         garchomp_zoroark_dex(),
         move_dex,
@@ -3565,8 +4507,16 @@ fn test_zoroark_pass3_direction_a_promotes_on_defender_infeasibility() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Psychic, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(75) })],
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Psychic,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(75),
+            })],
         )],
         garchomp_zoroark_dex(),
         move_dex,
@@ -3620,15 +4570,29 @@ fn test_s42_pass3_direction_a_does_not_reattach_hypothesis_after_illusion_ended(
     let state = battle_1v1(p1_mon, garchomp_shown);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Earthquake, targets: vec![p2(0)] },
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p2(0)],
+            },
             vec![event_with(
-                EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(95) },
-                vec![event(EventKind::IllusionEnded { slot: p2(0), actual_species: Species::Zoroark })],
+                EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p2(0),
+                    new_hp: PokemonHP::Percent(95),
+                },
+                vec![event(EventKind::IllusionEnded {
+                    slot: p2(0),
+                    actual_species: Species::Zoroark,
+                })],
             )],
         )],
         garchomp_zoroark_dex(),
@@ -3666,7 +4630,10 @@ fn test_s42_pass3_direction_b_does_not_reattach_hypothesis_after_learnset_promot
     seed_zoroark_hypothesis_on(&mut garchomp_shown, &neutral_no_item_zoroark());
 
     let our_mon = known_p1_normal();
-    let pre_hp = match our_mon.hp { PokemonHP::Number(n) => n, _ => panic!("expected Number") };
+    let pre_hp = match our_mon.hp {
+        PokemonHP::Number(n) => n,
+        _ => panic!("expected Number"),
+    };
 
     let state = battle_1v1(our_mon, garchomp_shown);
 
@@ -3677,14 +4644,28 @@ fn test_s42_pass3_direction_b_does_not_reattach_hypothesis_after_learnset_promot
     move_dex.insert(PokemonMove::DarkPulse, dark_pulse);
 
     let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
-    learnset_dex.insert(Species::Garchomp, [PokemonMove::Earthquake].into_iter().collect());
-    learnset_dex.insert(Species::Zoroark, [PokemonMove::DarkPulse].into_iter().collect());
-    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+    learnset_dex.insert(
+        Species::Garchomp,
+        [PokemonMove::Earthquake].into_iter().collect(),
+    );
+    learnset_dex.insert(
+        Species::Zoroark,
+        [PokemonMove::DarkPulse].into_iter().collect(),
+    );
+    let config = InferenceConfig {
+        learnset_dex,
+        ev_total_cap: None,
+        ..Default::default()
+    };
 
     let result = apply_with_config(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::DarkPulse, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::DarkPulse,
+                targets: vec![p1(0)],
+            },
             vec![event(EventKind::DamageDealt {
                 max_hp: 0,
                 target: p1(0),
@@ -3798,13 +4779,24 @@ fn test_s46_pass3_dir_b_lethal_hit_does_not_cap_upper_bound() {
 
     let state = battle_1v1(p1_mon, neutral_no_item_garchomp());
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(0) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(0),
+            })],
         )],
         garchomp_dex(),
         move_dex,
@@ -3835,7 +4827,10 @@ fn test_s46_pass3_dir_b_lethal_hit_does_not_cap_upper_bound() {
 /// `known_p1_normal` target is neutral effectiveness, and Garchomp isn't Dark-type,
 /// so there's no STAB/type-effectiveness complication to account for by hand.
 fn dark_physical_move(name: PokemonMove, bp: u16) -> MoveData {
-    MoveData { pokemon_type: PokemonType::Dark, ..normal_physical_move(name, bp) }
+    MoveData {
+        pokemon_type: PokemonType::Dark,
+        ..normal_physical_move(name, bp)
+    }
 }
 
 /// A single top-level `MoveUsed` event with no preceding move this turn — the target
@@ -3859,13 +4854,24 @@ fn dark_physical_move(name: PokemonMove, bp: u16) -> MoveData {
 fn test_s48_pass3_dir_b_payback_target_not_acted_tightens_min_bound() {
     let state = battle_1v1(known_p1_normal(), neutral_no_item_garchomp());
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Payback, dark_physical_move(PokemonMove::Payback, 50));
+    move_dex.insert(
+        PokemonMove::Payback,
+        dark_physical_move(PokemonMove::Payback, 50),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Payback, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(500 - 35) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Payback,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(500 - 35),
+            })],
         )],
         garchomp_dex(),
         move_dex,
@@ -3893,7 +4899,11 @@ fn test_s48_pass3_dir_b_payback_target_not_acted_tightens_min_bound() {
 // those still silently used the wrong, fixed-50%-HP base power in the oracle.
 
 fn fire_special_move(name: PokemonMove, bp: u16) -> MoveData {
-    MoveData { category: MoveCategory::Special, pokemon_type: PokemonType::Fire, ..normal_physical_move(name, bp) }
+    MoveData {
+        category: MoveCategory::Special,
+        pokemon_type: PokemonType::Fire,
+        ..normal_physical_move(name, bp)
+    }
 }
 
 /// Garchomp (attacker) pinned to max_hp=200, tracked display HP=Percent(90) (true HP
@@ -3922,13 +4932,24 @@ fn test_s54_pass3_dir_b_eruption_uses_true_hp_not_sentinel() {
 
     let state = battle_1v1(known_p1_normal(), garchomp);
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Eruption, fire_special_move(PokemonMove::Eruption, 150));
+    move_dex.insert(
+        PokemonMove::Eruption,
+        fire_special_move(PokemonMove::Eruption, 150),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Eruption, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(500 - 64) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Eruption,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(500 - 64),
+            })],
         )],
         garchomp_dex(),
         move_dex,
@@ -3966,18 +4987,22 @@ fn test_pass3_dir_b_no_contradiction_across_damage_range() {
         assert!(
             p2.min_pre_nature_stat[1] <= p2.max_pre_nature_stat[1],
             "Pass 3 produced inverted bounds (min {} > max {}) for damage={}",
-            p2.min_pre_nature_stat[1], p2.max_pre_nature_stat[1], damage
+            p2.min_pre_nature_stat[1],
+            p2.max_pre_nature_stat[1],
+            damage
         );
         // Bounds must stay inside Garchomp's theoretical BSV range [135, 182].
         assert!(
             p2.min_pre_nature_stat[1] >= 135,
             "min BSV ({}) dropped below Garchomp's minimum (135) for damage={}",
-            p2.min_pre_nature_stat[1], damage
+            p2.min_pre_nature_stat[1],
+            damage
         );
         assert!(
             p2.max_pre_nature_stat[1] <= 182,
             "max BSV ({}) exceeded Garchomp's maximum (182) for damage={}",
-            p2.max_pre_nature_stat[1], damage
+            p2.max_pre_nature_stat[1],
+            damage
         );
 
         // ── T3 additions: soundness + tightness assertions ────────────────────
@@ -3989,7 +5014,10 @@ fn test_pass3_dir_b_no_contradiction_across_damage_range() {
                 p2.min_pre_nature_stat[1] <= TRUE_ATK_BSV
                     && TRUE_ATK_BSV <= p2.max_pre_nature_stat[1],
                 "soundness: true Atk BSV ({}) must lie within [{}, {}] for damage={}",
-                TRUE_ATK_BSV, p2.min_pre_nature_stat[1], p2.max_pre_nature_stat[1], damage
+                TRUE_ATK_BSV,
+                p2.min_pre_nature_stat[1],
+                p2.max_pre_nature_stat[1],
+                damage
             );
         }
         if damage == 100 {
@@ -4025,41 +5053,41 @@ fn test_pass3_fixed_damage_move_skipped() {
 
     // Build a fixed-damage move (level-dependent, like Seismic Toss).
     let fixed_move = MoveData {
-        name:           PokemonMove::SeismicToss,
-        base_power:     1, // ignored for fixed-damage
-        accuracy:       AccuracyType::Percent(100),
-        target:         MoveTarget::Normal,
-        category:       MoveCategory::Physical,
-        pokemon_type:   PokemonType::Normal,
-        priority:       0,
-        pp:             10,
-        flags:          vec![],
-        ohko:           false,
-        thaws_target:   false,
-        heal_fraction:  [0, 0],
-        force_switch:   false,
-        self_switch:    SelfSwitchType::None,
-        self_boost:     [0; 7],
-        self_destruct:  SelfDestructType::None,
+        name: PokemonMove::SeismicToss,
+        base_power: 1, // ignored for fixed-damage
+        accuracy: AccuracyType::Percent(100),
+        target: MoveTarget::Normal,
+        category: MoveCategory::Physical,
+        pokemon_type: PokemonType::Normal,
+        priority: 0,
+        pp: 10,
+        flags: vec![],
+        ohko: false,
+        thaws_target: false,
+        heal_fraction: [0, 0],
+        force_switch: false,
+        self_switch: SelfSwitchType::None,
+        self_boost: [0; 7],
+        self_destruct: SelfDestructType::None,
         breaks_protect: false,
-        recoil_fraction:  [0, 0],
-        drain_fraction:   [0, 0],
+        recoil_fraction: [0, 0],
+        drain_fraction: [0, 0],
         mind_blown_recoil: false,
-        struggle_recoil:  false,
-        crit_ratio:     1,
-        foul_play:      false,
-        ignore_ability:        false,
+        struggle_recoil: false,
+        crit_ratio: 1,
+        foul_play: false,
+        ignore_ability: false,
         ignore_defense_boosts: false,
-        ignore_evasion:        false,
-        ignore_immunity:       vec![],
-        multihit_range:        [1, 1],
-        multihit_accuracy:     false,
-        sleep_usable:          false,
-        has_crash_damage:      false,
-        damage_override:       DamageOverride::Level, // fixed: causes pass3 skip
-        stalling_move:         false,
-        secondaries:           vec![],
-        self_secondaries:      vec![],
+        ignore_evasion: false,
+        ignore_immunity: vec![],
+        multihit_range: [1, 1],
+        multihit_accuracy: false,
+        sleep_usable: false,
+        has_crash_damage: false,
+        damage_override: DamageOverride::Level, // fixed: causes pass3 skip
+        stalling_move: false,
+        secondaries: vec![],
+        self_secondaries: vec![],
         override_offensive_stat: None,
         override_defensive_stat: None,
     };
@@ -4070,8 +5098,16 @@ fn test_pass3_fixed_damage_move_skipped() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::SeismicToss, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(450) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::SeismicToss,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(450),
+            })],
         )],
         garchomp_dex(),
         move_dex,
@@ -4102,8 +5138,9 @@ fn test_pass3_dir_b_choice_band_loosens_unconditional_bound() {
     use crate::state::pokemon::Nature;
     // Attacker: neutral nature only, but item is unknown (Choice Band remains possible).
     // Use real dex so pre-nature bounds reflect true base Atk=130.
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
-    p2_mon.possible_natures   = Unknown::Known(Nature::Hardy);
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    p2_mon.possible_natures = Unknown::Known(Nature::Hardy);
     p2_mon.possible_abilities = Unknown::Known(Ability::SandVeil);
     // item is Unknown::Not(vec![]) — fully unknown, Choice Band is possible.
     p2_mon.hp = PokemonHP::Percent(100);
@@ -4132,18 +5169,32 @@ fn test_pass3_dir_b_choice_band_loosens_unconditional_bound() {
     let new_hp = pre_hp - 91;
     let state = battle_1v1(our_mon2, p2_mon);
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
         vec![
             // Move event that produces damage 91.
             event_with(
-                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-                vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(new_hp) })],
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::Earthquake,
+                    targets: vec![p1(0)],
+                },
+                vec![event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(new_hp),
+                })],
             ),
             // Item revealed: NOT Choice Band — eliminates the booster disjunct in BCP.
-            event(EventKind::ItemRevealed { slot: p2(0), item: Item::LumBerry }),
+            event(EventKind::ItemRevealed {
+                slot: p2(0),
+                item: Item::LumBerry,
+            }),
         ],
         garchomp_dex(),
         move_dex,
@@ -4177,7 +5228,10 @@ fn test_pass3_dir_b_crit_observed_no_contradiction() {
 
     let state = battle_1v1(our_mon, p2_mon.clone());
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, ground_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        ground_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     // Feed a FEASIBLE crit damage (previously 100, which no Atk in [135,182] can
     // produce under the ×1.5 crit multiplier — the test only exercised robustness).
@@ -4191,9 +5245,17 @@ fn test_pass3_dir_b_crit_observed_no_contradiction() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            },
             vec![event_with(
-                EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(359) }, // 141 damage
+                EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(359),
+                }, // 141 damage
                 vec![event(EventKind::Crit { target: p1(0) })], // crit signalled
             )],
         )],
@@ -4208,12 +5270,14 @@ fn test_pass3_dir_b_crit_observed_no_contradiction() {
     assert!(
         p2_r.min_pre_nature_stat[1] <= p2_r.max_pre_nature_stat[1],
         "Crit observation must not produce inverted bounds (min {}, max {})",
-        p2_r.min_pre_nature_stat[1], p2_r.max_pre_nature_stat[1]
+        p2_r.min_pre_nature_stat[1],
+        p2_r.max_pre_nature_stat[1]
     );
     assert!(
         p2_r.min_pre_nature_stat[1] > 135 || p2_r.max_pre_nature_stat[1] < 182,
         "feasible crit damage must actually narrow the bounds; got [{}, {}]",
-        p2_r.min_pre_nature_stat[1], p2_r.max_pre_nature_stat[1]
+        p2_r.min_pre_nature_stat[1],
+        p2_r.max_pre_nature_stat[1]
     );
 }
 
@@ -4233,14 +5297,32 @@ fn poke_status_move(name: PokemonMove) -> MoveData {
         pokemon_type: PokemonType::Normal,
         priority: 0,
         flags: vec![],
-        ohko: false, thaws_target: false, heal_fraction: [0, 0], force_switch: false,
-        self_switch: SelfSwitchType::None, self_boost: [0; 7], self_destruct: SelfDestructType::None,
-        breaks_protect: false, recoil_fraction: [0, 0], drain_fraction: [0, 0],
-        mind_blown_recoil: false, struggle_recoil: false, crit_ratio: 1, foul_play: false,
-        ignore_ability: false, ignore_defense_boosts: false, ignore_evasion: false,
-        ignore_immunity: vec![], multihit_range: [1, 1], multihit_accuracy: false,
-        sleep_usable: false, has_crash_damage: false, damage_override: DamageOverride::None,
-        stalling_move: false, override_offensive_stat: None, override_defensive_stat: None,
+        ohko: false,
+        thaws_target: false,
+        heal_fraction: [0, 0],
+        force_switch: false,
+        self_switch: SelfSwitchType::None,
+        self_boost: [0; 7],
+        self_destruct: SelfDestructType::None,
+        breaks_protect: false,
+        recoil_fraction: [0, 0],
+        drain_fraction: [0, 0],
+        mind_blown_recoil: false,
+        struggle_recoil: false,
+        crit_ratio: 1,
+        foul_play: false,
+        ignore_ability: false,
+        ignore_defense_boosts: false,
+        ignore_evasion: false,
+        ignore_immunity: vec![],
+        multihit_range: [1, 1],
+        multihit_accuracy: false,
+        sleep_usable: false,
+        has_crash_damage: false,
+        damage_override: DamageOverride::None,
+        stalling_move: false,
+        override_offensive_stat: None,
+        override_defensive_stat: None,
     }
 }
 
@@ -4248,8 +5330,16 @@ fn poke_status_move(name: PokemonMove) -> MoveData {
 /// Both use physical moves at priority 0. Neither has Quick Claw or Quick Draw.
 fn speed_order_events(p2_move: PokemonMove, p1_move: PokemonMove) -> Vec<InformationEvent> {
     vec![
-        event(EventKind::MoveUsed { user: p2(0), move_used: p2_move, targets: vec![p1(0)] }),
-        event(EventKind::MoveUsed { user: p1(0), move_used: p1_move, targets: vec![p2(0)] }),
+        event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: p2_move,
+            targets: vec![p1(0)],
+        }),
+        event(EventKind::MoveUsed {
+            user: p1(0),
+            move_used: p1_move,
+            targets: vec![p2(0)],
+        }),
     ]
 }
 
@@ -4258,12 +5348,25 @@ fn no_speed_escape_mon(species: Species) -> UnknownPokemonState {
     let mut mon = unknown_mon_species(species);
     // Exclude items and abilities that could create a speed escape clause.
     mon.item = Unknown::Not(vec![
-        Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+        Item::QuickClaw,
+        Item::ChoiceScarf,
+        Item::IronBall,
+        Item::LaggingTail,
+        Item::FullIncense,
     ]);
     mon.possible_abilities = Unknown::Not(vec![
-        Ability::QuickDraw, Ability::Prankster, Ability::GaleWings, Ability::Triage,
-        Ability::Stall, Ability::SwiftSwim, Ability::Chlorophyll, Ability::SandRush,
-        Ability::SlushRush, Ability::SurgeSurfer, Ability::Unburden, Ability::QuickFeet,
+        Ability::QuickDraw,
+        Ability::Prankster,
+        Ability::GaleWings,
+        Ability::Triage,
+        Ability::Stall,
+        Ability::SwiftSwim,
+        Ability::Chlorophyll,
+        Ability::SandRush,
+        Ability::SlushRush,
+        Ability::SurgeSurfer,
+        Ability::Unburden,
+        Ability::QuickFeet,
     ]);
     mon
 }
@@ -4277,8 +5380,14 @@ fn test_pass4_speed_comparison_emitted() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let result = apply_ex(
         state,
@@ -4290,9 +5399,21 @@ fn test_pass4_speed_comparison_emitted() {
     // In battle_1v1: P1 active mon = idx 0, P2 active mon = idx 1.
     // P2 moved first → fast_idx = 1, slow_idx = 0 (in normal order).
     let has_speed_cmp = result.predicates.iter().any(|clause| {
-        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 1, slow_idx: 0, .. }))
+        clause.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::SpeedComparison {
+                    fast_idx: 1,
+                    slow_idx: 0,
+                    ..
+                }
+            )
+        })
     });
-    assert!(has_speed_cmp, "Pass 4 must emit SpeedComparison(fast=P2, slow=P1) when P2 moves first in priority 0");
+    assert!(
+        has_speed_cmp,
+        "Pass 4 must emit SpeedComparison(fast=P2, slow=P1) when P2 moves first in priority 0"
+    );
 }
 
 /// Under Trick Room the slower mon goes first; Pass 4 should swap fast/slow so the
@@ -4306,8 +5427,14 @@ fn test_pass4_trick_room_swaps_comparison() {
     state.pseudo_weather_turns = vec![Unknown::Known(3)];
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     // P2 moves first under Trick Room → P2 is the SLOWER mon.
     // Pass 4 must swap: the SpeedComparison should have fast_idx=0 (P1=slower→second=faster-in-TR).
@@ -4319,15 +5446,39 @@ fn test_pass4_trick_room_swaps_comparison() {
     );
 
     let has_tr_cmp = result.predicates.iter().any(|clause| {
-        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 0, slow_idx: 1, .. }))
+        clause.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::SpeedComparison {
+                    fast_idx: 0,
+                    slow_idx: 1,
+                    ..
+                }
+            )
+        })
     });
-    assert!(has_tr_cmp, "Under Trick Room, SpeedComparison must have fast_idx=P1 (moved second = naturally faster)");
+    assert!(
+        has_tr_cmp,
+        "Under Trick Room, SpeedComparison must have fast_idx=P1 (moved second = naturally faster)"
+    );
 
     // Sanity: should NOT have the non-TR direction.
     let has_wrong_cmp = result.predicates.iter().any(|clause| {
-        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 1, slow_idx: 0, .. }))
+        clause.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::SpeedComparison {
+                    fast_idx: 1,
+                    slow_idx: 0,
+                    ..
+                }
+            )
+        })
     });
-    assert!(!has_wrong_cmp, "Trick Room must not emit the non-reversed SpeedComparison");
+    assert!(
+        !has_wrong_cmp,
+        "Trick Room must not emit the non-reversed SpeedComparison"
+    );
 }
 
 /// S32 regression (TODO.md "SpeedComparison raises min above max" / RagePowder
@@ -4355,19 +5506,36 @@ fn test_s32_own_turn_tailwind_not_retroactive_to_pre_cast_pairing() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Tailwind, poke_status_move(PokemonMove::Tailwind));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Tailwind,
+        poke_status_move(PokemonMove::Tailwind),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let tailwind_event = event_with(
-        EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Tailwind, targets: vec![] },
-        vec![event(EventKind::SideConditionStart { side: Player::P1, condition: SideCondition::TailWind })],
+        EventKind::MoveUsed {
+            user: p1(0),
+            move_used: PokemonMove::Tailwind,
+            targets: vec![],
+        },
+        vec![event(EventKind::SideConditionStart {
+            side: Player::P1,
+            condition: SideCondition::TailWind,
+        })],
     );
 
     let result = apply_ex(
         state,
         vec![
             tailwind_event,
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::DragonClaw, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::DragonClaw,
+                targets: vec![p1(0)],
+            }),
         ],
         HashMap::new(),
         move_dex,
@@ -4379,8 +5547,17 @@ fn test_s32_own_turn_tailwind_not_retroactive_to_pre_cast_pairing() {
     // cross-multiply). Tailwind wasn't up yet when this pairing raced, so it must
     // not appear in either factor.
     let has_correct = result.predicates.iter().any(|clause| {
-        clause.iter().any(|stmt| matches!(stmt,
-            Statement::SpeedComparison { fast_idx: 0, slow_idx: 1, fast_mult: 4, slow_mult: 4 }))
+        clause.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::SpeedComparison {
+                    fast_idx: 0,
+                    slow_idx: 1,
+                    fast_mult: 4,
+                    slow_mult: 4
+                }
+            )
+        })
     });
     assert!(
         has_correct,
@@ -4391,8 +5568,17 @@ fn test_s32_own_turn_tailwind_not_retroactive_to_pre_cast_pairing() {
     // Bug: fast_mult=8 (double the neutral 4) would mean P1's own same-turn Tailwind
     // cast was wrongly applied retroactively to the pairing that put it first.
     let has_buggy = result.predicates.iter().any(|clause| {
-        clause.iter().any(|stmt| matches!(stmt,
-            Statement::SpeedComparison { fast_idx: 0, slow_idx: 1, fast_mult: 8, .. }))
+        clause.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::SpeedComparison {
+                    fast_idx: 0,
+                    slow_idx: 1,
+                    fast_mult: 8,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_buggy,
@@ -4418,26 +5604,51 @@ fn test_s32_own_turn_trick_room_not_retroactive_to_pre_cast_pairing() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::TrickRoom, poke_status_move(PokemonMove::TrickRoom));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::TrickRoom,
+        poke_status_move(PokemonMove::TrickRoom),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let trick_room_event = event_with(
-        EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::TrickRoom, targets: vec![] },
-        vec![event(EventKind::PseudoWeatherStart { effect: PseudoWeather::TrickRoom })],
+        EventKind::MoveUsed {
+            user: p1(0),
+            move_used: PokemonMove::TrickRoom,
+            targets: vec![],
+        },
+        vec![event(EventKind::PseudoWeatherStart {
+            effect: PseudoWeather::TrickRoom,
+        })],
     );
 
     let result = apply_ex(
         state,
         vec![
             trick_room_event,
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::DragonClaw, targets: vec![p1(0)] }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::DragonClaw,
+                targets: vec![p1(0)],
+            }),
         ],
         HashMap::new(),
         move_dex,
     );
 
     let has_correct = result.predicates.iter().any(|clause| {
-        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 0, slow_idx: 1, .. }))
+        clause.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::SpeedComparison {
+                    fast_idx: 0,
+                    slow_idx: 1,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         has_correct,
@@ -4447,7 +5658,16 @@ fn test_s32_own_turn_trick_room_not_retroactive_to_pre_cast_pairing() {
     );
 
     let has_wrongly_swapped = result.predicates.iter().any(|clause| {
-        clause.iter().any(|stmt| matches!(stmt, Statement::SpeedComparison { fast_idx: 1, slow_idx: 0, .. }))
+        clause.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::SpeedComparison {
+                    fast_idx: 1,
+                    slow_idx: 0,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_wrongly_swapped,
@@ -4489,22 +5709,40 @@ fn test_s33_pass5_hp_self_heals_instead_of_panicking() {
     assert!(
         mon.min_stats[0] <= mon.max_stats[0],
         "healed HP window must be non-empty: [{}, {}]",
-        mon.min_stats[0], mon.max_stats[0]
+        mon.min_stats[0],
+        mon.max_stats[0]
     );
-    assert_eq!(mon.min_evs[0], 0, "healed window must widen EVs back to the full range");
-    assert_eq!(mon.max_evs[0], 252, "healed window must widen EVs back to the full range");
+    assert_eq!(
+        mon.min_evs[0], 0,
+        "healed window must widen EVs back to the full range"
+    );
+    assert_eq!(
+        mon.max_evs[0], 252,
+        "healed window must widen EVs back to the full range"
+    );
 
     // Soundness: the real Charizard's achievable HP range (base HP, level 50) must lie
     // within the healed window at both IV extremes.
     let base_hp = pd.get(&Species::Charizard).unwrap().base_stats[0];
-    let iv_lo = if config.force_max_ivs { 31 } else { mon.min_ivs[0] };
-    let iv_hi = if config.force_max_ivs { 31 } else { mon.max_ivs[0] };
+    let iv_lo = if config.force_max_ivs {
+        31
+    } else {
+        mon.min_ivs[0]
+    };
+    let iv_hi = if config.force_max_ivs {
+        31
+    } else {
+        mon.max_ivs[0]
+    };
     let real_lo = crate::state::pokemon::calc_hp(base_hp, iv_lo, 0, 50);
     let real_hi = crate::state::pokemon::calc_hp(base_hp, iv_hi, 252, 50);
     assert!(
         mon.min_stats[0] <= real_lo && real_hi <= mon.max_stats[0],
         "healed window [{}, {}] must contain the true achievable HP range [{}, {}]",
-        mon.min_stats[0], mon.max_stats[0], real_lo, real_hi
+        mon.min_stats[0],
+        mon.max_stats[0],
+        real_lo,
+        real_hi
     );
 }
 
@@ -4544,7 +5782,11 @@ fn test_achievable_defender_hp_values_full_ev_mode_covers_off_lattice_hp() {
     mon.min_stats[0] = true_hp - 2;
     mon.max_stats[0] = true_hp + 2;
 
-    let config = InferenceConfig { use_stat_points: false, force_max_ivs: true, ..InferenceConfig::default() };
+    let config = InferenceConfig {
+        use_stat_points: false,
+        force_max_ivs: true,
+        ..InferenceConfig::default()
+    };
     let vals = achievable_defender_hp_values(base_hp, 100, &config, &mon);
     assert!(
         vals.contains(&true_hp),
@@ -4578,13 +5820,18 @@ fn test_pass5_back_solve_full_ev_mode_covers_off_lattice_stat() {
     mon.min_pre_nature_stat[2] = true_def;
     mon.max_pre_nature_stat[2] = true_def;
 
-    let config = InferenceConfig { use_stat_points: false, force_max_ivs: true, ..InferenceConfig::default() };
+    let config = InferenceConfig {
+        use_stat_points: false,
+        force_max_ivs: true,
+        ..InferenceConfig::default()
+    };
     pass5_back_solve(&mut mon, 0, &config, pd); // must not panic
 
     assert!(
         mon.min_evs[2] <= 8 && mon.max_evs[2] >= 8,
         "full-EV mode must narrow Def EV window to include the true off-lattice EV=8; got [{}, {}]",
-        mon.min_evs[2], mon.max_evs[2]
+        mon.min_evs[2],
+        mon.max_evs[2]
     );
 }
 
@@ -4599,21 +5846,39 @@ fn test_pass4_prankster_escape_on_status_move() {
     let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
     p2_mon.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
     p2_mon.item = Unknown::Not(vec![
-        Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+        Item::QuickClaw,
+        Item::ChoiceScarf,
+        Item::IronBall,
+        Item::LaggingTail,
+        Item::FullIncense,
     ]);
 
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
     // P2 uses a Status move (priority 0), P1 uses a Physical move (priority 0).
-    move_dex.insert(PokemonMove::WillOWisp, poke_status_move(PokemonMove::WillOWisp));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::WillOWisp,
+        poke_status_move(PokemonMove::WillOWisp),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let result = apply_ex(
         state,
         vec![
-            event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::WillOWisp, targets: vec![p1(0)] }),
-            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::DragonClaw, targets: vec![p2(0)] }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::WillOWisp,
+                targets: vec![p1(0)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::DragonClaw,
+                targets: vec![p2(0)],
+            }),
         ],
         HashMap::new(),
         move_dex,
@@ -4622,13 +5887,24 @@ fn test_pass4_prankster_escape_on_status_move() {
     // The predicate clause for this comparison must include HasAbility{Prankster} as a
     // disjunct (since Prankster could explain P2 going first with a status move).
     let has_prankster_escape = result.predicates.iter().any(|clause| {
-        let has_speed_cmp = clause.iter().any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }));
-        let has_prankster = clause.iter().any(|s| matches!(s,
-            Statement::HasAbility { mon_idx: 1, ability: Ability::Prankster }
-        ));
+        let has_speed_cmp = clause
+            .iter()
+            .any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }));
+        let has_prankster = clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasAbility {
+                    mon_idx: 1,
+                    ability: Ability::Prankster
+                }
+            )
+        });
         has_speed_cmp && has_prankster
     });
-    assert!(has_prankster_escape, "Status move by P2 with possible Prankster must add Prankster escape to clause");
+    assert!(
+        has_prankster_escape,
+        "Status move by P2 with possible Prankster must add Prankster escape to clause"
+    );
 }
 
 /// A Physical move by P2 should NOT add a Prankster escape disjunct — Prankster only
@@ -4640,13 +5916,23 @@ fn test_pass4_no_prankster_escape_on_physical_move() {
     // Allow Prankster on P2 (but the move is Physical → no escape needed).
     p2_mon.possible_abilities = Unknown::Not(vec![Ability::QuickDraw]);
     p2_mon.item = Unknown::Not(vec![
-        Item::QuickClaw, Item::ChoiceScarf, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+        Item::QuickClaw,
+        Item::ChoiceScarf,
+        Item::IronBall,
+        Item::LaggingTail,
+        Item::FullIncense,
     ]);
 
     let state = battle_1v1(p1_mon, p2_mon);
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let result = apply_ex(
         state,
@@ -4656,10 +5942,21 @@ fn test_pass4_no_prankster_escape_on_physical_move() {
     );
 
     // Prankster escape must NOT appear for a physical move.
-    let has_prankster_escape = result.predicates.iter().any(|clause|
-        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::Prankster, .. }))
+    let has_prankster_escape = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasAbility {
+                    ability: Ability::Prankster,
+                    ..
+                }
+            )
+        })
+    });
+    assert!(
+        !has_prankster_escape,
+        "Physical move must not add Prankster escape (Prankster only affects status moves)"
     );
-    assert!(!has_prankster_escape, "Physical move must not add Prankster escape (Prankster only affects status moves)");
 }
 
 /// S57: Skill Swap moving first via Prankster, while ALSO swapping Prankster away
@@ -4688,8 +5985,14 @@ fn test_s57_skill_swap_does_not_lose_its_own_prankster_escape() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::SkillSwap, poke_status_move(PokemonMove::SkillSwap));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::SkillSwap,
+        poke_status_move(PokemonMove::SkillSwap),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let result = apply_ex(
         state,
@@ -4699,10 +6002,21 @@ fn test_s57_skill_swap_does_not_lose_its_own_prankster_escape() {
             // resolution reveals P2 now holds Levitate (swapped in from P1) — a live
             // ability change, not a narrowing of P2's original 3-ability pool.
             event_with(
-                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::SkillSwap, targets: vec![p1(0)] },
-                vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Levitate })],
+                EventKind::MoveUsed {
+                    user: p2(0),
+                    move_used: PokemonMove::SkillSwap,
+                    targets: vec![p1(0)],
+                },
+                vec![event(EventKind::AbilityRevealed {
+                    slot: p2(0),
+                    ability: Ability::Levitate,
+                })],
             ),
-            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::DragonClaw, targets: vec![p2(0)] }),
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::DragonClaw,
+                targets: vec![p2(0)],
+            }),
         ],
         HashMap::new(),
         move_dex,
@@ -4714,7 +6028,9 @@ fn test_s57_skill_swap_does_not_lose_its_own_prankster_escape() {
     // immediately (and validly, from its own narrow per-clause view) discard as
     // unsatisfiable, discarding the still-live Prankster escape with it.
     let doomed_clause_present = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }))
+        clause
+            .iter()
+            .any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }))
     });
     assert!(
         !doomed_clause_present,
@@ -4730,6 +6046,97 @@ fn test_s57_skill_swap_does_not_lose_its_own_prankster_escape() {
     ));
 }
 
+/// Skill Swap can give a later mover Prankster before it acts. Its visible move
+/// order is then priority-driven, not evidence that its raw Speed exceeds the next
+/// mover's. The reaction scan must suppress that comparison for the recipient.
+#[test]
+fn test_skill_swap_granting_prankster_skips_later_speed_inference() {
+    let mut sableye = no_speed_escape_mon(Species::Sableye);
+    sableye.possible_abilities = Unknown::Known(Ability::Prankster);
+    sableye.possible_original_abilities = Unknown::Known(Ability::Prankster);
+
+    let mut clefable = no_speed_escape_mon(Species::Clefable);
+    clefable.possible_abilities = Unknown::Known(Ability::Unaware);
+    clefable.possible_original_abilities = Unknown::Known(Ability::Unaware);
+    clefable.item = Unknown::Known(Item::Clefablite);
+    clefable.min_stats[5] = 85;
+    clefable.max_stats[5] = 85;
+
+    let mut pidgeot = no_speed_escape_mon(Species::PidgeotMega);
+    pidgeot.possible_abilities = Unknown::Known(Ability::NoGuard);
+    pidgeot.possible_original_abilities = Unknown::Known(Ability::NoGuard);
+    pidgeot.min_stats[5] = 190;
+    pidgeot.max_stats[5] = 190;
+
+    let state = battle_nvn(vec![sableye, clefable], vec![pidgeot]);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(
+        PokemonMove::SkillSwap,
+        poke_status_move(PokemonMove::SkillSwap),
+    );
+    move_dex.insert(
+        PokemonMove::CalmMind,
+        poke_status_move(PokemonMove::CalmMind),
+    );
+    move_dex.insert(
+        PokemonMove::Hurricane,
+        normal_physical_move(PokemonMove::Hurricane, 110),
+    );
+
+    let result = apply_ex(
+        state,
+        vec![
+            event_with(
+                EventKind::MoveUsed {
+                    user: p1(0),
+                    move_used: PokemonMove::SkillSwap,
+                    targets: vec![p1(1)],
+                },
+                vec![
+                    event(EventKind::AbilityRevealed {
+                        slot: p1(0),
+                        ability: Ability::Unaware,
+                    }),
+                    event(EventKind::AbilityRevealed {
+                        slot: p1(1),
+                        ability: Ability::Prankster,
+                    }),
+                ],
+            ),
+            event(EventKind::MoveUsed {
+                user: p1(1),
+                move_used: PokemonMove::CalmMind,
+                targets: vec![p1(1)],
+            }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Hurricane,
+                targets: vec![p1(0)],
+            }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(matches!(
+        result.p1_active_mons[1].item,
+        Unknown::Known(Item::Clefablite)
+    ));
+    assert!(
+        !result
+            .predicates
+            .iter()
+            .any(|clause| clause.iter().any(|lit| {
+                matches!(
+                    lit,
+                    Statement::SpeedComparison { fast_idx: 1, .. }
+                        | Statement::SpeedComparison { slow_idx: 1, .. }
+                )
+            })),
+        "a later mover whose ability was revealed/changed must not produce a raw-Speed comparison"
+    );
+}
+
 /// Choice Scarf is a speed-boosting item; its presence on the fast mon makes the
 /// SpeedComparison predicate too strong (unsound) → Pass 4 must add an escape disjunct.
 #[test]
@@ -4738,14 +6145,23 @@ fn test_pass4_choice_scarf_escape_on_fast_mon() {
     let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
     // Allow Choice Scarf on P2 (fast mon). Remove it from the exclusion list.
     p2_mon.item = Unknown::Not(vec![
-        Item::QuickClaw, Item::IronBall, Item::LaggingTail, Item::FullIncense,
+        Item::QuickClaw,
+        Item::IronBall,
+        Item::LaggingTail,
+        Item::FullIncense,
         // NOT excluding ChoiceScarf → it's possible
     ]);
 
     let state = battle_1v1(p1_mon, p2_mon);
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let result = apply_ex(
         state,
@@ -4756,13 +6172,24 @@ fn test_pass4_choice_scarf_escape_on_fast_mon() {
 
     // The clause for P2-first must include HasItem{ChoiceScarf, mon_idx=1} as escape.
     let has_scarf_escape = result.predicates.iter().any(|clause| {
-        let has_speed_cmp = clause.iter().any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }));
-        let has_scarf = clause.iter().any(|s| matches!(s,
-            Statement::HasItem { mon_idx: 1, item: Item::ChoiceScarf }
-        ));
+        let has_speed_cmp = clause
+            .iter()
+            .any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }));
+        let has_scarf = clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    mon_idx: 1,
+                    item: Item::ChoiceScarf
+                }
+            )
+        });
         has_speed_cmp && has_scarf
     });
-    assert!(has_scarf_escape, "Choice Scarf possible on fast mon → must add ChoiceScarf escape disjunct");
+    assert!(
+        has_scarf_escape,
+        "Choice Scarf possible on fast mon → must add ChoiceScarf escape disjunct"
+    );
 }
 
 // ── Pass 3: Multi-hit damage ──────────────────────────────────────────────────
@@ -4788,11 +6215,26 @@ fn test_pass3_multihit_2hits_no_contradiction() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::BulletSeed,
+                targets: vec![p1(0)],
+            },
             vec![
-                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(460) }),
-                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(422) }),
-                event(EventKind::HitCount { target: p1(0), hits: 2 }),
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(460),
+                }),
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(422),
+                }),
+                event(EventKind::HitCount {
+                    target: p1(0),
+                    hits: 2,
+                }),
             ],
         )],
         garchomp_dex(),
@@ -4804,11 +6246,18 @@ fn test_pass3_multihit_2hits_no_contradiction() {
     assert!(
         p2_r.min_pre_nature_stat[1] <= p2_r.max_pre_nature_stat[1],
         "Multi-hit must not invert Atk bounds (min {}, max {})",
-        p2_r.min_pre_nature_stat[1], p2_r.max_pre_nature_stat[1]
+        p2_r.min_pre_nature_stat[1],
+        p2_r.max_pre_nature_stat[1]
     );
     // Bounds must be within Garchomp's Atk range.
-    assert!(p2_r.min_pre_nature_stat[1] >= 135, "min BSV below Garchomp minimum");
-    assert!(p2_r.max_pre_nature_stat[1] <= 182, "max BSV above Garchomp maximum");
+    assert!(
+        p2_r.min_pre_nature_stat[1] >= 135,
+        "min BSV below Garchomp minimum"
+    );
+    assert!(
+        p2_r.max_pre_nature_stat[1] <= 182,
+        "max BSV above Garchomp maximum"
+    );
 
     // T3: Note on damage values — 40 and 38 are physically impossible from a 25 BP
     // Normal move with Atk ≤ 182 vs Def=100 (max achievable ≈ 22).  This test
@@ -4850,16 +6299,31 @@ fn test_s23_multihit_mixed_crit_keeps_true_atk_feasible() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::BulletSeed,
+                targets: vec![p1(0)],
+            },
             vec![
                 // Hit 1: non-crit, 33 damage (500 → 467), no nested Crit.
-                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(467) }),
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(467),
+                }),
                 // Hit 2: crit, 45 damage (467 → 422) — Crit nested under this hit's own DamageDealt.
                 event_with(
-                    EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(422) },
+                    EventKind::DamageDealt {
+                        max_hp: 0,
+                        target: p1(0),
+                        new_hp: PokemonHP::Number(422),
+                    },
                     vec![event(EventKind::Crit { target: p1(0) })],
                 ),
-                event(EventKind::HitCount { target: p1(0), hits: 2 }),
+                event(EventKind::HitCount {
+                    target: p1(0),
+                    hits: 2,
+                }),
             ],
         )],
         garchomp_dex(),
@@ -4899,15 +6363,34 @@ fn test_s23_multihit_heal_between_hits_keeps_true_atk_feasible() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::BulletSeed,
+                targets: vec![p1(0)],
+            },
             vec![
                 // Hit 1: 28 damage (500 → 472).
-                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(472) }),
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(472),
+                }),
                 // Berry-style heal on the target: 472 → 478.
-                event(EventKind::Healed { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(478) }),
+                event(EventKind::Healed {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(478),
+                }),
                 // Hit 2: 33 damage measured from the healed baseline (478 → 445).
-                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(445) }),
-                event(EventKind::HitCount { target: p1(0), hits: 2 }),
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(445),
+                }),
+                event(EventKind::HitCount {
+                    target: p1(0),
+                    hits: 2,
+                }),
             ],
         )],
         garchomp_dex(),
@@ -4966,11 +6449,26 @@ fn test_pass3_multihit_tighter_than_single_hit() {
     let multi_result = apply_ex(
         battle_1v1(p1_mon.clone(), p2_mon.clone()),
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::BulletSeed, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::BulletSeed,
+                targets: vec![p1(0)],
+            },
             vec![
-                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(472) }), // 28 dmg
-                event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(443) }), // 29 dmg
-                event(EventKind::HitCount { target: p1(0), hits: 2 }),
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(472),
+                }), // 28 dmg
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p1(0),
+                    new_hp: PokemonHP::Number(443),
+                }), // 29 dmg
+                event(EventKind::HitCount {
+                    target: p1(0),
+                    hits: 2,
+                }),
             ],
         )],
         garchomp_dex(),
@@ -4981,8 +6479,16 @@ fn test_pass3_multihit_tighter_than_single_hit() {
     let single_result = apply_ex(
         battle_1v1(p1_mon, p2_mon),
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Tackle, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(472) })], // 28 dmg
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(472),
+            })], // 28 dmg
         )],
         garchomp_dex(),
         move_dex_single,
@@ -4992,8 +6498,14 @@ fn test_pass3_multihit_tighter_than_single_hit() {
     let s = &single_result.p2_active_mons[0];
 
     // Sound: bounds must not be inverted.
-    assert!(m.min_pre_nature_stat[1] <= m.max_pre_nature_stat[1], "multi-hit bounds inverted");
-    assert!(s.min_pre_nature_stat[1] <= s.max_pre_nature_stat[1], "single-hit bounds inverted");
+    assert!(
+        m.min_pre_nature_stat[1] <= m.max_pre_nature_stat[1],
+        "multi-hit bounds inverted"
+    );
+    assert!(
+        s.min_pre_nature_stat[1] <= s.max_pre_nature_stat[1],
+        "single-hit bounds inverted"
+    );
 
     // Multi-hit intersection must be STRICTLY tighter than single-hit alone.
     // The second hit (29 dmg) raises the min beyond what the first hit (28 dmg) constrains.
@@ -5001,14 +6513,16 @@ fn test_pass3_multihit_tighter_than_single_hit() {
         m.min_pre_nature_stat[1] > s.min_pre_nature_stat[1],
         "Multi-hit must raise min Atk BSV higher than single-hit: \
          multi min={} should be > single min={}",
-        m.min_pre_nature_stat[1], s.min_pre_nature_stat[1],
+        m.min_pre_nature_stat[1],
+        s.min_pre_nature_stat[1],
     );
     // Max should not be wider (the intersection can only be the same or tighter).
     assert!(
         m.max_pre_nature_stat[1] <= s.max_pre_nature_stat[1],
         "Multi-hit must not produce a wider max Atk BSV than single-hit: \
          multi max={}, single max={}",
-        m.max_pre_nature_stat[1], s.max_pre_nature_stat[1],
+        m.max_pre_nature_stat[1],
+        s.max_pre_nature_stat[1],
     );
 }
 
@@ -5074,18 +6588,28 @@ fn test_learnset_keeps_both_when_move_is_legal_for_both() {
 
     let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
     learnset_dex.insert(Species::Garchomp, {
-        let mut s = HashSet::new(); s.insert(PokemonMove::Earthquake); s
+        let mut s = HashSet::new();
+        s.insert(PokemonMove::Earthquake);
+        s
     });
     learnset_dex.insert(Species::Tyranitar, {
-        let mut s = HashSet::new(); s.insert(PokemonMove::Earthquake); s
+        let mut s = HashSet::new();
+        s.insert(PokemonMove::Earthquake);
+        s
     });
 
-    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+    let config = InferenceConfig {
+        learnset_dex,
+        ev_total_cap: None,
+        ..Default::default()
+    };
 
     let result = apply_with_config(
         state,
         vec![event(EventKind::MoveUsed {
-            user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)],
+            user: p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets: vec![p1(0)],
         })],
         HashMap::new(),
         HashMap::new(),
@@ -5111,16 +6635,24 @@ fn test_learnset_keeps_species_when_no_data() {
     // Learnset: only Garchomp has data; Alakazam is absent → keep both.
     let mut learnset_dex: HashMap<Species, HashSet<PokemonMove>> = HashMap::new();
     learnset_dex.insert(Species::Garchomp, {
-        let mut s = HashSet::new(); s.insert(PokemonMove::Earthquake); s
+        let mut s = HashSet::new();
+        s.insert(PokemonMove::Earthquake);
+        s
     });
     // Alakazam absent → keep it regardless of move.
 
-    let config = InferenceConfig { learnset_dex, ev_total_cap: None, ..Default::default() };
+    let config = InferenceConfig {
+        learnset_dex,
+        ev_total_cap: None,
+        ..Default::default()
+    };
 
     let result = apply_with_config(
         state,
         vec![event(EventKind::MoveUsed {
-            user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)],
+            user: p2(0),
+            move_used: PokemonMove::Earthquake,
+            targets: vec![p1(0)],
         })],
         HashMap::new(),
         HashMap::new(),
@@ -5146,7 +6678,8 @@ fn test_learnset_keeps_species_when_no_data() {
 fn test_ev_cap_tightens_remaining_stats() {
     use crate::state::pokemon::Nature;
 
-    let mut mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     mon.possible_natures = Unknown::Known(Nature::Hardy); // neutral
 
     // Pin Atk (stat 1) to exactly 175: requires EV≈196 (31 IVs, neutral, lv50 Garchomp base=130).
@@ -5178,7 +6711,10 @@ fn test_ev_cap_tightens_remaining_stats() {
     // Atk and Def EVs should be pinned near their expected values.
     assert_eq!(mon.min_evs[1], 196, "Atk minEV must be 196 for stat=175");
     assert_eq!(mon.max_evs[1], 196, "Atk maxEV must be 196 for stat=175");
-    assert!(mon.min_evs[2] <= 116, "Def minEV must be ≤ 116 for stat≥130");
+    assert!(
+        mon.min_evs[2] <= 116,
+        "Def minEV must be ≤ 116 for stat≥130"
+    );
 
     // After cap (budget = 510 - 196 - 116 - 0..= 198), other stats must have maxEV ≤ 196.
     // (Nearest EV_LATTICE value ≤ 198 is 196.)
@@ -5200,7 +6736,11 @@ fn test_ev_cap_tightens_remaining_stats() {
 
     // Soundness check: min ≤ max for all stats.
     for i in 0..6 {
-        assert!(mon.min_evs[i] <= mon.max_evs[i], "EV bounds inverted for stat {}", i);
+        assert!(
+            mon.min_evs[i] <= mon.max_evs[i],
+            "EV bounds inverted for stat {}",
+            i
+        );
     }
 }
 
@@ -5209,7 +6749,8 @@ fn test_ev_cap_tightens_remaining_stats() {
 fn test_ev_cap_no_tightening_when_evs_low() {
     use crate::state::pokemon::Nature;
 
-    let mut mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     mon.possible_natures = Unknown::Known(Nature::Hardy);
 
     // Don't pin stats — everything stays at default wide range.
@@ -5227,8 +6768,17 @@ fn test_ev_cap_no_tightening_when_evs_low() {
 
     // When min_evs are all 0, budget per stat = 510 - 0 = 510 ≥ 252 → no cap tightening.
     for i in 0..6 {
-        assert!(mon.max_evs[i] <= 252, "maxEV must never exceed 252 (got {} for stat {})", mon.max_evs[i], i);
-        assert!(mon.min_evs[i] <= mon.max_evs[i], "EV bounds inverted for stat {}", i);
+        assert!(
+            mon.max_evs[i] <= 252,
+            "maxEV must never exceed 252 (got {} for stat {})",
+            mon.max_evs[i],
+            i
+        );
+        assert!(
+            mon.min_evs[i] <= mon.max_evs[i],
+            "EV bounds inverted for stat {}",
+            i
+        );
     }
 }
 
@@ -5261,7 +6811,10 @@ fn test_ability_revealed_within_set_narrows_to_known() {
     let state = battle_with_p2(vec![mon]);
     let result = apply(
         state,
-        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::SandVeil })],
+        vec![event(EventKind::AbilityRevealed {
+            slot: p2(0),
+            ability: Ability::SandVeil,
+        })],
     );
     assert_eq!(
         result.p2_active_mons[0].possible_abilities,
@@ -5279,7 +6832,10 @@ fn test_ability_revealed_outside_set_overwrites_to_known() {
     // Levitate is not in Garchomp's slot set — simulates a Trace/Mummy/etc.
     let result = apply(
         state,
-        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Levitate })],
+        vec![event(EventKind::AbilityRevealed {
+            slot: p2(0),
+            ability: Ability::Levitate,
+        })],
     );
     assert_eq!(
         result.p2_active_mons[0].possible_abilities,
@@ -5305,7 +6861,10 @@ fn test_ability_revealed_previously_excluded_overwrites_to_known() {
 
     let result = apply(
         state,
-        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Drizzle })],
+        vec![event(EventKind::AbilityRevealed {
+            slot: p2(0),
+            ability: Ability::Drizzle,
+        })],
     );
     assert_eq!(
         result.p2_active_mons[0].possible_abilities,
@@ -5325,7 +6884,10 @@ fn test_ability_revealed_conflicting_known_overwrites_to_known() {
 
     let result = apply(
         state,
-        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Levitate })],
+        vec![event(EventKind::AbilityRevealed {
+            slot: p2(0),
+            ability: Ability::Levitate,
+        })],
     );
     assert_eq!(
         result.p2_active_mons[0].possible_abilities,
@@ -5348,7 +6910,8 @@ fn contact_physical_move(name: PokemonMove, bp: u16) -> MoveData {
 #[test]
 fn test_contact_absence_excludes_rocky_helmet() {
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         // Our mon: item Known(None) — no Protective Pads; ability Known(SandVeil) — no LongReach
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
@@ -5358,13 +6921,24 @@ fn test_contact_absence_excludes_rocky_helmet() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, contact_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        contact_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Earthquake, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(50) })],
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(50),
+            })],
             // No ItemRevealed{RockyHelmet} — helmet is absent.
         )],
         garchomp_dex(),
@@ -5386,7 +6960,8 @@ fn test_contact_absence_excludes_rocky_helmet() {
 #[test]
 fn test_s21_no_helmet_exclusion_under_magic_room() {
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
         m
@@ -5397,13 +6972,24 @@ fn test_s21_no_helmet_exclusion_under_magic_room() {
     state.pseudo_weather_turns = vec![Unknown::Known(3)];
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, contact_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        contact_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Earthquake, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(50) })],
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(50),
+            })],
         )],
         garchomp_dex(),
         move_dex,
@@ -5420,7 +7006,8 @@ fn test_s21_no_helmet_exclusion_under_magic_room() {
 #[test]
 fn test_s21_no_life_orb_exclusion_under_magic_room() {
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
         m
@@ -5433,13 +7020,24 @@ fn test_s21_no_life_orb_exclusion_under_magic_room() {
     state.pseudo_weather_turns = vec![Unknown::Known(3)];
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Earthquake, targets: vec![p1(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Number(120) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Earthquake,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Number(120),
+            })],
         )],
         garchomp_dex(),
         move_dex,
@@ -5471,12 +7069,19 @@ fn test_powder_immunity_reveals_safety_goggles_or_overcoat() {
     let state = battle_with_p2(vec![p2_mon]);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::PowderSnow, powder_status_move(PokemonMove::PowderSnow));
+    move_dex.insert(
+        PokemonMove::PowderSnow,
+        powder_status_move(PokemonMove::PowderSnow),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::PowderSnow, targets: vec![p2(0)] },
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::PowderSnow,
+                targets: vec![p2(0)],
+            },
             vec![event(EventKind::Immune { target: p2(0) })],
         )],
         HashMap::new(),
@@ -5487,10 +7092,18 @@ fn test_powder_immunity_reveals_safety_goggles_or_overcoat() {
     // Clause should contain BOTH SafetyGoggles and Overcoat as a 2-element disjunction
     // (mon_idx 0: battle_with_p2 has empty p1_active, so p2(0) is flat index 0).
     let has_sg_and_overcoat = pred.iter().any(|clause| {
-        clause.contains(&Statement::HasItem { mon_idx: 0, item: Item::SafetyGoggles })
-            && clause.contains(&Statement::HasAbility { mon_idx: 0, ability: Ability::Overcoat })
+        clause.contains(&Statement::HasItem {
+            mon_idx: 0,
+            item: Item::SafetyGoggles,
+        }) && clause.contains(&Statement::HasAbility {
+            mon_idx: 0,
+            ability: Ability::Overcoat,
+        })
     });
-    assert!(has_sg_and_overcoat, "Should emit [SafetyGoggles ∨ Overcoat] clause on powder immunity");
+    assert!(
+        has_sg_and_overcoat,
+        "Should emit [SafetyGoggles ∨ Overcoat] clause on powder immunity"
+    );
 }
 
 /// A powder move that `MoveFailed` (not `Immune`) must NOT emit a sand/powder-immunity
@@ -5506,12 +7119,19 @@ fn test_powder_immunity_not_inferred_from_move_failed() {
     let state = battle_with_p2(vec![p2_mon]);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::PowderSnow, powder_status_move(PokemonMove::PowderSnow));
+    move_dex.insert(
+        PokemonMove::PowderSnow,
+        powder_status_move(PokemonMove::PowderSnow),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::PowderSnow, targets: vec![p2(0)] },
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::PowderSnow,
+                targets: vec![p2(0)],
+            },
             vec![event(EventKind::MoveFailed { slot: p2(0) })],
         )],
         HashMap::new(),
@@ -5519,11 +7139,18 @@ fn test_powder_immunity_not_inferred_from_move_failed() {
     );
 
     let has_powder_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(
-            s,
-            Statement::HasItem { item: Item::SafetyGoggles, .. }
-                | Statement::HasAbility { ability: Ability::Overcoat, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Overcoat,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_powder_clause,
@@ -5540,7 +7167,8 @@ fn test_powder_immunity_not_inferred_from_move_failed() {
 #[test]
 fn test_prankster_immunity_from_dark_type_bounce() {
     let mut p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.possible_types = Unknown::Known(vec![PokemonType::Dark]);
         // The pass requires the target's ability to be Known and non-immunity-granting
         // (an unknown ability could be an absorb ability or Good as Gold).
@@ -5553,12 +7181,19 @@ fn test_prankster_immunity_from_dark_type_bounce() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::WillOWisp, poke_status_move(PokemonMove::WillOWisp));
+    move_dex.insert(
+        PokemonMove::WillOWisp,
+        poke_status_move(PokemonMove::WillOWisp),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::WillOWisp, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::WillOWisp,
+                targets: vec![p1(0)],
+            },
             vec![event(EventKind::Immune { target: p1(0) })],
         )],
         HashMap::new(),
@@ -5577,19 +7212,27 @@ fn test_prankster_immunity_from_dark_type_bounce() {
 /// already-statused targets, terrain blocks, and Dazzling-class blocks.
 #[test]
 fn test_prankster_not_inferred_from_move_failed() {
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     p1_mon.possible_types = Unknown::Known(vec![PokemonType::Dark]);
     p1_mon.possible_abilities = Unknown::Known(Ability::SandVeil);
     let p2_mon = unknown_mon_species(Species::Garchomp);
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::WillOWisp, poke_status_move(PokemonMove::WillOWisp));
+    move_dex.insert(
+        PokemonMove::WillOWisp,
+        poke_status_move(PokemonMove::WillOWisp),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::WillOWisp, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::WillOWisp,
+                targets: vec![p1(0)],
+            },
             vec![event(EventKind::MoveFailed { slot: p1(0) })],
         )],
         HashMap::new(),
@@ -5608,19 +7251,27 @@ fn test_prankster_not_inferred_from_move_failed() {
 /// Good as Gold) — must NOT force Prankster.
 #[test]
 fn test_prankster_not_inferred_when_target_ability_unknown() {
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.possible_types = Unknown::Known(vec![PokemonType::Dark]);
     // possible_abilities stays Not([]) — fully unknown.
     let p2_mon = unknown_mon_species(Species::Garchomp);
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::WillOWisp, poke_status_move(PokemonMove::WillOWisp));
+    move_dex.insert(
+        PokemonMove::WillOWisp,
+        poke_status_move(PokemonMove::WillOWisp),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::WillOWisp, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::WillOWisp,
+                targets: vec![p1(0)],
+            },
             vec![event(EventKind::Immune { target: p1(0) })],
         )],
         HashMap::new(),
@@ -5639,7 +7290,8 @@ fn test_prankster_not_inferred_when_target_ability_unknown() {
 /// Prankster — must NOT force it.
 #[test]
 fn test_prankster_not_inferred_for_dual_type_immunity() {
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     p1_mon.possible_types = Unknown::Known(vec![PokemonType::Dark, PokemonType::Ground]);
     p1_mon.possible_abilities = Unknown::Known(Ability::SandVeil);
     let p2_mon = unknown_mon_species(Species::Garchomp);
@@ -5653,7 +7305,11 @@ fn test_prankster_not_inferred_for_dual_type_immunity() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::ThunderWave, targets: vec![p1(0)] },
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::ThunderWave,
+                targets: vec![p1(0)],
+            },
             vec![event(EventKind::Immune { target: p1(0) })],
         )],
         HashMap::new(),
@@ -5673,7 +7329,8 @@ fn test_prankster_not_inferred_for_dual_type_immunity() {
 /// An unexplained EOT heal on a non-Poison opponent should emit [Leftovers].
 #[test]
 fn test_eot_heal_reveals_leftovers() {
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
     p2_mon.hp = PokemonHP::Percent(94); // not full — heal is visible
 
@@ -5683,7 +7340,11 @@ fn test_eot_heal_reveals_leftovers() {
         state,
         vec![event_with(
             EventKind::EndOfTurn,
-            vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(100) })],
+            vec![event(EventKind::Healed {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(100),
+            })],
         )],
     );
 
@@ -5704,7 +7365,8 @@ fn test_eot_heal_reveals_leftovers() {
 /// An unexplained EOT heal on a Poison-type opponent should emit [Leftovers ∨ BlackSludge].
 #[test]
 fn test_eot_heal_poison_type_includes_black_sludge() {
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Poison]);
     p2_mon.hp = PokemonHP::Percent(90);
 
@@ -5714,21 +7376,33 @@ fn test_eot_heal_poison_type_includes_black_sludge() {
         state,
         vec![event_with(
             EventKind::EndOfTurn,
-            vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(100) })],
+            vec![event(EventKind::Healed {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(100),
+            })],
         )],
     );
 
     let has_joint_clause = result.predicates.iter().any(|clause| {
-        clause.contains(&Statement::HasItem { mon_idx: 0, item: Item::Leftovers })
-            && clause.contains(&Statement::HasItem { mon_idx: 0, item: Item::BlackSludge })
+        clause.contains(&Statement::HasItem {
+            mon_idx: 0,
+            item: Item::Leftovers,
+        }) && clause.contains(&Statement::HasItem {
+            mon_idx: 0,
+            item: Item::BlackSludge,
+        })
     });
-    assert!(has_joint_clause, "Poison-type EOT heal should emit [Leftovers ∨ BlackSludge]");
+    assert!(
+        has_joint_clause,
+        "Poison-type EOT heal should emit [Leftovers ∨ BlackSludge]"
+    );
 }
 
 // ── Phase 5: Guaranteed-status absence ───────────────────────────────────────
 
 fn guaranteed_burn_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
-    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
+    use crate::state::dex_data::{HitEffect, PokemonSecondaryEffect};
     let mut md = normal_physical_move(name, bp);
     md.secondaries = vec![PokemonSecondaryEffect {
         chance: 100,
@@ -5747,13 +7421,15 @@ fn guaranteed_burn_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
 fn test_guaranteed_status_absence_emits_preventer_clause() {
     // Use empty dex so possible_abilities = Not([]) — keeps all prevention abilities in the
     // predicate clause (Garchomp's Possibly([SandVeil,RoughSkin]) would prune them all via BCP).
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     // Dragon/Ground — not Fire-type, not already statused, no Substitute.
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
 
     // Our attacking mon (p1): known, no special properties.
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
         m
@@ -5769,8 +7445,16 @@ fn test_guaranteed_status_absence_emits_preventer_clause() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Ember, targets: vec![p2(0)] },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(80) })],
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Ember,
+                targets: vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
             // No StatusInflicted — burn was prevented.
         )],
         garchomp_dex(),
@@ -5779,23 +7463,42 @@ fn test_guaranteed_status_absence_emits_preventer_clause() {
 
     // Should emit a clause containing burn-prevention abilities (WaterVeil, WaterBubble, etc.)
     let has_preventer_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::WaterVeil, .. }
-            | Statement::HasAbility { ability: Ability::WaterBubble, .. }
-            | Statement::HasAbility { ability: Ability::ThermalExchange, .. }
-            | Statement::HasItem { item: Item::CovertCloak, .. }))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasAbility {
+                    ability: Ability::WaterVeil,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::WaterBubble,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::ThermalExchange,
+                    ..
+                } | Statement::HasItem {
+                    item: Item::CovertCloak,
+                    ..
+                }
+            )
+        })
     });
-    assert!(has_preventer_clause, "Should emit burn-preventer clause when guaranteed burn doesn't land");
+    assert!(
+        has_preventer_clause,
+        "Should emit burn-preventer clause when guaranteed burn doesn't land"
+    );
 }
 
 /// A target KO'd by the very hit receives no secondary status — the absence is fully
 /// explained by the faint, so NO preventer clause may be emitted (it would be unsound).
 #[test]
 fn test_guaranteed_status_absence_skipped_on_fainted_target() {
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
 
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
         m
@@ -5811,10 +7514,18 @@ fn test_guaranteed_status_absence_skipped_on_fainted_target() {
     let result = apply_ex(
         state,
         vec![event_with(
-            EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Ember, targets: vec![p2(0)] },
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Ember,
+                targets: vec![p2(0)],
+            },
             vec![
                 // The hit KOs the target — no burn can land.
-                event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(0) }),
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p2(0),
+                    new_hp: PokemonHP::Percent(0),
+                }),
                 event(EventKind::Faint { slot: p2(0) }),
             ],
         )],
@@ -5823,8 +7534,18 @@ fn test_guaranteed_status_absence_skipped_on_fainted_target() {
     );
 
     let has_preventer_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::WaterVeil, .. }
-            | Statement::HasItem { item: Item::CovertCloak, .. }))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasAbility {
+                    ability: Ability::WaterVeil,
+                    ..
+                } | Statement::HasItem {
+                    item: Item::CovertCloak,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_preventer_clause,
@@ -5879,19 +7600,22 @@ fn test_mega_evolution_real_species_change_does_not_panic() {
     state.p2_has_mega = true;
 
     let mut dex = HashMap::new();
-    dex.insert(Species::GarchompMega, PokemonData {
-        species: Species::GarchompMega,
-        types: vec![PokemonType::Dragon, PokemonType::Ground],
-        base_stats: [108, 170, 115, 120, 95, 92],
-        weight: 950,
-        primary_ability: Some(Ability::SandForce),
-        abilities: vec![Ability::SandForce],
-        base_species: Some(Species::Garchomp),
-        forme: None,
-        required_item: None,
-        battle_only: Some(Species::Garchomp),
-        default_gender: PokemonGender::Male,
-    });
+    dex.insert(
+        Species::GarchompMega,
+        PokemonData {
+            species: Species::GarchompMega,
+            types: vec![PokemonType::Dragon, PokemonType::Ground],
+            base_stats: [108, 170, 115, 120, 95, 92],
+            weight: 950,
+            primary_ability: Some(Ability::SandForce),
+            abilities: vec![Ability::SandForce],
+            base_species: Some(Species::Garchomp),
+            forme: None,
+            required_item: None,
+            battle_only: Some(Species::Garchomp),
+            default_gender: PokemonGender::Male,
+        },
+    );
 
     let result = apply_ex(
         state,
@@ -5917,6 +7641,67 @@ fn test_mega_evolution_real_species_change_does_not_panic() {
         "ability set must be recomputed from the mega species dex entry, got {:?}",
         mon.possible_abilities
     );
+}
+
+/// If Skill Swap (or another live ability replacement) happened before Mega
+/// Evolution, the simulator keeps the pre-swap ability in `original_ability` and
+/// restores it on switch-out. Mega changes only the live ability in that case.
+#[test]
+fn test_mega_preserves_pre_swap_switch_out_ability() {
+    use crate::state::pokemon::PokemonGender;
+
+    let p1_mon = unknown_mon_species(Species::Snorlax);
+    let mut p2_mon = unknown_mon_species(Species::Garchomp);
+    p2_mon.possible_original_abilities = Unknown::Known(Ability::Sharpness);
+    p2_mon.possible_abilities = Unknown::Known(Ability::Moxie);
+    p2_mon.ability_changed_on_field = true;
+    let mut state = battle_1v1(p1_mon, p2_mon);
+    state.p2_has_mega = true;
+
+    let mut dex = HashMap::new();
+    dex.insert(
+        Species::GarchompMega,
+        PokemonData {
+            species: Species::GarchompMega,
+            types: vec![PokemonType::Dragon, PokemonType::Ground],
+            base_stats: [108, 170, 115, 120, 95, 92],
+            weight: 950,
+            primary_ability: Some(Ability::SandForce),
+            abilities: vec![Ability::SandForce],
+            base_species: Some(Species::Garchomp),
+            forme: None,
+            required_item: None,
+            battle_only: Some(Species::Garchomp),
+            default_gender: PokemonGender::Male,
+        },
+    );
+
+    let mut result = apply_ex(
+        state,
+        vec![event(EventKind::MegaEvolution {
+            slot: p2(0),
+            into: Species::GarchompMega,
+        })],
+        dex,
+        HashMap::new(),
+    );
+    let mega = &result.p2_active_mons[0];
+    assert!(
+        matches!(mega.possible_abilities, Unknown::Possibly(ref v) if v == &vec![Ability::SandForce])
+    );
+    assert!(matches!(
+        mega.possible_original_abilities,
+        Unknown::Known(Ability::Sharpness)
+    ));
+    assert!(mega.ability_changed_on_field);
+
+    apply_switch_out_reset(&mut result, &p2(0));
+    let reset = &result.p2_active_mons[0];
+    assert!(matches!(
+        reset.possible_abilities,
+        Unknown::Known(Ability::Sharpness)
+    ));
+    assert!(!reset.ability_changed_on_field);
 }
 
 /// Regression (TODO.md "SpeedComparison raises min above max" / Mega Evolution): a
@@ -5953,26 +7738,32 @@ fn test_mega_evolution_purges_stale_speed_comparison() {
     }]);
 
     let mut dex = HashMap::new();
-    dex.insert(Species::GarchompMega, PokemonData {
-        species: Species::GarchompMega,
-        types: vec![PokemonType::Dragon, PokemonType::Ground],
-        // Base Spe 150 (vs. Garchomp's real 102) — deliberately exaggerated so the
-        // post-mega min_stats[5] floor is guaranteed to exceed the stale 100 cap.
-        base_stats: [108, 170, 115, 120, 95, 150],
-        weight: 950,
-        primary_ability: Some(Ability::SandForce),
-        abilities: vec![Ability::SandForce],
-        base_species: Some(Species::Garchomp),
-        forme: None,
-        required_item: None,
-        battle_only: Some(Species::Garchomp),
-        default_gender: PokemonGender::Male,
-    });
+    dex.insert(
+        Species::GarchompMega,
+        PokemonData {
+            species: Species::GarchompMega,
+            types: vec![PokemonType::Dragon, PokemonType::Ground],
+            // Base Spe 150 (vs. Garchomp's real 102) — deliberately exaggerated so the
+            // post-mega min_stats[5] floor is guaranteed to exceed the stale 100 cap.
+            base_stats: [108, 170, 115, 120, 95, 150],
+            weight: 950,
+            primary_ability: Some(Ability::SandForce),
+            abilities: vec![Ability::SandForce],
+            base_species: Some(Species::Garchomp),
+            forme: None,
+            required_item: None,
+            battle_only: Some(Species::Garchomp),
+            default_gender: PokemonGender::Male,
+        },
+    );
 
     // Does not panic — this is the primary regression assertion.
     let result = apply_ex(
         state,
-        vec![event(EventKind::MegaEvolution { slot: p2(0), into: Species::GarchompMega })],
+        vec![event(EventKind::MegaEvolution {
+            slot: p2(0),
+            into: Species::GarchompMega,
+        })],
         dex,
         HashMap::new(),
     );
@@ -5981,7 +7772,8 @@ fn test_mega_evolution_purges_stale_speed_comparison() {
     assert!(
         mon.min_stats[5] <= mon.max_stats[5],
         "post-mega Spe bounds must stay consistent: min={} max={}",
-        mon.min_stats[5], mon.max_stats[5]
+        mon.min_stats[5],
+        mon.max_stats[5]
     );
     // The stale pre-mega cap must be gone — max Spe should reflect the new, much
     // faster base stat, not stay pinned at the old 100 cap.
@@ -5991,10 +7783,14 @@ fn test_mega_evolution_purges_stale_speed_comparison() {
         mon.max_stats[5]
     );
     assert!(
-        !result.predicates.iter().any(|clause| clause.iter().any(|lit| matches!(
-            lit,
-            Statement::SpeedComparison { slow_idx: 1, .. } | Statement::SpeedComparison { fast_idx: 1, .. }
-        ))),
+        !result
+            .predicates
+            .iter()
+            .any(|clause| clause.iter().any(|lit| matches!(
+                lit,
+                Statement::SpeedComparison { slow_idx: 1, .. }
+                    | Statement::SpeedComparison { fast_idx: 1, .. }
+            ))),
         "no SpeedComparison clause referencing the mega'd mon should survive; predicates = {:?}",
         result.predicates
     );
@@ -6054,32 +7850,38 @@ fn test_s41_mega_evolution_uses_post_mega_speed_for_same_turn_move_order() {
     state.p1_has_mega = true;
 
     let mut dex = HashMap::new();
-    dex.insert(Species::Tyranitar, PokemonData {
-        species: Species::Tyranitar,
-        types: vec![PokemonType::Rock, PokemonType::Dark],
-        base_stats: [100, 134, 110, 95, 100, 80], // Spe 80 (test value, not the real dex)
-        weight: 2020,
-        primary_ability: Some(Ability::SandStream),
-        abilities: vec![Ability::SandStream, Ability::Unnerve],
-        base_species: None,
-        forme: None,
-        required_item: None,
-        battle_only: None,
-        default_gender: PokemonGender::Male,
-    });
-    dex.insert(Species::TyranitarMega, PokemonData {
-        species: Species::TyranitarMega,
-        types: vec![PokemonType::Rock, PokemonType::Dark],
-        base_stats: [100, 164, 150, 95, 120, 120], // Spe 120 (test value) — the real jump
-        weight: 2550,
-        primary_ability: Some(Ability::SandStream),
-        abilities: vec![Ability::SandStream],
-        base_species: Some(Species::Tyranitar),
-        forme: None,
-        required_item: Some("Tyranitarite".to_string()),
-        battle_only: Some(Species::Tyranitar),
-        default_gender: PokemonGender::Male,
-    });
+    dex.insert(
+        Species::Tyranitar,
+        PokemonData {
+            species: Species::Tyranitar,
+            types: vec![PokemonType::Rock, PokemonType::Dark],
+            base_stats: [100, 134, 110, 95, 100, 80], // Spe 80 (test value, not the real dex)
+            weight: 2020,
+            primary_ability: Some(Ability::SandStream),
+            abilities: vec![Ability::SandStream, Ability::Unnerve],
+            base_species: None,
+            forme: None,
+            required_item: None,
+            battle_only: None,
+            default_gender: PokemonGender::Male,
+        },
+    );
+    dex.insert(
+        Species::TyranitarMega,
+        PokemonData {
+            species: Species::TyranitarMega,
+            types: vec![PokemonType::Rock, PokemonType::Dark],
+            base_stats: [100, 164, 150, 95, 120, 120], // Spe 120 (test value) — the real jump
+            weight: 2550,
+            primary_ability: Some(Ability::SandStream),
+            abilities: vec![Ability::SandStream],
+            base_species: Some(Species::Tyranitar),
+            forme: None,
+            required_item: Some("Tyranitarite".to_string()),
+            battle_only: Some(Species::Tyranitar),
+            default_gender: PokemonGender::Male,
+        },
+    );
 
     let mut move_dex = HashMap::new();
     move_dex.insert(PokemonMove::Growl, {
@@ -6092,10 +7894,25 @@ fn test_s41_mega_evolution_uses_post_mega_speed_for_same_turn_move_order() {
     // (only sound post-mega: 120-base Spe > 150? no — post-mega Spe here is 172,
     // computed below, comfortably above p1_other's 150), then p1_other.
     let events = vec![
-        event(EventKind::MegaEvolution { slot: p1(1), into: Species::TyranitarMega }),
-        event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Growl, targets: vec![p1(0)] }),
-        event(EventKind::MoveUsed { user: p1(1), move_used: PokemonMove::Growl, targets: vec![p2(1)] }),
-        event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Growl, targets: vec![p2(0)] }),
+        event(EventKind::MegaEvolution {
+            slot: p1(1),
+            into: Species::TyranitarMega,
+        }),
+        event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Growl,
+            targets: vec![p1(0)],
+        }),
+        event(EventKind::MoveUsed {
+            user: p1(1),
+            move_used: PokemonMove::Growl,
+            targets: vec![p2(1)],
+        }),
+        event(EventKind::MoveUsed {
+            user: p1(0),
+            move_used: PokemonMove::Growl,
+            targets: vec![p2(0)],
+        }),
     ];
 
     // Must not panic — this is the primary regression assertion.
@@ -6105,7 +7922,8 @@ fn test_s41_mega_evolution_uses_post_mega_speed_for_same_turn_move_order() {
     assert!(
         mon.min_stats[5] <= mon.max_stats[5],
         "post-mega Spe bounds must stay consistent: min={} max={}",
-        mon.min_stats[5], mon.max_stats[5]
+        mon.min_stats[5],
+        mon.max_stats[5]
     );
     // Post-mega Spe (base 120, iv 31, ev 252, lvl 50, neutral) = 172 — must not be
     // corrupted down toward the pre-mega 132 by a stale pre-mega SpeedComparison.
@@ -6126,19 +7944,22 @@ fn test_forme_change_real_species_change_does_not_panic() {
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut dex = HashMap::new();
-    dex.insert(Species::GarchompMega, PokemonData {
-        species: Species::GarchompMega,
-        types: vec![PokemonType::Dragon, PokemonType::Ground],
-        base_stats: [108, 170, 115, 120, 95, 92],
-        weight: 950,
-        primary_ability: Some(Ability::SandForce),
-        abilities: vec![Ability::SandForce],
-        base_species: Some(Species::Garchomp),
-        forme: None,
-        required_item: None,
-        battle_only: Some(Species::Garchomp),
-        default_gender: PokemonGender::Male,
-    });
+    dex.insert(
+        Species::GarchompMega,
+        PokemonData {
+            species: Species::GarchompMega,
+            types: vec![PokemonType::Dragon, PokemonType::Ground],
+            base_stats: [108, 170, 115, 120, 95, 92],
+            weight: 950,
+            primary_ability: Some(Ability::SandForce),
+            abilities: vec![Ability::SandForce],
+            base_species: Some(Species::Garchomp),
+            forme: None,
+            required_item: None,
+            battle_only: Some(Species::Garchomp),
+            default_gender: PokemonGender::Male,
+        },
+    );
 
     let result = apply_ex(
         state,
@@ -6176,11 +7997,12 @@ fn test_damage_dealt_records_delta() {
         state,
         vec![event_with(
             EventKind::MoveUsed {
-                user:      p1(0),
+                user: p1(0),
                 move_used: PokemonMove::Ember,
-                targets:   vec![p2(0)],
+                targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80), // old=100, new=80 → delta=20
             })],
@@ -6220,9 +8042,9 @@ fn test_life_orb_not_excluded_without_damage() {
     let result = apply_ex(
         state,
         vec![event(EventKind::MoveUsed {
-            user:      p2(0),
+            user: p2(0),
             move_used: PokemonMove::Earthquake,
-            targets:   vec![p1(0)],
+            targets: vec![p1(0)],
             // No DamageDealt child — the move missed.
         })],
         HashMap::new(),
@@ -6250,11 +8072,15 @@ fn test_life_orb_not_excluded_without_damage() {
         state2,
         vec![event_with(
             EventKind::MoveUsed {
-                user:      p2(0),
+                user: p2(0),
                 move_used: PokemonMove::Earthquake,
-                targets:   vec![p1(0)],
+                targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(80) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
         )],
         HashMap::new(),
         move_dex2,
@@ -6279,15 +8105,16 @@ fn test_life_orb_not_excluded_without_damage() {
 /// A direct unit test is the only way to validate the reset function itself.
 #[test]
 fn test_switch_out_clears_boosts_and_volatiles() {
-    use crate::state::pokemon::VolatileStatusState;
     use crate::state::dex_data::VolatileStatus;
+    use crate::state::pokemon::VolatileStatusState;
 
     let mut p2_mon = unknown_mon();
     // Set up field-state that apply_switch_out_reset is responsible for clearing.
     p2_mon.boosts = [3, 2, 1, -1, 0, 0, 0];
-    p2_mon.volatiles = vec![
-        VolatileStatusState::TurnStatus(VolatileStatus::Confusion, 3),
-    ];
+    p2_mon.volatiles = vec![VolatileStatusState::TurnStatus(
+        VolatileStatus::Confusion,
+        3,
+    )];
     p2_mon.status = Some(Status::ToxicPoison(4)); // tier-4 toxic
 
     let mut state = battle_with_p2(vec![p2_mon]);
@@ -6296,11 +8123,18 @@ fn test_switch_out_clears_boosts_and_volatiles() {
     apply_switch_out_reset(&mut state, &p2(0));
 
     let mon = &state.p2_active_mons[0];
-    assert_eq!(mon.boosts, [0i8; 7], "apply_switch_out_reset must zero all boosts");
-    assert!(mon.volatiles.is_empty(), "apply_switch_out_reset must clear all volatiles");
+    assert_eq!(
+        mon.boosts, [0i8; 7],
+        "apply_switch_out_reset must zero all boosts"
+    );
+    assert!(
+        mon.volatiles.is_empty(),
+        "apply_switch_out_reset must clear all volatiles"
+    );
     assert!(
         matches!(mon.status, Some(Status::ToxicPoison(0))),
-        "apply_switch_out_reset must reset ToxicPoison tier to 0, got {:?}", mon.status
+        "apply_switch_out_reset must reset ToxicPoison tier to 0, got {:?}",
+        mon.status
     );
 }
 
@@ -6333,29 +8167,28 @@ fn test_pass3_dir_a_assault_vest_defender_does_not_exclude_true_bsv() {
     // Lock every stat to 100; the oracle reads min_stats[3] for SpA.
     p1_mon.min_stats = [500, 100, 100, 100, 100, 100];
     p1_mon.max_stats = [500, 100, 100, 100, 100, 100];
-    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.item = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
     // P2: Garchomp defender with an artificially widened SpDef range that
     // includes the target BSV of 70 (below Garchomp's natural minimum of 90).
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp, &garchomp_dex(), 50,
-    );
-    p2_mon.hp                    = PokemonHP::Percent(100);
-    p2_mon.min_pre_nature_stat[4] = 50;   // force scan to start below the true threshold
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    p2_mon.hp = PokemonHP::Percent(100);
+    p2_mon.min_pre_nature_stat[4] = 50; // force scan to start below the true threshold
     p2_mon.max_pre_nature_stat[4] = 200;
-    p2_mon.min_stats[0]            = 200;  // fix max-HP to 200 for deterministic % → HP conversion
-    p2_mon.max_stats[0]            = 200;
-    p2_mon.possible_natures      = Unknown::Known(Nature::Hardy); // neutral → BSV == final stat
-    p2_mon.possible_abilities    = Unknown::Known(Ability::None); // no ability reduction
-    p2_mon.item                  = Unknown::Not(vec![]);          // AV not excluded
+    p2_mon.min_stats[0] = 200; // fix max-HP to 200 for deterministic % → HP conversion
+    p2_mon.max_stats[0] = 200;
+    p2_mon.possible_natures = Unknown::Known(Nature::Hardy); // neutral → BSV == final stat
+    p2_mon.possible_abilities = Unknown::Known(Ability::None); // no ability reduction
+    p2_mon.item = Unknown::Not(vec![]); // AV not excluded
 
     let state = battle_1v1(p1_mon, p2_mon);
 
     // Psychic: 100 BP Special Psychic-type move.
     // Neutral vs Dragon/Ground (Garchomp's types), no STAB for Normal-type Snorlax.
     let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
-    psychic.category     = MoveCategory::Special;
+    psychic.category = MoveCategory::Special;
     psychic.pokemon_type = PokemonType::Psychic;
     let mut move_dex = HashMap::new();
     move_dex.insert(PokemonMove::Psychic, psychic);
@@ -6364,12 +8197,13 @@ fn test_pass3_dir_a_assault_vest_defender_does_not_exclude_true_bsv() {
         state,
         vec![event_with(
             EventKind::MoveUsed {
-                user:      p1(0),
+                user: p1(0),
                 move_used: PokemonMove::Psychic,
-                targets:   vec![p2(0)],
+                targets: vec![p2(0)],
             },
             // P2 takes 20% damage (100 % → 80 %) — consistent with AV-boosted SpD = 70×1.5 = 105.
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -6411,17 +8245,16 @@ fn test_s47_pass3_dir_a_lethal_hit_does_not_exclude_weak_defense() {
     p1_mon.hp = PokemonHP::Number(500);
     p1_mon.min_stats = [500, 100, 100, 100, 100, 100];
     p1_mon.max_stats = [500, 100, 100, 100, 100, 100];
-    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.item = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp, &garchomp_dex(), 50,
-    );
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     p2_mon.hp = PokemonHP::Percent(100);
     p2_mon.min_stats[0] = 200; // fix max-HP to 200 for deterministic % → HP conversion
     p2_mon.max_stats[0] = 200;
     p2_mon.possible_abilities = Unknown::Known(Ability::None);
-    p2_mon.item               = Unknown::Known(Item::None);
+    p2_mon.item = Unknown::Known(Item::None);
     // Natural (unmodified) SpDef range from `from_opponent_species` — the floor this
     // test asserts must not be pushed up.
     let natural_min_spdef = p2_mon.min_pre_nature_stat[4];
@@ -6431,7 +8264,7 @@ fn test_s47_pass3_dir_a_lethal_hit_does_not_exclude_weak_defense() {
     // BP chosen so even at the defender's natural minimum SpDef, every roll overkills
     // a 200-HP mon (verified empirically against Garchomp's real SpDef base of 85).
     let mut heavy_special = normal_physical_move(PokemonMove::Psychic, 500);
-    heavy_special.category     = MoveCategory::Special;
+    heavy_special.category = MoveCategory::Special;
     heavy_special.pokemon_type = PokemonType::Psychic;
     let mut move_dex = HashMap::new();
     move_dex.insert(PokemonMove::Psychic, heavy_special);
@@ -6440,11 +8273,12 @@ fn test_s47_pass3_dir_a_lethal_hit_does_not_exclude_weak_defense() {
         state,
         vec![event_with(
             EventKind::MoveUsed {
-                user:      p1(0),
+                user: p1(0),
                 move_used: PokemonMove::Psychic,
-                targets:   vec![p2(0)],
+                targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(0),
             })],
@@ -6488,8 +8322,14 @@ fn test_pass4_custap_escape_at_low_hp() {
 
     let state = battle_1v1(p1_mon, p2_mon);
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     // P2 moves first (fast_idx = 1 in battle_1v1), then P1.
     let result = apply_ex(
@@ -6503,10 +8343,23 @@ fn test_pass4_custap_escape_at_low_hp() {
     // disjunct on the fast mon (mon_idx = 1 = P2).
     let has_custap_escape = result.predicates.iter().any(|clause| {
         let has_speed_cmp = clause.iter().any(|s| {
-            matches!(s, Statement::SpeedComparison { fast_idx: 1, slow_idx: 0, .. })
+            matches!(
+                s,
+                Statement::SpeedComparison {
+                    fast_idx: 1,
+                    slow_idx: 0,
+                    ..
+                }
+            )
         });
         let has_custap = clause.iter().any(|s| {
-            matches!(s, Statement::HasItem { mon_idx: 1, item: Item::CustapBerry })
+            matches!(
+                s,
+                Statement::HasItem {
+                    mon_idx: 1,
+                    item: Item::CustapBerry
+                }
+            )
         });
         has_speed_cmp && has_custap
     });
@@ -6520,7 +8373,7 @@ fn test_pass4_custap_escape_at_low_hp() {
 // ── Regression: S6 — Complete per-status preventer lists ─────────────────────
 
 fn guaranteed_paralysis_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
-    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
+    use crate::state::dex_data::{HitEffect, PokemonSecondaryEffect};
     let mut md = normal_physical_move(name, bp);
     md.pokemon_type = PokemonType::Electric; // Nuzzle-style Electric move
     md.secondaries = vec![PokemonSecondaryEffect {
@@ -6535,7 +8388,7 @@ fn guaranteed_paralysis_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
 }
 
 fn guaranteed_freeze_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
-    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
+    use crate::state::dex_data::{HitEffect, PokemonSecondaryEffect};
     let mut md = normal_physical_move(name, bp);
     md.secondaries = vec![PokemonSecondaryEffect {
         chance: 100,
@@ -6549,7 +8402,7 @@ fn guaranteed_freeze_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
 }
 
 fn guaranteed_poison_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
-    use crate::state::dex_data::{PokemonSecondaryEffect, HitEffect};
+    use crate::state::dex_data::{HitEffect, PokemonSecondaryEffect};
     let mut md = normal_physical_move(name, bp);
     md.secondaries = vec![PokemonSecondaryEffect {
         chance: 100,
@@ -6568,17 +8421,15 @@ fn guaranteed_poison_secondary_move(name: PokemonMove, bp: u16) -> MoveData {
 #[test]
 fn test_s6_shield_dust_explains_secondary_paralysis_absence() {
     // Empty dex → possible_abilities = Not([]) so ShieldDust is not pre-excluded.
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp,
-        &HashMap::new(),
-        50,
-    );
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     // Not Electric-type, not Ground-type (Ground is immune to Electric paralysis),
     // not already statused, no Substitute.
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon]);
 
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
         m
@@ -6599,7 +8450,8 @@ fn test_s6_shield_dust_explains_secondary_paralysis_absence() {
                 move_used: PokemonMove::Nuzzle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -6612,7 +8464,13 @@ fn test_s6_shield_dust_explains_secondary_paralysis_absence() {
     // The emitted clause must include ShieldDust (secondary-effect blocker).
     let has_shield_dust = result.predicates.iter().any(|clause| {
         clause.iter().any(|s| {
-            matches!(s, Statement::HasAbility { ability: Ability::ShieldDust, .. })
+            matches!(
+                s,
+                Statement::HasAbility {
+                    ability: Ability::ShieldDust,
+                    ..
+                }
+            )
         })
     });
     assert!(
@@ -6627,15 +8485,13 @@ fn test_s6_shield_dust_explains_secondary_paralysis_absence() {
 /// is fully explained by weather and emitting ability clauses would be unsound.
 #[test]
 fn test_s6_freeze_in_sun_emits_no_clause() {
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp,
-        &HashMap::new(),
-        50,
-    );
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
 
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
         m
@@ -6658,7 +8514,8 @@ fn test_s6_freeze_in_sun_emits_no_clause() {
                 move_used: PokemonMove::Blizzard,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -6681,10 +8538,10 @@ fn test_s6_freeze_in_sun_emits_no_clause() {
         matches!(
             s,
             Statement::EVIVStatGE { .. }
-            | Statement::EVIVStatLE { .. }
-            | Statement::NatureBoostsStat { .. }
-            | Statement::NatureNerfsStat { .. }
-            | Statement::SpeedComparison { .. }
+                | Statement::EVIVStatLE { .. }
+                | Statement::NatureBoostsStat { .. }
+                | Statement::NatureNerfsStat { .. }
+                | Statement::SpeedComparison { .. }
         )
     };
     let has_freeze_preventer_clause = result.predicates.iter().any(|clause| {
@@ -6692,17 +8549,34 @@ fn test_s6_freeze_in_sun_emits_no_clause() {
         if clause.iter().any(&is_stat_literal) {
             return false;
         }
-        clause.iter().any(|s| matches!(
-            s,
-            // Any of the per-status preventer abilities for Frozen:
-            Statement::HasAbility { ability: Ability::MagmaArmor, .. }
-            | Statement::HasAbility { ability: Ability::Comatose, .. }
-            | Statement::HasAbility { ability: Ability::PurifyingSalt, .. }
-            | Statement::HasAbility { ability: Ability::ShieldsDown, .. }
-            | Statement::HasAbility { ability: Ability::LeafGuard, .. }
-            | Statement::HasAbility { ability: Ability::FlowerVeil, .. }
-            | Statement::HasAbility { ability: Ability::ShieldDust, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                // Any of the per-status preventer abilities for Frozen:
+                Statement::HasAbility {
+                    ability: Ability::MagmaArmor,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Comatose,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::PurifyingSalt,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::ShieldsDown,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::LeafGuard,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::FlowerVeil,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::ShieldDust,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_freeze_preventer_clause,
@@ -6716,16 +8590,14 @@ fn test_s6_freeze_in_sun_emits_no_clause() {
 /// status conditions in harsh sun.
 #[test]
 fn test_s6_leaf_guard_explains_poison_absence_in_sun() {
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp,
-        &HashMap::new(),
-        50,
-    );
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     // Not Poison/Steel-type, not already statused.
     p2_mon.possible_types = Unknown::Known(vec![PokemonType::Dragon, PokemonType::Ground]);
 
     let p1_mon = {
-        let mut m = UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+        let mut m =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
         m.item = Unknown::Known(Item::None);
         m.possible_abilities = Unknown::Known(Ability::SandVeil);
         m
@@ -6747,7 +8619,8 @@ fn test_s6_leaf_guard_explains_poison_absence_in_sun() {
                 move_used: PokemonMove::SludgeBomb,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -6759,7 +8632,13 @@ fn test_s6_leaf_guard_explains_poison_absence_in_sun() {
 
     let has_leaf_guard = result.predicates.iter().any(|clause| {
         clause.iter().any(|s| {
-            matches!(s, Statement::HasAbility { ability: Ability::LeafGuard, .. })
+            matches!(
+                s,
+                Statement::HasAbility {
+                    ability: Ability::LeafGuard,
+                    ..
+                }
+            )
         })
     });
     assert!(
@@ -6780,35 +8659,34 @@ fn test_s6_leaf_guard_explains_poison_absence_in_sun() {
 /// rather than testing full BCP resolution (which requires solving the whole CNF).
 #[test]
 fn test_pass3_dir_a_emits_nature_conditional_predicate() {
-    use crate::state::pokemon::Nature;
     use crate::state::dex_data::PokemonStat;
+    use crate::state::pokemon::Nature;
 
     // P1: our known mon with SpA = 100, no item/ability multipliers.
     let mut p1_mon = unknown_mon_species(Species::Snorlax);
     p1_mon.hp = PokemonHP::Number(500);
     p1_mon.min_stats = [500, 100, 100, 100, 100, 100];
     p1_mon.max_stats = [500, 100, 100, 100, 100, 100];
-    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.item = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
     // P2: Garchomp defender; BSV range [50, 200] for SpD (wider than true).
     // Neutral nature so BSV == stat.  No item/ability excluded (AV/Eviolite possible).
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp, &garchomp_dex(), 50,
-    );
-    p2_mon.hp                     = PokemonHP::Percent(100);
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    p2_mon.hp = PokemonHP::Percent(100);
     p2_mon.min_pre_nature_stat[4] = 50;
     p2_mon.max_pre_nature_stat[4] = 200;
-    p2_mon.min_stats[0]            = 200;
-    p2_mon.max_stats[0]            = 200;
-    p2_mon.possible_natures       = Unknown::Known(Nature::Hardy); // neutral
-    p2_mon.possible_abilities     = Unknown::Known(Ability::None);
-    p2_mon.item                   = Unknown::Not(vec![]);          // AV not excluded
+    p2_mon.min_stats[0] = 200;
+    p2_mon.max_stats[0] = 200;
+    p2_mon.possible_natures = Unknown::Known(Nature::Hardy); // neutral
+    p2_mon.possible_abilities = Unknown::Known(Ability::None);
+    p2_mon.item = Unknown::Not(vec![]); // AV not excluded
 
     let state = battle_1v1(p1_mon, p2_mon);
 
     let mut psychic = normal_physical_move(PokemonMove::Psychic, 100);
-    psychic.category     = MoveCategory::Special;
+    psychic.category = MoveCategory::Special;
     psychic.pokemon_type = PokemonType::Psychic;
     let mut move_dex = HashMap::new();
     move_dex.insert(PokemonMove::Psychic, psychic);
@@ -6817,13 +8695,14 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
         state,
         vec![event_with(
             EventKind::MoveUsed {
-                user:      p1(0),
+                user: p1(0),
                 move_used: PokemonMove::Psychic,
-                targets:   vec![p2(0)],
+                targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
-                target:  p2(0),
-                new_hp:  PokemonHP::Percent(80), // 20% damage
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80), // 20% damage
             })],
         )],
         garchomp_dex(),
@@ -6836,8 +8715,13 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
         clause.iter().any(|s| {
             matches!(
                 s,
-                Statement::EVIVStatGE { stat: PokemonStat::SpD, .. }
-                | Statement::EVIVStatLE { stat: PokemonStat::SpD, .. }
+                Statement::EVIVStatGE {
+                    stat: PokemonStat::SpD,
+                    ..
+                } | Statement::EVIVStatLE {
+                    stat: PokemonStat::SpD,
+                    ..
+                }
             )
         })
     });
@@ -6872,7 +8756,7 @@ fn test_s58_knock_off_keeps_type_mismatched_berry_as_item_presence_escape() {
     p1_mon.hp = PokemonHP::Number(100);
     p1_mon.min_stats = [100, 100, 100, 100, 100, 100];
     p1_mon.max_stats = [100, 100, 100, 100, 100, 100];
-    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.item = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
     // P2: defender, single Steel type (neutral to Dark — no STAB/resist noise).
@@ -6880,31 +8764,34 @@ fn test_s58_knock_off_keeps_type_mismatched_berry_as_item_presence_escape() {
     // Berry — Fighting-resist, doesn't match Knock Off's Dark type — stays a
     // candidate unless wrongly pruned).
     let mut dex = HashMap::new();
-    dex.insert(Species::Kingambit, PokemonData {
-        species:       Species::Kingambit,
-        types:         vec![PokemonType::Steel],
-        base_stats:    [100, 100, 100, 100, 100, 100],
-        weight:        1000,
-        primary_ability: Some(Ability::Defiant),
-        abilities:     vec![Ability::Defiant],
-        base_species:  None,
-        forme:         None,
-        required_item: None,
-        battle_only:   None,
-        default_gender: PokemonGender::Male,
-    });
+    dex.insert(
+        Species::Kingambit,
+        PokemonData {
+            species: Species::Kingambit,
+            types: vec![PokemonType::Steel],
+            base_stats: [100, 100, 100, 100, 100, 100],
+            weight: 1000,
+            primary_ability: Some(Ability::Defiant),
+            abilities: vec![Ability::Defiant],
+            base_species: None,
+            forme: None,
+            required_item: None,
+            battle_only: None,
+            default_gender: PokemonGender::Male,
+        },
+    );
     let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Kingambit, &dex, 50);
-    p2_mon.hp                     = PokemonHP::Percent(100);
+    p2_mon.hp = PokemonHP::Percent(100);
     p2_mon.min_pre_nature_stat[2] = 50;
     p2_mon.max_pre_nature_stat[2] = 200;
-    p2_mon.min_stats[0]           = 200;
-    p2_mon.max_stats[0]           = 200;
+    p2_mon.min_stats[0] = 200;
+    p2_mon.max_stats[0] = 200;
     // Nature left fully ambiguous (all 25 candidates, the `from_opponent_species`
     // default) rather than pinned to one — avoids an unrelated pass5 back-solve
     // contradiction from over-constraining this hand-built scenario; the neutral
     // CNF class this test checks fires for any Def-neutral nature, not just Hardy.
-    p2_mon.possible_abilities     = Unknown::Known(Ability::None);
-    p2_mon.item                   = Unknown::Not(vec![]); // nothing excluded yet
+    p2_mon.possible_abilities = Unknown::Known(Ability::None);
+    p2_mon.item = Unknown::Not(vec![]); // nothing excluded yet
 
     let state = battle_1v1(p1_mon, p2_mon);
 
@@ -6917,13 +8804,14 @@ fn test_s58_knock_off_keeps_type_mismatched_berry_as_item_presence_escape() {
         state,
         vec![event_with(
             EventKind::MoveUsed {
-                user:      p1(0),
+                user: p1(0),
                 move_used: PokemonMove::KnockOff,
-                targets:   vec![p2(0)],
+                targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
-                target:  p2(0),
-                new_hp:  PokemonHP::Percent(80), // 20% damage
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(80), // 20% damage
             })],
         )],
         dex,
@@ -6938,12 +8826,23 @@ fn test_s58_knock_off_keeps_type_mismatched_berry_as_item_presence_escape() {
         let has_def_stat = clause.iter().any(|s| {
             matches!(
                 s,
-                Statement::EVIVStatGE { stat: PokemonStat::Def, .. }
-                | Statement::EVIVStatLE { stat: PokemonStat::Def, .. }
+                Statement::EVIVStatGE {
+                    stat: PokemonStat::Def,
+                    ..
+                } | Statement::EVIVStatLE {
+                    stat: PokemonStat::Def,
+                    ..
+                }
             )
         });
         let has_chople_escape = clause.iter().any(|s| {
-            matches!(s, Statement::HasItem { item: Item::ChopleBerry, .. })
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::ChopleBerry,
+                    ..
+                }
+            )
         });
         has_def_stat && has_chople_escape
     });
@@ -6954,6 +8853,201 @@ fn test_s58_knock_off_keeps_type_mismatched_berry_as_item_presence_escape() {
          explains the power boost. predicates: {:?}",
         result.predicates,
     );
+}
+
+/// S59: Pass 3 runs after a move's entire reaction tree. If Knock Off removes
+/// the defender's item in that tree, the newly emitted HasItem escape describes
+/// the hit-time item, not the post-move `None`. Resolve the late clause against
+/// the exact outgoing item before BCP can strip the escape and force its stat bound.
+#[test]
+fn test_s59_knock_off_item_loss_resolves_late_stat_escape_at_hit_time() {
+    use crate::state::pokemon::PokemonGender;
+
+    let mut attacker = unknown_mon_species(Species::Ariados);
+    attacker.possible_species = Unknown::Known(Species::Ariados);
+    attacker.hp = PokemonHP::Number(100);
+    attacker.min_stats = [100; 6];
+    attacker.max_stats = [100; 6];
+    attacker.item = Unknown::Known(Item::None);
+    attacker.possible_abilities = Unknown::Known(Ability::None);
+
+    let mut dex = HashMap::new();
+    dex.insert(
+        Species::Kingambit,
+        PokemonData {
+            species: Species::Kingambit,
+            types: vec![PokemonType::Steel],
+            base_stats: [100; 6],
+            weight: 1000,
+            primary_ability: Some(Ability::Defiant),
+            abilities: vec![Ability::Defiant],
+            base_species: None,
+            forme: None,
+            required_item: None,
+            battle_only: None,
+            default_gender: PokemonGender::Male,
+        },
+    );
+    let mut defender = UnknownPokemonState::from_opponent_species(Species::Kingambit, &dex, 50);
+    defender.hp = PokemonHP::Percent(100);
+    defender.min_pre_nature_stat[2] = 50;
+    defender.max_pre_nature_stat[2] = 200;
+    defender.min_stats[0] = 200;
+    defender.max_stats[0] = 200;
+    defender.possible_abilities = Unknown::Known(Ability::None);
+    defender.item = Unknown::Not(vec![]);
+
+    let state = battle_1v1(attacker, defender);
+    let mut knock_off = normal_physical_move(PokemonMove::KnockOff, 65);
+    knock_off.pokemon_type = PokemonType::Dark;
+    let move_dex = HashMap::from([(PokemonMove::KnockOff, knock_off)]);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::KnockOff,
+                targets: vec![p2(0)],
+            },
+            vec![
+                event(EventKind::DamageDealt {
+                    max_hp: 0,
+                    target: p2(0),
+                    new_hp: PokemonHP::Percent(80),
+                }),
+                event(EventKind::ItemLost {
+                    slot: p2(0),
+                    item: Item::ChopleBerry,
+                    consumed: false,
+                }),
+            ],
+        )],
+        dex,
+        move_dex,
+    );
+
+    assert_eq!(result.p2_active_mons[0].item, Unknown::Known(Item::None));
+    assert!(
+        !result.predicates.iter().flatten().any(|statement| matches!(
+            statement,
+            Statement::EVIVStatGE {
+                stat: crate::state::dex_data::PokemonStat::Def,
+                ..
+            } | Statement::EVIVStatLE {
+                stat: crate::state::dex_data::PokemonStat::Def,
+                ..
+            }
+        )),
+        "a hit-time Chople escape satisfies the late Knock Off stat clauses; stale bounds must not survive: {:?}",
+        result.predicates,
+    );
+}
+
+/// S60: Zero to Hero changes Palafin while it is leaving, so the bench entry
+/// must already be Palafin-Hero. Otherwise the Hero-form re-entry misses the
+/// physical roster entry and is rebuilt as a fresh uncertain opponent, losing
+/// the viewer's exact item, EVs, nature, and stats.
+#[test]
+fn test_s60_zero_to_hero_switch_out_preserves_physical_roster_entry() {
+    use crate::state::pokemon::{Nature, PokemonGender, calc_hp, calc_stat};
+
+    let mut palafin = unknown_mon_species(Species::Palafin);
+    palafin.possible_species = Unknown::Known(Species::Palafin);
+    palafin.possible_abilities = Unknown::Known(Ability::ZerotoHero);
+    palafin.possible_original_abilities = Unknown::Known(Ability::ZerotoHero);
+    palafin.item = Unknown::Known(Item::ChoiceScarf);
+    palafin.possible_natures = Unknown::Known(Nature::Adamant);
+    palafin.min_ivs = [31; 6];
+    palafin.max_ivs = [31; 6];
+    palafin.min_evs = [252, 252, 0, 0, 0, 12];
+    palafin.max_evs = palafin.min_evs;
+
+    let mut dex = garchomp_dex();
+    dex.insert(
+        Species::PalafinHero,
+        PokemonData {
+            species: Species::PalafinHero,
+            types: vec![PokemonType::Water],
+            base_stats: [100, 160, 97, 106, 87, 100],
+            weight: 974,
+            primary_ability: Some(Ability::ZerotoHero),
+            abilities: vec![Ability::ZerotoHero],
+            base_species: Some(Species::Palafin),
+            forme: Some(Species::PalafinHero),
+            required_item: None,
+            battle_only: Some(Species::Palafin),
+            default_gender: PokemonGender::Male,
+        },
+    );
+
+    let state = battle_1v1(palafin, unknown_mon_species(Species::Snorlax));
+    let switches = vec![
+        event(EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
+            slot: p1(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Number(180),
+            status: None,
+            tera_type: None,
+        })),
+        event(EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
+            slot: p1(0),
+            species: Species::PalafinHero,
+            level: 50,
+            hp: PokemonHP::Number(calc_hp(100, 31, 252, 50)),
+            status: None,
+            tera_type: None,
+        })),
+    ];
+    let result = apply_ex(state, switches, dex, HashMap::new());
+    let hero = &result.p1_active_mons[0];
+
+    assert_eq!(hero.possible_species, Unknown::Known(Species::PalafinHero));
+    assert_eq!(hero.item, Unknown::Known(Item::ChoiceScarf));
+    assert_eq!(hero.possible_natures, Unknown::Known(Nature::Adamant));
+    assert_eq!(hero.min_evs, [252, 252, 0, 0, 0, 12]);
+    assert_eq!(hero.min_stats[0], calc_hp(100, 31, 252, 50));
+    assert_eq!(hero.min_stats[1], calc_stat(160, 31, 252, 50, 1.1));
+    assert_eq!(hero.min_stats, hero.max_stats);
+}
+
+/// S62: a real species can reject its Illusion hypothesis during an earlier field
+/// stint, then later be selected as Zoroark's disguise. Matching that species from
+/// the bench must re-seed the hypothesis at the new switch-in boundary.
+#[test]
+fn test_s62_switch_in_reseeds_illusion_on_previously_resolved_decoy_species() {
+    let mut state = battle_1v1(
+        unknown_mon_species(Species::Pikachu),
+        unknown_mon_species(Species::Tyranitar),
+    );
+    let mut hydrapple = unknown_mon_species(Species::Hydrapple);
+    hydrapple.possible_illusion_state = None;
+    state.p2_known_back_mons = vec![hydrapple];
+    state.p2_possible_back_mons = vec![unknown_mon_species(Species::ZoroarkHisui)];
+    state.p2_unresolved_zoroark_count = 1;
+
+    let result = apply(state, vec![switch_in(Species::Hydrapple, p2(0))]);
+    let incoming = &result.p2_active_mons[0];
+    assert_eq!(
+        incoming.possible_species,
+        Unknown::Known(Species::Hydrapple)
+    );
+    assert!(
+        incoming.possible_illusion_state.is_some(),
+        "an unresolved benched Zoroark can newly disguise itself as the returning Hydrapple"
+    );
+    assert!(matches!(
+        incoming
+            .possible_illusion_state
+            .as_deref()
+            .map(|hypothesis| &hypothesis.possible_species),
+        Some(Unknown::Known(Species::ZoroarkHisui))
+    ));
 }
 
 // ── Regression: S11 — Direction A must not fire for an unknown (non-P1) attacker ──
@@ -6973,9 +9067,8 @@ fn test_pass3_dir_a_skipped_for_opponent_ally_hit() {
     // P2 mon 0: the attacker (unknown to us).
     let p2_attacker = unknown_mon_species(Species::Snorlax);
     // P2 mon 1: the defender — Garchomp, with a wide starting SpD BSV range.
-    let mut p2_defender = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp, &garchomp_dex(), 50,
-    );
+    let mut p2_defender =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     p2_defender.hp = PokemonHP::Percent(100);
     let orig_bsv_lo = p2_defender.min_pre_nature_stat[4];
     let orig_bsv_hi = p2_defender.max_pre_nature_stat[4];
@@ -6997,7 +9090,8 @@ fn test_pass3_dir_a_skipped_for_opponent_ally_hit() {
                 move_used: PokemonMove::Psychic,
                 targets: vec![p2(1)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p2(1),
                 new_hp: PokemonHP::Percent(80), // 20% damage
             })],
@@ -7012,8 +9106,13 @@ fn test_pass3_dir_a_skipped_for_opponent_ally_hit() {
         clause.iter().any(|s| {
             matches!(
                 s,
-                Statement::EVIVStatGE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
-                | Statement::EVIVStatLE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
+                Statement::EVIVStatGE {
+                    stat: crate::state::dex_data::PokemonStat::SpD,
+                    ..
+                } | Statement::EVIVStatLE {
+                    stat: crate::state::dex_data::PokemonStat::SpD,
+                    ..
+                }
             )
         })
     });
@@ -7051,9 +9150,8 @@ fn test_pass3_dir_a_skipped_for_opponent_ally_hit() {
 #[test]
 fn test_s43_pass3_direction_a_requires_attacker_fully_known() {
     // P1 mon 0: the defender — Garchomp, with a wide starting SpD BSV range.
-    let mut p1_defender = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp, &garchomp_dex(), 50,
-    );
+    let mut p1_defender =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     p1_defender.hp = PokemonHP::Percent(100);
     let orig_bsv_lo = p1_defender.min_pre_nature_stat[4];
     let orig_bsv_hi = p1_defender.max_pre_nature_stat[4];
@@ -7080,7 +9178,8 @@ fn test_s43_pass3_direction_a_requires_attacker_fully_known() {
                 move_used: PokemonMove::Psychic,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p1(0),
                 new_hp: PokemonHP::Percent(80), // 20% damage
             })],
@@ -7095,8 +9194,13 @@ fn test_s43_pass3_direction_a_requires_attacker_fully_known() {
         clause.iter().any(|s| {
             matches!(
                 s,
-                Statement::EVIVStatGE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
-                | Statement::EVIVStatLE { stat: crate::state::dex_data::PokemonStat::SpD, .. }
+                Statement::EVIVStatGE {
+                    stat: crate::state::dex_data::PokemonStat::SpD,
+                    ..
+                } | Statement::EVIVStatLE {
+                    stat: crate::state::dex_data::PokemonStat::SpD,
+                    ..
+                }
             )
         })
     });
@@ -7136,16 +9240,15 @@ fn test_e1_binary_search_direction_b_preserves_precision() {
     p1_mon.hp = PokemonHP::Number(200);
     p1_mon.min_stats = [200, 110, 65, 65, 110, 30]; // approximate Snorlax level-50 stats
     p1_mon.max_stats = [200, 110, 65, 65, 110, 30];
-    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.item = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Known(Ability::None);
 
     // P2: Garchomp attacker — full BSV range, Hardy nature so BSV == final stat.
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp, &garchomp_dex(), 50,
-    );
-    p2_mon.hp               = PokemonHP::Percent(100);
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
+    p2_mon.hp = PokemonHP::Percent(100);
     p2_mon.possible_natures = Unknown::Known(Nature::Hardy);
-    p2_mon.item             = Unknown::Known(Item::None);
+    p2_mon.item = Unknown::Known(Item::None);
     p2_mon.possible_abilities = Unknown::Known(Ability::None);
 
     let initial_atk_min = p2_mon.min_pre_nature_stat[1];
@@ -7153,17 +9256,21 @@ fn test_e1_binary_search_direction_b_preserves_precision() {
 
     let state = battle_1v1(p1_mon, p2_mon);
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40));
+    move_dex.insert(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    );
 
     let result = apply_ex(
         state,
         vec![event_with(
             EventKind::MoveUsed {
-                user:      p2(0),
+                user: p2(0),
                 move_used: PokemonMove::Tackle,
-                targets:   vec![p1(0)],
+                targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p1(0),
                 new_hp: PokemonHP::Number(158), // 200 − 158 = 42 exact HP dealt
             })],
@@ -7202,8 +9309,14 @@ fn test_pass4_no_custap_escape_at_full_hp() {
 
     let state = battle_1v1(p1_mon, p2_mon);
     let mut move_dex = HashMap::new();
-    move_dex.insert(PokemonMove::Earthquake, normal_physical_move(PokemonMove::Earthquake, 100));
-    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+    move_dex.insert(
+        PokemonMove::Earthquake,
+        normal_physical_move(PokemonMove::Earthquake, 100),
+    );
+    move_dex.insert(
+        PokemonMove::DragonClaw,
+        normal_physical_move(PokemonMove::DragonClaw, 80),
+    );
 
     let result = apply_ex(
         state,
@@ -7213,7 +9326,15 @@ fn test_pass4_no_custap_escape_at_full_hp() {
     );
 
     let has_custap_escape = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s, Statement::HasItem { item: Item::CustapBerry, .. }))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::CustapBerry,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_custap_escape,
@@ -7407,9 +9528,15 @@ fn test_i2_no_air_balloon_clause_when_types_unknown() {
 
     // No AirBalloon clause should be emitted when types are unknown.
     let has_air_balloon_clause = result.predicates.iter().any(|clause| {
-        clause
-            .iter()
-            .any(|s| matches!(s, Statement::HasItem { item: Item::AirBalloon, .. }))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::AirBalloon,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_air_balloon_clause,
@@ -7446,7 +9573,10 @@ fn test_item_clause_excludes_revealed_item_from_teammate() {
     // Default config: allow_repeat_items = false (item clause on).
     let result = apply_with_config(
         state,
-        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+        vec![event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::Leftovers,
+        })],
         HashMap::new(),
         HashMap::new(),
         InferenceConfig::default(),
@@ -7478,7 +9608,10 @@ fn test_item_clause_none_item_not_excluded() {
 
     let result = apply_with_config(
         state,
-        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::None })],
+        vec![event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::None,
+        })],
         HashMap::new(),
         HashMap::new(),
         InferenceConfig::default(),
@@ -7502,10 +9635,16 @@ fn test_repeat_items_allowed_no_exclusion() {
 
     let result = apply_with_config(
         state,
-        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+        vec![event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::Leftovers,
+        })],
         HashMap::new(),
         HashMap::new(),
-        InferenceConfig { allow_repeat_items: true, ..InferenceConfig::default() },
+        InferenceConfig {
+            allow_repeat_items: true,
+            ..InferenceConfig::default()
+        },
     );
 
     // Back mon must still allow Leftovers (clause is off).
@@ -7530,7 +9669,10 @@ fn test_item_clause_bcp_cascade() {
 
     let result = apply_with_config(
         state,
-        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+        vec![event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::Leftovers,
+        })],
         HashMap::new(),
         HashMap::new(),
         InferenceConfig::default(),
@@ -7573,9 +9715,8 @@ fn test_pass3_dir_a_ev_lattice_hp_does_not_exclude_true_bsv() {
     // SpD BSV range widened so BSV=121 is a candidate (Garchomp natural max BSV~137,
     // but we inflate the search space to include artificially low values).
     // With Hardy nature and no item, the oracle uses SpD_stat = BSV directly.
-    let mut p2_mon = UnknownPokemonState::from_opponent_species(
-        Species::Garchomp, &garchomp_dex(), 50,
-    );
+    let mut p2_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &garchomp_dex(), 50);
     p2_mon.hp = PokemonHP::Percent(100);
     // Pin HP to the 4-value lattice window [183, 186].
     p2_mon.min_stats[0] = 183;
@@ -7607,7 +9748,8 @@ fn test_pass3_dir_a_ev_lattice_hp_does_not_exclude_true_bsv() {
                 move_used: PokemonMove::Psychic,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p2(0),
                 new_hp: PokemonHP::Percent(50), // 50% damage
             })],
@@ -7821,7 +9963,10 @@ fn test_item_gained_does_not_exclude_teammate() {
 
     let result = apply_with_config(
         state,
-        vec![event(EventKind::ItemGained { slot: p2(0), item: Item::Leftovers })],
+        vec![event(EventKind::ItemGained {
+            slot: p2(0),
+            item: Item::Leftovers,
+        })],
         HashMap::new(),
         HashMap::new(),
         InferenceConfig::default(),
@@ -7855,9 +10000,15 @@ fn test_item_revealed_after_transfer_does_not_exclude_teammate() {
         state,
         vec![
             // Turn N: the active mon receives Leftovers via a transfer (Trick).
-            event(EventKind::ItemGained { slot: p2(0), item: Item::Leftovers }),
+            event(EventKind::ItemGained {
+                slot: p2(0),
+                item: Item::Leftovers,
+            }),
             // Turn N+k: an independent source (Frisk) re-reveals the SAME item.
-            event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers }),
+            event(EventKind::ItemRevealed {
+                slot: p2(0),
+                item: Item::Leftovers,
+            }),
         ],
         HashMap::new(),
         HashMap::new(),
@@ -7919,13 +10070,21 @@ fn test_ib_pass5_reruns_after_bcp_narrows_nature_via_pre_nature_stat() {
         value: 156,
     }]);
 
-    let config = InferenceConfig { force_max_ivs: true, ..InferenceConfig::default() };
+    let config = InferenceConfig {
+        force_max_ivs: true,
+        ..InferenceConfig::default()
+    };
     let result = apply_with_config(state, vec![], garchomp_dex(), HashMap::new(), config);
 
     let p2_mon = &result.p2_active_mons[0];
 
     // +Atk natures must be excluded: at BSV≥156 their stat always exceeds max_stats=170.
-    for atk_nature in [Nature::Lonely, Nature::Adamant, Nature::Naughty, Nature::Brave] {
+    for atk_nature in [
+        Nature::Lonely,
+        Nature::Adamant,
+        Nature::Naughty,
+        Nature::Brave,
+    ] {
         assert!(
             unknown_is_excluded(&p2_mon.possible_natures, &atk_nature),
             "{atk_nature:?} (+Atk ×1.1) must be excluded after second pass5 uses \
@@ -7971,10 +10130,19 @@ fn test_weather_clause_item_reveal_collapses_timer_to_8() {
     let state = battle_with_p2(vec![unknown_mon_species(Species::Garchomp)]);
     let events = vec![
         event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::RainDance, targets: vec![] },
-            vec![event(EventKind::WeatherChanged { weather: Some(Weather::Rain) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::RainDance,
+                targets: vec![],
+            },
+            vec![event(EventKind::WeatherChanged {
+                weather: Some(Weather::Rain),
+            })],
         ),
-        event(EventKind::ItemRevealed { slot: p2(0), item: Item::DampRock }),
+        event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::DampRock,
+        }),
     ];
     let result = apply_ex(state, events, HashMap::new(), weather_move_dex());
     assert_eq!(
@@ -7991,10 +10159,19 @@ fn test_weather_clause_non_rock_item_collapses_timer_to_5() {
     let state = battle_with_p2(vec![unknown_mon_species(Species::Garchomp)]);
     let events = vec![
         event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::RainDance, targets: vec![] },
-            vec![event(EventKind::WeatherChanged { weather: Some(Weather::Rain) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::RainDance,
+                targets: vec![],
+            },
+            vec![event(EventKind::WeatherChanged {
+                weather: Some(Weather::Rain),
+            })],
         ),
-        event(EventKind::ItemRevealed { slot: p2(0), item: Item::LumBerry }),
+        event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::LumBerry,
+        }),
     ];
     let result = apply_ex(state, events, HashMap::new(), weather_move_dex());
     assert_eq!(
@@ -8012,8 +10189,14 @@ fn test_weather_clause_non_rock_item_collapses_timer_to_5() {
 fn test_weather_natural_expiry_excludes_rock_instead_of_revealing() {
     let state = battle_with_p2(vec![unknown_mon_species(Species::Garchomp)]);
     let mut events = vec![event_with(
-        EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::RainDance, targets: vec![] },
-        vec![event(EventKind::WeatherChanged { weather: Some(Weather::Rain) })],
+        EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::RainDance,
+            targets: vec![],
+        },
+        vec![event(EventKind::WeatherChanged {
+            weather: Some(Weather::Rain),
+        })],
     )];
     // Four uneventful end-of-turns, then the expiry EOT with the nested end event.
     for _ in 0..4 {
@@ -8046,12 +10229,21 @@ fn test_weather_clause_turns_decrement_stays_in_sync() {
     let state = battle_with_p2(vec![unknown_mon_species(Species::Garchomp)]);
     let events = vec![
         event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::RainDance, targets: vec![] },
-            vec![event(EventKind::WeatherChanged { weather: Some(Weather::Rain) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::RainDance,
+                targets: vec![],
+            },
+            vec![event(EventKind::WeatherChanged {
+                weather: Some(Weather::Rain),
+            })],
         ),
         event(EventKind::EndOfTurn),
         event(EventKind::EndOfTurn),
-        event(EventKind::ItemRevealed { slot: p2(0), item: Item::DampRock }),
+        event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::DampRock,
+        }),
     ];
     let result = apply_ex(state, events, HashMap::new(), weather_move_dex());
     assert_eq!(
@@ -8068,28 +10260,48 @@ fn test_weather_clause_turns_decrement_stays_in_sync() {
 fn test_weather_override_purges_old_clauses() {
     let state = battle_with_p2(vec![unknown_mon_species(Species::Garchomp)]);
     let mut move_dex = weather_move_dex();
-    move_dex.insert(PokemonMove::SunnyDay, poke_status_move(PokemonMove::SunnyDay));
+    move_dex.insert(
+        PokemonMove::SunnyDay,
+        poke_status_move(PokemonMove::SunnyDay),
+    );
     let events = vec![
         event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::RainDance, targets: vec![] },
-            vec![event(EventKind::WeatherChanged { weather: Some(Weather::Rain) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::RainDance,
+                targets: vec![],
+            },
+            vec![event(EventKind::WeatherChanged {
+                weather: Some(Weather::Rain),
+            })],
         ),
         event(EventKind::EndOfTurn),
         // Turn 2: the rain is overridden by Sun before its duration resolved.
         event_with(
-            EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::SunnyDay, targets: vec![] },
-            vec![event(EventKind::WeatherChanged { weather: Some(Weather::Sun) })],
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::SunnyDay,
+                targets: vec![],
+            },
+            vec![event(EventKind::WeatherChanged {
+                weather: Some(Weather::Sun),
+            })],
         ),
     ];
     let result = apply_ex(state, events, HashMap::new(), move_dex);
     assert!(
-        !result.predicates.iter().any(|c| c.iter().any(|s| clause_mentions_item(s, &Item::DampRock))),
+        !result
+            .predicates
+            .iter()
+            .any(|c| c.iter().any(|s| clause_mentions_item(s, &Item::DampRock))),
         "old Damp Rock clauses must be purged on override; predicates = {:?}",
         result.predicates
     );
-    let heat_rock_clauses = result.predicates.iter().filter(|c| {
-        c.iter().any(|s| clause_mentions_item(s, &Item::HeatRock))
-    }).count();
+    let heat_rock_clauses = result
+        .predicates
+        .iter()
+        .filter(|c| c.iter().any(|s| clause_mentions_item(s, &Item::HeatRock)))
+        .count();
     assert_eq!(
         heat_rock_clauses, 2,
         "the new Sun must carry exactly its own clause pair; predicates = {:?}",
@@ -8105,8 +10317,14 @@ fn test_weather_override_purges_old_clauses() {
 fn test_weather_overridden_at_collapse_eot_gives_no_item_info() {
     let state = battle_with_p2(vec![unknown_mon_species(Species::Garchomp)]);
     let mut events = vec![event_with(
-        EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::RainDance, targets: vec![] },
-        vec![event(EventKind::WeatherChanged { weather: Some(Weather::Rain) })],
+        EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::RainDance,
+            targets: vec![],
+        },
+        vec![event(EventKind::WeatherChanged {
+            weather: Some(Weather::Rain),
+        })],
     )];
     for _ in 0..4 {
         events.push(event(EventKind::EndOfTurn));
@@ -8114,7 +10332,9 @@ fn test_weather_overridden_at_collapse_eot_gives_no_item_info() {
     // 5th EOT: something replaces the rain in the same end-of-turn window.
     events.push(event_with(
         EventKind::EndOfTurn,
-        vec![event(EventKind::WeatherChanged { weather: Some(Weather::Sun) })],
+        vec![event(EventKind::WeatherChanged {
+            weather: Some(Weather::Sun),
+        })],
     ));
     let result = apply_ex(state, events, HashMap::new(), weather_move_dex());
     let setter = &result.p2_active_mons[0];
@@ -8141,8 +10361,14 @@ fn test_terrain_natural_expiry_excludes_extender() {
         poke_status_move(PokemonMove::ElectricTerrain),
     );
     let mut events = vec![event_with(
-        EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::ElectricTerrain, targets: vec![] },
-        vec![event(EventKind::TerrainChanged { terrain: Some(Terrain::ElectricTerrain) })],
+        EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::ElectricTerrain,
+            targets: vec![],
+        },
+        vec![event(EventKind::TerrainChanged {
+            terrain: Some(Terrain::ElectricTerrain),
+        })],
     )];
     for _ in 0..4 {
         events.push(event(EventKind::EndOfTurn));
@@ -8167,7 +10393,11 @@ fn test_screen_natural_expiry_excludes_light_clay() {
     let mut move_dex = HashMap::new();
     move_dex.insert(PokemonMove::Reflect, poke_status_move(PokemonMove::Reflect));
     let mut events = vec![event_with(
-        EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Reflect, targets: vec![] },
+        EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Reflect,
+            targets: vec![],
+        },
         vec![event(EventKind::SideConditionStart {
             side: Player::P2,
             condition: SideCondition::Reflect,
@@ -8210,7 +10440,11 @@ fn test_screen_timer_collapse_reveals_light_clay() {
     let mut move_dex = HashMap::new();
     move_dex.insert(PokemonMove::Reflect, poke_status_move(PokemonMove::Reflect));
     let mut events = vec![event_with(
-        EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Reflect, targets: vec![] },
+        EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Reflect,
+            targets: vec![],
+        },
         vec![event(EventKind::SideConditionStart {
             side: Player::P2,
             condition: SideCondition::Reflect,
@@ -8251,7 +10485,9 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
             move_used: PokemonMove::RainDance,
             targets: vec![],
         },
-        vec![event(EventKind::WeatherChanged { weather: Some(Weather::Rain) })],
+        vec![event(EventKind::WeatherChanged {
+            weather: Some(Weather::Rain),
+        })],
     )];
 
     let mut cur_state = apply_ex(state, rain_dance_turn, HashMap::new(), move_dex);
@@ -8263,7 +10499,8 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
     );
     assert_eq!(cur_state.weather, Some(Weather::Rain));
     assert_eq!(
-        cur_state.weather_setter_mon_idx, Some(0),
+        cur_state.weather_setter_mon_idx,
+        Some(0),
         "setter must be mon_idx=0 (Garchomp at p2 slot 0)"
     );
     assert!(
@@ -8278,11 +10515,17 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
         Unknown::Possibly(vec![2, 5]),
         Unknown::Possibly(vec![1, 4]),
     ] {
-        cur_state = apply_ex(cur_state, vec![event(EventKind::EndOfTurn)], HashMap::new(), HashMap::new());
+        cur_state = apply_ex(
+            cur_state,
+            vec![event(EventKind::EndOfTurn)],
+            HashMap::new(),
+            HashMap::new(),
+        );
         assert_eq!(
             cur_state.weather_turns,
             Some(expected_after.clone()),
-            "weather_turns after decrement should be {:?}", expected_after
+            "weather_turns after decrement should be {:?}",
+            expected_after
         );
         // Item still unknown — collapse has not happened yet.
         assert!(
@@ -8292,7 +10535,12 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
     }
 
     // 5th EndOfTurn — timer collapses: Possibly([1,4]) → filter(n>1) → [3] → Known(3).
-    cur_state = apply_ex(cur_state, vec![event(EventKind::EndOfTurn)], HashMap::new(), HashMap::new());
+    cur_state = apply_ex(
+        cur_state,
+        vec![event(EventKind::EndOfTurn)],
+        HashMap::new(),
+        HashMap::new(),
+    );
     assert_eq!(
         cur_state.weather_turns,
         Some(Unknown::Known(3)),
@@ -8331,25 +10579,28 @@ fn test_ia_weather_timer_collapse_reveals_damp_rock() {
 //     in default probe state
 #[test]
 fn test_sc_allowlist_completeness_cross_validation() {
-    use crate::state::dex_data::{Status, Terrain, Weather};
     use crate::information::inference::{
-        defensive_damage_abilities, defensive_damage_items,
-        offensive_damage_abilities, offensive_damage_items,
+        defensive_damage_abilities, defensive_damage_items, offensive_damage_abilities,
+        offensive_damage_items,
     };
     use crate::information::materialize::{materialize_battle, materialize_pokemon};
-    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
     use crate::simulator::DamageConfig;
-    use crate::state::dex_data::{parse_ability_dex, parse_item_ids, MoveFlag};
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
+    use crate::state::dex_data::{MoveFlag, parse_ability_dex, parse_item_ids};
+    use crate::state::dex_data::{Status, Terrain, Weather};
 
     // Load every known ability and item from the Showdown data files.
-    let all_abilities: Vec<Ability> =
-        parse_ability_dex("../pokemon_info/showdownAbilities.txt")
-            .into_keys()
-            .collect();
+    let all_abilities: Vec<Ability> = parse_ability_dex("../pokemon_info/showdownAbilities.txt")
+        .into_keys()
+        .collect();
     let all_items: Vec<Item> = parse_item_ids("../pokemon_info/showdownItems.txt");
 
     // Single roll, no crit: produces one deterministic (damage, false, 1.0) outcome.
-    let oracle_config = DamageConfig { consider_crit: false, damage_rolls: 1, sample: false };
+    let oracle_config = DamageConfig {
+        consider_crit: false,
+        damage_rolls: 1,
+        sample: false,
+    };
 
     // Fixed stats (lv50 rough values): attacker hits hard, defender has moderate bulk.
     let atk_stats: [u16; 6] = [150, 150, 80, 150, 80, 100];
@@ -8389,53 +10640,245 @@ fn test_sc_allowlist_completeness_cross_validation() {
     }
     let probes = vec![
         // Physical contact Normal: FurCoat, ToughClaws, Fluffy-contact, ChilanBerry.
-        Probe { name: "phys-normal-contact", move_type: PokemonType::Normal, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![MoveFlag::Contact], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        Probe {
+            name: "phys-normal-contact",
+            move_type: PokemonType::Normal,
+            move_cat: MoveCategory::Physical,
+            move_bp: 80,
+            move_flags: vec![MoveFlag::Contact],
+            def_types: vec![PokemonType::Normal],
+            def_full_hp: false,
+        },
         // Physical punch Normal: IronFist.
-        Probe { name: "phys-normal-punch", move_type: PokemonType::Normal, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![MoveFlag::Contact, MoveFlag::Punch], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        Probe {
+            name: "phys-normal-punch",
+            move_type: PokemonType::Normal,
+            move_cat: MoveCategory::Physical,
+            move_bp: 80,
+            move_flags: vec![MoveFlag::Contact, MoveFlag::Punch],
+            def_types: vec![PokemonType::Normal],
+            def_full_hp: false,
+        },
         // Physical slicing Normal: Sharpness.
-        Probe { name: "phys-normal-slicing", move_type: PokemonType::Normal, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![MoveFlag::Slicing], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        Probe {
+            name: "phys-normal-slicing",
+            move_type: PokemonType::Normal,
+            move_cat: MoveCategory::Physical,
+            move_bp: 80,
+            move_flags: vec![MoveFlag::Slicing],
+            def_types: vec![PokemonType::Normal],
+            def_full_hp: false,
+        },
         // Physical low-BP Normal: Technician (≤60 BP).
-        Probe { name: "phys-normal-lowbp", move_type: PokemonType::Normal, move_cat: MoveCategory::Physical, move_bp: 40, move_flags: vec![MoveFlag::Contact], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        Probe {
+            name: "phys-normal-lowbp",
+            move_type: PokemonType::Normal,
+            move_cat: MoveCategory::Physical,
+            move_bp: 40,
+            move_flags: vec![MoveFlag::Contact],
+            def_types: vec![PokemonType::Normal],
+            def_full_hp: false,
+        },
         // Special Fire vs Grass: OccaBerry, Heatproof, WaterBubble-def, ThickFat, IceScales, Filter.
-        Probe { name: "spec-fire-vs-grass", move_type: PokemonType::Fire, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Grass], def_full_hp: false },
+        Probe {
+            name: "spec-fire-vs-grass",
+            move_type: PokemonType::Fire,
+            move_cat: MoveCategory::Special,
+            move_bp: 90,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Grass],
+            def_full_hp: false,
+        },
         // Special Fire pulse vs Grass: MegaLauncher bonus on top of fire coverage.
-        Probe { name: "spec-fire-pulse-vs-grass", move_type: PokemonType::Fire, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![MoveFlag::Pulse], def_types: vec![PokemonType::Grass], def_full_hp: false },
+        Probe {
+            name: "spec-fire-pulse-vs-grass",
+            move_type: PokemonType::Fire,
+            move_cat: MoveCategory::Special,
+            move_bp: 90,
+            move_flags: vec![MoveFlag::Pulse],
+            def_types: vec![PokemonType::Grass],
+            def_full_hp: false,
+        },
         // Special Ice vs Dragon: YacheBerry, ThickFat-ice, IceScales, Filter.
-        Probe { name: "spec-ice-vs-dragon", move_type: PokemonType::Ice, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Dragon], def_full_hp: false },
+        Probe {
+            name: "spec-ice-vs-dragon",
+            move_type: PokemonType::Ice,
+            move_cat: MoveCategory::Special,
+            move_bp: 90,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Dragon],
+            def_full_hp: false,
+        },
         // Special Psychic Sound vs Fighting: PayapaBerry, PunkRock-def, IceScales, Filter.
-        Probe { name: "spec-psychic-sound-vs-fighting", move_type: PokemonType::Psychic, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![MoveFlag::Sound], def_types: vec![PokemonType::Fighting], def_full_hp: false },
+        Probe {
+            name: "spec-psychic-sound-vs-fighting",
+            move_type: PokemonType::Psychic,
+            move_cat: MoveCategory::Special,
+            move_bp: 90,
+            move_flags: vec![MoveFlag::Sound],
+            def_types: vec![PokemonType::Fighting],
+            def_full_hp: false,
+        },
         // Special Ghost vs Ghost: KasibBerry, PurifyingSalt, Filter.
-        Probe { name: "spec-ghost-vs-ghost", move_type: PokemonType::Ghost, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Ghost], def_full_hp: false },
+        Probe {
+            name: "spec-ghost-vs-ghost",
+            move_type: PokemonType::Ghost,
+            move_cat: MoveCategory::Special,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Ghost],
+            def_full_hp: false,
+        },
         // Special Water vs Rock: PasshoBerry, Filter.
-        Probe { name: "spec-water-vs-rock", move_type: PokemonType::Water, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Rock], def_full_hp: false },
+        Probe {
+            name: "spec-water-vs-rock",
+            move_type: PokemonType::Water,
+            move_cat: MoveCategory::Special,
+            move_bp: 90,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Rock],
+            def_full_hp: false,
+        },
         // Special Electric vs Water: WacanBerry, Filter.
-        Probe { name: "spec-electric-vs-water", move_type: PokemonType::Electric, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Water], def_full_hp: false },
+        Probe {
+            name: "spec-electric-vs-water",
+            move_type: PokemonType::Electric,
+            move_cat: MoveCategory::Special,
+            move_bp: 90,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Water],
+            def_full_hp: false,
+        },
         // Special Grass vs Water: RindoBerry, Filter.
-        Probe { name: "spec-grass-vs-water", move_type: PokemonType::Grass, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Water], def_full_hp: false },
+        Probe {
+            name: "spec-grass-vs-water",
+            move_type: PokemonType::Grass,
+            move_cat: MoveCategory::Special,
+            move_bp: 90,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Water],
+            def_full_hp: false,
+        },
         // Physical Fighting vs Rock: ChopleBerry, Filter.
-        Probe { name: "phys-fighting-vs-rock", move_type: PokemonType::Fighting, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Rock], def_full_hp: false },
+        Probe {
+            name: "phys-fighting-vs-rock",
+            move_type: PokemonType::Fighting,
+            move_cat: MoveCategory::Physical,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Rock],
+            def_full_hp: false,
+        },
         // Special Poison vs Fairy: KebiaBerry, Filter.
-        Probe { name: "spec-poison-vs-fairy", move_type: PokemonType::Poison, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Fairy], def_full_hp: false },
+        Probe {
+            name: "spec-poison-vs-fairy",
+            move_type: PokemonType::Poison,
+            move_cat: MoveCategory::Special,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Fairy],
+            def_full_hp: false,
+        },
         // Physical Ground vs Rock: ShucaBerry, Filter.
-        Probe { name: "phys-ground-vs-rock", move_type: PokemonType::Ground, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Rock], def_full_hp: false },
+        Probe {
+            name: "phys-ground-vs-rock",
+            move_type: PokemonType::Ground,
+            move_cat: MoveCategory::Physical,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Rock],
+            def_full_hp: false,
+        },
         // Physical Flying vs Fighting: CobaBerry, Filter.
-        Probe { name: "phys-flying-vs-fighting", move_type: PokemonType::Flying, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Fighting], def_full_hp: false },
+        Probe {
+            name: "phys-flying-vs-fighting",
+            move_type: PokemonType::Flying,
+            move_cat: MoveCategory::Physical,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Fighting],
+            def_full_hp: false,
+        },
         // Special Bug vs Psychic: TangaBerry, Filter.
-        Probe { name: "spec-bug-vs-psychic", move_type: PokemonType::Bug, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Psychic], def_full_hp: false },
+        Probe {
+            name: "spec-bug-vs-psychic",
+            move_type: PokemonType::Bug,
+            move_cat: MoveCategory::Special,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Psychic],
+            def_full_hp: false,
+        },
         // Physical Rock vs Ice: ChartiBerry, Filter.
-        Probe { name: "phys-rock-vs-ice", move_type: PokemonType::Rock, move_cat: MoveCategory::Physical, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Ice], def_full_hp: false },
+        Probe {
+            name: "phys-rock-vs-ice",
+            move_type: PokemonType::Rock,
+            move_cat: MoveCategory::Physical,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Ice],
+            def_full_hp: false,
+        },
         // Physical Dragon contact, full HP: HabanBerry, Multiscale, ShadowShield, TeraShell.
-        Probe { name: "phys-dragon-contact-fullhp", move_type: PokemonType::Dragon, move_cat: MoveCategory::Physical, move_bp: 90, move_flags: vec![MoveFlag::Contact], def_types: vec![PokemonType::Dragon], def_full_hp: true },
+        Probe {
+            name: "phys-dragon-contact-fullhp",
+            move_type: PokemonType::Dragon,
+            move_cat: MoveCategory::Physical,
+            move_bp: 90,
+            move_flags: vec![MoveFlag::Contact],
+            def_types: vec![PokemonType::Dragon],
+            def_full_hp: true,
+        },
         // Special Dark vs Psychic: ColburBerry, Filter.
-        Probe { name: "spec-dark-vs-psychic", move_type: PokemonType::Dark, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Psychic], def_full_hp: false },
+        Probe {
+            name: "spec-dark-vs-psychic",
+            move_type: PokemonType::Dark,
+            move_cat: MoveCategory::Special,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Psychic],
+            def_full_hp: false,
+        },
         // Special Dark bite vs Psychic: StrongJaw.
-        Probe { name: "spec-dark-bite-vs-psychic", move_type: PokemonType::Dark, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![MoveFlag::Bite], def_types: vec![PokemonType::Psychic], def_full_hp: false },
+        Probe {
+            name: "spec-dark-bite-vs-psychic",
+            move_type: PokemonType::Dark,
+            move_cat: MoveCategory::Special,
+            move_bp: 80,
+            move_flags: vec![MoveFlag::Bite],
+            def_types: vec![PokemonType::Psychic],
+            def_full_hp: false,
+        },
         // Special Steel vs Ice: BabiriBerry, Filter.
-        Probe { name: "spec-steel-vs-ice", move_type: PokemonType::Steel, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Ice], def_full_hp: false },
+        Probe {
+            name: "spec-steel-vs-ice",
+            move_type: PokemonType::Steel,
+            move_cat: MoveCategory::Special,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Ice],
+            def_full_hp: false,
+        },
         // Special Fairy vs Dragon: RoseliBerry, Filter.
-        Probe { name: "spec-fairy-vs-dragon", move_type: PokemonType::Fairy, move_cat: MoveCategory::Special, move_bp: 80, move_flags: vec![], def_types: vec![PokemonType::Dragon], def_full_hp: false },
+        Probe {
+            name: "spec-fairy-vs-dragon",
+            move_type: PokemonType::Fairy,
+            move_cat: MoveCategory::Special,
+            move_bp: 80,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Dragon],
+            def_full_hp: false,
+        },
         // Special Water neutral: WaterBubble offensive (×2 to Water moves on attacker).
-        Probe { name: "spec-water-neutral", move_type: PokemonType::Water, move_cat: MoveCategory::Special, move_bp: 90, move_flags: vec![], def_types: vec![PokemonType::Normal], def_full_hp: false },
+        Probe {
+            name: "spec-water-neutral",
+            move_type: PokemonType::Water,
+            move_cat: MoveCategory::Special,
+            move_bp: 90,
+            move_flags: vec![],
+            def_types: vec![PokemonType::Normal],
+            def_full_hp: false,
+        },
     ];
 
     // Open mon for allowlist queries (no exclusions → full lists returned).
@@ -8473,10 +10916,23 @@ fn test_sc_allowlist_completeness_cross_validation() {
         // Baseline: both sides hold Item::None and Ability::None.
         let atk_base = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
         let def_base = materialize_pokemon(&def_unk, def_stats, Item::None, Ability::None);
-        let battle_base = materialize_battle(&blank_battle_unk, vec![atk_base.clone()], vec![def_base.clone()]);
+        let battle_base = materialize_battle(
+            &blank_battle_unk,
+            vec![atk_base.clone()],
+            vec![def_base.clone()],
+        );
         let baseline = calculate_damage_outcomes_for_target_with_options(
-            &battle_base, &atk_base, &def_base,
-            p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+            &battle_base,
+            &atk_base,
+            &def_base,
+            p1(0),
+            p2(0),
+            &move_data,
+            oracle_config,
+            1.0,
+            1.0,
+            None,
+            None,
         );
 
         // ── Defensive items ──
@@ -8485,10 +10941,23 @@ fn test_sc_allowlist_completeness_cross_validation() {
                 continue; // handled manually in pass3_direction_a; oracle won't see them
             }
             let def_with = materialize_pokemon(&def_unk, def_stats, item.clone(), Ability::None);
-            let battle = materialize_battle(&blank_battle_unk, vec![atk_base.clone()], vec![def_with.clone()]);
+            let battle = materialize_battle(
+                &blank_battle_unk,
+                vec![atk_base.clone()],
+                vec![def_with.clone()],
+            );
             let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle, &atk_base, &def_with,
-                p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle,
+                &atk_base,
+                &def_with,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
             if damage_differs(&outcomes, &baseline) && !listed_def_items.contains(item) {
                 failures.push(format!(
@@ -8501,10 +10970,23 @@ fn test_sc_allowlist_completeness_cross_validation() {
         // ── Defensive abilities ──
         for ability in &all_abilities {
             let def_with = materialize_pokemon(&def_unk, def_stats, Item::None, ability.clone());
-            let battle = materialize_battle(&blank_battle_unk, vec![atk_base.clone()], vec![def_with.clone()]);
+            let battle = materialize_battle(
+                &blank_battle_unk,
+                vec![atk_base.clone()],
+                vec![def_with.clone()],
+            );
             let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle, &atk_base, &def_with,
-                p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle,
+                &atk_base,
+                &def_with,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
             if damage_differs(&outcomes, &baseline) && !listed_def_abilities.contains(ability) {
                 failures.push(format!(
@@ -8517,10 +10999,23 @@ fn test_sc_allowlist_completeness_cross_validation() {
         // ── Offensive items ──
         for item in &all_items {
             let atk_with = materialize_pokemon(&atk_unk, atk_stats, item.clone(), Ability::None);
-            let battle = materialize_battle(&blank_battle_unk, vec![atk_with.clone()], vec![def_base.clone()]);
+            let battle = materialize_battle(
+                &blank_battle_unk,
+                vec![atk_with.clone()],
+                vec![def_base.clone()],
+            );
             let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle, &atk_with, &def_base,
-                p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle,
+                &atk_with,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
             if damage_differs(&outcomes, &baseline) && !listed_atk_items.contains(item) {
                 failures.push(format!(
@@ -8533,10 +11028,23 @@ fn test_sc_allowlist_completeness_cross_validation() {
         // ── Offensive abilities ──
         for ability in &all_abilities {
             let atk_with = materialize_pokemon(&atk_unk, atk_stats, Item::None, ability.clone());
-            let battle = materialize_battle(&blank_battle_unk, vec![atk_with.clone()], vec![def_base.clone()]);
+            let battle = materialize_battle(
+                &blank_battle_unk,
+                vec![atk_with.clone()],
+                vec![def_base.clone()],
+            );
             let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle, &atk_with, &def_base,
-                p1(0), p2(0), &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle,
+                &atk_with,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
             if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(ability) {
                 failures.push(format!(
@@ -8579,19 +11087,30 @@ fn test_sc_allowlist_completeness_cross_validation() {
             atk_unk.possible_types = Unknown::Known(vec![PokemonType::Fire]);
             let def_base = materialize_pokemon(&open_mon(), def_stats, Item::None, Ability::None);
             let atk_base = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
-            let battle_base = materialize_battle(&battle_sun, vec![atk_base.clone()], vec![def_base.clone()]);
+            let battle_base =
+                materialize_battle(&battle_sun, vec![atk_base.clone()], vec![def_base.clone()]);
             let baseline = calculate_damage_outcomes_for_target_with_options(
-                &battle_base, &atk_base, &def_base, p1(0), p2(0),
+                &battle_base,
+                &atk_base,
+                &def_base,
+                p1(0),
+                p2(0),
                 &{
                     let mut md = normal_physical_move(PokemonMove::Tackle, 90);
                     md.category = MoveCategory::Special;
                     md.pokemon_type = PokemonType::Fire;
                     md
                 },
-                oracle_config, 1.0, 1.0, None, None,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
-            let atk_with = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::SolarPower);
-            let battle_with = materialize_battle(&battle_sun, vec![atk_with.clone()], vec![def_base.clone()]);
+            let atk_with =
+                materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::SolarPower);
+            let battle_with =
+                materialize_battle(&battle_sun, vec![atk_with.clone()], vec![def_base.clone()]);
             let move_data = {
                 let mut md = normal_physical_move(PokemonMove::Tackle, 90);
                 md.category = MoveCategory::Special;
@@ -8599,13 +11118,25 @@ fn test_sc_allowlist_completeness_cross_validation() {
                 md
             };
             let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle_with, &atk_with, &def_base, p1(0), p2(0),
-                &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle_with,
+                &atk_with,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
-            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(&Ability::SolarPower) {
+            if damage_differs(&outcomes, &baseline)
+                && !listed_atk_abilities.contains(&Ability::SolarPower)
+            {
                 failures.push(
                     "[CONDITIONED-ATK-ABILITY] SolarPower changes damage under Sun but is \
-                     NOT in offensive_damage_abilities".to_string()
+                     NOT in offensive_damage_abilities"
+                        .to_string(),
                 );
             }
         }
@@ -8623,21 +11154,44 @@ fn test_sc_allowlist_completeness_cross_validation() {
                 md.pokemon_type = PokemonType::Rock;
                 md
             };
-            let battle_base = materialize_battle(&battle_sand, vec![atk_base.clone()], vec![def_base.clone()]);
+            let battle_base =
+                materialize_battle(&battle_sand, vec![atk_base.clone()], vec![def_base.clone()]);
             let baseline = calculate_damage_outcomes_for_target_with_options(
-                &battle_base, &atk_base, &def_base, p1(0), p2(0),
-                &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle_base,
+                &atk_base,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
             let atk_with = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::SandForce);
-            let battle_with = materialize_battle(&battle_sand, vec![atk_with.clone()], vec![def_base.clone()]);
+            let battle_with =
+                materialize_battle(&battle_sand, vec![atk_with.clone()], vec![def_base.clone()]);
             let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle_with, &atk_with, &def_base, p1(0), p2(0),
-                &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle_with,
+                &atk_with,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
-            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(&Ability::SandForce) {
+            if damage_differs(&outcomes, &baseline)
+                && !listed_atk_abilities.contains(&Ability::SandForce)
+            {
                 failures.push(
                     "[CONDITIONED-ATK-ABILITY] SandForce changes damage under Sandstorm but is \
-                     NOT in offensive_damage_abilities".to_string()
+                     NOT in offensive_damage_abilities"
+                        .to_string(),
                 );
             }
         }
@@ -8652,23 +11206,54 @@ fn test_sc_allowlist_completeness_cross_validation() {
             let def_base = materialize_pokemon(&open_mon(), def_stats, Item::None, Ability::None);
             let move_data = normal_physical_move(PokemonMove::Tackle, 80);
             // Baseline: burned attacker, no ability.
-            let atk_base = materialize_pokemon(&atk_unk_burned, atk_stats, Item::None, Ability::None);
-            let battle_base = materialize_battle(&blank_battle_unk, vec![atk_base.clone()], vec![def_base.clone()]);
+            let atk_base =
+                materialize_pokemon(&atk_unk_burned, atk_stats, Item::None, Ability::None);
+            let battle_base = materialize_battle(
+                &blank_battle_unk,
+                vec![atk_base.clone()],
+                vec![def_base.clone()],
+            );
             let baseline = calculate_damage_outcomes_for_target_with_options(
-                &battle_base, &atk_base, &def_base, p1(0), p2(0),
-                &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle_base,
+                &atk_base,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
             // Probe: burned attacker + Guts.
-            let atk_with = materialize_pokemon(&atk_unk_burned, atk_stats, Item::None, Ability::Guts);
-            let battle_with = materialize_battle(&blank_battle_unk, vec![atk_with.clone()], vec![def_base.clone()]);
-            let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle_with, &atk_with, &def_base, p1(0), p2(0),
-                &move_data, oracle_config, 1.0, 1.0, None, None,
+            let atk_with =
+                materialize_pokemon(&atk_unk_burned, atk_stats, Item::None, Ability::Guts);
+            let battle_with = materialize_battle(
+                &blank_battle_unk,
+                vec![atk_with.clone()],
+                vec![def_base.clone()],
             );
-            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(&Ability::Guts) {
+            let outcomes = calculate_damage_outcomes_for_target_with_options(
+                &battle_with,
+                &atk_with,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
+            );
+            if damage_differs(&outcomes, &baseline)
+                && !listed_atk_abilities.contains(&Ability::Guts)
+            {
                 failures.push(
                     "[CONDITIONED-ATK-ABILITY] Guts changes damage on a burned attacker but is \
-                     NOT in offensive_damage_abilities".to_string()
+                     NOT in offensive_damage_abilities"
+                        .to_string(),
                 );
             }
         }
@@ -8686,21 +11271,51 @@ fn test_sc_allowlist_completeness_cross_validation() {
                 md
             };
             let atk_base = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::None);
-            let battle_base = materialize_battle(&battle_eterrain, vec![atk_base.clone()], vec![def_base.clone()]);
+            let battle_base = materialize_battle(
+                &battle_eterrain,
+                vec![atk_base.clone()],
+                vec![def_base.clone()],
+            );
             let baseline = calculate_damage_outcomes_for_target_with_options(
-                &battle_base, &atk_base, &def_base, p1(0), p2(0),
-                &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle_base,
+                &atk_base,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
-            let atk_with = materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::HadronEngine);
-            let battle_with = materialize_battle(&battle_eterrain, vec![atk_with.clone()], vec![def_base.clone()]);
+            let atk_with =
+                materialize_pokemon(&atk_unk, atk_stats, Item::None, Ability::HadronEngine);
+            let battle_with = materialize_battle(
+                &battle_eterrain,
+                vec![atk_with.clone()],
+                vec![def_base.clone()],
+            );
             let outcomes = calculate_damage_outcomes_for_target_with_options(
-                &battle_with, &atk_with, &def_base, p1(0), p2(0),
-                &move_data, oracle_config, 1.0, 1.0, None, None,
+                &battle_with,
+                &atk_with,
+                &def_base,
+                p1(0),
+                p2(0),
+                &move_data,
+                oracle_config,
+                1.0,
+                1.0,
+                None,
+                None,
             );
-            if damage_differs(&outcomes, &baseline) && !listed_atk_abilities.contains(&Ability::HadronEngine) {
+            if damage_differs(&outcomes, &baseline)
+                && !listed_atk_abilities.contains(&Ability::HadronEngine)
+            {
                 failures.push(
                     "[CONDITIONED-ATK-ABILITY] HadronEngine changes damage under Electric Terrain \
-                     but is NOT in offensive_damage_abilities".to_string()
+                     but is NOT in offensive_damage_abilities"
+                        .to_string(),
                 );
             }
         }
@@ -8732,11 +11347,15 @@ fn test_sc_allowlist_completeness_cross_validation() {
 fn test_lb_multiscale_hp_gate_and_timer_sentinel() {
     use crate::information::materialize::{materialize_battle, materialize_pokemon};
     use crate::information::unknowns::Unknown;
-    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
     use crate::simulator::DamageConfig;
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
     use crate::state::dex_data::Weather;
 
-    let oracle_config = DamageConfig { consider_crit: false, damage_rolls: 1, sample: false };
+    let oracle_config = DamageConfig {
+        consider_crit: false,
+        damage_rolls: 1,
+        sample: false,
+    };
     let atk_stats: [u16; 6] = [200, 250, 100, 100, 100, 100];
     let def_stats: [u16; 6] = [300, 80, 100, 80, 100, 80];
 
@@ -8761,19 +11380,42 @@ fn test_lb_multiscale_hp_gate_and_timer_sentinel() {
     let def_ps_part = materialize_pokemon(&def_part, def_stats, Item::None, Ability::Multiscale);
 
     let blank_unk = battle_with_p2(vec![def_unk.clone()]);
-    let battle_full = materialize_battle(&blank_unk, vec![atk_ps.clone()], vec![def_ps_full.clone()]);
-    let battle_part = materialize_battle(&blank_unk, vec![atk_ps.clone()], vec![def_ps_part.clone()]);
+    let battle_full =
+        materialize_battle(&blank_unk, vec![atk_ps.clone()], vec![def_ps_full.clone()]);
+    let battle_part =
+        materialize_battle(&blank_unk, vec![atk_ps.clone()], vec![def_ps_part.clone()]);
 
     let out_full = calculate_damage_outcomes_for_target_with_options(
-        &battle_full, &atk_ps, &def_ps_full, p1(0), p2(0),
-        &move_data, oracle_config, 1.0, 1.0, None, None,
+        &battle_full,
+        &atk_ps,
+        &def_ps_full,
+        p1(0),
+        p2(0),
+        &move_data,
+        oracle_config,
+        1.0,
+        1.0,
+        None,
+        None,
     );
     let out_part = calculate_damage_outcomes_for_target_with_options(
-        &battle_part, &atk_ps, &def_ps_part, p1(0), p2(0),
-        &move_data, oracle_config, 1.0, 1.0, None, None,
+        &battle_part,
+        &atk_ps,
+        &def_ps_part,
+        p1(0),
+        p2(0),
+        &move_data,
+        oracle_config,
+        1.0,
+        1.0,
+        None,
+        None,
     );
 
-    assert!(!out_full.is_empty() && !out_part.is_empty(), "oracle must produce results");
+    assert!(
+        !out_full.is_empty() && !out_part.is_empty(),
+        "oracle must produce results"
+    );
 
     let dmg_full = out_full[0].0 as f64;
     let dmg_part = out_part[0].0 as f64;
@@ -8817,8 +11459,15 @@ fn test_leftovers_eot_heal_reveals_item() {
     let state = battle_1v1(unknown_mon(), foe);
 
     let events = vec![event_with(
-        EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers },
-        vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(50) })],
+        EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::Leftovers,
+        },
+        vec![event(EventKind::Healed {
+            max_hp: 0,
+            target: p2(0),
+            new_hp: PokemonHP::Percent(50),
+        })],
     )];
 
     let result = apply(state, events);
@@ -8841,8 +11490,14 @@ fn test_frisk_reveals_item() {
     let state = battle_1v1(unknown_mon(), foe);
 
     let events = vec![event_with(
-        EventKind::AbilityRevealed { slot: p1(0), ability: Ability::Frisk },
-        vec![event(EventKind::ItemRevealed { slot: p2(0), item: Item::Leftovers })],
+        EventKind::AbilityRevealed {
+            slot: p1(0),
+            ability: Ability::Frisk,
+        },
+        vec![event(EventKind::ItemRevealed {
+            slot: p2(0),
+            item: Item::Leftovers,
+        })],
     )];
 
     let result = apply(state, events);
@@ -8867,16 +11522,31 @@ fn test_frisk_reveals_multiple_foes() {
     state.p1_slot_conditions = vec![vec![], vec![]];
 
     let events = vec![event_with(
-        EventKind::AbilityRevealed { slot: p1(0), ability: Ability::Frisk },
+        EventKind::AbilityRevealed {
+            slot: p1(0),
+            ability: Ability::Frisk,
+        },
         vec![
-            event(EventKind::ItemRevealed { slot: p2(0), item: Item::ChoiceBand }),
-            event(EventKind::ItemRevealed { slot: p2(1), item: Item::Leftovers }),
+            event(EventKind::ItemRevealed {
+                slot: p2(0),
+                item: Item::ChoiceBand,
+            }),
+            event(EventKind::ItemRevealed {
+                slot: p2(1),
+                item: Item::Leftovers,
+            }),
         ],
     )];
 
     let result = apply(state, events);
-    assert_eq!(result.p2_active_mons[0].item, Unknown::Known(Item::ChoiceBand));
-    assert_eq!(result.p2_active_mons[1].item, Unknown::Known(Item::Leftovers));
+    assert_eq!(
+        result.p2_active_mons[0].item,
+        Unknown::Known(Item::ChoiceBand)
+    );
+    assert_eq!(
+        result.p2_active_mons[1].item,
+        Unknown::Known(Item::Leftovers)
+    );
 }
 
 /// Frisk with an item-less foe: no ItemRevealed inside, foe's item stays excluded (None).
@@ -8916,15 +11586,23 @@ fn test_anticipation_adds_predicate() {
 
     let events = vec![event_with(
         EventKind::AnticipationShudder { slot: p1(0) },
-        vec![event(EventKind::AbilityRevealed { slot: p1(0), ability: Ability::Anticipation })],
+        vec![event(EventKind::AbilityRevealed {
+            slot: p1(0),
+            ability: Ability::Anticipation,
+        })],
     )];
 
     let result = apply(state, events);
     // There must be at least one predicate clause referencing KnowsThreateningMove.
     let has_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|lit| matches!(lit, Statement::KnowsThreateningMove { .. }))
+        clause
+            .iter()
+            .any(|lit| matches!(lit, Statement::KnowsThreateningMove { .. }))
     });
-    assert!(has_clause, "AnticipationShudder must add a KnowsThreateningMove clause");
+    assert!(
+        has_clause,
+        "AnticipationShudder must add a KnowsThreateningMove clause"
+    );
 }
 
 /// Anticipation on opponent's mon: shudder on P2 slot 0 gives P1 no info
@@ -8939,13 +11617,18 @@ fn test_anticipation_opponent_shudder_no_clause() {
 
     let events = vec![event_with(
         EventKind::AnticipationShudder { slot: p2(0) },
-        vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Anticipation })],
+        vec![event(EventKind::AbilityRevealed {
+            slot: p2(0),
+            ability: Ability::Anticipation,
+        })],
     )];
 
     let result = apply(state, events);
     // No KnowsThreateningMove clause should be added for the observer's own mons.
     let has_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|lit| matches!(lit, Statement::KnowsThreateningMove { .. }))
+        clause
+            .iter()
+            .any(|lit| matches!(lit, Statement::KnowsThreateningMove { .. }))
     });
     assert!(
         !has_clause,
@@ -9049,7 +11732,8 @@ fn flinch_deduces_kings_rock_single_attacker() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0,
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
                 target: p1(0),
                 new_hp: PokemonHP::Percent(80),
             })],
@@ -9061,7 +11745,10 @@ fn flinch_deduces_kings_rock_single_attacker() {
     ];
 
     // Tackle: damaging, no flinch secondary.
-    let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
+    let md = HashMap::from([(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    )]);
     let result = apply_ex(state, events, HashMap::new(), md);
 
     // BCP should collapse the [KingsRock] unit clause to Known(KingsRock).
@@ -9069,7 +11756,64 @@ fn flinch_deduces_kings_rock_single_attacker() {
         result.p2_active_mons[0].item,
         Unknown::Known(Item::KingsRock),
         "With RazorFang excluded and Stench excluded, flinch from sole attacker must \
-         deduce Known(KingsRock); got {:?}", result.p2_active_mons[0].item
+         deduce Known(KingsRock); got {:?}",
+        result.p2_active_mons[0].item
+    );
+}
+
+/// S59: the attacker held King's Rock when the hit occurred, then lost it before
+/// the target's Cant event. The late flinch clause is historically satisfied and
+/// must be dropped rather than evaluated against the current `None` item.
+#[test]
+fn flinch_resolves_item_against_hit_time_snapshot() {
+    let mut attacker = unknown_mon();
+    attacker.item = Unknown::Known(Item::KingsRock);
+    attacker.possible_abilities = Unknown::Not(vec![Ability::Stench]);
+    let state = battle_1v1(unknown_mon(), attacker);
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Tackle,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
+        ),
+        event(EventKind::ItemLost {
+            slot: p2(0),
+            item: Item::KingsRock,
+            consumed: false,
+        }),
+        event(EventKind::Cant {
+            slot: p1(0),
+            reason: CantReason::Flinch,
+        }),
+    ];
+    let md = HashMap::from([(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    )]);
+    let result = apply_ex(state, events, HashMap::new(), md);
+
+    assert_eq!(result.p2_active_mons[0].item, Unknown::Known(Item::None));
+    assert!(
+        result
+            .predicates
+            .iter()
+            .all(|clause| !clause.iter().any(|s| matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::KingsRock | Item::RazorFang,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Stench,
+                    ..
+                }
+            )))
     );
 }
 
@@ -9083,7 +11827,10 @@ fn flinch_no_deduction_multiple_attackers() {
     );
 
     // Both P2 attackers deal damage to P1 slot 0 this turn, then P1/0 flinches.
-    let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
+    let md = HashMap::from([(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    )]);
     let events = vec![
         event_with(
             EventKind::MoveUsed {
@@ -9091,7 +11838,11 @@ fn flinch_no_deduction_multiple_attackers() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(80) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
         ),
         event_with(
             EventKind::MoveUsed {
@@ -9099,29 +11850,55 @@ fn flinch_no_deduction_multiple_attackers() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(60) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(60),
+            })],
         ),
-        event(EventKind::Cant { slot: p1(0), reason: CantReason::Flinch }),
+        event(EventKind::Cant {
+            slot: p1(0),
+            reason: CantReason::Flinch,
+        }),
     ];
 
     let result = apply_ex(state, events, HashMap::new(), md);
 
     // With two candidate attackers, no flinch clause should be pushed.
     let has_flinch_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s,
-            Statement::HasItem { item: Item::KingsRock, .. }
-            | Statement::HasItem { item: Item::RazorFang, .. }
-            | Statement::HasAbility { ability: Ability::Stench, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::KingsRock,
+                    ..
+                } | Statement::HasItem {
+                    item: Item::RazorFang,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Stench,
+                    ..
+                }
+            )
+        })
     });
-    assert!(!has_flinch_clause,
+    assert!(
+        !has_flinch_clause,
         "Ambiguous flinch (two attackers) must not push a flinch clause;\n\
-         predicates = {:#?}", result.predicates);
+         predicates = {:#?}",
+        result.predicates
+    );
     // Neither attacker's item should be forced.
-    assert!(!matches!(&result.p2_active_mons[0].item, Unknown::Known(_)),
-        "Attacker 0 item must not be forced; got {:?}", result.p2_active_mons[0].item);
-    assert!(!matches!(&result.p2_active_mons[1].item, Unknown::Known(_)),
-        "Attacker 1 item must not be forced; got {:?}", result.p2_active_mons[1].item);
+    assert!(
+        !matches!(&result.p2_active_mons[0].item, Unknown::Known(_)),
+        "Attacker 0 item must not be forced; got {:?}",
+        result.p2_active_mons[0].item
+    );
+    assert!(
+        !matches!(&result.p2_active_mons[1].item, Unknown::Known(_)),
+        "Attacker 1 item must not be forced; got {:?}",
+        result.p2_active_mons[1].item
+    );
 }
 
 /// Move already has a flinch secondary (e.g. Iron Head 30%) → no item/ability deduction.
@@ -9140,9 +11917,16 @@ fn flinch_no_deduction_move_has_flinch_secondary() {
                 move_used: PokemonMove::IronHead,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(70) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(70),
+            })],
         ),
-        event(EventKind::Cant { slot: p1(0), reason: CantReason::Flinch }),
+        event(EventKind::Cant {
+            slot: p1(0),
+            reason: CantReason::Flinch,
+        }),
     ];
 
     // Iron Head: physical Steel move with a 30% flinch secondary.
@@ -9160,19 +11944,97 @@ fn flinch_no_deduction_move_has_flinch_secondary() {
 
     // The move explains the flinch; no item deduction should occur.
     let has_flinch_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s,
-            Statement::HasItem { item: Item::KingsRock, .. }
-            | Statement::HasAbility { ability: Ability::Stench, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::KingsRock,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Stench,
+                    ..
+                }
+            )
+        })
     });
-    assert!(!has_flinch_clause,
+    assert!(
+        !has_flinch_clause,
         "Iron Head's flinch secondary explains the flinch; no clause should be pushed;\n\
-         predicates = {:#?}", result.predicates);
+         predicates = {:#?}",
+        result.predicates
+    );
     // KingsRock must not be deduced.
     assert!(
-        !matches!(&result.p2_active_mons[0].item, Unknown::Known(Item::KingsRock)),
+        !matches!(
+            &result.p2_active_mons[0].item,
+            Unknown::Known(Item::KingsRock)
+        ),
         "Must not attribute King's Rock when move has a flinch secondary; got {:?}",
         result.p2_active_mons[0].item
+    );
+}
+
+/// S64: a friendly-fire Fake Out is a complete alternative explanation for the
+/// target's flinch, even if an opponent also damaged that target before it moved.
+#[test]
+fn flinch_no_deduction_when_allied_fake_out_also_hit_target() {
+    let mut opponent = unknown_mon_species(Species::Sylveon);
+    opponent.item = Unknown::Possibly(vec![Item::KingsRock, Item::FairyFeather]);
+    opponent.possible_abilities = Unknown::Known(Ability::None);
+    let mut state = battle_nvn(vec![unknown_mon(), unknown_mon()], vec![opponent]);
+    state.active_per_side = 2;
+
+    let events = vec![
+        event_with(
+            EventKind::MoveUsed {
+                user: p1(1),
+                move_used: PokemonMove::FakeOut,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
+        ),
+        event_with(
+            EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::QuickAttack,
+                targets: vec![p1(0)],
+            },
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(70),
+            })],
+        ),
+        event(EventKind::Cant {
+            slot: p1(0),
+            reason: CantReason::Flinch,
+        }),
+    ];
+
+    let mut fake_out = normal_physical_move(PokemonMove::FakeOut, 40);
+    fake_out.secondaries = vec![PokemonSecondaryEffect {
+        chance: 100,
+        effect: HitEffect {
+            volatile_status: Some(VolatileStatus::Flinch),
+            ..Default::default()
+        },
+        random_choices: vec![],
+    }];
+    let quick_attack = normal_physical_move(PokemonMove::QuickAttack, 40);
+    let move_dex = HashMap::from([
+        (PokemonMove::FakeOut, fake_out),
+        (PokemonMove::QuickAttack, quick_attack),
+    ]);
+    let result = apply_ex(state, events, HashMap::new(), move_dex);
+
+    assert!(
+        !unknown_is_excluded(&result.p2_active_mons[0].item, &Item::FairyFeather),
+        "the opponent's item must remain ambiguous when allied Fake Out explains the flinch: {:?}",
+        result.p2_active_mons[0].item,
     );
 }
 
@@ -9190,24 +12052,45 @@ fn flinch_no_deduction_when_observer_side_flinches() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(70) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(70),
+            })],
         ),
-        event(EventKind::Cant { slot: p2(0), reason: CantReason::Flinch }),
+        event(EventKind::Cant {
+            slot: p2(0),
+            reason: CantReason::Flinch,
+        }),
     ];
 
-    let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
+    let md = HashMap::from([(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    )]);
     let result = apply_ex(state, events, HashMap::new(), md);
 
     // P2 flinching: attacker is P1 (observer's own side) — no useful clause.
     let has_flinch_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s,
-            Statement::HasItem { item: Item::KingsRock, .. }
-            | Statement::HasAbility { ability: Ability::Stench, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::KingsRock,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Stench,
+                    ..
+                }
+            )
+        })
     });
-    assert!(!has_flinch_clause,
+    assert!(
+        !has_flinch_clause,
         "P2 flinching (from P1 attack) must not push a flinch clause on P1;\n\
-         predicates = {:#?}", result.predicates);
+         predicates = {:#?}",
+        result.predicates
+    );
 }
 
 /// S49: the attacker's slot switches (a different mon takes over P2/0) between the
@@ -9231,10 +12114,16 @@ fn flinch_no_deduction_when_attacker_switches_before_cant() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p1(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: PokemonHP::Percent(80) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p1(0),
+                new_hp: PokemonHP::Percent(80),
+            })],
         ),
         // The original attacker switches out before P1's flinch resolves.
-        event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+        event(EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
             slot: p2(0),
             species: Species::Zapdos,
             level: 50,
@@ -9242,27 +12131,52 @@ fn flinch_no_deduction_when_attacker_switches_before_cant() {
             status: None,
             tera_type: None,
         })),
-        event(EventKind::Cant { slot: p1(0), reason: CantReason::Flinch }),
+        event(EventKind::Cant {
+            slot: p1(0),
+            reason: CantReason::Flinch,
+        }),
     ];
 
-    let md = HashMap::from([(PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40))]);
+    let md = HashMap::from([(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    )]);
     let result = apply_ex(state, events, HashMap::new(), md);
 
     let has_flinch_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(s,
-            Statement::HasItem { item: Item::KingsRock, .. }
-            | Statement::HasItem { item: Item::RazorFang, .. }
-            | Statement::HasAbility { ability: Ability::Stench, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::KingsRock,
+                    ..
+                } | Statement::HasItem {
+                    item: Item::RazorFang,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Stench,
+                    ..
+                }
+            )
+        })
     });
-    assert!(!has_flinch_clause,
+    assert!(
+        !has_flinch_clause,
         "A mid-turn switch at the attacker's slot must not push a flinch clause \
          (attribution can no longer be pinned to a stable mon);\n\
-         predicates = {:#?}", result.predicates);
+         predicates = {:#?}",
+        result.predicates
+    );
     // The switched-in mon (now at p2_active_mons[0]) must not be wrongly forced either.
-    assert!(!matches!(&result.p2_active_mons[0].item, Unknown::Known(Item::KingsRock)),
+    assert!(
+        !matches!(
+            &result.p2_active_mons[0].item,
+            Unknown::Known(Item::KingsRock)
+        ),
         "The switched-in mon must not inherit the departed attacker's flinch clause; \
-         got {:?}", result.p2_active_mons[0].item);
+         got {:?}",
+        result.p2_active_mons[0].item
+    );
 }
 
 /// S37-gate regression (item-9 investigation): `pass1_switch`'s "already placed" shortcut
@@ -9291,7 +12205,10 @@ fn test_pass1_switch_species_coincidence_mid_battle_seeds_two_in_front_hypothesi
 
     let mut state = battle_nvn(
         vec![unknown_mon_species(Species::Pikachu)],
-        vec![unknown_mon_species(Species::Garchomp), unknown_mon_species(Species::Garchomp)],
+        vec![
+            unknown_mon_species(Species::Garchomp),
+            unknown_mon_species(Species::Garchomp),
+        ],
     );
     state.p2_possible_back_mons = vec![zoroark_back];
     state.p2_unresolved_zoroark_count = 1;
@@ -9326,7 +12243,9 @@ fn test_pass1_switch_species_coincidence_mid_battle_seeds_two_in_front_hypothesi
 fn test_c1_switch_tera_type_not_leaked_when_none() {
     // ── Case 1: non-tera switch (tera_type: None) ──────────────────────────
     let state_a = battle_with_p2(vec![unknown_mon()]);
-    let events_a = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let events_a = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9336,8 +12255,10 @@ fn test_c1_switch_tera_type_not_leaked_when_none() {
     }))];
     let result_a = apply(state_a, events_a);
     let p2_a = &result_a.p2_active_mons[0];
-    assert!(!p2_a.is_tera,
-        "non-tera switch must leave is_tera=false; got is_tera=true");
+    assert!(
+        !p2_a.is_tera,
+        "non-tera switch must leave is_tera=false; got is_tera=true"
+    );
     assert!(
         !matches!(&p2_a.possible_tera_type, Unknown::Known(_)),
         "non-tera switch must NOT set possible_tera_type to Known; got {:?}",
@@ -9346,7 +12267,9 @@ fn test_c1_switch_tera_type_not_leaked_when_none() {
 
     // ── Case 2: tera switch (tera_type: Some(Fire)) ─────────────────────────
     let state_b = battle_with_p2(vec![unknown_mon()]);
-    let events_b = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let events_b = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -9356,10 +12279,10 @@ fn test_c1_switch_tera_type_not_leaked_when_none() {
     }))];
     let result_b = apply(state_b, events_b);
     let p2_b = &result_b.p2_active_mons[0];
-    assert!(p2_b.is_tera,
-        "tera switch must set is_tera=true");
+    assert!(p2_b.is_tera, "tera switch must set is_tera=true");
     assert_eq!(
-        p2_b.possible_tera_type, Unknown::Known(PokemonType::Fire),
+        p2_b.possible_tera_type,
+        Unknown::Known(PokemonType::Fire),
         "tera switch must set possible_tera_type = Known(Fire); got {:?}",
         p2_b.possible_tera_type
     );
@@ -9405,8 +12328,10 @@ fn test_c2_analytic_first_mover_does_not_exclude_true_stat() {
     // P1: observer's own mon — exact Number HP, known Def.
     let mut mon_p1 = unknown_mon();
     mon_p1.hp = PokemonHP::Number(p1_hp);
-    mon_p1.min_stats[0] = p1_hp; mon_p1.max_stats[0] = p1_hp;
-    mon_p1.min_stats[2] = p1_def; mon_p1.max_stats[2] = p1_def;
+    mon_p1.min_stats[0] = p1_hp;
+    mon_p1.max_stats[0] = p1_hp;
+    mon_p1.min_stats[2] = p1_def;
+    mon_p1.max_stats[2] = p1_def;
 
     // P2: Garchomp with Analytic, pre-nature Atk stat tightened to exactly 150
     // (corresponds to 31 IVs, 0 EVs, neutral nature at level 50).
@@ -9427,21 +12352,24 @@ fn test_c2_analytic_first_mover_does_not_exclude_true_stat() {
     let new_hp_val = PokemonHP::Number(p1_hp - exact_damage); // 200 - 24 = 176
 
     let state = battle_1v1(mon_p1, mon_p2);
-    let md = HashMap::from([
-        (PokemonMove::Tackle, normal_physical_move(PokemonMove::Tackle, 40)),
-    ]);
+    let md = HashMap::from([(
+        PokemonMove::Tackle,
+        normal_physical_move(PokemonMove::Tackle, 40),
+    )]);
 
     // P2 moves first — no P1 MoveUsed before this event.
-    let events = vec![
-        event_with(
-            EventKind::MoveUsed {
-                user: p2(0),
-                move_used: PokemonMove::Tackle,
-                targets: vec![p1(0)],
-            },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p1(0), new_hp: new_hp_val })],
-        ),
-    ];
+    let events = vec![event_with(
+        EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Tackle,
+            targets: vec![p1(0)],
+        },
+        vec![event(EventKind::DamageDealt {
+            max_hp: 0,
+            target: p1(0),
+            new_hp: new_hp_val,
+        })],
+    )];
 
     let result = apply_ex(state, events, dex, md);
 
@@ -9462,23 +12390,23 @@ fn test_c3_intrepid_sword_not_excluded_on_reentry() {
     // Turn 1: P2 enters with Intrepid Sword firing (+1 Atk to self).
     // This should mark one_time_ability_used = true on P2's mon.
     let state = battle_with_p2(vec![unknown_mon()]);
-    let events_turn1 = vec![
-        event_with(
-            EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-                slot: p2(0),
-                species: Species::Garchomp,
-                level: 50,
-                hp: PokemonHP::Percent(100),
-                status: None,
-                tera_type: None,
-            }),
-            vec![event(EventKind::BoostChanged {
-                target: p2(0),
-                boost_idx: 0,
-                stages: 1,
-            })],
-        ),
-    ];
+    let events_turn1 = vec![event_with(
+        EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }),
+        vec![event(EventKind::BoostChanged {
+            target: p2(0),
+            boost_idx: 0,
+            stages: 1,
+        })],
+    )];
     let after_turn1 = apply(state, events_turn1);
 
     assert!(
@@ -9488,23 +12416,24 @@ fn test_c3_intrepid_sword_not_excluded_on_reentry() {
 
     // Turn 2: P2 re-enters with NO +1 Atk boost (once-per-battle ability exhausted).
     // The absence inference must NOT exclude IntrepidSword because one_time_ability_used = true.
-    let events_turn2 = vec![
-        event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-            slot: p2(0),
-            species: Species::Garchomp,
-            level: 50,
-            hp: PokemonHP::Percent(100),
-            status: None,
-            tera_type: None,
-        })),
-    ];
+    let events_turn2 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
+    }))];
     let after_turn2 = apply(after_turn1, events_turn2);
 
     let p2_mon = &after_turn2.p2_active_mons[0];
     assert!(
         !unknown_is_excluded(&p2_mon.possible_abilities, &Ability::IntrepidSword),
         "IntrepidSword must NOT be excluded after re-entry (one_time_ability_used = true); \
-         possible_abilities = {:?}", p2_mon.possible_abilities
+         possible_abilities = {:?}",
+        p2_mon.possible_abilities
     );
 }
 
@@ -9520,24 +12449,25 @@ fn test_c4_weather_setter_not_excluded_under_primordial_weather() {
 
     // P2 switches in with Drizzle revealed (AbilityRevealed reaction) but NO WeatherChanged.
     // Under Heavy Rain, set_weather silently no-ops, so no WeatherChanged event fires.
-    let events = vec![
-        event_with(
-            EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let events = vec![event_with(
+        EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
+            slot: p2(0),
+            species: Species::Garchomp,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }),
+        vec![event_with(
+            EventKind::AbilityRevealed {
                 slot: p2(0),
-                species: Species::Garchomp,
-                level: 50,
-                hp: PokemonHP::Percent(100),
-                status: None,
-                tera_type: None,
-            }),
-            vec![
-                event_with(
-                    EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Drizzle },
-                    vec![], // No WeatherChanged reaction (primordial weather suppressed it).
-                ),
-            ],
-        ),
-    ];
+                ability: Ability::Drizzle,
+            },
+            vec![], // No WeatherChanged reaction (primordial weather suppressed it).
+        )],
+    )];
 
     // This must not panic (before fix: absence pass would exclude Drizzle, then
     // AbilityRevealed would try to set Known(Drizzle) → contradiction panic).
@@ -9547,7 +12477,8 @@ fn test_c4_weather_setter_not_excluded_under_primordial_weather() {
     assert!(
         !unknown_is_excluded(&p2_mon.possible_abilities, &Ability::Drizzle),
         "Drizzle must NOT be excluded when switching in under Heavy Rain (primordial weather); \
-         possible_abilities = {:?}", p2_mon.possible_abilities
+         possible_abilities = {:?}",
+        p2_mon.possible_abilities
     );
 }
 
@@ -9568,24 +12499,25 @@ fn test_c5_weather_setter_not_excluded_under_same_normal_weather() {
 
     // P2 switches in with SandStream revealed (AbilityRevealed reaction) but NO WeatherChanged
     // — set_weather no-ops because Sandstorm is already active.
-    let events = vec![
-        event_with(
-            EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let events = vec![event_with(
+        EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
+            slot: p2(0),
+            species: Species::Tyranitar,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        }),
+        vec![event_with(
+            EventKind::AbilityRevealed {
                 slot: p2(0),
-                species: Species::Tyranitar,
-                level: 50,
-                hp: PokemonHP::Percent(100),
-                status: None,
-                tera_type: None,
-            }),
-            vec![
-                event_with(
-                    EventKind::AbilityRevealed { slot: p2(0), ability: Ability::SandStream },
-                    vec![], // No WeatherChanged reaction (already-active weather suppressed it).
-                ),
-            ],
-        ),
-    ];
+                ability: Ability::SandStream,
+            },
+            vec![], // No WeatherChanged reaction (already-active weather suppressed it).
+        )],
+    )];
 
     // Must not panic (a blanket strong-weather-only guard would exclude SandStream here, then
     // AbilityRevealed would try to set Known(SandStream) → contradiction panic).
@@ -9595,7 +12527,8 @@ fn test_c5_weather_setter_not_excluded_under_same_normal_weather() {
     assert!(
         !unknown_is_excluded(&p2_mon.possible_abilities, &Ability::SandStream),
         "SandStream must NOT be excluded when switching in under an already-active Sandstorm; \
-         possible_abilities = {:?}", p2_mon.possible_abilities
+         possible_abilities = {:?}",
+        p2_mon.possible_abilities
     );
 
     // Contrast: a DIFFERENT weather-setting ability (Drizzle, sets Rain, not Sandstorm) is
@@ -9604,7 +12537,8 @@ fn test_c5_weather_setter_not_excluded_under_same_normal_weather() {
     assert!(
         unknown_is_excluded(&p2_mon.possible_abilities, &Ability::Drizzle),
         "Drizzle should still be excluded — it would have changed the weather and didn't; \
-         possible_abilities = {:?}", p2_mon.possible_abilities
+         possible_abilities = {:?}",
+        p2_mon.possible_abilities
     );
 }
 
@@ -9624,12 +12558,14 @@ mod roundtrip_soundness {
     use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
-    use crate::information::inference::{apply_information, unknown_is_excluded, InferenceConfig};
+    use crate::information::inference::{InferenceConfig, apply_information, unknown_is_excluded};
     use crate::information::information::InformationEvent;
-    use crate::information::unknowns::{Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState};
+    use crate::information::unknowns::{
+        Statement, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
+    };
     use crate::state::battle::{BattleCommand, MatchState, Player, PlayerCommand, SwitchCommand};
     use crate::state::dex_data::PokemonType;
-    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{Nature, PokemonState, build_pokemon_state};
     use crate::tests::simuilator_test_helpers::{
         battle_state_from_lists, move_dex, pokemon_dex, run_single_turn_with_events, simple_attack,
     };
@@ -9643,7 +12579,9 @@ mod roundtrip_soundness {
         let dex = pokemon_dex();
         super::battle_nvn(
             vec![UnknownPokemonState::from_known_pokemon(p1)],
-            vec![UnknownPokemonState::from_opponent_species(p2_species, dex, 50)],
+            vec![UnknownPokemonState::from_opponent_species(
+                p2_species, dex, 50,
+            )],
         )
     }
 
@@ -9656,7 +12594,8 @@ mod roundtrip_soundness {
     ) -> Vec<InformationEvent> {
         let md = move_dex();
         let pd = pokemon_dex();
-        let mut branches = run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
+        let mut branches =
+            run_single_turn_with_events(&state, &p1_cmd, &p2_cmd, md, pd, Player::P1);
         // Sort highest probability first; take the first BattleState branch.
         branches.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         for (st, ev_opt, _) in branches {
@@ -9668,7 +12607,10 @@ mod roundtrip_soundness {
     }
 
     /// Apply the real event stream to the fog-of-war state, returning the updated battle.
-    fn apply_roundtrip(fog: UnknownBattleState, events: Vec<InformationEvent>) -> UnknownBattleState {
+    fn apply_roundtrip(
+        fog: UnknownBattleState,
+        events: Vec<InformationEvent>,
+    ) -> UnknownBattleState {
         let dex = pokemon_dex();
         let md = move_dex();
         let result = apply_information(
@@ -9691,11 +12633,16 @@ mod roundtrip_soundness {
     /// `informationMode="openSheet"` branch, via `team_preview_open_sheet_from_perspective`)
     /// that produced the S34/S35 contradictions. `reveal_nature=false` matches plain
     /// "Open Team Sheet" (not "+ Natures").
-    fn fog_1v1_open_sheet_force_max_ivs(p1: &PokemonState, p2: &PokemonState) -> UnknownBattleState {
+    fn fog_1v1_open_sheet_force_max_ivs(
+        p1: &PokemonState,
+        p2: &PokemonState,
+    ) -> UnknownBattleState {
         let dex = pokemon_dex();
         super::battle_nvn(
             vec![UnknownPokemonState::from_known_pokemon(p1)],
-            vec![UnknownPokemonState::from_opponent_open_sheet(p2, dex, 50, false, true)],
+            vec![UnknownPokemonState::from_opponent_open_sheet(
+                p2, dex, 50, false, true,
+            )],
         )
     }
 
@@ -9727,16 +12674,34 @@ mod roundtrip_soundness {
         let md = move_dex();
 
         let p1 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Earthquake), None, None, None]),
-            None, Some(Ability::RoughSkin), Some(Nature::Adamant), Some(Item::ChoiceBand),
-            None, Some([4, 252, 0, 0, 0, 252]), None, true,
+            None,
+            Some(Ability::RoughSkin),
+            Some(Nature::Adamant),
+            Some(Item::ChoiceBand),
+            None,
+            Some([4, 252, 0, 0, 0, 252]),
+            None,
+            true,
         );
         let p2 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::BodySlam), None, None, None]),
-            None, Some(Ability::ThickFat), Some(Nature::Impish), Some(Item::None),
-            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+            None,
+            Some(Ability::ThickFat),
+            Some(Nature::Impish),
+            Some(Item::None),
+            None,
+            Some([252, 0, 252, 0, 4, 0]),
+            None,
+            true,
         );
 
         let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
@@ -9747,7 +12712,14 @@ mod roundtrip_soundness {
         let fog = fog_1v1_open_sheet_force_max_ivs(&p1, &p2);
 
         let branches = crate::tests::simuilator_test_helpers::run_single_turn_with_events_opts(
-            &state, &p1_cmd, &p2_cmd, md, pd, Player::P1, true, 16,
+            &state,
+            &p1_cmd,
+            &p2_cmd,
+            md,
+            pd,
+            Player::P1,
+            true,
+            16,
         );
         assert!(!branches.is_empty());
 
@@ -9802,21 +12774,46 @@ mod roundtrip_soundness {
         let md = move_dex();
 
         let p1a = build_pokemon_state(
-            Species::Tyranitar, pd, md, Some(50),
+            Species::Tyranitar,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::RockSlide), None, None, None]),
-            None, Some(Ability::SandStream), Some(Nature::Adamant), Some(Item::Tyranitarite),
-            None, Some([26, 252, 0, 0, 0, 0]), None, true,
+            None,
+            Some(Ability::SandStream),
+            Some(Nature::Adamant),
+            Some(Item::Tyranitarite),
+            None,
+            Some([26, 252, 0, 0, 0, 0]),
+            None,
+            true,
         );
         let p2a = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::BodySlam), None, None, None]),
-            None, Some(Ability::ThickFat), Some(Nature::Impish), Some(Item::None),
-            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+            None,
+            Some(Ability::ThickFat),
+            Some(Nature::Impish),
+            Some(Item::None),
+            None,
+            Some([252, 0, 252, 0, 4, 0]),
+            None,
+            true,
         );
 
         let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
-            Player::P1, std::slice::from_ref(&p1a), std::slice::from_ref(&p2a), pd, 1, 1, 50,
-            crate::information::unknowns::InformationMode::OpenTeamSheet, true,
+            Player::P1,
+            std::slice::from_ref(&p1a),
+            std::slice::from_ref(&p2a),
+            pd,
+            1,
+            1,
+            50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet,
+            true,
         );
         let UnknownMatchState::TeamPreview(preview) = preview else {
             panic!("expected TeamPreview")
@@ -9828,7 +12825,9 @@ mod roundtrip_soundness {
         let events = vec![InformationEvent {
             kind: crate::information::information::EventKind::SimultaneousSwitch {
                 switches: vec![
-                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                    crate::information::information::SwitchState {
+                        disguise_species: None,
+                        max_hp: 0,
                         slot: super::p1(0),
                         species: Species::Tyranitar,
                         level: 50,
@@ -9836,7 +12835,9 @@ mod roundtrip_soundness {
                         status: None,
                         tera_type: None,
                     },
-                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                    crate::information::information::SwitchState {
+                        disguise_species: None,
+                        max_hp: 0,
                         slot: super::p2(0),
                         species: Species::Snorlax,
                         level: 50,
@@ -9850,7 +12851,12 @@ mod roundtrip_soundness {
         }];
 
         let result = apply_information(
-            UnknownMatchState::Battle(fog), &events, true, pd, md, &HashMap::new(),
+            UnknownMatchState::Battle(fog),
+            &events,
+            true,
+            pd,
+            md,
+            &HashMap::new(),
             &InferenceConfig::default(),
         );
         let UnknownMatchState::Battle(b) = result else {
@@ -9859,9 +12865,11 @@ mod roundtrip_soundness {
         let p1_mon = &b.p1_active_mons[0];
 
         assert_eq!(
-            p1_mon.possible_natures, Unknown::Known(Nature::Adamant),
+            p1_mon.possible_natures,
+            Unknown::Known(Nature::Adamant),
             "P1's own lead must keep its Known nature through the team-preview \
-             transition; got {:?}", p1_mon.possible_natures
+             transition; got {:?}",
+            p1_mon.possible_natures
         );
         assert_eq!(
             p1_mon.min_evs, p1a.evs,
@@ -9893,21 +12901,46 @@ mod roundtrip_soundness {
         let md = move_dex();
 
         let p2a = build_pokemon_state(
-            Species::Tyranitar, pd, md, Some(50),
+            Species::Tyranitar,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::RockSlide), None, None, None]),
-            None, Some(Ability::SandStream), Some(Nature::Adamant), Some(Item::Tyranitarite),
-            None, Some([26, 252, 0, 0, 0, 0]), None, true,
+            None,
+            Some(Ability::SandStream),
+            Some(Nature::Adamant),
+            Some(Item::Tyranitarite),
+            None,
+            Some([26, 252, 0, 0, 0, 0]),
+            None,
+            true,
         );
         let p1a = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::BodySlam), None, None, None]),
-            None, Some(Ability::ThickFat), Some(Nature::Impish), Some(Item::None),
-            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+            None,
+            Some(Ability::ThickFat),
+            Some(Nature::Impish),
+            Some(Item::None),
+            None,
+            Some([252, 0, 252, 0, 4, 0]),
+            None,
+            true,
         );
 
         let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
-            Player::P2, std::slice::from_ref(&p2a), std::slice::from_ref(&p1a), pd, 1, 1, 50,
-            crate::information::unknowns::InformationMode::OpenTeamSheet, true,
+            Player::P2,
+            std::slice::from_ref(&p2a),
+            std::slice::from_ref(&p1a),
+            pd,
+            1,
+            1,
+            50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet,
+            true,
         );
         let UnknownMatchState::TeamPreview(preview) = preview else {
             panic!("expected TeamPreview")
@@ -9919,7 +12952,9 @@ mod roundtrip_soundness {
         let events = vec![InformationEvent {
             kind: crate::information::information::EventKind::SimultaneousSwitch {
                 switches: vec![
-                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                    crate::information::information::SwitchState {
+                        disguise_species: None,
+                        max_hp: 0,
                         slot: super::p1(0),
                         species: Species::Snorlax,
                         level: 50,
@@ -9927,7 +12962,9 @@ mod roundtrip_soundness {
                         status: None,
                         tera_type: None,
                     },
-                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                    crate::information::information::SwitchState {
+                        disguise_species: None,
+                        max_hp: 0,
                         slot: super::p2(0),
                         species: Species::Tyranitar,
                         level: 50,
@@ -9941,7 +12978,12 @@ mod roundtrip_soundness {
         }];
 
         let result = apply_information(
-            UnknownMatchState::Battle(fog), &events, true, pd, md, &HashMap::new(),
+            UnknownMatchState::Battle(fog),
+            &events,
+            true,
+            pd,
+            md,
+            &HashMap::new(),
             &InferenceConfig::default(),
         );
         let UnknownMatchState::Battle(b) = result else {
@@ -9950,9 +12992,11 @@ mod roundtrip_soundness {
         let p2_mon = &b.p2_active_mons[0];
 
         assert_eq!(
-            p2_mon.possible_natures, Unknown::Known(Nature::Adamant),
+            p2_mon.possible_natures,
+            Unknown::Known(Nature::Adamant),
             "P2's own lead must keep its Known nature through the team-preview \
-             transition; got {:?}", p2_mon.possible_natures
+             transition; got {:?}",
+            p2_mon.possible_natures
         );
         assert_eq!(
             p2_mon.min_evs, p2a.evs,
@@ -9975,7 +13019,8 @@ mod roundtrip_soundness {
         assert!(
             b.p2_known_back_mons.is_empty(),
             "P2's own lead must not be duplicated onto the bench during the \
-             team-preview transition; got {:?}", b.p2_known_back_mons
+             team-preview transition; got {:?}",
+            b.p2_known_back_mons
         );
     }
 
@@ -9999,21 +13044,46 @@ mod roundtrip_soundness {
         let md = move_dex();
 
         let p1a = build_pokemon_state(
-            Species::Corviknight, pd, md, Some(50),
+            Species::Corviknight,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::BraveBird), None, None, None]),
-            None, Some(Ability::Pressure), Some(Nature::Impish), Some(Item::Leftovers),
-            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+            None,
+            Some(Ability::Pressure),
+            Some(Nature::Impish),
+            Some(Item::Leftovers),
+            None,
+            Some([252, 0, 252, 0, 4, 0]),
+            None,
+            true,
         );
         let p2a = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::BodySlam), None, None, None]),
-            None, Some(Ability::ThickFat), Some(Nature::Impish), Some(Item::None),
-            None, Some([252, 0, 252, 0, 4, 0]), None, true,
+            None,
+            Some(Ability::ThickFat),
+            Some(Nature::Impish),
+            Some(Item::None),
+            None,
+            Some([252, 0, 252, 0, 4, 0]),
+            None,
+            true,
         );
 
         let preview = UnknownMatchState::team_preview_open_sheet_from_perspective(
-            Player::P1, std::slice::from_ref(&p1a), std::slice::from_ref(&p2a), pd, 1, 1, 50,
-            crate::information::unknowns::InformationMode::OpenTeamSheet, true,
+            Player::P1,
+            std::slice::from_ref(&p1a),
+            std::slice::from_ref(&p2a),
+            pd,
+            1,
+            1,
+            50,
+            crate::information::unknowns::InformationMode::OpenTeamSheet,
+            true,
         );
         let UnknownMatchState::TeamPreview(preview) = preview else {
             panic!("expected TeamPreview")
@@ -10024,7 +13094,9 @@ mod roundtrip_soundness {
         let events = vec![InformationEvent {
             kind: crate::information::information::EventKind::SimultaneousSwitch {
                 switches: vec![
-                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                    crate::information::information::SwitchState {
+                        disguise_species: None,
+                        max_hp: 0,
                         slot: super::p1(0),
                         species: Species::Corviknight,
                         level: 50,
@@ -10032,7 +13104,9 @@ mod roundtrip_soundness {
                         status: None,
                         tera_type: None,
                     },
-                    crate::information::information::SwitchState { disguise_species: None, max_hp: 0,
+                    crate::information::information::SwitchState {
+                        disguise_species: None,
+                        max_hp: 0,
                         slot: super::p2(0),
                         species: Species::Snorlax,
                         level: 50,
@@ -10046,7 +13120,12 @@ mod roundtrip_soundness {
         }];
 
         let result = apply_information(
-            UnknownMatchState::Battle(fog), &events, true, pd, md, &HashMap::new(),
+            UnknownMatchState::Battle(fog),
+            &events,
+            true,
+            pd,
+            md,
+            &HashMap::new(),
             &InferenceConfig::default(),
         );
         let UnknownMatchState::Battle(b) = result else {
@@ -10056,7 +13135,8 @@ mod roundtrip_soundness {
         assert!(
             b.p1_known_back_mons.is_empty(),
             "P1's lead must not be duplicated onto the bench during the team-preview \
-             transition; got {:?}", b.p1_known_back_mons
+             transition; got {:?}",
+            b.p1_known_back_mons
         );
 
         // Regression proper: a later ItemRevealed re-confirming the lead's own item
@@ -10070,7 +13150,12 @@ mod roundtrip_soundness {
             reactions: vec![],
         }];
         let result2 = apply_information(
-            UnknownMatchState::Battle(b), &item_reveal, true, pd, md, &HashMap::new(),
+            UnknownMatchState::Battle(b),
+            &item_reveal,
+            true,
+            pd,
+            md,
+            &HashMap::new(),
             &InferenceConfig::default(),
         );
         let UnknownMatchState::Battle(b2) = result2 else {
@@ -10097,40 +13182,67 @@ mod roundtrip_soundness {
 
         // P1: slow Shuckle with Splash.
         let p1 = build_pokemon_state(
-            Species::Shuckle, pd, md, Some(50),
+            Species::Shuckle,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
         // P2 active: Snorlax with Splash, Immunity ability.
         let p2_active = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         // P2 back: Garchomp, SandVeil, tera_type=Fire — but NOT Terastallized.
         let p2_back = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::SandVeil), Some(Nature::Hardy), None,
+            None,
+            Some(Ability::SandVeil),
+            Some(Nature::Hardy),
+            None,
             Some(PokemonType::Fire), // tera_type = Fire
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
-        assert!(!p2_back.is_tera, "test setup: back Garchomp must not be Terastallized");
+        assert!(
+            !p2_back.is_tera,
+            "test setup: back Garchomp must not be Terastallized"
+        );
 
-        let battle = battle_state_from_lists(
-            vec![p1.clone()], vec![],
-            vec![p2_active], vec![p2_back],
-        );
+        let battle =
+            battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_active], vec![p2_back]);
         let state = MatchState::BattleState(battle);
 
         // P1 uses Splash (harmless); P2 switches to Garchomp (back-index 0).
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
-        let p2_cmd = PlayerCommand::Battle(vec![
-            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
-        ]);
+        let p2_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand {
+            party_index: 0,
+        })]);
 
         let fog = fog_1v1(&p1, Species::Snorlax);
         let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
@@ -10141,21 +13253,24 @@ mod roundtrip_soundness {
         assert!(
             !incoming.is_tera,
             "C1 regression: switched-in non-tera Garchomp must NOT be flagged as Terastallized; \
-             is_tera = {}", incoming.is_tera
+             is_tera = {}",
+            incoming.is_tera
         );
         assert_ne!(
             incoming.possible_tera_type,
             Unknown::Known(PokemonType::Fire),
             "C1 regression: Garchomp's hidden tera type (Fire) must NOT be Known — \
              tera type is only observable when the mon actually Terastallizes; \
-             possible_tera_type = {:?}", incoming.possible_tera_type
+             possible_tera_type = {:?}",
+            incoming.possible_tera_type
         );
         // Ability soundness: true ability (SandVeil) must be within possible_abilities.
         // from_opponent_species(Garchomp) gives Possibly([SandVeil, RoughSkin]).
         assert!(
             !unknown_is_excluded(&incoming.possible_abilities, &Ability::SandVeil),
             "soundness: true ability SandVeil must not be excluded; \
-             possible_abilities = {:?}", incoming.possible_abilities
+             possible_abilities = {:?}",
+            incoming.possible_abilities
         );
     }
 
@@ -10175,25 +13290,46 @@ mod roundtrip_soundness {
         // P1: Garchomp with Earthquake (Atk=150 at Hardy/31IVs/0EVs/Lv50). Garchomp
         // is Ground-type so Earthquake gets STAB.  Garchomp base Spe=102 → faster than Snorlax.
         let p1 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
-            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
+            Some([
+                Some(PokemonMove::Earthquake),
+                Some(PokemonMove::Splash),
+                None,
+                None,
+            ]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
         // P2: Snorlax with Splash, Immunity ability (in Snorlax's real ability list).
         // Hardy/31IVs/0EVs → true Def BSV = 85.
         let p2 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let true_def_bsv = p2.stats[2]; // Hardy neutral: post-nature stat == BSV
 
-        let battle = battle_state_from_lists(
-            vec![p1.clone()], vec![], vec![p2.clone()], vec![],
-        );
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
         let state = MatchState::BattleState(battle);
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Earthquake
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
@@ -10208,12 +13344,14 @@ mod roundtrip_soundness {
                 && true_def_bsv <= p2_fog.max_pre_nature_stat[2],
             "soundness (Direction A): true Def BSV ({true_def_bsv}) must lie within \
              inferred range [{}, {}]",
-            p2_fog.min_pre_nature_stat[2], p2_fog.max_pre_nature_stat[2]
+            p2_fog.min_pre_nature_stat[2],
+            p2_fog.max_pre_nature_stat[2]
         );
         assert!(
             !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::Immunity),
             "soundness: true ability Immunity must not be excluded; \
-             possible_abilities = {:?}", p2_fog.possible_abilities
+             possible_abilities = {:?}",
+            p2_fog.possible_abilities
         );
     }
 
@@ -10237,28 +13375,49 @@ mod roundtrip_soundness {
         let md = move_dex();
 
         let p1 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
-            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
+            Some([
+                Some(PokemonMove::Earthquake),
+                Some(PokemonMove::Splash),
+                None,
+                None,
+            ]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
         // True build: 252 HP EVs, 0 Def EVs (all other EVs 0 too) — maximally
         // HP-heavy, the exact shape the TODO complaint describes.
         let p2 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([252u8, 0, 0, 0, 0, 0]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([252u8, 0, 0, 0, 0, 0]),
+            Some([31u8; 6]),
+            false,
         );
         let true_hp_ev: u8 = p2.evs[0];
         let true_def_ev: u8 = p2.evs[2];
         assert_eq!(true_hp_ev, 252);
         assert_eq!(true_def_ev, 0);
 
-        let battle = battle_state_from_lists(
-            vec![p1.clone()], vec![], vec![p2.clone()], vec![],
-        );
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
         let state = MatchState::BattleState(battle);
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Earthquake
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0])); // Splash
@@ -10271,13 +13430,18 @@ mod roundtrip_soundness {
         assert!(
             p2_fog.min_evs[0] <= true_hp_ev && true_hp_ev <= p2_fog.max_evs[0],
             "soundness: true HP EV ({true_hp_ev}) must lie within inferred range \
-             [{}, {}]", p2_fog.min_evs[0], p2_fog.max_evs[0]
+             [{}, {}]",
+            p2_fog.min_evs[0],
+            p2_fog.max_evs[0]
         );
         assert!(
             p2_fog.min_evs[2] <= true_def_ev && true_def_ev <= p2_fog.max_evs[2],
             "soundness: true Def EV ({true_def_ev}) must lie within inferred range \
              [{}, {}] — HP EV bound was [{}, {}]",
-            p2_fog.min_evs[2], p2_fog.max_evs[2], p2_fog.min_evs[0], p2_fog.max_evs[0]
+            p2_fog.min_evs[2],
+            p2_fog.max_evs[2],
+            p2_fog.min_evs[0],
+            p2_fog.max_evs[0]
         );
     }
 
@@ -10295,16 +13459,39 @@ mod roundtrip_soundness {
         let md = move_dex();
 
         let p1 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
-            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
+            Some([
+                Some(PokemonMove::Earthquake),
+                Some(PokemonMove::Splash),
+                None,
+                None,
+            ]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let p2 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([252u8, 0, 0, 0, 0, 0]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([252u8, 0, 0, 0, 0, 0]),
+            Some([31u8; 6]),
+            false,
         );
         let true_hp_ev: u8 = p2.evs[0];
         let true_def_ev: u8 = p2.evs[2];
@@ -10351,7 +13538,12 @@ mod roundtrip_soundness {
         let turn2_events = turn2_events.expect("observer set → events must be Some");
 
         let belief_after_2 = apply_information(
-            belief_after_1, &turn2_events, false, dex, md, &HashMap::new(),
+            belief_after_1,
+            &turn2_events,
+            false,
+            dex,
+            md,
+            &HashMap::new(),
             &InferenceConfig::default(),
         );
         let UnknownMatchState::Battle(result) = belief_after_2 else {
@@ -10362,13 +13554,18 @@ mod roundtrip_soundness {
         assert!(
             p2_fog.min_evs[0] <= true_hp_ev && true_hp_ev <= p2_fog.max_evs[0],
             "soundness (2 hits): true HP EV ({true_hp_ev}) must lie within inferred \
-             range [{}, {}]", p2_fog.min_evs[0], p2_fog.max_evs[0]
+             range [{}, {}]",
+            p2_fog.min_evs[0],
+            p2_fog.max_evs[0]
         );
         assert!(
             p2_fog.min_evs[2] <= true_def_ev && true_def_ev <= p2_fog.max_evs[2],
             "soundness (2 hits): true Def EV ({true_def_ev}) must lie within inferred \
              range [{}, {}] — HP EV bound was [{}, {}]",
-            p2_fog.min_evs[2], p2_fog.max_evs[2], p2_fog.min_evs[0], p2_fog.max_evs[0]
+            p2_fog.min_evs[2],
+            p2_fog.max_evs[2],
+            p2_fog.min_evs[0],
+            p2_fog.max_evs[0]
         );
     }
 
@@ -10388,7 +13585,10 @@ mod roundtrip_soundness {
         let zoroark_back = UnknownPokemonState::from_opponent_species(Species::Zoroark, pd, 50);
         let mut snorlax_back = UnknownPokemonState::from_opponent_species(Species::Snorlax, pd, 50);
         snorlax_back.possible_illusion_state = Some(Box::new(
-            crate::information::unknowns::seed_illusion_hypothesis_for(&snorlax_back, &zoroark_back),
+            crate::information::unknowns::seed_illusion_hypothesis_for(
+                &snorlax_back,
+                &zoroark_back,
+            ),
         ));
         let mut state = super::battle_with_p2(vec![]);
         state.p2_known_back_mons = vec![snorlax_back];
@@ -10422,14 +13622,17 @@ mod roundtrip_soundness {
             &HashMap::new(),
             &InferenceConfig::default(),
         );
-        let UnknownMatchState::Battle(b) = result else { panic!("expected battle state") };
+        let UnknownMatchState::Battle(b) = result else {
+            panic!("expected battle state")
+        };
         let m = &b.p2_active_mons[0];
 
         assert_eq!(m.possible_species, Unknown::Known(Species::Zoroark));
         assert!(
             m.min_stats[0] <= m.max_stats[0],
             "HP window must be non-empty after promotion: [{}, {}]",
-            m.min_stats[0], m.max_stats[0]
+            m.min_stats[0],
+            m.max_stats[0]
         );
         // The window must be Zoroark-consistent: a real Zoroark (base HP 60, 31 IV,
         // any EV) must lie within it, NOT Snorlax's (base HP 160) window.
@@ -10438,7 +13641,9 @@ mod roundtrip_soundness {
             m.min_stats[0] <= real_zoroark_hp && real_zoroark_hp <= m.max_stats[0],
             "promoted HP window [{}, {}] must contain a real Zoroark HP ({}) — a stale \
              Snorlax-derived window would exclude it",
-            m.min_stats[0], m.max_stats[0], real_zoroark_hp
+            m.min_stats[0],
+            m.max_stats[0],
+            real_zoroark_hp
         );
     }
 
@@ -10458,25 +13663,46 @@ mod roundtrip_soundness {
 
         // P1: Snorlax with Splash (Spe=50, will be damaged by Garchomp first).
         let p1 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
         // P2: Garchomp with Earthquake, SandVeil ability (real Garchomp ability).
         // Hardy/31IVs/0EVs → true Atk BSV = 150, Spe BSV = 122.
         let p2 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
-            Some([Some(PokemonMove::Earthquake), Some(PokemonMove::Splash), None, None]),
-            None, Some(Ability::SandVeil), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
+            Some([
+                Some(PokemonMove::Earthquake),
+                Some(PokemonMove::Splash),
+                None,
+                None,
+            ]),
+            None,
+            Some(Ability::SandVeil),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let true_atk_bsv = p2.stats[1]; // Hardy neutral: post-nature stat == BSV
 
-        let battle = battle_state_from_lists(
-            vec![p1.clone()], vec![], vec![p2.clone()], vec![],
-        );
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
         let state = MatchState::BattleState(battle);
         // P1 uses Splash; P2 uses Earthquake. P2 (Spe=122) moves first.
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0])); // Splash
@@ -10492,16 +13718,97 @@ mod roundtrip_soundness {
                 && true_atk_bsv <= p2_fog.max_pre_nature_stat[1],
             "soundness (Direction B): true Atk BSV ({true_atk_bsv}) must lie within \
              inferred range [{}, {}]",
-            p2_fog.min_pre_nature_stat[1], p2_fog.max_pre_nature_stat[1]
+            p2_fog.min_pre_nature_stat[1],
+            p2_fog.max_pre_nature_stat[1]
         );
         assert!(
             !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::SandVeil),
             "soundness: true ability SandVeil must not be excluded; \
-             possible_abilities = {:?}", p2_fog.possible_abilities
+             possible_abilities = {:?}",
+            p2_fog.possible_abilities
         );
     }
 
     // ── Scenario D: Speed order — Pass 4 soundness ───────────────────────────
+
+    /// S61: Focus Sash changes a would-be KO into exactly enough applied damage to
+    /// leave 1 HP. The observed HP delta is therefore a lower bound on the move's
+    /// rolled damage, not an exact roll. Reproduces deterministic fuzz seed 50.
+    #[test]
+    fn roundtrip_s61_focus_sash_survival_does_not_cap_attacker_spa() {
+        let pd = pokemon_dex();
+        let md = move_dex();
+
+        let p1 = build_pokemon_state(
+            Species::Lycanroc,
+            pd,
+            md,
+            Some(50),
+            Some([Some(PokemonMove::Splash), None, None, None]),
+            None,
+            Some(Ability::KeenEye),
+            Some(Nature::Hardy),
+            Some(Item::FocusSash),
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
+        );
+        let p2 = build_pokemon_state(
+            Species::Torkoal,
+            pd,
+            md,
+            Some(50),
+            Some([Some(PokemonMove::EarthPower), None, None, None]),
+            None,
+            Some(Ability::WhiteSmoke),
+            Some(Nature::Quiet),
+            Some(Item::ChoiceSpecs),
+            None,
+            Some([0, 0, 0, 252, 0, 0]),
+            Some([31u8; 6]),
+            false,
+        );
+        // Quiet boosts SpA by 1.1; invert the exact final stat back to its BSV.
+        let true_spa_bsv = p2.stats[3] * 10 / 11;
+
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
+        let state = MatchState::BattleState(battle);
+        let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
+        let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
+        let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
+
+        fn contains_sash_loss(events: &[InformationEvent]) -> bool {
+            events.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    crate::information::information::EventKind::ItemLost {
+                        item: Item::FocusSash,
+                        ..
+                    }
+                ) || contains_sash_loss(&event.reactions)
+            })
+        }
+        assert!(
+            contains_sash_loss(&events),
+            "the probe must activate Focus Sash"
+        );
+
+        let result = apply_roundtrip(fog_1v1(&p1, Species::Torkoal), events);
+        let attacker = &result.p2_active_mons[0];
+        assert!(
+            attacker.min_pre_nature_stat[3] <= true_spa_bsv
+                && true_spa_bsv <= attacker.max_pre_nature_stat[3],
+            "Sash-censored damage must retain true SpA BSV {true_spa_bsv}; inferred [{}, {}]",
+            attacker.min_pre_nature_stat[3],
+            attacker.max_pre_nature_stat[3],
+        );
+        assert!(
+            !unknown_is_excluded(&attacker.possible_natures, &Nature::Quiet),
+            "Sash-censored damage must not exclude the true Quiet nature: {:?}",
+            attacker.possible_natures,
+        );
+    }
 
     /// Both mons use Tackle. P1 (Garchomp, Spe=122) moves first; P2 (Snorlax, Spe=50)
     /// moves second.  Pass 4 emits a SpeedComparison constraint and propagates it.
@@ -10515,24 +13822,45 @@ mod roundtrip_soundness {
 
         // P1: Garchomp with Tackle (Spe=122, moves first).
         let p1 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
-            Some([Some(PokemonMove::Tackle), Some(PokemonMove::Splash), None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
+            Some([
+                Some(PokemonMove::Tackle),
+                Some(PokemonMove::Splash),
+                None,
+                None,
+            ]),
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
         // P2: Snorlax with Tackle (Spe=50, moves second), Immunity ability.
         let p2 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Tackle), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let true_spe_bsv = p2.stats[5]; // Hardy neutral: post-nature stat == BSV
 
-        let battle = battle_state_from_lists(
-            vec![p1.clone()], vec![], vec![p2.clone()], vec![],
-        );
+        let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2.clone()], vec![]);
         let state = MatchState::BattleState(battle);
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
@@ -10547,7 +13875,8 @@ mod roundtrip_soundness {
             p2_fog.min_stats[5] <= true_spe_bsv && true_spe_bsv <= p2_fog.max_stats[5],
             "soundness (Pass 4): true Spe BSV ({true_spe_bsv}) must lie within \
              inferred Spe range [{}, {}]",
-            p2_fog.min_stats[5], p2_fog.max_stats[5]
+            p2_fog.min_stats[5],
+            p2_fog.max_stats[5]
         );
         assert!(
             !unknown_is_excluded(&p2_fog.possible_abilities, &Ability::Immunity),
@@ -10575,16 +13904,34 @@ mod roundtrip_soundness {
         // P1 lead: bulky Snorlax that will switch out. Back: a second wall to receive
         // the hit (Def known to us; its species base Def anchors the inversion).
         let p1_lead = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let p1_back = build_pokemon_state(
-            Species::Regice, pd, md, Some(50),
+            Species::Regice,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::ClearBody), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::ClearBody),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
         // P2: Garchomp, Analytic, NEUTRAL 0-EV Atk (true BSV near the species floor).
@@ -10595,24 +13942,35 @@ mod roundtrip_soundness {
         // A weak, non-STAB move (Tackle, 40 BP) so the exact-damage inversion is
         // discriminating; a strong STAB move saturates (every BSV reproduces it).
         let p2 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Tackle), None, None, None]),
-            None, Some(Ability::Analytic), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Analytic),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         // Hardy is neutral → pre-nature BSV == the final Atk stat.
         let true_atk_bsv = p2.stats[1];
 
         let battle = battle_state_from_lists(
-            vec![p1_lead.clone()], vec![p1_back.clone()],
-            vec![p2.clone()], vec![],
+            vec![p1_lead.clone()],
+            vec![p1_back.clone()],
+            vec![p2.clone()],
+            vec![],
         );
         let state = MatchState::BattleState(battle);
 
         // P1 switches to Regice (back-index 0); P2 attacks — P2 moves last.
-        let p1_cmd = PlayerCommand::Battle(vec![
-            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
-        ]);
+        let p1_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand {
+            party_index: 0,
+        })]);
         let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![0]));
 
         let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
@@ -10623,8 +13981,7 @@ mod roundtrip_soundness {
         // would dominate the min-BSV and mask whether Analytic is (in)correctly
         // included — the S28 distinction only bites when Analytic is the binding
         // booster.
-        let mut p2_fog_mon =
-            UnknownPokemonState::from_opponent_species(Species::Garchomp, pd, 50);
+        let mut p2_fog_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, pd, 50);
         p2_fog_mon.possible_abilities =
             Unknown::Possibly(vec![Ability::Analytic, Ability::SandVeil]);
         p2_fog_mon.possible_original_abilities =
@@ -10636,19 +13993,26 @@ mod roundtrip_soundness {
             vec![UnknownPokemonState::from_known_pokemon(&p1_lead)],
             vec![p2_fog_mon],
         );
-        initial_fog.p1_known_back_mons =
-            vec![UnknownPokemonState::from_known_pokemon(&p1_back)];
+        initial_fog.p1_known_back_mons = vec![UnknownPokemonState::from_known_pokemon(&p1_back)];
 
         let result = apply_information(
             UnknownMatchState::Battle(initial_fog),
-            &events, false, pd, md, &HashMap::new(), &InferenceConfig::default(),
+            &events,
+            false,
+            pd,
+            md,
+            &HashMap::new(),
+            &InferenceConfig::default(),
         );
         let result = match result {
             UnknownMatchState::Battle(b) => b,
             _ => panic!("expected Battle state"),
         };
 
-        let p2_slot = super::FieldSlot { player: Player::P2, slot_index: 0 };
+        let p2_slot = super::FieldSlot {
+            player: Player::P2,
+            slot_index: 0,
+        };
         let p2_idx = super::mon_idx_for_active_slot(&result, &p2_slot).unwrap();
         let p2_fog = super::get_mon_by_idx(&result, p2_idx).unwrap();
         assert!(
@@ -10657,7 +14021,8 @@ mod roundtrip_soundness {
             "soundness (S28): true Atk BSV {true_atk_bsv} must lie within inferred \
              pre-nature range [{}, {}] — Analytic must be in the union because P2 \
              moved last (after P1's switch)",
-            p2_fog.min_pre_nature_stat[1], p2_fog.max_pre_nature_stat[1]
+            p2_fog.min_pre_nature_stat[1],
+            p2_fog.max_pre_nature_stat[1]
         );
     }
 
@@ -10674,37 +14039,63 @@ mod roundtrip_soundness {
 
         // P1: known Garchomp (max Atk, Adamant) with Splash.
         let p1 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::SandVeil), Some(Nature::Adamant), None, None,
-            Some([0, 252, 0, 0, 0, 4]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::SandVeil),
+            Some(Nature::Adamant),
+            None,
+            None,
+            Some([0, 252, 0, 0, 0, 4]),
+            Some([31u8; 6]),
+            false,
         );
         let true_atk = p1.stats[1];
 
         // P2 lead: Snorlax; back: Ditto with Imposter.
         let p2_lead = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let p2_ditto = build_pokemon_state(
-            Species::Ditto, pd, md, Some(50),
+            Species::Ditto,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Transform), None, None, None]),
-            None, Some(Ability::Imposter), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Imposter),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
-        let battle = battle_state_from_lists(
-            vec![p1.clone()], vec![], vec![p2_lead], vec![p2_ditto],
-        );
+        let battle =
+            battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_lead], vec![p2_ditto]);
         let state = MatchState::BattleState(battle);
 
         // P1 Splash; P2 switches to Ditto → Imposter transforms into Garchomp.
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
-        let p2_cmd = PlayerCommand::Battle(vec![
-            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
-        ]);
+        let p2_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand {
+            party_index: 0,
+        })]);
         let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
 
         // The event stream must contain a Transformed announcing the copy.
@@ -10716,16 +14107,27 @@ mod roundtrip_soundness {
                     || contains_transformed(&e.reactions)
             })
         }
-        assert!(contains_transformed(&events), "sim must emit Transformed for Imposter");
+        assert!(
+            contains_transformed(&events),
+            "sim must emit Transformed for Imposter"
+        );
 
         let fog = fog_1v1(&p1, Species::Snorlax);
         let mut initial_fog = fog;
-        initial_fog.p2_known_back_mons =
-            vec![UnknownPokemonState::from_opponent_species(Species::Ditto, pd, 50)];
+        initial_fog.p2_known_back_mons = vec![UnknownPokemonState::from_opponent_species(
+            Species::Ditto,
+            pd,
+            50,
+        )];
 
         let result = apply_information(
             UnknownMatchState::Battle(initial_fog),
-            &events, false, pd, md, &HashMap::new(), &InferenceConfig::default(),
+            &events,
+            false,
+            pd,
+            md,
+            &HashMap::new(),
+            &InferenceConfig::default(),
         );
         let result = match result {
             UnknownMatchState::Battle(b) => b,
@@ -10735,12 +14137,17 @@ mod roundtrip_soundness {
         let t = &result.p2_active_mons[0];
         assert!(
             matches!(&t.possible_species, Unknown::Known(Species::Garchomp)),
-            "transformed Ditto must display Garchomp; got {:?}", t.possible_species
+            "transformed Ditto must display Garchomp; got {:?}",
+            t.possible_species
         );
-        assert!(t.pre_transform.is_some(), "pre_transform snapshot must be saved");
+        assert!(
+            t.pre_transform.is_some(),
+            "pre_transform snapshot must be saved"
+        );
         // Copy source is our own Known mon → copied Atk is exact.
         assert_eq!(
-            (t.min_stats[1], t.max_stats[1]), (true_atk, true_atk),
+            (t.min_stats[1], t.max_stats[1]),
+            (true_atk, true_atk),
             "copied Atk must be exact (source is the observer's Known Garchomp)"
         );
         // Garchomp's move (Splash was P1's; the copy takes P1's move set).
@@ -10766,37 +14173,62 @@ mod roundtrip_soundness {
 
         // P1: Regice — Clear Body silently blocks Intimidate.
         let p1 = build_pokemon_state(
-            Species::Regice, pd, md, Some(50),
+            Species::Regice,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::ClearBody), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::ClearBody),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
         // P2 lead: harmless Snorlax.  Back: Garchomp with Intimidate.
         let p2_lead = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let p2_back = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Intimidate), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Intimidate),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
 
-        let battle = battle_state_from_lists(
-            vec![p1.clone()], vec![],
-            vec![p2_lead], vec![p2_back],
-        );
+        let battle =
+            battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_lead], vec![p2_back]);
         let state = MatchState::BattleState(battle);
 
         // P1 uses Splash; P2 switches to Garchomp (back-index 0).
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
-        let p2_cmd = PlayerCommand::Battle(vec![
-            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
-        ]);
+        let p2_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand {
+            party_index: 0,
+        })]);
 
         let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
 
@@ -10808,11 +14240,17 @@ mod roundtrip_soundness {
         let p1_fog = UnknownPokemonState::from_known_pokemon(&p1);
         let mut initial_fog = super::battle_nvn(
             vec![p1_fog],
-            vec![UnknownPokemonState::from_opponent_species(Species::Snorlax, &HashMap::new(), 50)],
+            vec![UnknownPokemonState::from_opponent_species(
+                Species::Snorlax,
+                &HashMap::new(),
+                50,
+            )],
         );
-        initial_fog.p2_known_back_mons = vec![
-            UnknownPokemonState::from_opponent_species(Species::Garchomp, &infer_dex, 50),
-        ];
+        initial_fog.p2_known_back_mons = vec![UnknownPokemonState::from_opponent_species(
+            Species::Garchomp,
+            &infer_dex,
+            50,
+        )];
 
         let result = apply_information(
             UnknownMatchState::Battle(initial_fog),
@@ -10854,10 +14292,19 @@ mod roundtrip_soundness {
         let pd = pokemon_dex();
         let md = move_dex();
         build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Tackle), None, None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         )
     }
 
@@ -10868,10 +14315,19 @@ mod roundtrip_soundness {
         let p1 = fast_tackle_p1();
         // P2: Garchomp with Rough Skin (a real Garchomp ability).
         let p2 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::RoughSkin), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::RoughSkin),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
         let state = MatchState::BattleState(battle);
@@ -10883,7 +14339,10 @@ mod roundtrip_soundness {
         let result = apply_roundtrip(fog, events);
 
         assert!(
-            !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
+            !unknown_is_excluded(
+                &result.p2_active_mons[0].possible_abilities,
+                &Ability::RoughSkin
+            ),
             "silent-chip regression: Rough Skin must not be excluded after a contact hit \
              (the sim now emits AbilityRevealed); possible_abilities = {:?}",
             result.p2_active_mons[0].possible_abilities
@@ -10897,10 +14356,19 @@ mod roundtrip_soundness {
         let p1 = fast_tackle_p1();
         // P2: Ferrothorn with Iron Barbs.
         let p2 = build_pokemon_state(
-            Species::Ferrothorn, pd, md, Some(50),
+            Species::Ferrothorn,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::IronBarbs), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::IronBarbs),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
         let state = MatchState::BattleState(battle);
@@ -10912,7 +14380,10 @@ mod roundtrip_soundness {
         let result = apply_roundtrip(fog, events);
 
         assert!(
-            !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::IronBarbs),
+            !unknown_is_excluded(
+                &result.p2_active_mons[0].possible_abilities,
+                &Ability::IronBarbs
+            ),
             "silent-chip regression: Iron Barbs must not be excluded after a contact hit; \
              possible_abilities = {:?}",
             result.p2_active_mons[0].possible_abilities
@@ -10926,10 +14397,19 @@ mod roundtrip_soundness {
         let p1 = fast_tackle_p1();
         // P2: Garchomp holding Rocky Helmet (item), ability Sand Veil.
         let p2 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::SandVeil), Some(Nature::Hardy), Some(Item::RockyHelmet), None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::SandVeil),
+            Some(Nature::Hardy),
+            Some(Item::RockyHelmet),
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
         let state = MatchState::BattleState(battle);
@@ -10958,16 +14438,34 @@ mod roundtrip_soundness {
         let pd = pokemon_dex();
         let md = move_dex();
         let p1 = build_pokemon_state(
-            Species::Shuckle, pd, md, Some(50),
+            Species::Shuckle,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let mut p2 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::SandVeil), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::SandVeil),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         p2.status = Some(crate::state::dex_data::Status::Poison);
 
@@ -11003,17 +14501,35 @@ mod roundtrip_soundness {
         let md = move_dex();
         // P1: bulky Snorlax so the Tackle can't KO (faint-masking guard).
         let p1 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         // P2: Garchomp holding Life Orb, attacking with Tackle.
         let p2 = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Tackle), None, None, None]),
-            None, Some(Ability::SandVeil), Some(Nature::Hardy), Some(Item::LifeOrb), None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::SandVeil),
+            Some(Nature::Hardy),
+            Some(Item::LifeOrb),
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
         let state = MatchState::BattleState(battle);
@@ -11067,19 +14583,37 @@ mod roundtrip_soundness {
         // huge Def means P2's Tackle deals only a sliver, well under the
         // max_hp/4 Sitrus heal that follows.
         let mut p1 = build_pokemon_state(
-            Species::Shuckle, pd, md, Some(50),
+            Species::Shuckle,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), Some(Item::SitrusBerry), None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            Some(Item::SitrusBerry),
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let p1_max_hp = p1.hp;
         p1.hp = p1_max_hp / 2 + 1;
         // P2: Snorlax holding Life Orb, attacking with Tackle.
         let p2 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Tackle), None, None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), Some(Item::LifeOrb), None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            Some(Item::LifeOrb),
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
         let state = MatchState::BattleState(battle);
@@ -11122,40 +14656,67 @@ mod roundtrip_soundness {
         let pd = pokemon_dex();
         let md = move_dex();
         let p1 = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::None), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::None),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         // P2 lead: harmless Snorlax. Back: Garchomp with Intimidate.
         let p2_lead = build_pokemon_state(
-            Species::Snorlax, pd, md, Some(50),
+            Species::Snorlax,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Immunity), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Immunity),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let p2_back = build_pokemon_state(
-            Species::Garchomp, pd, md, Some(50),
+            Species::Garchomp,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::Intimidate), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Intimidate),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
-        let battle = battle_state_from_lists(
-            vec![p1.clone()], vec![],
-            vec![p2_lead], vec![p2_back],
-        );
+        let battle =
+            battle_state_from_lists(vec![p1.clone()], vec![], vec![p2_lead], vec![p2_back]);
         let state = MatchState::BattleState(battle);
         let p1_cmd = PlayerCommand::Battle(simple_attack(Player::P1, vec![0]));
-        let p2_cmd = PlayerCommand::Battle(vec![
-            BattleCommand::Switch(SwitchCommand { party_index: 0 }),
-        ]);
+        let p2_cmd = PlayerCommand::Battle(vec![BattleCommand::Switch(SwitchCommand {
+            party_index: 0,
+        })]);
         let events = simulate_and_get_events(state, p1_cmd, p2_cmd);
 
         let infer_dex = super::intimidate_species_dex();
         let mut fog = fog_1v1(&p1, Species::Snorlax);
-        fog.p2_known_back_mons = vec![
-            UnknownPokemonState::from_opponent_species(Species::Garchomp, &infer_dex, 50),
-        ];
+        fog.p2_known_back_mons = vec![UnknownPokemonState::from_opponent_species(
+            Species::Garchomp,
+            &infer_dex,
+            50,
+        )];
         let result = apply_information(
             UnknownMatchState::Battle(fog),
             &events,
@@ -11180,7 +14741,9 @@ mod roundtrip_soundness {
         );
         // Outgoing Snorlax (benched): must NOT have been branded with Intimidate by
         // the reveal that used to precede the Switch event.
-        let benched = result.p2_known_back_mons.iter()
+        let benched = result
+            .p2_known_back_mons
+            .iter()
             .find(|m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Snorlax))
             .expect("outgoing Snorlax must be benched in fog state");
         assert!(
@@ -11204,18 +14767,36 @@ mod roundtrip_soundness {
         let md = move_dex();
         // P1: pure Dark type, fully known (from_known_pokemon), Splash.
         let p1 = build_pokemon_state(
-            Species::Umbreon, pd, md, Some(50),
+            Species::Umbreon,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::Splash), None, None, None]),
-            None, Some(Ability::SandVeil), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::SandVeil),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         // P2: Murkrow with Prankster using Thunder Wave (Umbreon is not Ground-type,
         // so no dual-type immunity alternative).
         let p2 = build_pokemon_state(
-            Species::Murkrow, pd, md, Some(50),
+            Species::Murkrow,
+            pd,
+            md,
+            Some(50),
             Some([Some(PokemonMove::ThunderWave), None, None, None]),
-            None, Some(Ability::Prankster), Some(Nature::Hardy), None, None,
-            Some([0u8; 6]), Some([31u8; 6]), false,
+            None,
+            Some(Ability::Prankster),
+            Some(Nature::Hardy),
+            None,
+            None,
+            Some([0u8; 6]),
+            Some([31u8; 6]),
+            false,
         );
         let battle = battle_state_from_lists(vec![p1.clone()], vec![], vec![p2], vec![]);
         let state = MatchState::BattleState(battle);
@@ -11315,8 +14896,14 @@ Jolly Nature
         // before turn 1 — so Sand Stream's Sandstorm and its chip on Charizard are
         // already baked into these branches, not something this test has to fake.
         let turn0_branches = crate::simulator::simulate_turn(
-            &MatchState::TeamPreviewState(preview.clone()), &p1_tp_cmd, &p2_tp_cmd,
-            md, pd, false, 16, Some(Player::P2),
+            &MatchState::TeamPreviewState(preview.clone()),
+            &p1_tp_cmd,
+            &p2_tp_cmd,
+            md,
+            pd,
+            false,
+            16,
+            Some(Player::P2),
         );
         assert!(!turn0_branches.is_empty());
 
@@ -11329,12 +14916,20 @@ Jolly Nature
             if !matches!(&turn0_state, MatchState::BattleState(_)) {
                 continue;
             }
-            let Some(turn0_events) = turn0_events_opt else { continue };
+            let Some(turn0_events) = turn0_events_opt else {
+                continue;
+            };
 
             // P2's fog-of-war belief, seeded the same way `session.rs` does:
             // species-only team preview, then the real transition's own event log.
             let fog_preview = UnknownMatchState::team_preview_from_perspective(
-                Player::P2, &my_team, &opponent_species, pd, 2, 3, 50,
+                Player::P2,
+                &my_team,
+                &opponent_species,
+                pd,
+                2,
+                3,
+                50,
             );
             let UnknownMatchState::TeamPreview(fog_preview) = fog_preview else {
                 panic!("expected TeamPreview")
@@ -11346,14 +14941,24 @@ Jolly Nature
             // Corviknight (party_index 0, its only bench mon); everyone else Protects.
             let p1_cmd = PlayerCommand::Battle(vec![
                 BattleCommand::Attack(crate::state::battle::AttackCommand {
-                    move_slot: 1, target: None, terastallize: false, mega_evolve: false,
+                    move_slot: 1,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: false,
                 }),
                 BattleCommand::Switch(SwitchCommand { party_index: 0 }),
             ]);
             let p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1, 1]));
 
             let turn1_branches = crate::simulator::simulate_turn(
-                &turn0_state, &p1_cmd, &p2_cmd, md, pd, false, 16, Some(Player::P2),
+                &turn0_state,
+                &p1_cmd,
+                &p2_cmd,
+                md,
+                pd,
+                false,
+                16,
+                Some(Player::P2),
             );
             for (_s, events_opt, _p) in turn1_branches {
                 let Some(events) = events_opt else { continue };
@@ -11445,8 +15050,14 @@ Jolly Nature
         });
 
         let turn0_branches = crate::simulator::simulate_turn(
-            &MatchState::TeamPreviewState(preview.clone()), &p1_tp_cmd, &p2_tp_cmd,
-            md, pd, false, 16, Some(Player::P2),
+            &MatchState::TeamPreviewState(preview.clone()),
+            &p1_tp_cmd,
+            &p2_tp_cmd,
+            md,
+            pd,
+            false,
+            16,
+            Some(Player::P2),
         );
         assert!(!turn0_branches.is_empty());
 
@@ -11459,10 +15070,18 @@ Jolly Nature
             if !matches!(&turn0_state, MatchState::BattleState(_)) {
                 continue;
             }
-            let Some(turn0_events) = turn0_events_opt else { continue };
+            let Some(turn0_events) = turn0_events_opt else {
+                continue;
+            };
 
             let fog_preview = UnknownMatchState::team_preview_from_perspective(
-                Player::P2, &my_team, &opponent_species, pd, 2, 3, 50,
+                Player::P2,
+                &my_team,
+                &opponent_species,
+                pd,
+                2,
+                3,
+                50,
             );
             let UnknownMatchState::TeamPreview(fog_preview) = fog_preview else {
                 panic!("expected TeamPreview")
@@ -11476,22 +15095,37 @@ Jolly Nature
             // Lycanroc's (idx 1) hidden Spe bounds to a P2 mon's known Spe.
             let turn1_p1_cmd = PlayerCommand::Battle(vec![
                 BattleCommand::Attack(crate::state::battle::AttackCommand {
-                    move_slot: 1, target: None, terastallize: false, mega_evolve: false,
+                    move_slot: 1,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: false,
                 }),
                 BattleCommand::Attack(crate::state::battle::AttackCommand {
-                    move_slot: 1, target: None, terastallize: false, mega_evolve: false,
+                    move_slot: 1,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: false,
                 }),
             ]);
             let turn1_p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1, 1]));
             let turn1_branches = crate::simulator::simulate_turn(
-                &turn0_state, &turn1_p1_cmd, &turn1_p2_cmd, md, pd, false, 16, Some(Player::P2),
+                &turn0_state,
+                &turn1_p1_cmd,
+                &turn1_p2_cmd,
+                md,
+                pd,
+                false,
+                16,
+                Some(Player::P2),
             );
 
             for (turn1_state, turn1_events_opt, _p) in turn1_branches {
                 if !matches!(&turn1_state, MatchState::BattleState(_)) {
                     continue;
                 }
-                let Some(turn1_events) = turn1_events_opt else { continue };
+                let Some(turn1_events) = turn1_events_opt else {
+                    continue;
+                };
                 let fog_after_turn1 = apply_roundtrip(fog_after_leads.clone(), turn1_events);
 
                 // ── Turn 2 (the crash turn): P1 switches Lycanroc (slot 1) out for
@@ -11499,16 +15133,28 @@ Jolly Nature
                 // everyone else Protects — matching the live crash trace exactly.
                 let turn2_p1_cmd = PlayerCommand::Battle(vec![
                     BattleCommand::Attack(crate::state::battle::AttackCommand {
-                        move_slot: 1, target: None, terastallize: false, mega_evolve: true,
+                        move_slot: 1,
+                        target: None,
+                        terastallize: false,
+                        mega_evolve: true,
                     }),
                     BattleCommand::Switch(SwitchCommand { party_index: 0 }),
                 ]);
                 let turn2_p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1, 1]));
                 let turn2_branches = crate::simulator::simulate_turn(
-                    &turn1_state, &turn2_p1_cmd, &turn2_p2_cmd, md, pd, false, 16, Some(Player::P2),
+                    &turn1_state,
+                    &turn2_p1_cmd,
+                    &turn2_p2_cmd,
+                    md,
+                    pd,
+                    false,
+                    16,
+                    Some(Player::P2),
                 );
                 for (_s2, turn2_events_opt, _p2) in turn2_branches {
-                    let Some(turn2_events) = turn2_events_opt else { continue };
+                    let Some(turn2_events) = turn2_events_opt else {
+                        continue;
+                    };
                     checked += 1;
                     // Must not panic — this is the actual regression under test.
                     let _ = apply_roundtrip(fog_after_turn1.clone(), turn2_events);
@@ -11597,8 +15243,14 @@ Jolly Nature
         });
 
         let turn0_branches = crate::simulator::simulate_turn(
-            &MatchState::TeamPreviewState(preview.clone()), &p1_tp_cmd, &p2_tp_cmd,
-            md, pd, false, 16, Some(Player::P2),
+            &MatchState::TeamPreviewState(preview.clone()),
+            &p1_tp_cmd,
+            &p2_tp_cmd,
+            md,
+            pd,
+            false,
+            16,
+            Some(Player::P2),
         );
         assert!(!turn0_branches.is_empty());
 
@@ -11611,10 +15263,18 @@ Jolly Nature
             if !matches!(&turn0_state, MatchState::BattleState(_)) {
                 continue;
             }
-            let Some(turn0_events) = turn0_events_opt else { continue };
+            let Some(turn0_events) = turn0_events_opt else {
+                continue;
+            };
 
             let fog_preview = UnknownMatchState::team_preview_from_perspective(
-                Player::P2, &my_team, &opponent_species, pd, 2, 3, 50,
+                Player::P2,
+                &my_team,
+                &opponent_species,
+                pd,
+                2,
+                3,
+                50,
             );
             let UnknownMatchState::TeamPreview(fog_preview) = fog_preview else {
                 panic!("expected TeamPreview")
@@ -11627,16 +15287,28 @@ Jolly Nature
             // Evolves Tyranitar (slot 0) in the SAME turn; everyone else Protects.
             let turn1_p1_cmd = PlayerCommand::Battle(vec![
                 BattleCommand::Attack(crate::state::battle::AttackCommand {
-                    move_slot: 1, target: None, terastallize: false, mega_evolve: true,
+                    move_slot: 1,
+                    target: None,
+                    terastallize: false,
+                    mega_evolve: true,
                 }),
                 BattleCommand::Switch(SwitchCommand { party_index: 0 }),
             ]);
             let turn1_p2_cmd = PlayerCommand::Battle(simple_attack(Player::P2, vec![1, 1]));
             let turn1_branches = crate::simulator::simulate_turn(
-                &turn0_state, &turn1_p1_cmd, &turn1_p2_cmd, md, pd, false, 16, Some(Player::P2),
+                &turn0_state,
+                &turn1_p1_cmd,
+                &turn1_p2_cmd,
+                md,
+                pd,
+                false,
+                16,
+                Some(Player::P2),
             );
             for (_s, turn1_events_opt, _p) in turn1_branches {
-                let Some(turn1_events) = turn1_events_opt else { continue };
+                let Some(turn1_events) = turn1_events_opt else {
+                    continue;
+                };
                 checked += 1;
                 // Must not panic — this is the actual regression under test.
                 let _ = apply_roundtrip(fog_after_leads.clone(), turn1_events);
@@ -11661,21 +15333,23 @@ fn test_team_preview_switch_updates_hp_and_level() {
 
     // Pre-populate P2 with two species (as team preview reveals all species up front).
     let p2_garchomp = unknown_mon_species(Species::Garchomp);
-    let p2_snorlax  = unknown_mon_species(Species::Snorlax);
+    let p2_snorlax = unknown_mon_species(Species::Snorlax);
 
     let mut preview_state = UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
-        active_per_side:  1,
+        active_per_side: 1,
         brought_per_side: 3,
         p1_mons: vec![],
         p2_mons: vec![p2_garchomp, p2_snorlax],
     });
 
-    let events = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-        slot:      p2(0),
-        species:   Species::Garchomp,
-        level:     50,
-        hp:        PokemonHP::Percent(80),
-        status:    None,
+    let events = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(80),
+        status: None,
         tera_type: None,
     }))];
 
@@ -11702,7 +15376,8 @@ fn test_team_preview_switch_updates_hp_and_level() {
     );
     assert!(
         matches!(garchomp.hp, PokemonHP::Percent(80)),
-        "Garchomp's HP must be Percent(80) from SwitchState, got {:?}", garchomp.hp
+        "Garchomp's HP must be Percent(80) from SwitchState, got {:?}",
+        garchomp.hp
     );
 
     // Snorlax (index 1) was NOT switched in — its state must be unchanged.
@@ -11719,12 +15394,12 @@ fn test_team_preview_switch_updates_hp_and_level() {
 fn test_team_preview_simultaneous_switch_two_leads() {
     use crate::information::unknowns::UnknownTeamPreviewState;
 
-    let p2_garchomp  = unknown_mon_species(Species::Garchomp);
-    let p2_snorlax   = unknown_mon_species(Species::Snorlax);
+    let p2_garchomp = unknown_mon_species(Species::Garchomp);
+    let p2_snorlax = unknown_mon_species(Species::Snorlax);
     let p2_charizard = unknown_mon_species(Species::Charizard);
 
     let mut preview_state = UnknownMatchState::TeamPreview(UnknownTeamPreviewState {
-        active_per_side:  2,
+        active_per_side: 2,
         brought_per_side: 3,
         p1_mons: vec![],
         p2_mons: vec![p2_garchomp, p2_snorlax, p2_charizard],
@@ -11733,20 +15408,24 @@ fn test_team_preview_simultaneous_switch_two_leads() {
     // P2 leads with Garchomp at slot 0 and Snorlax at slot 1.
     let events = vec![event(EventKind::SimultaneousSwitch {
         switches: vec![
-            SwitchState { disguise_species: None, max_hp: 0,
-                slot:      p2(0),
-                species:   Species::Garchomp,
-                level:     50,
-                hp:        PokemonHP::Percent(100),
-                status:    None,
+            SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p2(0),
+                species: Species::Garchomp,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
                 tera_type: None,
             },
-            SwitchState { disguise_species: None, max_hp: 0,
-                slot:      p2(1),
-                species:   Species::Snorlax,
-                level:     50,
-                hp:        PokemonHP::Percent(90),
-                status:    None,
+            SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p2(1),
+                species: Species::Snorlax,
+                level: 50,
+                hp: PokemonHP::Percent(90),
+                status: None,
                 tera_type: None,
             },
         ],
@@ -11770,11 +15449,13 @@ fn test_team_preview_simultaneous_switch_two_leads() {
     // Both leads were switched in; Charizard (not switched in) must be unchanged.
     assert!(
         matches!(preview.p2_mons[0].hp, PokemonHP::Percent(100)),
-        "Garchomp HP must be Percent(100), got {:?}", preview.p2_mons[0].hp
+        "Garchomp HP must be Percent(100), got {:?}",
+        preview.p2_mons[0].hp
     );
     assert!(
         matches!(preview.p2_mons[1].hp, PokemonHP::Percent(90)),
-        "Snorlax HP must be Percent(90), got {:?}", preview.p2_mons[1].hp
+        "Snorlax HP must be Percent(90), got {:?}",
+        preview.p2_mons[1].hp
     );
     assert!(
         matches!(preview.p2_mons[2].hp, PokemonHP::Percent(100)),
@@ -11806,11 +15487,13 @@ fn test_terrain_timer_collapse_reveals_terrain_extender() {
 
     let set_terrain_turn = vec![event_with(
         EventKind::MoveUsed {
-            user:      p2(0),
+            user: p2(0),
             move_used: PokemonMove::ElectricTerrain,
-            targets:   vec![],
+            targets: vec![],
         },
-        vec![event(EventKind::TerrainChanged { terrain: Some(Terrain::ElectricTerrain) })],
+        vec![event(EventKind::TerrainChanged {
+            terrain: Some(Terrain::ElectricTerrain),
+        })],
     )];
 
     let mut cur_state = apply_ex(state, set_terrain_turn, HashMap::new(), move_dex);
@@ -11822,7 +15505,8 @@ fn test_terrain_timer_collapse_reveals_terrain_extender() {
     );
     assert_eq!(cur_state.terrain, Some(Terrain::ElectricTerrain));
     assert_eq!(
-        cur_state.terrain_setter_mon_idx, Some(0),
+        cur_state.terrain_setter_mon_idx,
+        Some(0),
         "terrain setter must be mon_idx=0 (p2 Garchomp)"
     );
 
@@ -11834,12 +15518,16 @@ fn test_terrain_timer_collapse_reveals_terrain_extender() {
         Unknown::Possibly(vec![1, 4]),
     ] {
         cur_state = apply_ex(
-            cur_state, vec![event(EventKind::EndOfTurn)], HashMap::new(), HashMap::new(),
+            cur_state,
+            vec![event(EventKind::EndOfTurn)],
+            HashMap::new(),
+            HashMap::new(),
         );
         assert_eq!(
             cur_state.terrain_turns,
             Some(expected.clone()),
-            "terrain_turns after decrement: expected {:?}", expected
+            "terrain_turns after decrement: expected {:?}",
+            expected
         );
         // Item still unknown.
         assert!(
@@ -11850,7 +15538,10 @@ fn test_terrain_timer_collapse_reveals_terrain_extender() {
 
     // 5th EOT — collapses: Possibly([1,4]) → filter(>1) → [3] → Known(3).
     cur_state = apply_ex(
-        cur_state, vec![event(EventKind::EndOfTurn)], HashMap::new(), HashMap::new(),
+        cur_state,
+        vec![event(EventKind::EndOfTurn)],
+        HashMap::new(),
+        HashMap::new(),
     );
     assert_eq!(
         cur_state.terrain_turns,
@@ -11897,15 +15588,30 @@ fn test_eot_sand_immunity_emits_clause_when_no_chip() {
     // The predicates must contain a clause that mentions at least SafetyGoggles
     // or one of the sand-immunity abilities.
     let clause_with_sand_immunity = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(
-            s,
-            Statement::HasItem { item: Item::SafetyGoggles, .. }
-                | Statement::HasAbility { ability: Ability::SandVeil, .. }
-                | Statement::HasAbility { ability: Ability::SandRush, .. }
-                | Statement::HasAbility { ability: Ability::SandForce, .. }
-                | Statement::HasAbility { ability: Ability::Overcoat, .. }
-                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandVeil,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandRush,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandForce,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Overcoat,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::MagicGuard,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         clause_with_sand_immunity,
@@ -11926,15 +15632,30 @@ fn test_eot_sand_immunity_not_emitted_for_innately_immune_type() {
     let result = apply(state, vec![event(EventKind::EndOfTurn)]);
 
     let has_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(
-            s,
-            Statement::HasItem { item: Item::SafetyGoggles, .. }
-                | Statement::HasAbility { ability: Ability::SandVeil, .. }
-                | Statement::HasAbility { ability: Ability::SandRush, .. }
-                | Statement::HasAbility { ability: Ability::SandForce, .. }
-                | Statement::HasAbility { ability: Ability::Overcoat, .. }
-                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandVeil,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandRush,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandForce,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Overcoat,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::MagicGuard,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_clause,
@@ -11954,11 +15675,18 @@ fn test_eot_sand_immunity_not_emitted_without_sandstorm() {
     let result = apply(state, vec![event(EventKind::EndOfTurn)]);
 
     let has_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(
-            s,
-            Statement::HasItem { item: Item::SafetyGoggles, .. }
-                | Statement::HasAbility { ability: Ability::SandVeil, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandVeil,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_clause,
@@ -11993,15 +15721,30 @@ fn test_sand_immunity_not_inferred_when_weather_expires_this_eot() {
     let result = apply(state, vec![eot]);
 
     let has_sand_immunity_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(
-            s,
-            Statement::HasItem { item: Item::SafetyGoggles, .. }
-                | Statement::HasAbility { ability: Ability::SandVeil, .. }
-                | Statement::HasAbility { ability: Ability::SandRush, .. }
-                | Statement::HasAbility { ability: Ability::SandForce, .. }
-                | Statement::HasAbility { ability: Ability::Overcoat, .. }
-                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandVeil,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandRush,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandForce,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Overcoat,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::MagicGuard,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_sand_immunity_clause,
@@ -12032,14 +15775,30 @@ fn test_eot_heal_not_inferred_when_same_target_also_took_chip_this_eot() {
     let eot = event_with(
         EventKind::EndOfTurn,
         vec![
-            event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(40) }),
-            event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(55) }),
+            event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(40),
+            }),
+            event(EventKind::Healed {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(55),
+            }),
         ],
     );
     let result = apply(state, vec![eot]);
 
     let has_leftovers_clause = result.predicates.iter().any(|c| {
-        c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::Leftovers, .. }))
+        c.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::Leftovers,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_leftovers_clause,
@@ -12064,20 +15823,39 @@ fn test_sand_immunity_not_inferred_when_target_healed_this_eot() {
     // the netted result of a sand chip clobbered by a pinch berry.
     let eot = event_with(
         EventKind::EndOfTurn,
-        vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(55) })],
+        vec![event(EventKind::Healed {
+            max_hp: 0,
+            target: p2(0),
+            new_hp: PokemonHP::Percent(55),
+        })],
     );
     let result = apply(state, vec![eot]);
 
     let has_sand_immunity_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(
-            s,
-            Statement::HasItem { item: Item::SafetyGoggles, .. }
-                | Statement::HasAbility { ability: Ability::SandVeil, .. }
-                | Statement::HasAbility { ability: Ability::SandRush, .. }
-                | Statement::HasAbility { ability: Ability::SandForce, .. }
-                | Statement::HasAbility { ability: Ability::Overcoat, .. }
-                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandVeil,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandRush,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandForce,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Overcoat,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::MagicGuard,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_sand_immunity_clause,
@@ -12112,15 +15890,30 @@ fn test_sand_immunity_not_inferred_when_target_ate_berry_this_eot_exact_cancel()
     let result = apply(state, vec![eot]);
 
     let has_sand_immunity_clause = result.predicates.iter().any(|clause| {
-        clause.iter().any(|s| matches!(
-            s,
-            Statement::HasItem { item: Item::SafetyGoggles, .. }
-                | Statement::HasAbility { ability: Ability::SandVeil, .. }
-                | Statement::HasAbility { ability: Ability::SandRush, .. }
-                | Statement::HasAbility { ability: Ability::SandForce, .. }
-                | Statement::HasAbility { ability: Ability::Overcoat, .. }
-                | Statement::HasAbility { ability: Ability::MagicGuard, .. }
-        ))
+        clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandVeil,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandRush,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandForce,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::Overcoat,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::MagicGuard,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_sand_immunity_clause,
@@ -12146,7 +15939,8 @@ fn test_contact_absence_magic_guard_attacker_does_not_exclude_rough_skin_iron_ba
 
     // Attacker (P1): item Known(None), ability Unknown::Not([LongReach]) — LongReach ruled out
     // but Magic Guard is NOT ruled out.  Protective Pads also not excluded.
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.item = Unknown::Known(Item::None);
     // Exclude LongReach and ProtectivePads so those escape-routes are not the cause,
     // but leave Magic Guard possible.
@@ -12171,18 +15965,28 @@ fn test_contact_absence_magic_guard_attacker_does_not_exclude_rough_skin_iron_ba
                 move_used: PokemonMove::Tackle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(75) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(75),
+            })],
         )],
         HashMap::new(),
         move_dex,
     );
 
     assert!(
-        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
+        !unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::RoughSkin
+        ),
         "RoughSkin must remain possible when attacker may have Magic Guard (C1)"
     );
     assert!(
-        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::IronBarbs),
+        !unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::IronBarbs
+        ),
         "IronBarbs must remain possible when attacker may have Magic Guard (C1)"
     );
 }
@@ -12202,7 +16006,8 @@ fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
     // (sound: might be true) blocks the exclusion below just like Magic Guard does.
     // NeutralizingGas must be excluded on BOTH actives, or the defender-suppression
     // gate (sound: the chip could be suppressed field-wide) skips the exclusions.
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.item = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Not(vec![
         Ability::LongReach,
@@ -12230,18 +16035,28 @@ fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(75) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(75),
+            })],
         )],
         HashMap::new(),
         move_dex,
     );
 
     assert!(
-        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
+        unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::RoughSkin
+        ),
         "RoughSkin must be excluded when Magic Guard is also excluded (C1 control)"
     );
     assert!(
-        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::IronBarbs),
+        unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::IronBarbs
+        ),
         "IronBarbs must be excluded when Magic Guard is also excluded (C1 control)"
     );
 }
@@ -12253,7 +16068,8 @@ fn test_contact_absence_no_magic_guard_excludes_rough_skin_iron_barbs() {
 fn test_contact_absence_skipped_when_defender_may_be_suppressed() {
     use crate::state::dex_data::MoveFlag;
 
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.item = Unknown::Known(Item::None);
     p1_mon.possible_abilities = Unknown::Not(vec![
         Ability::LongReach,
@@ -12281,18 +16097,28 @@ fn test_contact_absence_skipped_when_defender_may_be_suppressed() {
                 move_used: PokemonMove::Tackle,
                 targets: vec![p2(0)],
             },
-            vec![event(EventKind::DamageDealt { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(75) })],
+            vec![event(EventKind::DamageDealt {
+                max_hp: 0,
+                target: p2(0),
+                new_hp: PokemonHP::Percent(75),
+            })],
         )],
         HashMap::new(),
         move_dex,
     );
 
     assert!(
-        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::RoughSkin),
+        !unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::RoughSkin
+        ),
         "RoughSkin must stay possible while its suppression (NGas) is possible"
     );
     assert!(
-        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::IronBarbs),
+        !unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::IronBarbs
+        ),
         "IronBarbs must stay possible while its suppression (NGas) is possible"
     );
     // The Helmet is an item — unaffected by ability suppression, still excludable.
@@ -12310,7 +16136,8 @@ fn test_contact_absence_skipped_when_defender_may_be_suppressed() {
 fn test_unseen_fist_absence_excluded_on_genuine_block() {
     use crate::state::dex_data::MoveFlag;
 
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.possible_abilities = Unknown::Not(vec![Ability::NeutralizingGas]);
 
     let mut p2_mon = unknown_mon();
@@ -12337,7 +16164,10 @@ fn test_unseen_fist_absence_excluded_on_genuine_block() {
     );
 
     assert!(
-        unknown_is_excluded(&result.p1_active_mons[0].possible_abilities, &Ability::UnseenFist),
+        unknown_is_excluded(
+            &result.p1_active_mons[0].possible_abilities,
+            &Ability::UnseenFist
+        ),
         "a genuine Blocked outcome for a contact move must exclude Unseen Fist on the attacker"
     );
 }
@@ -12376,7 +16206,10 @@ fn test_unseen_fist_absence_skipped_when_attacker_may_be_suppressed() {
     );
 
     assert!(
-        !unknown_is_excluded(&result.p1_active_mons[0].possible_abilities, &Ability::UnseenFist),
+        !unknown_is_excluded(
+            &result.p1_active_mons[0].possible_abilities,
+            &Ability::UnseenFist
+        ),
         "Unseen Fist must stay possible while the attacker's own ability suppression (NGas) is possible"
     );
 }
@@ -12391,32 +16224,43 @@ fn intimidate_species_dex() -> HashMap<Species, PokemonData> {
     let mut dex = HashMap::new();
     // Reuse Species::Garchomp as the "Intimidate user" species.
     // Abilities: [Intimidate, SandVeil] — includes Intimidate, excludes NeutralizingGas.
-    dex.insert(Species::Garchomp, PokemonData {
-        species:       Species::Garchomp,
-        types:         vec![PokemonType::Dragon, PokemonType::Ground],
-        base_stats:    [108, 130, 95, 80, 85, 102],
-        weight:        950,
-        primary_ability: Some(Ability::Intimidate),
-        abilities:     vec![Ability::Intimidate, Ability::SandVeil],
-        base_species:  None,
-        forme:         None,
-        required_item: None,
-        battle_only:   None,
-        default_gender: PokemonGender::Male,
-    });
+    dex.insert(
+        Species::Garchomp,
+        PokemonData {
+            species: Species::Garchomp,
+            types: vec![PokemonType::Dragon, PokemonType::Ground],
+            base_stats: [108, 130, 95, 80, 85, 102],
+            weight: 950,
+            primary_ability: Some(Ability::Intimidate),
+            abilities: vec![Ability::Intimidate, Ability::SandVeil],
+            base_species: None,
+            forme: None,
+            required_item: None,
+            battle_only: None,
+            default_gender: PokemonGender::Male,
+        },
+    );
     dex
 }
 
 /// Helper: build an `UnknownPokemonState` for the entering P2 Garchomp (from `intimidate_species_dex`),
 /// placed in the back-mon list so `pass1_switch` can promote it to active.
-fn p2_back_with_intimidate_possible(dex: &HashMap<Species, PokemonData>) -> Vec<UnknownPokemonState> {
-    vec![UnknownPokemonState::from_opponent_species(Species::Garchomp, dex, 50)]
+fn p2_back_with_intimidate_possible(
+    dex: &HashMap<Species, PokemonData>,
+) -> Vec<UnknownPokemonState> {
+    vec![UnknownPokemonState::from_opponent_species(
+        Species::Garchomp,
+        dex,
+        50,
+    )]
 }
 
 /// Common switch event used in C2 tests: P2's Garchomp enters, no BoostChanged{Atk,−1}.
 fn p2_switch_event() -> InformationEvent {
     event(EventKind::SimultaneousSwitch {
-        switches: vec![SwitchState { disguise_species: None, max_hp: 0,
+        switches: vec![SwitchState {
+            disguise_species: None,
+            max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -12435,7 +16279,8 @@ fn p2_switch_event() -> InformationEvent {
 #[test]
 fn test_intimidate_not_excluded_when_own_mon_has_clear_body() {
     // Our mon (P1): ability Known(ClearBody), so it would silently block Intimidate.
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.possible_abilities = Unknown::Known(Ability::ClearBody);
     p1_mon.boosts = [0; 7];
 
@@ -12448,7 +16293,10 @@ fn test_intimidate_not_excluded_when_own_mon_has_clear_body() {
     let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
 
     assert!(
-        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
+        !unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::Intimidate
+        ),
         "Intimidate must remain possible when own active mon has Clear Body (C2)"
     );
 }
@@ -12460,7 +16308,8 @@ fn test_intimidate_not_excluded_when_own_mon_has_clear_body() {
 #[test]
 fn test_intimidate_excluded_when_own_mon_unprotected() {
     // Our mon (P1): ability Known(SandVeil) — not a blocker.
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.possible_abilities = Unknown::Known(Ability::SandVeil);
     p1_mon.boosts = [0; 7];
 
@@ -12472,7 +16321,10 @@ fn test_intimidate_excluded_when_own_mon_unprotected() {
 
     // Intimidate MUST be excluded: SandVeil doesn't block the −1, Atk is not at −6.
     assert!(
-        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
+        unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::Intimidate
+        ),
         "Intimidate must be excluded when own mon has no Intimidate-blocking ability (C2 control)"
     );
 }
@@ -12483,7 +16335,8 @@ fn test_intimidate_excluded_when_own_mon_unprotected() {
 /// No `BoostChanged { Atk, −1 }` for our mon even with Intimidate on the opponent.
 #[test]
 fn test_intimidate_not_excluded_when_own_mon_has_guard_dog() {
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.possible_abilities = Unknown::Known(Ability::GuardDog);
     p1_mon.boosts = [0; 7];
 
@@ -12494,7 +16347,10 @@ fn test_intimidate_not_excluded_when_own_mon_has_guard_dog() {
     let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
 
     assert!(
-        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
+        !unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::Intimidate
+        ),
         "Intimidate must remain possible when own active mon has Guard Dog (C2)"
     );
 }
@@ -12531,7 +16387,9 @@ fn test_b1_bench_hp_preserved_across_switch_out() {
     state.active_per_side = 1;
     state.back_mons_per_side = 5;
 
-    let switch_ev = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let switch_ev = event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p1(0),
         species: Species::Snorlax,
         level: 50,
@@ -12547,12 +16405,16 @@ fn test_b1_bench_hp_preserved_across_switch_out() {
         matches!(&after.p1_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Snorlax),
         "Snorlax must be active after the switch"
     );
-    let benched = after.p1_known_back_mons.iter()
+    let benched = after
+        .p1_known_back_mons
+        .iter()
         .find(|m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Garchomp))
         .expect("Garchomp must be in known_back_mons after being displaced (B1)");
     assert_eq!(
-        benched.hp, PokemonHP::Percent(50),
-        "B1: Garchomp's last-seen HP (50%) must survive the bench round-trip; got {:?}", benched.hp
+        benched.hp,
+        PokemonHP::Percent(50),
+        "B1: Garchomp's last-seen HP (50%) must survive the bench round-trip; got {:?}",
+        benched.hp
     );
 }
 
@@ -12574,7 +16436,9 @@ fn test_b2_regenerator_inferred_from_hp_gain_on_reentry() {
     state.p2_known_back_mons = vec![garchomp];
 
     // ── Turn 1: P2 switches to Garchomp (Snorlax goes to bench at 50%) ────────
-    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -12588,13 +16452,21 @@ fn test_b2_regenerator_inferred_from_hp_gain_on_reentry() {
     assert!(
         matches!(&after_t1.p2_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Garchomp)
     );
-    let benched_snorlax = after_t1.p2_known_back_mons.iter()
+    let benched_snorlax = after_t1
+        .p2_known_back_mons
+        .iter()
         .find(|m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Snorlax))
         .expect("Snorlax must be on bench after turn 1");
-    assert_eq!(benched_snorlax.hp, PokemonHP::Percent(50), "bench HP must be 50%");
+    assert_eq!(
+        benched_snorlax.hp,
+        PokemonHP::Percent(50),
+        "bench HP must be 50%"
+    );
 
     // ── Turn 2: Snorlax returns at 83% (50% + 33% Regen heal) ────────────────
-    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Snorlax,
         level: 50,
@@ -12610,13 +16482,18 @@ fn test_b2_regenerator_inferred_from_hp_gain_on_reentry() {
         "Snorlax must be active after turn 2"
     );
     assert_eq!(
-        p2_active.hp, PokemonHP::Percent(83),
+        p2_active.hp,
+        PokemonHP::Percent(83),
         "Snorlax's HP must reflect the re-entry value"
     );
     assert!(
-        matches!(&p2_active.possible_abilities, Unknown::Known(Ability::Regenerator)),
+        matches!(
+            &p2_active.possible_abilities,
+            Unknown::Known(Ability::Regenerator)
+        ),
         "B2: Snorlax must be inferred to have Regenerator from the ≈33% HP gain;\n\
-         possible_abilities = {:?}", p2_active.possible_abilities
+         possible_abilities = {:?}",
+        p2_active.possible_abilities
     );
 }
 
@@ -12633,7 +16510,9 @@ fn test_b2_regenerator_excluded_when_no_hp_gain_on_reentry() {
     let mut state = battle_with_p2(vec![snorlax]);
     state.p2_known_back_mons = vec![garchomp];
 
-    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -12644,7 +16523,9 @@ fn test_b2_regenerator_excluded_when_no_hp_gain_on_reentry() {
     let after_t1 = apply(state, t1);
 
     // Snorlax returns at 40% — same as it left (no Regenerator gain).
-    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Snorlax,
         level: 50,
@@ -12659,7 +16540,8 @@ fn test_b2_regenerator_excluded_when_no_hp_gain_on_reentry() {
         unknown_is_excluded(&p2_active.possible_abilities, &Ability::Regenerator),
         "B2: Regenerator must be excluded when no HP gain observed (mon left at 40%, \
          returned at 40%);\n\
-         possible_abilities = {:?}", p2_active.possible_abilities
+         possible_abilities = {:?}",
+        p2_active.possible_abilities
     );
 }
 
@@ -12680,7 +16562,9 @@ fn test_b2_regenerator_skip_when_stealth_rock_present() {
     state.p2_side_condition_turns = vec![Unknown::Known(0)];
     state.p2_side_condition_setters = vec![Some(0)];
 
-    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -12692,7 +16576,9 @@ fn test_b2_regenerator_skip_when_stealth_rock_present() {
 
     // Snorlax returns at 75% — looks like 50% + 33% Regen − 8% rock = 75%, but
     // the engine should skip inference entirely when rocks are present.
-    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Snorlax,
         level: 50,
@@ -12705,14 +16591,19 @@ fn test_b2_regenerator_skip_when_stealth_rock_present() {
     let p2_active = &after_t2.p2_active_mons[0];
     // Must be neither Known(Regenerator) nor Excluded(Regenerator).
     assert!(
-        !matches!(&p2_active.possible_abilities, Unknown::Known(Ability::Regenerator)),
+        !matches!(
+            &p2_active.possible_abilities,
+            Unknown::Known(Ability::Regenerator)
+        ),
         "B2: Regenerator must NOT be inferred when Stealth Rock is present (hazard skip);\n\
-         possible_abilities = {:?}", p2_active.possible_abilities
+         possible_abilities = {:?}",
+        p2_active.possible_abilities
     );
     assert!(
         !unknown_is_excluded(&p2_active.possible_abilities, &Ability::Regenerator),
         "B2: Regenerator must NOT be excluded when Stealth Rock is present (hazard skip);\n\
-         possible_abilities = {:?}", p2_active.possible_abilities
+         possible_abilities = {:?}",
+        p2_active.possible_abilities
     );
 }
 
@@ -12729,7 +16620,9 @@ fn test_b2_regenerator_skip_when_mon_left_near_full() {
     let mut state = battle_with_p2(vec![snorlax]);
     state.p2_known_back_mons = vec![garchomp];
 
-    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -12740,7 +16633,9 @@ fn test_b2_regenerator_skip_when_mon_left_near_full() {
     let after_t1 = apply(state, t1);
 
     // Returns at 100% — could be 70% + 33% Regen (capped) or just full HP.
-    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Snorlax,
         level: 50,
@@ -12752,14 +16647,19 @@ fn test_b2_regenerator_skip_when_mon_left_near_full() {
 
     let p2_active = &after_t2.p2_active_mons[0];
     assert!(
-        !matches!(&p2_active.possible_abilities, Unknown::Known(Ability::Regenerator)),
+        !matches!(
+            &p2_active.possible_abilities,
+            Unknown::Known(Ability::Regenerator)
+        ),
         "B2: Regenerator must NOT be inferred when mon left near-full (near-cap — inconclusive);\n\
-         possible_abilities = {:?}", p2_active.possible_abilities
+         possible_abilities = {:?}",
+        p2_active.possible_abilities
     );
     assert!(
         !unknown_is_excluded(&p2_active.possible_abilities, &Ability::Regenerator),
         "B2: Regenerator must NOT be excluded when mon left near-full;\n\
-         possible_abilities = {:?}", p2_active.possible_abilities
+         possible_abilities = {:?}",
+        p2_active.possible_abilities
     );
 }
 
@@ -12777,42 +16677,69 @@ fn test_b2_regenerator_inference_persists_across_second_switch() {
     state.p2_known_back_mons = vec![garchomp];
 
     // Turn 1: Garchomp in, Snorlax (50%) to bench.
-    let t1 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-        slot: p2(0), species: Species::Garchomp, level: 50,
-        hp: PokemonHP::Percent(100), status: None, tera_type: None,
+    let t1 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(100),
+        status: None,
+        tera_type: None,
     }))];
     let after_t1 = apply(state, t1);
 
     // Turn 2: Snorlax returns at 83% → Regenerator inferred.
-    let t2 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-        slot: p2(0), species: Species::Snorlax, level: 50,
-        hp: PokemonHP::Percent(83), status: None, tera_type: None,
+    let t2 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
+        slot: p2(0),
+        species: Species::Snorlax,
+        level: 50,
+        hp: PokemonHP::Percent(83),
+        status: None,
+        tera_type: None,
     }))];
     let after_t2 = apply(after_t1, t2);
     assert!(
-        matches!(&after_t2.p2_active_mons[0].possible_abilities, Unknown::Known(Ability::Regenerator)),
+        matches!(
+            &after_t2.p2_active_mons[0].possible_abilities,
+            Unknown::Known(Ability::Regenerator)
+        ),
         "Prerequisite: Regenerator must be inferred after turn 2"
     );
 
     // Turn 3: Snorlax switches out again (bench it).
     // Turn 4: Snorlax returns at some HP — the ability should still be Known(Regenerator).
-    let t3 = vec![event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
-        slot: p2(0), species: Species::Garchomp, level: 50,
-        hp: PokemonHP::Percent(90), status: None, tera_type: None,
+    let t3 = vec![event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
+        slot: p2(0),
+        species: Species::Garchomp,
+        level: 50,
+        hp: PokemonHP::Percent(90),
+        status: None,
+        tera_type: None,
     }))];
     let after_t3 = apply(after_t2, t3);
 
     // Garchomp is now active; Snorlax is benched.
-    let benched_snorlax = after_t3.p2_known_back_mons.iter()
+    let benched_snorlax = after_t3
+        .p2_known_back_mons
+        .iter()
         .find(|m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Snorlax))
         .expect("Snorlax must be on bench after turn 3");
     // After switch-out, possible_abilities resets to possible_original_abilities.
     // Since we updated possible_original_abilities in turn 2, it should still be Known(Regen).
     assert!(
-        matches!(&benched_snorlax.possible_abilities, Unknown::Known(Ability::Regenerator)),
+        matches!(
+            &benched_snorlax.possible_abilities,
+            Unknown::Known(Ability::Regenerator)
+        ),
         "B2 persistence: Regenerator must still be Known after a second switch-out;\n\
          (possible_original_abilities must have been updated)\n\
-         possible_abilities = {:?}", benched_snorlax.possible_abilities
+         possible_abilities = {:?}",
+        benched_snorlax.possible_abilities
     );
 }
 
@@ -12822,7 +16749,8 @@ fn test_b2_regenerator_inference_persists_across_second_switch() {
 /// no visible `BoostChanged` — absence of the event does not prove absence of Intimidate.
 #[test]
 fn test_intimidate_not_excluded_when_own_mon_atk_at_minus_six() {
-    let mut p1_mon = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+    let mut p1_mon =
+        UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
     p1_mon.possible_abilities = Unknown::Known(Ability::SandVeil); // not a blocker
     p1_mon.boosts = [-6, 0, 0, 0, 0, 0, 0]; // Atk already at min
 
@@ -12833,7 +16761,10 @@ fn test_intimidate_not_excluded_when_own_mon_atk_at_minus_six() {
     let result = apply_ex(state, vec![p2_switch_event()], dex, HashMap::new());
 
     assert!(
-        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::Intimidate),
+        !unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::Intimidate
+        ),
         "Intimidate must remain possible when own mon's Atk is already at −6 (C2)"
     );
 }
@@ -12857,14 +16788,24 @@ fn test_sand_immunity_skipped_when_cloud_nine_possible() {
 
     let result = apply(state, vec![event(EventKind::EndOfTurn)]);
     let has_clause = result.predicates.iter().any(|c| {
-        c.iter().any(|s| matches!(s,
-            Statement::HasItem { item: Item::SafetyGoggles, .. }
-                | Statement::HasAbility { ability: Ability::SandVeil, .. }))
+        c.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                } | Statement::HasAbility {
+                    ability: Ability::SandVeil,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_clause,
         "sand-immunity inference must be skipped when Air Lock / Cloud Nine is possible \
-         (weather may be suspended); predicates = {:?}", result.predicates
+         (weather may be suspended); predicates = {:?}",
+        result.predicates
     );
 }
 
@@ -12881,7 +16822,15 @@ fn test_sand_immunity_skipped_when_types_unknown() {
 
     let result = apply(state, vec![event(EventKind::EndOfTurn)]);
     let has_clause = result.predicates.iter().any(|c| {
-        c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::SafetyGoggles, .. }))
+        c.iter().any(|s| {
+            matches!(
+                s,
+                Statement::HasItem {
+                    item: Item::SafetyGoggles,
+                    ..
+                }
+            )
+        })
     });
     assert!(
         !has_clause,
@@ -12902,22 +16851,50 @@ fn test_eot_heal_in_rain_includes_rain_dish_and_dry_skin() {
 
     let ev = event_with(
         EventKind::EndOfTurn,
-        vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(90) })],
+        vec![event(EventKind::Healed {
+            max_hp: 0,
+            target: p2(0),
+            new_hp: PokemonHP::Percent(90),
+        })],
     );
     let result = apply(state, vec![ev]);
 
     let clause = result
         .predicates
         .iter()
-        .find(|c| c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::Leftovers, .. })))
+        .find(|c| {
+            c.iter().any(|s| {
+                matches!(
+                    s,
+                    Statement::HasItem {
+                        item: Item::Leftovers,
+                        ..
+                    }
+                )
+            })
+        })
         .expect("a Leftovers-bearing EOT-heal clause must be emitted");
     assert!(
-        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::RainDish, .. })),
-        "rain EOT-heal clause must include Rain Dish as a disjunct; clause = {:?}", clause
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasAbility {
+                ability: Ability::RainDish,
+                ..
+            }
+        )),
+        "rain EOT-heal clause must include Rain Dish as a disjunct; clause = {:?}",
+        clause
     );
     assert!(
-        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::DrySkin, .. })),
-        "rain EOT-heal clause must include Dry Skin as a disjunct; clause = {:?}", clause
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasAbility {
+                ability: Ability::DrySkin,
+                ..
+            }
+        )),
+        "rain EOT-heal clause must include Dry Skin as a disjunct; clause = {:?}",
+        clause
     );
 }
 
@@ -12930,18 +16907,39 @@ fn test_eot_heal_in_snow_includes_ice_body() {
 
     let ev = event_with(
         EventKind::EndOfTurn,
-        vec![event(EventKind::Healed { max_hp: 0, target: p2(0), new_hp: PokemonHP::Percent(90) })],
+        vec![event(EventKind::Healed {
+            max_hp: 0,
+            target: p2(0),
+            new_hp: PokemonHP::Percent(90),
+        })],
     );
     let result = apply(state, vec![ev]);
 
     let clause = result
         .predicates
         .iter()
-        .find(|c| c.iter().any(|s| matches!(s, Statement::HasItem { item: Item::Leftovers, .. })))
+        .find(|c| {
+            c.iter().any(|s| {
+                matches!(
+                    s,
+                    Statement::HasItem {
+                        item: Item::Leftovers,
+                        ..
+                    }
+                )
+            })
+        })
         .expect("a Leftovers-bearing EOT-heal clause must be emitted");
     assert!(
-        clause.iter().any(|s| matches!(s, Statement::HasAbility { ability: Ability::IceBody, .. })),
-        "snow EOT-heal clause must include Ice Body as a disjunct; clause = {:?}", clause
+        clause.iter().any(|s| matches!(
+            s,
+            Statement::HasAbility {
+                ability: Ability::IceBody,
+                ..
+            }
+        )),
+        "snow EOT-heal clause must include Ice Body as a disjunct; clause = {:?}",
+        clause
     );
 }
 
@@ -12958,7 +16956,9 @@ fn test_terrain_setter_excluded_when_no_terrain_change() {
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![p2_back];
 
-    let sw = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let sw = event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -12969,9 +16969,13 @@ fn test_terrain_setter_excluded_when_no_terrain_change() {
     let result = apply(state, vec![sw]);
 
     assert!(
-        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::ElectricSurge),
+        unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::ElectricSurge
+        ),
         "Electric Surge must be excluded when no TerrainChanged fires on switch-in; \
-         possible_abilities = {:?}", result.p2_active_mons[0].possible_abilities
+         possible_abilities = {:?}",
+        result.p2_active_mons[0].possible_abilities
     );
 }
 
@@ -12985,7 +16989,9 @@ fn test_terrain_setter_not_excluded_when_neutralizing_gas_possible() {
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![p2_back];
 
-    let sw = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let sw = event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -12996,7 +17002,10 @@ fn test_terrain_setter_not_excluded_when_neutralizing_gas_possible() {
     let result = apply(state, vec![sw]);
 
     assert!(
-        !unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::ElectricSurge),
+        !unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::ElectricSurge
+        ),
         "Electric Surge must NOT be excluded when Neutralizing Gas is possible (suppression gate)"
     );
 }
@@ -13021,7 +17030,9 @@ fn test_hadron_engine_not_excluded_by_weather_absence() {
     // Switch-in where HadronEngine sets Electric Terrain (TerrainChanged nested under
     // the AbilityRevealed wrapper), but no WeatherChanged occurs at all.
     let sw = event_with(
-        EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+        EventKind::Switch(SwitchState {
+            disguise_species: None,
+            max_hp: 0,
             slot: p2(0),
             species: Species::Garchomp,
             level: 50,
@@ -13030,8 +17041,13 @@ fn test_hadron_engine_not_excluded_by_weather_absence() {
             tera_type: None,
         }),
         vec![event_with(
-            EventKind::AbilityRevealed { slot: p2(0), ability: Ability::HadronEngine },
-            vec![event(EventKind::TerrainChanged { terrain: Some(Terrain::ElectricTerrain) })],
+            EventKind::AbilityRevealed {
+                slot: p2(0),
+                ability: Ability::HadronEngine,
+            },
+            vec![event(EventKind::TerrainChanged {
+                terrain: Some(Terrain::ElectricTerrain),
+            })],
         )],
     );
     let result = apply(state, vec![sw]);
@@ -13053,7 +17069,9 @@ fn test_hadron_engine_excluded_when_no_terrain_change() {
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![p2_back];
 
-    let sw = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let sw = event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -13064,7 +17082,10 @@ fn test_hadron_engine_excluded_when_no_terrain_change() {
     let result = apply(state, vec![sw]);
 
     assert!(
-        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::HadronEngine),
+        unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::HadronEngine
+        ),
         "HadronEngine must be excluded when no TerrainChanged fires on switch-in"
     );
 }
@@ -13079,7 +17100,9 @@ fn test_dauntless_shield_excluded_when_no_def_boost_on_entry() {
     let mut state = battle_with_p2(vec![]);
     state.p2_known_back_mons = vec![p2_back];
 
-    let sw = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let sw = event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p2(0),
         species: Species::Garchomp,
         level: 50,
@@ -13090,9 +17113,13 @@ fn test_dauntless_shield_excluded_when_no_def_boost_on_entry() {
     let result = apply(state, vec![sw]);
 
     assert!(
-        unknown_is_excluded(&result.p2_active_mons[0].possible_abilities, &Ability::DauntlessShield),
+        unknown_is_excluded(
+            &result.p2_active_mons[0].possible_abilities,
+            &Ability::DauntlessShield
+        ),
         "Dauntless Shield must be excluded when no +1 Def boost appears on switch-in; \
-         possible_abilities = {:?}", result.p2_active_mons[0].possible_abilities
+         possible_abilities = {:?}",
+        result.p2_active_mons[0].possible_abilities
     );
 }
 
@@ -13139,7 +17166,9 @@ fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
     // switches Corviknight out for a brand-new mon (Snorlax) never seen before —
     // this exercises both a Vec::remove (shrinking p1_known_back) and a push
     // (growing it), the two operations that caused the old layout to drift.
-    let switch_in_corviknight = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let switch_in_corviknight = event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p1(0),
         species: Species::Corviknight,
         level: 50,
@@ -13149,7 +17178,9 @@ fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
     }));
     let after_first_switch = apply(state, vec![switch_in_corviknight]);
 
-    let switch_in_new_mon = event(EventKind::Switch(SwitchState { disguise_species: None, max_hp: 0,
+    let switch_in_new_mon = event(EventKind::Switch(SwitchState {
+        disguise_species: None,
+        max_hp: 0,
         slot: p1(0),
         species: Species::Alakazam,
         level: 50,
@@ -13209,18 +17240,46 @@ fn test_p2_active_mon_idx_stable_across_p1_bench_churn() {
 fn test_simultaneous_switch_placement_survives_out_of_slot_order() {
     let p2_team = vec![
         crate::state::pokemon::build_pokemon_state(
-            Species::Charizard, &HashMap::new(), &HashMap::new(), Some(50),
-            None, None, None, None, None, None, None, None, true,
+            Species::Charizard,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some(50),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
         ),
         crate::state::pokemon::build_pokemon_state(
-            Species::Aerodactyl, &HashMap::new(), &HashMap::new(), Some(50),
-            None, None, None, None, None, None, None, None, true,
+            Species::Aerodactyl,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some(50),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
         ),
     ];
     let opponent_species = vec![Species::Tyranitar, Species::Lycanroc];
 
     let preview = UnknownMatchState::team_preview_from_perspective(
-        Player::P2, &p2_team, &opponent_species, &HashMap::new(), 2, 2, 50,
+        Player::P2,
+        &p2_team,
+        &opponent_species,
+        &HashMap::new(),
+        2,
+        2,
+        50,
     );
     let UnknownMatchState::TeamPreview(preview) = preview else {
         panic!("expected TeamPreview")
@@ -13232,33 +17291,55 @@ fn test_simultaneous_switch_placement_survives_out_of_slot_order() {
     // global speed sort produces when the higher-slot mon is faster.
     let events = vec![event(EventKind::SimultaneousSwitch {
         switches: vec![
-            SwitchState { disguise_species: None, max_hp: 0,
-                slot: p1(1), species: Species::Lycanroc, level: 50,
-                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p1(1),
+                species: Species::Lycanroc,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
             },
-            SwitchState { disguise_species: None, max_hp: 0,
-                slot: p1(0), species: Species::Tyranitar, level: 50,
-                hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p1(0),
+                species: Species::Tyranitar,
+                level: 50,
+                hp: PokemonHP::Percent(100),
+                status: None,
+                tera_type: None,
             },
         ],
     })];
 
     let result = apply_information(
-        UnknownMatchState::Battle(fog), &events, true, &HashMap::new(), &HashMap::new(),
-        &HashMap::new(), &InferenceConfig::default(),
+        UnknownMatchState::Battle(fog),
+        &events,
+        true,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &InferenceConfig::default(),
     );
     let UnknownMatchState::Battle(b) = result else {
         panic!("expected Battle state")
     };
 
     assert_eq!(
-        b.p1_active_mons.len(), 2,
+        b.p1_active_mons.len(),
+        2,
         "both P1 leads must survive the transition regardless of send-out order; got {:?}",
-        b.p1_active_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+        b.p1_active_mons
+            .iter()
+            .map(|m| &m.possible_species)
+            .collect::<Vec<_>>()
     );
     assert!(
         matches!(&b.p1_active_mons[0].possible_species, Unknown::Known(s) if *s == Species::Tyranitar),
-        "slot 0 must be Tyranitar; got {:?}", b.p1_active_mons[0].possible_species
+        "slot 0 must be Tyranitar; got {:?}",
+        b.p1_active_mons[0].possible_species
     );
     assert!(
         matches!(&b.p1_active_mons[1].possible_species, Unknown::Known(s) if *s == Species::Lycanroc),
@@ -13276,8 +17357,14 @@ fn test_simultaneous_switch_placement_survives_out_of_slot_order() {
 #[test]
 fn test_switch_purges_stale_speed_comparison_with_same_turn_mega_evolution() {
     let mut state = battle_nvn(
-        vec![unknown_mon_species(Species::Tyranitar), unknown_mon_species(Species::Lycanroc)],
-        vec![unknown_mon_species(Species::Aerodactyl), unknown_mon_species(Species::Charizard)],
+        vec![
+            unknown_mon_species(Species::Tyranitar),
+            unknown_mon_species(Species::Lycanroc),
+        ],
+        vec![
+            unknown_mon_species(Species::Aerodactyl),
+            unknown_mon_species(Species::Charizard),
+        ],
     );
     state.p1_possible_back_mons = vec![
         unknown_mon_species(Species::Sinistcha),
@@ -13285,8 +17372,10 @@ fn test_switch_purges_stale_speed_comparison_with_same_turn_mega_evolution() {
         unknown_mon_species(Species::Raichu),
         unknown_mon_species(Species::Hydreigon),
     ];
-    state.p2_known_back_mons =
-        vec![unknown_mon_species(Species::Sylveon), unknown_mon_species(Species::Ariados)];
+    state.p2_known_back_mons = vec![
+        unknown_mon_species(Species::Sylveon),
+        unknown_mon_species(Species::Ariados),
+    ];
 
     // Inject the exact stale clause from the live crash: idx 1 is the mon about to
     // leave P1_1 (Lycanroc here), idx 2 is Aerodactyl.
@@ -13299,14 +17388,34 @@ fn test_switch_purges_stale_speed_comparison_with_same_turn_mega_evolution() {
 
     let events = vec![
         event(EventKind::Switch(SwitchState {
-            disguise_species: None, max_hp: 0,
-            slot: p1(1), species: Species::Sinistcha, level: 50,
-            hp: PokemonHP::Percent(100), status: None, tera_type: None,
+            disguise_species: None,
+            max_hp: 0,
+            slot: p1(1),
+            species: Species::Sinistcha,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
         })),
-        event(EventKind::MegaEvolution { slot: p1(0), into: Species::TyranitarMega }),
-        event(EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::Protect, targets: vec![] }),
-        event(EventKind::MoveUsed { user: p2(1), move_used: PokemonMove::Protect, targets: vec![] }),
-        event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::Protect, targets: vec![] }),
+        event(EventKind::MegaEvolution {
+            slot: p1(0),
+            into: Species::TyranitarMega,
+        }),
+        event(EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Protect,
+            targets: vec![],
+        }),
+        event(EventKind::MoveUsed {
+            user: p2(1),
+            move_used: PokemonMove::Protect,
+            targets: vec![],
+        }),
+        event(EventKind::MoveUsed {
+            user: p1(0),
+            move_used: PokemonMove::Protect,
+            targets: vec![],
+        }),
         event(EventKind::EndOfTurn),
     ];
     let result = apply(state, events);
@@ -13326,11 +17435,16 @@ fn test_switch_purges_stale_speed_comparison_with_same_turn_mega_evolution() {
     // the live crash's mon_idx legend showed an empty `p1_known_back`, which would
     // mean the outgoing mon vanished from the roster entirely instead of landing here.
     assert!(
-        result.p1_known_back_mons.iter().any(
-            |m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Lycanroc),
-        ),
+        result
+            .p1_known_back_mons
+            .iter()
+            .any(|m| matches!(&m.possible_species, Unknown::Known(s) if *s == Species::Lycanroc),),
         "outgoing Lycanroc must be preserved in p1_known_back_mons after the switch; got {:?}",
-        result.p1_known_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+        result
+            .p1_known_back_mons
+            .iter()
+            .map(|m| &m.possible_species)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -13343,26 +17457,39 @@ mod information_mode_tests {
         describe_unknown_item,
     };
     use crate::information::unknowns::{InformationMode, UnknownTeamPreviewState};
-    use crate::state::pokemon::{build_pokemon_state, Nature, PokemonState};
+    use crate::state::pokemon::{Nature, PokemonState, build_pokemon_state};
 
     // ── describe.rs ───────────────────────────────────────────────────────────
 
     #[test]
     fn test_describe_unknown_known_possibly_not() {
-        assert_eq!(describe_unknown(&Unknown::Known(Ability::RoughSkin)), "Rough Skin");
         assert_eq!(
-            describe_unknown(&Unknown::Possibly(vec![Ability::RoughSkin, Ability::SandVeil])),
+            describe_unknown(&Unknown::Known(Ability::RoughSkin)),
+            "Rough Skin"
+        );
+        assert_eq!(
+            describe_unknown(&Unknown::Possibly(vec![
+                Ability::RoughSkin,
+                Ability::SandVeil
+            ])),
             "Rough Skin or Sand Veil"
         );
-        assert_eq!(describe_unknown(&Unknown::<Ability>::Not(vec![])), "Unknown");
+        assert_eq!(
+            describe_unknown(&Unknown::<Ability>::Not(vec![])),
+            "Unknown"
+        );
     }
 
     #[test]
     fn test_describe_unknown_item_shorter_list_uses_whitelist() {
-        let pool: HashSet<Item> =
-            [Item::Leftovers, Item::BlackSludge, Item::ChoiceBand, Item::ChoiceSpecs]
-                .into_iter()
-                .collect();
+        let pool: HashSet<Item> = [
+            Item::Leftovers,
+            Item::BlackSludge,
+            Item::ChoiceBand,
+            Item::ChoiceSpecs,
+        ]
+        .into_iter()
+        .collect();
         // Excluding 1 of 4 leaves 3 possible — the exclusion phrasing (1 item) is
         // shorter than the possible-list phrasing (3 items).
         let excl = Unknown::Not(vec![Item::ChoiceBand]);
@@ -13376,10 +17503,14 @@ mod information_mode_tests {
         // clause naming a different item) but was never IN the whitelist to begin
         // with, so it must never surface as "not Rocky Helmet"; only the
         // in-format exclusion (Choice Band) should render.
-        let pool: HashSet<Item> =
-            [Item::Leftovers, Item::BlackSludge, Item::ChoiceBand, Item::ChoiceSpecs]
-                .into_iter()
-                .collect();
+        let pool: HashSet<Item> = [
+            Item::Leftovers,
+            Item::BlackSludge,
+            Item::ChoiceBand,
+            Item::ChoiceSpecs,
+        ]
+        .into_iter()
+        .collect();
         let excl = Unknown::Not(vec![Item::ChoiceBand, Item::RockyHelmet]);
         assert_eq!(describe_unknown_item(&excl, Some(&pool)), "not Choice Band");
     }
@@ -13405,25 +17536,44 @@ mod information_mode_tests {
         // Without a whitelist (~1,000 items technically possible), a short exclusion
         // list is virtually always the shorter description.
         let u = Unknown::Not(vec![Item::ChoiceBand, Item::ChoiceSpecs]);
-        assert_eq!(describe_unknown_item(&u, None), "not Choice Band, not Choice Specs");
+        assert_eq!(
+            describe_unknown_item(&u, None),
+            "not Choice Band, not Choice Specs"
+        );
     }
 
     #[test]
     fn test_describe_statement_has_item_resolves_mon_label() {
-        let state =
-            battle_1v1(unknown_mon_species(Species::Snorlax), unknown_mon_species(Species::Garchomp));
+        let state = battle_1v1(
+            unknown_mon_species(Species::Snorlax),
+            unknown_mon_species(Species::Garchomp),
+        );
         // mon_idx 0 = p1_active[0] (Snorlax), per the actives-first flat ordering.
-        let stmt = Statement::HasItem { mon_idx: 0, item: Item::Leftovers };
-        assert_eq!(describe_statement(&stmt, &state), "Snorlax's item is Leftovers");
+        let stmt = Statement::HasItem {
+            mon_idx: 0,
+            item: Item::Leftovers,
+        };
+        assert_eq!(
+            describe_statement(&stmt, &state),
+            "Snorlax's item is Leftovers"
+        );
     }
 
     #[test]
     fn test_describe_clause_joins_with_or() {
-        let state =
-            battle_1v1(unknown_mon_species(Species::Snorlax), unknown_mon_species(Species::Garchomp));
+        let state = battle_1v1(
+            unknown_mon_species(Species::Snorlax),
+            unknown_mon_species(Species::Garchomp),
+        );
         let clause = vec![
-            Statement::HasItem { mon_idx: 0, item: Item::Leftovers },
-            Statement::HasItem { mon_idx: 0, item: Item::BlackSludge },
+            Statement::HasItem {
+                mon_idx: 0,
+                item: Item::Leftovers,
+            },
+            Statement::HasItem {
+                mon_idx: 0,
+                item: Item::BlackSludge,
+            },
         ];
         assert_eq!(
             describe_clause(&clause, &state),
@@ -13447,24 +17597,49 @@ mod information_mode_tests {
         moves: [Option<PokemonMove>; 4],
     ) -> PokemonState {
         build_pokemon_state(
-            species, &HashMap::new(), &HashMap::new(), Some(50), Some(moves),
-            None, Some(ability), Some(nature), Some(item), None, None, None, false,
+            species,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some(50),
+            Some(moves),
+            None,
+            Some(ability),
+            Some(nature),
+            Some(item),
+            None,
+            None,
+            None,
+            false,
         )
     }
 
     #[test]
     fn test_open_sheet_reveals_moves_item_ability_but_not_nature_or_evs() {
         let mon = concrete_mon(
-            Species::Garchomp, Ability::RoughSkin, Item::ChoiceScarf, Nature::Jolly,
-            [Some(PokemonMove::Earthquake), Some(PokemonMove::Outrage), None, None],
+            Species::Garchomp,
+            Ability::RoughSkin,
+            Item::ChoiceScarf,
+            Nature::Jolly,
+            [
+                Some(PokemonMove::Earthquake),
+                Some(PokemonMove::Outrage),
+                None,
+                None,
+            ],
         );
-        let unk = UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, false, false);
+        let unk =
+            UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, false, false);
 
         assert_eq!(unk.item, Unknown::Known(Item::ChoiceScarf));
         assert_eq!(unk.possible_abilities, Unknown::Known(Ability::RoughSkin));
         assert_eq!(
             unk.known_moves,
-            [Some(PokemonMove::Earthquake), Some(PokemonMove::Outrage), None, None]
+            [
+                Some(PokemonMove::Earthquake),
+                Some(PokemonMove::Outrage),
+                None,
+                None
+            ]
         );
         // Nature/EVs are NEVER on a sheet — must stay fully unknown / worst-case bounded.
         assert_eq!(unk.possible_natures, Unknown::Not(vec![]));
@@ -13475,11 +17650,16 @@ mod information_mode_tests {
     #[test]
     fn test_open_sheet_natures_tightens_stat_bounds_using_the_real_nature() {
         let mon = concrete_mon(
-            Species::Garchomp, Ability::RoughSkin, Item::ChoiceScarf, Nature::Jolly,
+            Species::Garchomp,
+            Ability::RoughSkin,
+            Item::ChoiceScarf,
+            Nature::Jolly,
             [Some(PokemonMove::Earthquake), None, None, None],
         );
-        let pre_reveal = UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
-        let unk = UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, true, false);
+        let pre_reveal =
+            UnknownPokemonState::from_opponent_species(Species::Garchomp, &HashMap::new(), 50);
+        let unk =
+            UnknownPokemonState::from_opponent_open_sheet(&mon, &HashMap::new(), 50, true, false);
 
         assert_eq!(unk.possible_natures, Unknown::Known(Nature::Jolly));
         // Jolly NERFS SpA (fixed 0.9 mod now that nature is known, not the independent
@@ -13488,14 +17668,16 @@ mod information_mode_tests {
         assert!(
             unk.max_stats[3] < pre_reveal.max_stats[3],
             "revealing a SpA-nerfing nature must lower the SpA ceiling: {} !< {}",
-            unk.max_stats[3], pre_reveal.max_stats[3]
+            unk.max_stats[3],
+            pre_reveal.max_stats[3]
         );
         // Jolly BOOSTS Speed (fixed 1.1 mod, not the independent 0.9 "worst case") —
         // revealing it must strictly raise the Speed floor.
         assert!(
             unk.min_stats[5] > pre_reveal.min_stats[5],
             "revealing a Speed-boosting nature must raise the Speed floor: {} !> {}",
-            unk.min_stats[5], pre_reveal.min_stats[5]
+            unk.min_stats[5],
+            pre_reveal.min_stats[5]
         );
     }
 
@@ -13517,8 +17699,12 @@ mod information_mode_tests {
         // `known_back`. Regression for the TODO.md fix: opponent back mons were
         // "immediately showing up" as already-revealed at turn 0.
         let p2_mons: Vec<UnknownPokemonState> = [
-            Species::Garchomp, Species::Snorlax, Species::Corviknight,
-            Species::Charizard, Species::Ferrothorn, Species::Toxapex,
+            Species::Garchomp,
+            Species::Snorlax,
+            Species::Corviknight,
+            Species::Charizard,
+            Species::Ferrothorn,
+            Species::Toxapex,
         ]
         .into_iter()
         .map(unknown_mon_species)
@@ -13535,7 +17721,11 @@ mod information_mode_tests {
         assert!(
             battle.p2_active_mons.is_empty(),
             "into_battle_state alone must not place any P2 mon active; got {:?}",
-            battle.p2_active_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+            battle
+                .p2_active_mons
+                .iter()
+                .map(|m| &m.possible_species)
+                .collect::<Vec<_>>()
         );
         // Nothing is battle-confirmed yet — known_back starts empty regardless of
         // which indices were passed as "back" vs left off entirely.
@@ -13554,8 +17744,12 @@ mod information_mode_tests {
         assert_eq!(
             possible_species,
             [
-                Species::Garchomp, Species::Snorlax, Species::Corviknight,
-                Species::Charizard, Species::Ferrothorn, Species::Toxapex,
+                Species::Garchomp,
+                Species::Snorlax,
+                Species::Corviknight,
+                Species::Charizard,
+                Species::Ferrothorn,
+                Species::Toxapex,
             ]
             .into_iter()
             .collect()
@@ -13573,12 +17767,11 @@ mod information_mode_tests {
     /// removed from `possible_back` (not left duplicated there).
     #[test]
     fn test_into_battle_state_then_apply_information_places_lead_active() {
-        let p2_mons: Vec<UnknownPokemonState> = [
-            Species::Garchomp, Species::Snorlax, Species::Corviknight,
-        ]
-        .into_iter()
-        .map(unknown_mon_species)
-        .collect();
+        let p2_mons: Vec<UnknownPokemonState> =
+            [Species::Garchomp, Species::Snorlax, Species::Corviknight]
+                .into_iter()
+                .map(unknown_mon_species)
+                .collect();
         let preview = UnknownTeamPreviewState {
             active_per_side: 1,
             brought_per_side: 3,
@@ -13589,13 +17782,25 @@ mod information_mode_tests {
 
         let switch_events = vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p1(0), species: Species::Snorlax, level: 50,
-                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p1(0),
+                    species: Species::Snorlax,
+                    level: 50,
+                    hp: PokemonHP::Number(200),
+                    status: None,
+                    tera_type: None,
                 },
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p2(0), species: Species::Garchomp, level: 50,
-                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p2(0),
+                    species: Species::Garchomp,
+                    level: 50,
+                    hp: PokemonHP::Percent(100),
+                    status: None,
+                    tera_type: None,
                 },
             ],
         })];
@@ -13610,8 +17815,10 @@ mod information_mode_tests {
         // Garchomp must be PULLED from possible_back, not left duplicated there.
         assert_eq!(result.p2_possible_back_mons.len(), 2);
         assert!(
-            !result.p2_possible_back_mons.iter().any(|m|
-                matches!(&m.possible_species, Unknown::Known(Species::Garchomp))),
+            !result
+                .p2_possible_back_mons
+                .iter()
+                .any(|m| matches!(&m.possible_species, Unknown::Known(Species::Garchomp))),
             "the now-active Garchomp must not remain in possible_back"
         );
     }
@@ -13625,12 +17832,11 @@ mod information_mode_tests {
     /// possibly in the back when led."
     #[test]
     fn test_zoroark_possibly_in_back_from_team_preview() {
-        let p2_mons: Vec<UnknownPokemonState> = [
-            Species::Milotic, Species::Zoroark, Species::Corviknight,
-        ]
-        .into_iter()
-        .map(unknown_mon_species)
-        .collect();
+        let p2_mons: Vec<UnknownPokemonState> =
+            [Species::Milotic, Species::Zoroark, Species::Corviknight]
+                .into_iter()
+                .map(unknown_mon_species)
+                .collect();
         let preview = UnknownTeamPreviewState {
             active_per_side: 1,
             brought_per_side: 3,
@@ -13650,13 +17856,25 @@ mod information_mode_tests {
 
         let switch_events = vec![event(EventKind::SimultaneousSwitch {
             switches: vec![
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p1(0), species: Species::Snorlax, level: 50,
-                    hp: PokemonHP::Number(200), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p1(0),
+                    species: Species::Snorlax,
+                    level: 50,
+                    hp: PokemonHP::Number(200),
+                    status: None,
+                    tera_type: None,
                 },
-                SwitchState { disguise_species: None, max_hp: 0,
-                    slot: p2(0), species: Species::Milotic, level: 50,
-                    hp: PokemonHP::Percent(100), status: None, tera_type: None,
+                SwitchState {
+                    disguise_species: None,
+                    max_hp: 0,
+                    slot: p2(0),
+                    species: Species::Milotic,
+                    level: 50,
+                    hp: PokemonHP::Percent(100),
+                    status: None,
+                    tera_type: None,
                 },
             ],
         })];
@@ -13674,10 +17892,16 @@ mod information_mode_tests {
         // Zoroark's own roster entry must still be present ("possibly in the back"),
         // not consumed by the active-slot's hypothesis attachment.
         assert!(
-            result.p2_possible_back_mons.iter().any(|m|
-                matches!(&m.possible_species, Unknown::Known(Species::Zoroark))),
+            result
+                .p2_possible_back_mons
+                .iter()
+                .any(|m| matches!(&m.possible_species, Unknown::Known(Species::Zoroark))),
             "Zoroark's own roster entry must remain in possible_back; possible_back = {:?}",
-            result.p2_possible_back_mons.iter().map(|m| &m.possible_species).collect::<Vec<_>>()
+            result
+                .p2_possible_back_mons
+                .iter()
+                .map(|m| &m.possible_species)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -13691,11 +17915,16 @@ mod information_mode_tests {
         let zoroark_back =
             UnknownPokemonState::from_opponent_species(Species::Zoroark, &HashMap::new(), 50);
         let mut state = battle_nvn(
-            vec![unknown_mon_species(Species::Pikachu), unknown_mon_species(Species::Pikachu)],
+            vec![
+                unknown_mon_species(Species::Pikachu),
+                unknown_mon_species(Species::Pikachu),
+            ],
             vec![unknown_mon_species(Species::Garchomp)],
         );
         state.active_per_side = 2;
-        state.p2_active_mons.push(unknown_mon_species(Species::Snorlax));
+        state
+            .p2_active_mons
+            .push(unknown_mon_species(Species::Snorlax));
         state.p2_possible_back_mons = vec![zoroark_back];
         state.p2_unresolved_zoroark_count = 1;
         state.p2_slot_conditions = vec![vec![], vec![]];

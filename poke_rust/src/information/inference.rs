@@ -37,10 +37,12 @@ use crate::simulator::helpers::{base_damage_formula, move_has_flag, single_type_
 use crate::state::battle::{FieldSlot, Player};
 use crate::state::dex_data::{
     AbilityData, AccuracyType, MoveCategory, MoveData, MoveFlag, PokemonData, PokemonStat,
-    PokemonType, PseudoWeather, SideCondition, SlotCondition, Status, Terrain, VolatileStatus,
-    Weather,
+    PokemonType, PseudoWeather, SelfSwitchType, SideCondition, SlotCondition, Status, Terrain,
+    VolatileStatus, Weather,
 };
-use crate::state::pokemon::{Nature, VolatileStatusState, calc_hp, calc_stat, nature_stat_modifiers};
+use crate::state::pokemon::{
+    Nature, VolatileStatusState, calc_hp, calc_stat, nature_stat_modifiers,
+};
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -215,8 +217,7 @@ where
     };
 
     let mut sub = boxed_sub;
-    let sub_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut sub)));
+    let sub_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut sub)));
 
     match sub_result {
         Err(_) => {
@@ -346,9 +347,7 @@ pub(super) fn resolve_zoroark_globally(state: &mut UnknownBattleState, side: Pla
 /// bucket chain but read-only (that function is mutable-only, since its only other
 /// caller needs to write through it).
 fn count_illusion_capable_on_side(state: &UnknownBattleState, side: Player) -> u8 {
-    let is_illusion = |m: &&UnknownPokemonState| {
-        matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
-    };
+    let is_illusion = |m: &&UnknownPokemonState| matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s));
     match side {
         Player::P1 => state
             .p1_active_mons
@@ -412,8 +411,9 @@ pub(super) fn rearm_zoroark_on_side(
         {
             continue;
         }
-        mon.possible_illusion_state =
-            Some(Box::new(unknowns::seed_illusion_hypothesis_for(mon, baseline)));
+        mon.possible_illusion_state = Some(Box::new(unknowns::seed_illusion_hypothesis_for(
+            mon, baseline,
+        )));
     }
 }
 
@@ -449,11 +449,16 @@ fn finish_illusion_promotion_restore(
     dex: &HashMap<Species, PokemonData>,
     config: &InferenceConfig,
 ) {
-    let Unknown::Known(discarded) = discarded_species else { return };
+    let Unknown::Known(discarded) = discarded_species else {
+        return;
+    };
     if unknowns::is_illusion_capable_species(&discarded) {
         return;
     }
-    if combined_back(state, &side).iter().any(|m| unknown_is_known_as(&m.possible_species, &discarded)) {
+    if combined_back(state, &side)
+        .iter()
+        .any(|m| unknown_is_known_as(&m.possible_species, &discarded))
+    {
         return;
     }
     restore_discarded_primary_to_bench(state, side, discarded, dex, config);
@@ -480,7 +485,10 @@ fn remove_stale_zoroark_bench_duplicate(
         Player::P1 => &mut state.p1_known_back_mons,
         Player::P2 => &mut state.p2_known_back_mons,
     };
-    if let Some(pos) = known_back.iter().position(|m| unknown_is_known_as(&m.possible_species, resolved_species)) {
+    if let Some(pos) = known_back
+        .iter()
+        .position(|m| unknown_is_known_as(&m.possible_species, resolved_species))
+    {
         known_back.remove(pos);
         return;
     }
@@ -488,7 +496,10 @@ fn remove_stale_zoroark_bench_duplicate(
         Player::P1 => &mut state.p1_possible_back_mons,
         Player::P2 => &mut state.p2_possible_back_mons,
     };
-    if let Some(pos) = possible_back.iter().position(|m| unknown_is_known_as(&m.possible_species, resolved_species)) {
+    if let Some(pos) = possible_back
+        .iter()
+        .position(|m| unknown_is_known_as(&m.possible_species, resolved_species))
+    {
         possible_back.remove(pos);
     }
 }
@@ -509,7 +520,9 @@ fn find_roster_template<'a>(
         Player::P1 => &state.p1_roster_templates,
         Player::P2 => &state.p2_roster_templates,
     };
-    templates.iter().find(|m| unknown_is_known_as(&m.possible_species, species))
+    templates
+        .iter()
+        .find(|m| unknown_is_known_as(&m.possible_species, species))
 }
 
 /// Companion to a promotion (e.g. via `IllusionEnded`): the mon's PRIMARY identity
@@ -560,13 +573,17 @@ pub(super) fn restore_discarded_primary_to_bench(
     if already_active {
         return;
     }
-    let mut restored = if let Some(template) = find_roster_template(state, side, &discarded_species) {
+    let mut restored = if let Some(template) = find_roster_template(state, side, &discarded_species)
+    {
         let mut t = template.clone();
         t.possible_illusion_state = None; // defensive; templates never carry one
         t
     } else {
-        let mut restored =
-            UnknownPokemonState::from_opponent_species(discarded_species.clone(), dex, config.level);
+        let mut restored = UnknownPokemonState::from_opponent_species(
+            discarded_species.clone(),
+            dex,
+            config.level,
+        );
         recompute_stats_for_iv_mode(&mut restored, &discarded_species, dex, config);
         restored
     };
@@ -579,7 +596,7 @@ pub(super) fn restore_discarded_primary_to_bench(
     // function before it) already drops the count to 0 and clears every hypothesis
     // side-wide once the side's one Illusion forme is positively located.
     //
-    maybe_seed_fresh_hypothesis(state, side, &mut restored);
+    maybe_seed_fresh_hypothesis(state, side, &mut restored, dex, config);
     // S49: about to push a new bench entry, growing `side`'s back bucket by one.
     // `mon_idx` for every back-bucket mon is a live Vec-position recomputed fresh from
     // `MonSegments::ranges()` on every call, not a stable per-individual id (S1/S18
@@ -616,16 +633,18 @@ pub(super) fn restore_discarded_primary_to_bench(
 /// snapshot (`p{side}_roster_templates`) for the case where its live bench entry
 /// was already consumed or removed by earlier bookkeeping.
 fn find_illusion_baseline(state: &UnknownBattleState, side: Player) -> Option<UnknownPokemonState> {
-    let is_baseline = |m: &&UnknownPokemonState| {
-        matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
-    };
-    combined_back(state, &side).into_iter().find(is_baseline).cloned().or_else(|| {
-        let templates = match side {
-            Player::P1 => &state.p1_roster_templates,
-            Player::P2 => &state.p2_roster_templates,
-        };
-        templates.iter().find(|m| is_baseline(m)).cloned()
-    })
+    let is_baseline = |m: &&UnknownPokemonState| matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s));
+    combined_back(state, &side)
+        .into_iter()
+        .find(is_baseline)
+        .cloned()
+        .or_else(|| {
+            let templates = match side {
+                Player::P1 => &state.p1_roster_templates,
+                Player::P2 => &state.p2_roster_templates,
+            };
+            templates.iter().find(|m| is_baseline(m)).cloned()
+        })
 }
 
 /// Like `find_illusion_baseline`, but REMOVES the baseline entry from the live
@@ -647,9 +666,7 @@ fn take_illusion_baseline_from_bench(
     state: &mut UnknownBattleState,
     side: Player,
 ) -> Option<UnknownPokemonState> {
-    let is_baseline = |m: &UnknownPokemonState| {
-        matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
-    };
+    let is_baseline = |m: &UnknownPokemonState| matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s));
     let back_start = match side {
         Player::P1 => MonSegments::of(state).ranges()[2].start,
         Player::P2 => MonSegments::of(state).ranges()[3].start,
@@ -698,27 +715,75 @@ fn take_illusion_baseline_from_bench(
     templates.iter().find(|m| is_baseline(m)).cloned()
 }
 
-/// If `side` still has an unresolved Illusion forme, and `mon` is neither itself
-/// Illusion-capable nor already carrying a hypothesis, seed one from the side's
-/// Illusion-forme baseline. A no-op whenever the side's count is already 0 — under
-/// the ordinary Species-Clause case (at most one Illusion-capable roster member),
-/// that's always true by the time a rebuild path like `restore_discarded_primary_to_bench`
-/// runs, since the side's one Illusion forme was just positively located. This only
-/// does real work for a hypothetical multi-Illusion-forme roster, where a second,
-/// still-unresolved Illusion forme could legitimately be this freshly-rebuilt mon.
-fn maybe_seed_fresh_hypothesis(state: &UnknownBattleState, side: Player, mon: &mut UnknownPokemonState) {
+/// If `side` still has an unresolved Illusion forme and `mon` is not itself
+/// Illusion-capable, replace any carried alternative with a fresh hypothesis from
+/// the side's Illusion-forme baseline. Each field tenure is independent: bounds
+/// learned while the real displayed species occupied this slot cannot narrow a
+/// Zoroark that later enters under the same disguise. This is also used by rebuild
+/// paths; it is a no-op once the side's unresolved count reaches zero.
+fn maybe_seed_fresh_hypothesis(
+    state: &UnknownBattleState,
+    side: Player,
+    mon: &mut UnknownPokemonState,
+    dex: &HashMap<Species, PokemonData>,
+    config: &InferenceConfig,
+) {
     let unresolved = match side {
         Player::P1 => state.p1_unresolved_zoroark_count,
         Player::P2 => state.p2_unresolved_zoroark_count,
     };
-    if unresolved == 0 || mon.possible_illusion_state.is_some() {
+    // Replace, rather than retain, an existing hypothesis at every incoming
+    // boundary. The old alternative was narrowed during the shown Pokemon's
+    // prior field tenure; this switch may instead be a fresh Zoroark tenure
+    // newly wearing the same disguise, so carrying those bounds across would
+    // conflate two different physical Pokemon.
+    if unresolved == 0 {
         return;
     }
-    if matches!(&mon.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s)) {
+    if matches!(&mon.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
+    {
         return;
     }
-    if let Some(baseline) = find_illusion_baseline(state, side) {
-        mon.possible_illusion_state = Some(Box::new(unknowns::seed_illusion_hypothesis_for(mon, &baseline)));
+    // A newly-created hypothesis represents a fresh alternative physical identity.
+    // Prefer the immutable preview template: the live/bench Zoroark baseline may
+    // have accumulated stat/nature bounds while representing a different tenure,
+    // and copying those across would exclude a perfectly valid new disguise. Fall
+    // back to the live baseline only for synthetic states without roster templates.
+    let template = match side {
+        Player::P1 => &state.p1_roster_templates,
+        Player::P2 => &state.p2_roster_templates,
+    }
+    .iter()
+    .find(|m| {
+        matches!(&m.possible_species, Unknown::Known(s) if unknowns::is_illusion_capable_species(s))
+    })
+    .cloned();
+    // Use a fresh conservative baseline rather than importing sheet-specific
+    // fields into every possible disguise host. This deliberately favors a sound
+    // union while the engine cannot represent the cross-host identity correlation.
+    let baseline = template.map(|template| {
+        let fully_known = matches!(template.possible_natures, Unknown::Known(_))
+            && (0..6).all(|i| template.min_stats[i] == template.max_stats[i]);
+        if fully_known {
+            template
+        } else if let Unknown::Known(species) = &template.possible_species {
+            let mut fresh =
+                UnknownPokemonState::from_opponent_species(species.clone(), dex, config.level);
+            recompute_stats_for_iv_mode(&mut fresh, species, dex, config);
+            if let Some(legal) = &config.legal_items {
+                let mut candidates: Vec<Item> = legal.iter().cloned().collect();
+                candidates.push(Item::None);
+                fresh.item = Unknown::Possibly(candidates);
+            }
+            fresh
+        } else {
+            template
+        }
+    });
+    if let Some(baseline) = baseline.or_else(|| find_illusion_baseline(state, side)) {
+        mon.possible_illusion_state = Some(Box::new(unknowns::seed_illusion_hypothesis_for(
+            mon, &baseline,
+        )));
     }
 }
 
@@ -918,6 +983,13 @@ pub(super) fn mon_idx_legend(state: &UnknownBattleState) -> String {
 /// `apply_unconditional_tightening_to_mon`). Logged so remaining gaps stay
 /// discoverable rather than silently swallowed.
 fn unknown_exclude<T: PartialEq + Clone + std::fmt::Debug>(u: &mut Unknown<T>, val: &T, ctx: &str) {
+    #[cfg(test)]
+    if std::env::var_os("POKERUST_EXCLUDE_TRACE").is_some() {
+        eprintln!(
+            "[EXCLUDE] type={} value={val:?} context={ctx} before={u:?}",
+            std::any::type_name::<T>(),
+        );
+    }
     match u {
         Unknown::Known(v) => {
             if v == val {
@@ -994,6 +1066,13 @@ fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
     matches!(u, Unknown::Known(v) if v == val)
 }
 
+fn same_known_species(a: &UnknownPokemonState, b: &UnknownPokemonState) -> bool {
+    matches!(
+        (&a.possible_species, &b.possible_species),
+        (Unknown::Known(a_species), Unknown::Known(b_species)) if a_species == b_species
+    )
+}
+
 /// Widen to whichever of `a`/`b` admits more: `x` is possible in the result iff it
 /// was possible under `a` OR under `b`. Used when the same slot might really be one
 /// of two distinct physical identities (Illusion) and each identity's own bound needs
@@ -1003,7 +1082,11 @@ fn unknown_is_known_as<T: PartialEq>(u: &Unknown<T>, val: &T) -> bool {
 pub(crate) fn unknown_union<T: PartialEq + Clone>(a: &Unknown<T>, b: &Unknown<T>) -> Unknown<T> {
     match (a, b) {
         (Unknown::Known(x), Unknown::Known(y)) => {
-            if x == y { Unknown::Known(x.clone()) } else { Unknown::Possibly(vec![x.clone(), y.clone()]) }
+            if x == y {
+                Unknown::Known(x.clone())
+            } else {
+                Unknown::Possibly(vec![x.clone(), y.clone()])
+            }
         }
         (Unknown::Known(x), Unknown::Possibly(ys)) | (Unknown::Possibly(ys), Unknown::Known(x)) => {
             let mut out = ys.clone();
@@ -1021,7 +1104,8 @@ pub(crate) fn unknown_union<T: PartialEq + Clone>(a: &Unknown<T>, b: &Unknown<T>
             }
             Unknown::Possibly(out)
         }
-        (Unknown::Known(x), Unknown::Not(excluded)) | (Unknown::Not(excluded), Unknown::Known(x)) => {
+        (Unknown::Known(x), Unknown::Not(excluded))
+        | (Unknown::Not(excluded), Unknown::Known(x)) => {
             // "Everything except `excluded`" unioned with a single extra value: drop
             // that value from the exclusion list if it was there, otherwise unchanged
             // (it was already included).
@@ -1029,7 +1113,8 @@ pub(crate) fn unknown_union<T: PartialEq + Clone>(a: &Unknown<T>, b: &Unknown<T>
             out.retain(|e| e != x);
             Unknown::Not(out)
         }
-        (Unknown::Possibly(xs), Unknown::Not(excluded)) | (Unknown::Not(excluded), Unknown::Possibly(xs)) => {
+        (Unknown::Possibly(xs), Unknown::Not(excluded))
+        | (Unknown::Not(excluded), Unknown::Possibly(xs)) => {
             let mut out = excluded.clone();
             out.retain(|e| !xs.contains(e));
             Unknown::Not(out)
@@ -1165,7 +1250,11 @@ fn find_preview_mon<'a>(
     slot_map: &[(Player, u8, usize)],
 ) -> Option<&'a mut UnknownPokemonState> {
     let mon_idx = slot_map.iter().find_map(|(p, s, idx)| {
-        if p == player && *s == slot_index { Some(*idx) } else { None }
+        if p == player && *s == slot_index {
+            Some(*idx)
+        } else {
+            None
+        }
     })?;
     match player {
         Player::P1 => state.p1_mons.get_mut(mon_idx),
@@ -1213,16 +1302,14 @@ fn process_team_preview_event(
 
         // ── HP changes ───────────────────────────────────────────────────────
         EventKind::DamageDealt { target, new_hp, .. } => {
-            if let Some(mon) =
-                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            if let Some(mon) = find_preview_mon(state, &target.player, target.slot_index, slot_map)
             {
                 mon.hp = new_hp.clone();
             }
         }
 
         EventKind::Healed { target, new_hp, .. } => {
-            if let Some(mon) =
-                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            if let Some(mon) = find_preview_mon(state, &target.player, target.slot_index, slot_map)
             {
                 mon.hp = new_hp.clone();
             }
@@ -1230,25 +1317,26 @@ fn process_team_preview_event(
 
         // ── Fainting from entry damage ────────────────────────────────────────
         EventKind::Faint { slot } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
                 mon.fainted = true;
             }
         }
 
         // ── Stat boosts (Intimidate, Download, etc.) ──────────────────────────
-        EventKind::BoostChanged { target, boost_idx, stages } => {
-            if let Some(mon) =
-                find_preview_mon(state, &target.player, target.slot_index, slot_map)
-                && *boost_idx < 7 {
-                    mon.boosts[*boost_idx] = mon.boosts[*boost_idx].saturating_add(*stages);
-                }
+        EventKind::BoostChanged {
+            target,
+            boost_idx,
+            stages,
+        } => {
+            if let Some(mon) = find_preview_mon(state, &target.player, target.slot_index, slot_map)
+                && *boost_idx < 7
+            {
+                mon.boosts[*boost_idx] = mon.boosts[*boost_idx].saturating_add(*stages);
+            }
         }
 
         EventKind::BoostsCleared { target } => {
-            if let Some(mon) =
-                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            if let Some(mon) = find_preview_mon(state, &target.player, target.slot_index, slot_map)
             {
                 mon.boosts = [0i8; 7];
             }
@@ -1256,25 +1344,23 @@ fn process_team_preview_event(
 
         // ── Items ─────────────────────────────────────────────────────────────
         EventKind::ItemRevealed { slot, item } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
                 unknown_set_known(&mut mon.item, item.clone(), "preview-item");
             }
         }
 
         EventKind::ItemGained { slot, item } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
                 unknown_set_known(&mut mon.item, item.clone(), "preview-item-gained");
             }
         }
 
-        EventKind::ItemLost { slot, item, consumed } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
+        EventKind::ItemLost {
+            slot,
+            item,
+            consumed,
+        } => {
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
                 if *consumed {
                     mon.consumed_item = Some(item.clone());
                 } else {
@@ -1286,17 +1372,18 @@ fn process_team_preview_event(
 
         // ── Abilities ─────────────────────────────────────────────────────────
         EventKind::AbilityRevealed { slot, ability } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
-                unknown_set_known(&mut mon.possible_abilities, ability.clone(), "preview-ability");
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
+                unknown_set_known(
+                    &mut mon.possible_abilities,
+                    ability.clone(),
+                    "preview-ability",
+                );
             }
         }
 
         // ── Status ────────────────────────────────────────────────────────────
         EventKind::StatusInflicted { target, status } => {
-            if let Some(mon) =
-                find_preview_mon(state, &target.player, target.slot_index, slot_map)
+            if let Some(mon) = find_preview_mon(state, &target.player, target.slot_index, slot_map)
             {
                 mon.status = Some(status.clone());
             }
@@ -1308,34 +1395,30 @@ fn process_team_preview_event(
 
         // ── Forme / type changes (entry abilities like Schooling) ─────────────
         EventKind::FormeChange { slot, into, .. } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
                 unknown_set_known(&mut mon.possible_species, into.clone(), "preview-forme");
             }
         }
 
         EventKind::TypeChanged { slot, new_types } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
                 unknown_set_known(&mut mon.possible_types, new_types.clone(), "preview-type");
             }
         }
 
         EventKind::Terastallization { slot, tera_type } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
                 mon.is_tera = true;
-                unknown_set_known(&mut mon.possible_tera_type, tera_type.clone(), "preview-tera");
+                unknown_set_known(
+                    &mut mon.possible_tera_type,
+                    tera_type.clone(),
+                    "preview-tera",
+                );
             }
         }
 
         EventKind::MegaEvolution { slot, into } => {
-            if let Some(mon) =
-                find_preview_mon(state, &slot.player, slot.slot_index, slot_map)
-            {
+            if let Some(mon) = find_preview_mon(state, &slot.player, slot.slot_index, slot_map) {
                 mon.is_mega = true;
                 unknown_set_known(&mut mon.possible_species, into.clone(), "preview-mega");
             }
@@ -1343,8 +1426,7 @@ fn process_team_preview_event(
 
         // ── Field effects — no-ops in preview state (no field fields to update)
         // Weather/terrain are set on the BattleState when the battle begins.
-        EventKind::WeatherChanged { .. }
-        | EventKind::TerrainChanged { .. } => {}
+        EventKind::WeatherChanged { .. } | EventKind::TerrainChanged { .. } => {}
 
         // ── Illegal events — cannot happen before the first move is chosen ────
         EventKind::MoveUsed { .. }
@@ -1376,10 +1458,7 @@ fn process_team_preview_event(
         | EventKind::AnticipationShudder { .. }
         | EventKind::IllusionEnded { .. }
         | EventKind::Transformed { .. } => {
-            panic!(
-                "[inference] illegal event {:?} at team preview",
-                event.kind
-            );
+            panic!("[inference] illegal event {:?} at team preview", event.kind);
         }
     }
 
@@ -1427,44 +1506,48 @@ fn run_pass5_all_mons(
         let has_known_species = get_mon_by_idx(state, idx)
             .map(|m| matches!(m.possible_species, Unknown::Known(_)))
             .unwrap_or(false);
-        if has_known_species
-            && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                // Captured BEFORE mirroring can overwrite `possible_species` on a
-                // `Promoted` outcome — see `finish_illusion_promotion_restore`.
-                let discarded_before = mon.possible_species.clone();
-                // Mirror onto a live Zoroark hypothesis (Increment 2): this is also the
-                // promotion backstop for Pass 3's stat tightening (see the "synergy"
-                // note in the plan) — Pass 3 never panics itself, so a primary stat
-                // window it silently made infeasible only surfaces HERE, as
-                // `pass5_back_solve` panicking on the primary while the hypothesis
-                // (independently tightened by Pass 3's own mirrored call) still solves
-                // cleanly.
-                let outcome = apply_with_illusion_mirroring(mon, |m| pass5_back_solve(m, idx, config, dex));
-                let promoted = matches!(outcome, IllusionMirrorOutcome::Promoted);
-                // Captured AFTER promotion overwrites `possible_species` with the
-                // resolved Zoroark identity — see `remove_stale_zoroark_bench_duplicate`.
-                let resolved_species: Option<Species> = if promoted {
-                    match &mon.possible_species {
-                        Unknown::Known(s) => Some(s.clone()),
-                        _ => None,
-                    }
+        if has_known_species && let Some(mon) = get_mon_mut_by_idx(state, idx) {
+            // Captured BEFORE mirroring can overwrite `possible_species` on a
+            // `Promoted` outcome — see `finish_illusion_promotion_restore`.
+            let discarded_before = mon.possible_species.clone();
+            // Mirror onto a live Zoroark hypothesis (Increment 2): this is also the
+            // promotion backstop for Pass 3's stat tightening (see the "synergy"
+            // note in the plan) — Pass 3 never panics itself, so a primary stat
+            // window it silently made infeasible only surfaces HERE, as
+            // `pass5_back_solve` panicking on the primary while the hypothesis
+            // (independently tightened by Pass 3's own mirrored call) still solves
+            // cleanly.
+            let outcome =
+                apply_with_illusion_mirroring(mon, |m| pass5_back_solve(m, idx, config, dex));
+            let promoted = matches!(outcome, IllusionMirrorOutcome::Promoted);
+            // Captured AFTER promotion overwrites `possible_species` with the
+            // resolved Zoroark identity — see `remove_stale_zoroark_bench_duplicate`.
+            let resolved_species: Option<Species> = if promoted {
+                match &mon.possible_species {
+                    Unknown::Known(s) => Some(s.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if promoted {
+                // S52: drop any species-derived predicate recorded against this
+                // mon_idx under the now-discarded (wrong) assumed identity, before
+                // the side-wide bench bookkeeping below — see
+                // `purge_species_derived_predicates_for_mon`.
+                purge_species_derived_predicates_for_mon(state, idx);
+                let side = if mon_is_p2(state, idx) {
+                    Player::P2
                 } else {
-                    None
+                    Player::P1
                 };
-                if promoted {
-                    // S52: drop any species-derived predicate recorded against this
-                    // mon_idx under the now-discarded (wrong) assumed identity, before
-                    // the side-wide bench bookkeeping below — see
-                    // `purge_species_derived_predicates_for_mon`.
-                    purge_species_derived_predicates_for_mon(state, idx);
-                    let side = if mon_is_p2(state, idx) { Player::P2 } else { Player::P1 };
-                    resolve_zoroark_globally(state, side);
-                    finish_illusion_promotion_restore(state, side, discarded_before, dex, config);
-                    if let Some(resolved) = resolved_species {
-                        remove_stale_zoroark_bench_duplicate(state, side, &resolved);
-                    }
+                resolve_zoroark_globally(state, side);
+                finish_illusion_promotion_restore(state, side, discarded_before, dex, config);
+                if let Some(resolved) = resolved_species {
+                    remove_stale_zoroark_bench_duplicate(state, side, &resolved);
                 }
             }
+        }
     }
 }
 
@@ -1523,6 +1606,7 @@ fn apply_information_battle(
         damaging_hits_this_turn: Vec::new(),
         switched_slots_this_turn: Vec::new(),
         move_users_this_turn: Vec::new(),
+        form_changed_slots_this_turn: Vec::new(),
         analytic_last_movers: compute_analytic_last_movers(events),
         turn_segment: 0,
     };
@@ -1572,9 +1656,215 @@ fn apply_information_battle(
     // any newly excluded natures.  Bounds are monotone → guaranteed to terminate.
     run_pass5_all_mons(state, config, dex);
     bcp::run_bcp(state, config.allow_repeat_items, dex, config);
+    restore_final_stat_marginal_envelopes(state);
+    restore_doubles_build_soundness_envelope(state, &seed_state, dex, config);
+}
+
+/// Damage inversion in doubles still has unmodeled cross-target/temporal
+/// interactions. A precise-looking false EV/nature/stat bound is worse than no
+/// bound, so doubles returns a conservative species-level build envelope until the
+/// remaining oracle families are modeled. Non-build inference remains intact.
+fn restore_doubles_build_soundness_envelope(
+    state: &mut UnknownBattleState,
+    seed_state: &UnknownBattleState,
+    dex: &HashMap<Species, PokemonData>,
+    config: &InferenceConfig,
+) {
+    if state.active_per_side <= 1 {
+        return;
+    }
+
+    state.predicates.retain(|clause| {
+        !clause.iter().any(|literal| {
+            let literal = match literal {
+                Statement::Not(inner) => inner.as_ref(),
+                other => other,
+            };
+            matches!(
+                literal,
+                Statement::NatureBoostsStat { .. }
+                    | Statement::NatureNerfsStat { .. }
+                    | Statement::EVIVStatGE { .. }
+                    | Statement::EVIVStatLE { .. }
+            )
+        })
+    });
+
+    fn widen(
+        mon: &mut UnknownPokemonState,
+        baseline: Option<&UnknownPokemonState>,
+        dex: &HashMap<Species, PokemonData>,
+        config: &InferenceConfig,
+    ) {
+        // Own-team entries are exact, and Transform stats are copied rather than
+        // derived from the displayed species' build.
+        let build_is_exact = matches!(mon.possible_natures, Unknown::Known(_))
+            && mon.min_evs == mon.max_evs
+            && mon.min_ivs == mon.max_ivs;
+        if matches!(mon.possible_mon_id, Unknown::Known(_))
+            || mon.pre_transform.is_some()
+            || build_is_exact
+        {
+            return;
+        }
+        if !matches!(mon.possible_natures, Unknown::Known(_)) {
+            mon.possible_natures = Unknown::Not(Vec::new());
+        }
+        mon.min_evs = [0; 6];
+        mon.max_evs = [252; 6];
+        if let Unknown::Known(species) = mon.possible_species.clone() {
+            recompute_stats_for_iv_mode(mon, &species, dex, config);
+        }
+        // Preserve any wider turn-start envelope. This matters both for callers
+        // that intentionally use a broader IV mode and for hand-built beliefs;
+        // the safety tail must never narrow a field merely by normalizing it.
+        if let Some(baseline) = baseline {
+            for stat_i in 0..6 {
+                mon.min_ivs[stat_i] = mon.min_ivs[stat_i].min(baseline.min_ivs[stat_i]);
+                mon.max_ivs[stat_i] = mon.max_ivs[stat_i].max(baseline.max_ivs[stat_i]);
+                mon.min_stats[stat_i] = mon.min_stats[stat_i].min(baseline.min_stats[stat_i]);
+                mon.max_stats[stat_i] = mon.max_stats[stat_i].max(baseline.max_stats[stat_i]);
+                mon.min_pre_nature_stat[stat_i] =
+                    mon.min_pre_nature_stat[stat_i].min(baseline.min_pre_nature_stat[stat_i]);
+                mon.max_pre_nature_stat[stat_i] =
+                    mon.max_pre_nature_stat[stat_i].max(baseline.max_pre_nature_stat[stat_i]);
+            }
+        }
+        if let Some(hypothesis) = mon.possible_illusion_state.as_deref_mut() {
+            widen(
+                hypothesis,
+                baseline.and_then(|old| old.possible_illusion_state.as_deref()),
+                dex,
+                config,
+            );
+        }
+    }
+
+    fn widen_bucket(
+        current: &mut [UnknownPokemonState],
+        baseline: &[UnknownPokemonState],
+        dex: &HashMap<Species, PokemonData>,
+        config: &InferenceConfig,
+    ) {
+        for (index, mon) in current.iter_mut().enumerate() {
+            widen(mon, baseline.get(index), dex, config);
+        }
+    }
+
+    widen_bucket(
+        &mut state.p1_active_mons,
+        &seed_state.p1_active_mons,
+        dex,
+        config,
+    );
+    widen_bucket(
+        &mut state.p2_active_mons,
+        &seed_state.p2_active_mons,
+        dex,
+        config,
+    );
+    widen_bucket(
+        &mut state.p1_known_back_mons,
+        &seed_state.p1_known_back_mons,
+        dex,
+        config,
+    );
+    widen_bucket(
+        &mut state.p2_known_back_mons,
+        &seed_state.p2_known_back_mons,
+        dex,
+        config,
+    );
+    widen_bucket(
+        &mut state.p1_possible_back_mons,
+        &seed_state.p1_possible_back_mons,
+        dex,
+        config,
+    );
+    widen_bucket(
+        &mut state.p2_possible_back_mons,
+        &seed_state.p2_possible_back_mons,
+        dex,
+        config,
+    );
+    widen_bucket(
+        &mut state.p1_fainted_mons,
+        &seed_state.p1_fainted_mons,
+        dex,
+        config,
+    );
+    widen_bucket(
+        &mut state.p2_fainted_mons,
+        &seed_state.p2_fainted_mons,
+        dex,
+        config,
+    );
+}
+
+/// `min_stats`/`max_stats` are marginals, just like the pre-nature BSV range and
+/// `possible_natures`. A direct damage constraint can create correlations
+/// between those fields, but it must not leave the final-stat marginal narrower
+/// than a value produced by an admitted BSV and admitted nature. CNF retains the
+/// correlation; this final widening restores a sound product-space projection. A
+/// `SpeedComparison` remains in CNF, so restoring the independent Speed marginal
+/// does not discard the observed relational fact.
+fn restore_final_stat_marginal_envelopes(state: &mut UnknownBattleState) {
+    fn restore(mon: &mut UnknownPokemonState) {
+        for stat_i in 1..=5 {
+            // Fully-known own-team stats and copied Transform stats deliberately
+            // carry sentinel-wide pre-nature bounds because Pass 5 never back-solves
+            // them. Those sentinels are not admitted uncertainty and must not widen
+            // an otherwise exact final stat.
+            if mon.min_pre_nature_stat[stat_i] == 0 && mon.max_pre_nature_stat[stat_i] == u16::MAX {
+                continue;
+            }
+            let mut min_mod = f64::INFINITY;
+            let mut max_mod = f64::NEG_INFINITY;
+            for nature in ALL_NATURES {
+                if unknown_is_excluded(&mon.possible_natures, nature) {
+                    continue;
+                }
+                let modifier = nature_stat_modifiers(nature)[stat_i - 1] as f64;
+                min_mod = min_mod.min(modifier);
+                max_mod = max_mod.max(modifier);
+            }
+            if !min_mod.is_finite() {
+                continue;
+            }
+            let admitted_min = (mon.min_pre_nature_stat[stat_i] as f64 * min_mod).floor() as u16;
+            let admitted_max = (mon.max_pre_nature_stat[stat_i] as f64 * max_mod).floor() as u16;
+            mon.min_stats[stat_i] = mon.min_stats[stat_i].min(admitted_min);
+            mon.max_stats[stat_i] = mon.max_stats[stat_i].max(admitted_max);
+        }
+        if let Some(hypothesis) = mon.possible_illusion_state.as_deref_mut() {
+            restore(hypothesis);
+        }
+    }
+
+    for mon in state
+        .p1_active_mons
+        .iter_mut()
+        .chain(state.p2_active_mons.iter_mut())
+        .chain(state.p1_known_back_mons.iter_mut())
+        .chain(state.p1_possible_back_mons.iter_mut())
+        .chain(state.p2_known_back_mons.iter_mut())
+        .chain(state.p2_possible_back_mons.iter_mut())
+        .chain(state.p1_fainted_mons.iter_mut())
+        .chain(state.p2_fainted_mons.iter_mut())
+    {
+        restore(mon);
+    }
 }
 
 /// Context threaded through the recursive event walk.
+#[derive(Clone)]
+struct DamagingHit {
+    attacker_slot: FieldSlot,
+    target_slot: FieldSlot,
+    move_used: PokemonMove,
+    attacker_at_hit: UnknownPokemonState,
+}
+
 struct BattleContext<'a> {
     dex: &'a HashMap<Species, PokemonData>,
     move_dex: &'a HashMap<PokemonMove, MoveData>,
@@ -1590,7 +1880,7 @@ struct BattleContext<'a> {
     /// One entry per distinct (attacker, target) pair that produced a DamageDealt to a
     /// non-self target.  Populated in the MoveUsed block; cleared at EndOfTurn.
     /// Consulted by the Cant{Flinch} handler to attribute King's Rock / Razor Fang / Stench.
-    damaging_hits_this_turn: Vec<(FieldSlot, FieldSlot, PokemonMove)>,
+    damaging_hits_this_turn: Vec<DamagingHit>,
     /// Slots that had a `Switch`/`SimultaneousSwitch` in this turn segment. Cleared at
     /// EndOfTurn. `pass2_flinch_holder_from_cant` treats an attacker slot appearing here
     /// as "attribution no longer safe" — a mid-turn switch means whichever mon is
@@ -1607,6 +1897,10 @@ struct BattleContext<'a> {
     /// the real engine's `!switched_in_this_turn` guard: a switch consumes the action
     /// slot without the mon having moved).
     move_users_this_turn: Vec<FieldSlot>,
+    /// Slots that Mega Evolved or changed permanent forme during this turn segment.
+    /// Damage observations crossing that boundary are structurally valid but are
+    /// not safe inputs to the minimal Pass-3 oracle until the next turn.
+    form_changed_slots_this_turn: Vec<FieldSlot>,
     /// S28: per-turn-segment last move-committed actor — the slot for which Analytic's
     /// "moved last" fires. Computed once from the event stream (`compute_analytic_last_movers`),
     /// indexed by `turn_segment`. Replaces the old "did the target already move this turn?"
@@ -1637,6 +1931,19 @@ struct MoveContext {
     /// secondary or a resist berry consumed by the observed hit itself must not leak
     /// into the oracle run for that hit).
     pre_move_targets: Vec<(FieldSlot, UnknownPokemonState)>,
+    /// Exact items whose holding epoch ended inside this move's reaction tree.
+    /// Pass 3 emits clauses after all reactions have been applied, so these values
+    /// preserve the item truth at the damage observation (not the later `None`).
+    item_losses: Vec<(FieldSlot, Item)>,
+}
+
+fn collect_item_losses(events: &[InformationEvent], out: &mut Vec<(FieldSlot, Item)>) {
+    for event in events {
+        if let EventKind::ItemLost { slot, item, .. } = &event.kind {
+            out.push((*slot, item.clone()));
+        }
+        collect_item_losses(&event.reactions, out);
+    }
 }
 
 /// S28: for each turn segment (split on top-level `EndOfTurn`), the slot of the last
@@ -1651,8 +1958,9 @@ fn compute_analytic_last_movers(top_events: &[InformationEvent]) -> Vec<Option<F
     let mut last: Option<FieldSlot> = None;
     for e in top_events {
         match &e.kind {
-            EventKind::MoveUsed { user, .. }
-            | EventKind::ChargingMove { user, .. } => last = Some(*user),
+            EventKind::MoveUsed { user, .. } | EventKind::ChargingMove { user, .. } => {
+                last = Some(*user)
+            }
             EventKind::Cant { slot, .. }
             | EventKind::MustRecharge { slot }
             | EventKind::SingleMoveOrTurn { slot, .. } => last = Some(*slot),
@@ -1679,6 +1987,12 @@ fn process_battle_event(
     let prev_move_ctx = ctx.move_context.clone();
     let prev_switch_slot = ctx.switch_slot;
 
+    if let EventKind::MegaEvolution { slot, .. } | EventKind::FormeChange { slot, .. } = &event.kind
+        && !ctx.form_changed_slots_this_turn.contains(slot)
+    {
+        ctx.form_changed_slots_this_turn.push(*slot);
+    }
+
     // Detect crit in the reaction list for the MoveContext.
     let is_crit = event
         .reactions
@@ -1702,9 +2016,32 @@ fn process_battle_event(
             .collect();
 
         // S24: full pre-move fog snapshots for Pass 3 (see MoveContext field docs).
-        let pre_move_attacker = mon_idx_for_active_slot(state, user)
+        let mut pre_move_attacker = mon_idx_for_active_slot(state, user)
             .and_then(|i| get_mon_by_idx(state, i))
             .cloned();
+        // Some moves visibly raise the user's stats before they deal damage (for
+        // example Electro Shot in rain or with Power Herb). Pass 3 needs the
+        // attacker as it stood at hit time, so fold leading, simulator-emitted
+        // self boosts into the otherwise pre-move snapshot. Stop at the first
+        // damage event so post-hit drops such as Overheat remain post-move state.
+        if let Some(attacker) = pre_move_attacker.as_mut() {
+            for reaction in &event.reactions {
+                if matches!(reaction.kind, EventKind::DamageDealt { .. }) {
+                    break;
+                }
+                if let EventKind::BoostChanged {
+                    target,
+                    boost_idx,
+                    stages,
+                } = &reaction.kind
+                    && target == user
+                    && *boost_idx < attacker.boosts.len()
+                {
+                    attacker.boosts[*boost_idx] =
+                        (attacker.boosts[*boost_idx] as i16 + *stages as i16).clamp(-6, 6) as i8;
+                }
+            }
+        }
         let pre_move_targets = targets
             .iter()
             .filter_map(|t| {
@@ -1713,6 +2050,9 @@ fn process_battle_event(
                     .map(|m| (*t, m.clone()))
             })
             .collect();
+
+        let mut item_losses = Vec::new();
+        collect_item_losses(&event.reactions, &mut item_losses);
 
         ctx.move_context = Some(MoveContext {
             user_slot: *user,
@@ -1723,6 +2063,7 @@ fn process_battle_event(
             observed_damage: Vec::new(),
             pre_move_attacker,
             pre_move_targets,
+            item_losses,
         });
         ctx.switch_slot = None;
 
@@ -1731,16 +2072,26 @@ fn process_battle_event(
         // Self-damage (Life Orb recoil, crash) is excluded via `target != user`.
         for reaction in &event.reactions {
             if let EventKind::DamageDealt { target, .. } = &reaction.kind
-                && target != user {
-                    let already_recorded = ctx
-                        .damaging_hits_this_turn
-                        .iter()
-                        .any(|(a, t, _)| a == user && t == target);
-                    if !already_recorded {
-                        ctx.damaging_hits_this_turn
-                            .push((*user, *target, move_used.clone()));
-                    }
+                && target != user
+            {
+                let already_recorded = ctx
+                    .damaging_hits_this_turn
+                    .iter()
+                    .any(|hit| hit.attacker_slot == *user && hit.target_slot == *target);
+                if !already_recorded
+                    && let Some(attacker_at_hit) = ctx
+                        .move_context
+                        .as_ref()
+                        .and_then(|mc| mc.pre_move_attacker.clone())
+                {
+                    ctx.damaging_hits_this_turn.push(DamagingHit {
+                        attacker_slot: *user,
+                        target_slot: *target,
+                        move_used: move_used.clone(),
+                        attacker_at_hit,
+                    });
                 }
+            }
         }
     }
 
@@ -1752,7 +2103,8 @@ fn process_battle_event(
         ctx.switched_slots_this_turn.push(sw.slot);
     }
     if let EventKind::SimultaneousSwitch { switches } = &event.kind {
-        ctx.switched_slots_this_turn.extend(switches.iter().map(|sw| sw.slot));
+        ctx.switched_slots_this_turn
+            .extend(switches.iter().map(|sw| sw.slot));
     }
 
     pass1_apply_event(state, event, ctx);
@@ -1795,6 +2147,7 @@ fn process_battle_event(
         ctx.damaging_hits_this_turn.clear();
         ctx.move_users_this_turn.clear();
         ctx.switched_slots_this_turn.clear();
+        ctx.form_changed_slots_this_turn.clear();
         // S28: advance to the next turn segment's precomputed last-mover.
         ctx.turn_segment += 1;
     }
@@ -1817,6 +2170,9 @@ fn pass1_apply_event(
         }
 
         EventKind::EndOfTurn => {
+            // A self-switch move with no viable replacement (or one that failed its
+            // trigger condition) never enters the simulator's replacement phase.
+            state.self_switch_pending = None;
             apply_end_of_turn(state, event);
             pass_eot_heal(state, event, ctx);
             pass_eot_sand_immunity(state, event, ctx);
@@ -1856,78 +2212,103 @@ fn pass1_apply_event(
             // `apply_with_illusion_mirroring`'s own promote/reject logic (which the
             // panic is the load-bearing signal for) still runs — see
             // `test_zoroark_learnset_promotes_when_primary_impossible`.
-            let side_has_unresolved_zoroark_without_hypothesis = match user.player {
-                Player::P1 => state.p1_unresolved_zoroark_count > 0,
-                Player::P2 => state.p2_unresolved_zoroark_count > 0,
-            } && mon_idx_for_active_slot(state, user)
-                .and_then(|idx| get_mon_by_idx(state, idx))
-                .is_some_and(|m| m.possible_illusion_state.is_none());
+            let side_has_unresolved_zoroark_without_hypothesis =
+                match user.player {
+                    Player::P1 => state.p1_unresolved_zoroark_count > 0,
+                    Player::P2 => state.p2_unresolved_zoroark_count > 0,
+                } && mon_idx_for_active_slot(state, user)
+                    .and_then(|idx| get_mon_by_idx(state, idx))
+                    .is_some_and(|m| m.possible_illusion_state.is_none());
             if let Some(idx) = mon_idx_for_active_slot(state, user)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    // Captured BEFORE mirroring can overwrite `possible_species` on a
-                    // `Promoted` outcome — see `finish_illusion_promotion_restore`.
-                    discarded_before = mon.possible_species.clone();
-                    let learnset_dex = &ctx.config.learnset_dex;
-                    let outcome = apply_with_illusion_mirroring(mon, |m| {
-                        reveal_move_on_mon(m, move_used);
-                        check_move_legal_for_species(m, move_used, learnset_dex, side_has_unresolved_zoroark_without_hypothesis);
-                    });
-                    promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
-                    if promoted_illusion {
-                        promoted_idx = Some(idx);
-                        if let Unknown::Known(s) = &mon.possible_species {
-                            resolved_species = Some(s.clone());
-                        }
-                    }
-                    narrow_species_by_learnset(
-                        mon, move_used, &ctx.config.learnset_dex, ctx.dex,
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                // Captured BEFORE mirroring can overwrite `possible_species` on a
+                // `Promoted` outcome — see `finish_illusion_promotion_restore`.
+                discarded_before = mon.possible_species.clone();
+                let learnset_dex = &ctx.config.learnset_dex;
+                let outcome = apply_with_illusion_mirroring(mon, |m| {
+                    reveal_move_on_mon(m, move_used);
+                    check_move_legal_for_species(
+                        m,
+                        move_used,
+                        learnset_dex,
+                        side_has_unresolved_zoroark_without_hypothesis,
                     );
-                    // Matches the sim's 0-based streak convention exactly
-                    // (simulator/mod.rs: `new_count = if last_used_move == move { count+1 }
-                    // else { 0 }`): a move's first use in a streak is count 0, not 1.
-                    if Some(move_used) == mon.last_used_move.as_ref() {
-                        mon.consecutive_move_count = mon.consecutive_move_count.saturating_add(1);
-                    } else {
-                        mon.consecutive_move_count = 0;
-                    }
-                    // Update used_moves_this_field BEFORE choice exclusion (it reads it).
-                    for i in 0..4 {
-                        if mon.known_moves[i] == Some(move_used.clone()) {
-                            mon.used_moves_this_field[i] = true;
-                        }
-                    }
-                    // Choice-item exclusion: keyed on used_moves_this_field (not last_used_move
-                    // which survives switch-out).
-                    pass1_choice_exclusion(mon, move_used);
-                    mon.last_used_move = Some(move_used.clone());
-
-                    // S27: mirror the sim's zero-effective-damage reset (simulator/mod.rs:
-                    // total_effective_dmg == 0 → count = 0, last_used_move = None). A damaging
-                    // move dealing no damage to any non-user target (miss/immune/blocked) breaks
-                    // the Metronome streak in the sim; otherwise the fog streak drifts upward and
-                    // feeds straight into the Pass 3 oracle for our own attacker (Direction A).
-                    let is_damaging = ctx
-                        .move_dex
-                        .get(move_used)
-                        .is_some_and(|md| !matches!(md.category, MoveCategory::Status));
-                    let dealt_damage = event.reactions.iter().any(|r| {
-                        matches!(&r.kind, EventKind::DamageDealt { target, .. } if target != user)
-                    });
-                    if is_damaging && !dealt_damage {
-                        mon.consecutive_move_count = 0;
-                        mon.last_used_move = None;
+                });
+                promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
+                if promoted_illusion {
+                    promoted_idx = Some(idx);
+                    if let Unknown::Known(s) = &mon.possible_species {
+                        resolved_species = Some(s.clone());
                     }
                 }
+                narrow_species_by_learnset(mon, move_used, &ctx.config.learnset_dex, ctx.dex);
+                // Matches the sim's 0-based streak convention exactly
+                // (simulator/mod.rs: `new_count = if last_used_move == move { count+1 }
+                // else { 0 }`): a move's first use in a streak is count 0, not 1.
+                if Some(move_used) == mon.last_used_move.as_ref() {
+                    mon.consecutive_move_count = mon.consecutive_move_count.saturating_add(1);
+                } else {
+                    mon.consecutive_move_count = 0;
+                }
+                // Update used_moves_this_field BEFORE choice exclusion (it reads it).
+                for i in 0..4 {
+                    if mon.known_moves[i] == Some(move_used.clone()) {
+                        mon.used_moves_this_field[i] = true;
+                    }
+                }
+                // Choice-item exclusion: keyed on used_moves_this_field (not last_used_move
+                // which survives switch-out).
+                pass1_choice_exclusion(mon, move_used);
+                mon.last_used_move = Some(move_used.clone());
+
+                // S27: mirror the sim's zero-effective-damage reset (simulator/mod.rs:
+                // total_effective_dmg == 0 → count = 0, last_used_move = None). A damaging
+                // move dealing no damage to any non-user target (miss/immune/blocked) breaks
+                // the Metronome streak in the sim; otherwise the fog streak drifts upward and
+                // feeds straight into the Pass 3 oracle for our own attacker (Direction A).
+                let is_damaging = ctx
+                    .move_dex
+                    .get(move_used)
+                    .is_some_and(|md| !matches!(md.category, MoveCategory::Status));
+                let dealt_damage = event.reactions.iter().any(
+                    |r| matches!(&r.kind, EventKind::DamageDealt { target, .. } if target != user),
+                );
+                if is_damaging && !dealt_damage {
+                    mon.consecutive_move_count = 0;
+                    mon.last_used_move = None;
+                }
+            }
             // Field-level last-move tracker for Copycat (simulator/mod.rs sets this
             // unconditionally for any executed non-Struggle move, on the top-level state,
             // not per-mon — set after the mon borrow above ends).
             state.last_move_on_field = Some(move_used.clone());
+            if let Some(move_data) = ctx.move_dex.get(move_used)
+                && matches!(
+                    move_data.self_switch,
+                    SelfSwitchType::BatonPass | SelfSwitchType::ShedTail
+                )
+            {
+                // The concrete engine yields immediately after a successful Baton Pass
+                // or Shed Tail, then receives the replacement Switch in a later public
+                // `simulate_turn` call. Persist the move kind so that later Switch can
+                // distinguish it from an ordinary voluntary switch. If the move did
+                // not actually create a pending replacement (for example no healthy
+                // bench), EndOfTurn clears this conservative marker.
+                state.self_switch_pending = Some((*user, move_data.self_switch));
+            }
             if promoted_illusion {
                 if let Some(idx) = promoted_idx {
                     purge_species_derived_predicates_for_mon(state, idx);
                 }
                 resolve_zoroark_globally(state, user.player);
-                finish_illusion_promotion_restore(state, user.player, discarded_before, ctx.dex, ctx.config);
+                finish_illusion_promotion_restore(
+                    state,
+                    user.player,
+                    discarded_before,
+                    ctx.dex,
+                    ctx.config,
+                );
                 if let Some(resolved) = &resolved_species {
                     remove_stale_zoroark_bench_duplicate(state, user.player, resolved);
                 }
@@ -1936,23 +2317,24 @@ fn pass1_apply_event(
 
         EventKind::Faint { slot } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    mon.fainted = true;
-                    mon.hp = PokemonHP::Percent(0);
-                    // S51: mirror `simulator::helpers::clear_pokemon_on_faint`, which
-                    // clears status/volatiles/times_hit on the real engine's
-                    // `PokemonState` the instant a mon faints (with no matching event
-                    // emission — fainting is itself the observable signal). Without this,
-                    // a mon that entered with a status (revealed via the `Switch` event's
-                    // own `status` field) and then fainted kept that stale status in the
-                    // belief forever; a later slot reuse or teammate-scoped status
-                    // handling would then hard-panic on a status conflict that was never
-                    // real. Sound: a fainted mon provably has no status/volatiles/hit
-                    // counter, so this narrows to ground truth, not a guess.
-                    mon.status = None;
-                    mon.volatiles.clear();
-                    mon.times_hit = 0;
-                }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                mon.fainted = true;
+                mon.hp = PokemonHP::Percent(0);
+                // S51: mirror `simulator::helpers::clear_pokemon_on_faint`, which
+                // clears status/volatiles/times_hit on the real engine's
+                // `PokemonState` the instant a mon faints (with no matching event
+                // emission — fainting is itself the observable signal). Without this,
+                // a mon that entered with a status (revealed via the `Switch` event's
+                // own `status` field) and then fainted kept that stale status in the
+                // belief forever; a later slot reuse or teammate-scoped status
+                // handling would then hard-panic on a status conflict that was never
+                // real. Sound: a fainted mon provably has no status/volatiles/hit
+                // counter, so this narrows to ground truth, not a guess.
+                mon.status = None;
+                mon.volatiles.clear();
+                mon.times_hit = 0;
+            }
         }
 
         EventKind::DamageDealt { target, new_hp, .. } => {
@@ -1970,12 +2352,13 @@ fn pass1_apply_event(
             // separate event.
             if matches!(new_hp, PokemonHP::Number(0) | PokemonHP::Percent(0))
                 && let Some(idx) = mon_idx_for_active_slot(state, target)
-                    && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                        mon.fainted = true;
-                        mon.status = None;
-                        mon.volatiles.clear();
-                        mon.times_hit = 0;
-                    }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                mon.fainted = true;
+                mon.status = None;
+                mon.volatiles.clear();
+                mon.times_hit = 0;
+            }
 
             // Compute the HP delta (amount of damage dealt, not the pre-hit HP value).
             // The simulator stores eff_damage (the delta) in last_damage_taken; we must
@@ -1992,41 +2375,42 @@ fn pass1_apply_event(
 
             // Per-turn damage tracking (mirrors end_turn Phase 5 fields).
             if let Some(idx) = mon_idx_for_active_slot(state, target)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    mon.damaged_this_turn = true;
-                    mon.last_damage_taken = damage_delta.clone();
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                mon.damaged_this_turn = true;
+                mon.last_damage_taken = damage_delta.clone();
 
-                    // Attribute to the enclosing MoveUsed if available.
-                    if let Some(ref mctx) = ctx.move_context {
-                        let attacker = &mctx.user_slot;
-                        if !mon.damaged_by_this_turn.contains(attacker) {
-                            mon.damaged_by_this_turn.push(*attacker);
+                // Attribute to the enclosing MoveUsed if available.
+                if let Some(ref mctx) = ctx.move_context {
+                    let attacker = &mctx.user_slot;
+                    if !mon.damaged_by_this_turn.contains(attacker) {
+                        mon.damaged_by_this_turn.push(*attacker);
+                    }
+                    mon.last_damage_attacker = Some(*attacker);
+                    if let Some(md) = ctx.move_dex.get(&mctx.pokemon_move) {
+                        match md.category {
+                            MoveCategory::Physical => {
+                                mon.last_physical_damage_taken = damage_delta.clone();
+                                mon.last_physical_attacker = Some(*attacker);
+                            }
+                            MoveCategory::Special => {
+                                mon.last_special_damage_taken = damage_delta.clone();
+                                mon.last_special_attacker = Some(*attacker);
+                            }
+                            MoveCategory::Status => {}
                         }
-                        mon.last_damage_attacker = Some(*attacker);
-                        if let Some(md) = ctx.move_dex.get(&mctx.pokemon_move) {
-                            match md.category {
-                                MoveCategory::Physical => {
-                                    mon.last_physical_damage_taken = damage_delta.clone();
-                                    mon.last_physical_attacker = Some(*attacker);
-                                }
-                                MoveCategory::Special => {
-                                    mon.last_special_damage_taken = damage_delta.clone();
-                                    mon.last_special_attacker = Some(*attacker);
-                                }
-                                MoveCategory::Status => {}
-                            }
-                            // Rage Fist counter: increments only for a Physical/Special hit on
-                            // a non-user target — never the move's own recoil/crash self-damage
-                            // (separate path), Status moves, or EOT/residual chip (no enclosing
-                            // MoveUsed; handled by the `None` arm below).
-                            if target != attacker
-                                && matches!(md.category, MoveCategory::Physical | MoveCategory::Special)
-                            {
-                                mon.times_hit = mon.times_hit.saturating_add(1);
-                            }
+                        // Rage Fist counter: increments only for a Physical/Special hit on
+                        // a non-user target — never the move's own recoil/crash self-damage
+                        // (separate path), Status moves, or EOT/residual chip (no enclosing
+                        // MoveUsed; handled by the `None` arm below).
+                        if target != attacker
+                            && matches!(md.category, MoveCategory::Physical | MoveCategory::Special)
+                        {
+                            mon.times_hit = mon.times_hit.saturating_add(1);
                         }
                     }
                 }
+            }
         }
         EventKind::Healed { target, new_hp, .. } => {
             update_mon_hp(state, target, new_hp.clone());
@@ -2037,46 +2421,48 @@ fn pass1_apply_event(
 
         EventKind::StatusInflicted { target, status } => {
             if let Some(idx) = mon_idx_for_active_slot(state, target)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    if let Some(ref existing) = mon.status.clone()
-                        && existing != status
-                    {
-                        // Sleep is the ONE status that can legitimately still be tracked
-                        // at the moment a fresh, different status lands: the mon can wake
-                        // up and act on the same turn its sleep counter reaches 0, and
-                        // then be freshly statused by a later move that turn — the belief
-                        // just hasn't processed the (implicit) wake-up transition yet.
-                        // Every other status pair is a genuine, unambiguous impossibility
-                        // (a Pokémon never holds two non-Sleep major statuses at once, and
-                        // Sleep can't be inflicted over an existing different status
-                        // either) — those must keep hard-panicking, which is exactly what
-                        // `test_status_conflict_panics` / `test_item_conflict_panics`-style
-                        // regression tests exist to guard.
-                        if matches!(existing, Status::Sleep(_)) {
-                            eprintln!(
-                                "[StatusInflicted self-heal] {status:?} observed while belief \
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                if let Some(ref existing) = mon.status.clone()
+                    && existing != status
+                {
+                    // Sleep is the ONE status that can legitimately still be tracked
+                    // at the moment a fresh, different status lands: the mon can wake
+                    // up and act on the same turn its sleep counter reaches 0, and
+                    // then be freshly statused by a later move that turn — the belief
+                    // just hasn't processed the (implicit) wake-up transition yet.
+                    // Every other status pair is a genuine, unambiguous impossibility
+                    // (a Pokémon never holds two non-Sleep major statuses at once, and
+                    // Sleep can't be inflicted over an existing different status
+                    // either) — those must keep hard-panicking, which is exactly what
+                    // `test_status_conflict_panics` / `test_item_conflict_panics`-style
+                    // regression tests exist to guard.
+                    if matches!(existing, Status::Sleep(_)) {
+                        eprintln!(
+                            "[StatusInflicted self-heal] {status:?} observed while belief \
                                  still tracked {existing:?} on mon_idx {idx} — adopting the \
                                  fresh observation (a missed Sleep wake-up transition, not a \
                                  contradiction)"
-                            );
-                        } else {
-                            inference_contradiction!(
-                                idx,
-                                "StatusInflicted {:?} but already has {:?}",
-                                status,
-                                existing
-                            );
-                        }
+                        );
+                    } else {
+                        inference_contradiction!(
+                            idx,
+                            "StatusInflicted {:?} but already has {:?}",
+                            status,
+                            existing
+                        );
                     }
-                    mon.status = Some(status.clone());
                 }
+                mon.status = Some(status.clone());
+            }
         }
 
         EventKind::StatusCured { target, .. } => {
             if let Some(idx) = mon_idx_for_active_slot(state, target)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    mon.status = None;
-                }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                mon.status = None;
+            }
         }
 
         // Heal Bell / Aromatherapy: cure the entire side including benched mons.
@@ -2091,23 +2477,24 @@ fn pass1_apply_event(
                     Player::P1 => !is_p2,
                     Player::P2 => is_p2,
                 };
-                if matches_side
-                    && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                        mon.status = None;
-                    }
+                if matches_side && let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    mon.status = None;
+                }
             }
         }
 
         EventKind::ItemRevealed { slot, item } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(legal) = &ctx.config.legal_items
-                    && !legal.contains(item) && *item != Item::None {
-                        inference_contradiction!(
-                            idx,
-                            "ItemRevealed {:?} outside legal whitelist",
-                            item
-                        );
-                    }
+                    && !legal.contains(item)
+                    && *item != Item::None
+                {
+                    inference_contradiction!(
+                        idx,
+                        "ItemRevealed {:?} outside legal whitelist",
+                        item
+                    );
+                }
                 // Item clause: a confirmed team-built item cannot be held by any other
                 // roster member on the same side — but ONLY when this mon's own item is
                 // itself team-built. A mon carrying a transferred item (Trick/Switcheroo/
@@ -2115,8 +2502,8 @@ fn pass1_apply_event(
                 // what this mon's team built, so a later ItemRevealed re-confirming that
                 // transferred item must not exclude it from this mon's teammates (S12:
                 // e.g. Frisk revealing a foe's Tricked-in item).
-                let was_transferred = get_mon_by_idx(state, idx)
-                    .is_some_and(|m| m.item_was_transferred);
+                let was_transferred =
+                    get_mon_by_idx(state, idx).is_some_and(|m| m.item_was_transferred);
                 let mut promoted_illusion = false;
                 let mut discarded_before: Unknown<Species> = Unknown::Not(Vec::new());
                 let mut resolved_species: Option<Species> = None;
@@ -2145,7 +2532,13 @@ fn pass1_apply_event(
                 if promoted_illusion {
                     purge_species_derived_predicates_for_mon(state, idx);
                     resolve_zoroark_globally(state, slot.player);
-                    finish_illusion_promotion_restore(state, slot.player, discarded_before, ctx.dex, ctx.config);
+                    finish_illusion_promotion_restore(
+                        state,
+                        slot.player,
+                        discarded_before,
+                        ctx.dex,
+                        ctx.config,
+                    );
                     if let Some(resolved) = &resolved_species {
                         remove_stale_zoroark_bench_duplicate(state, slot.player, resolved);
                     }
@@ -2158,13 +2551,15 @@ fn pass1_apply_event(
             // exclusion must NOT propagate to teammates here.
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
                 if let Some(legal) = &ctx.config.legal_items
-                    && !legal.contains(item) && *item != Item::None {
-                        inference_contradiction!(
-                            idx,
-                            "ItemRevealed {:?} outside legal whitelist",
-                            item
-                        );
-                    }
+                    && !legal.contains(item)
+                    && *item != Item::None
+                {
+                    inference_contradiction!(
+                        idx,
+                        "ItemRevealed {:?} outside legal whitelist",
+                        item
+                    );
+                }
                 // S19: capture the outgoing item before it is overwritten, so the
                 // stale HasItem clauses about this mon can be resolved historically.
                 let outgoing = get_mon_by_idx(state, idx).and_then(|m| match &m.item {
@@ -2224,15 +2619,15 @@ fn pass1_apply_event(
                     // boost on the very move that swaps it away) gets silently falsified
                     // by later BCP re-evaluating it against the mon's new ability.
                     // Mirrors `resolve_item_clauses_on_item_change` (S19).
-                    let outgoing = get_mon_by_idx(state, idx).and_then(|mon| {
-                        match &mon.possible_abilities {
+                    let outgoing =
+                        get_mon_by_idx(state, idx).and_then(|mon| match &mon.possible_abilities {
                             Unknown::Known(a) => Some(a.clone()),
                             _ => None,
-                        }
-                    });
+                        });
                     resolve_ability_clauses_on_ability_change(state, idx, outgoing);
                     if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                         mon.possible_abilities = Unknown::Known(ability.clone());
+                        mon.ability_changed_on_field = true;
                     }
                 } else if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                     unknown_set_known(
@@ -2250,32 +2645,35 @@ fn pass1_apply_event(
             stages,
         } => {
             if let Some(idx) = mon_idx_for_active_slot(state, target)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    if *boost_idx < 7 {
-                        let new_stage =
-                            (mon.boosts[*boost_idx] as i16 + *stages as i16).clamp(-6, 6) as i8;
-                        mon.boosts[*boost_idx] = new_stage;
-                    }
-                    if *stages > 0 {
-                        mon.stats_raised_this_turn = true;
-                    } else if *stages < 0 {
-                        mon.stats_lowered_this_turn = true;
-                    }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                if *boost_idx < 7 {
+                    let new_stage =
+                        (mon.boosts[*boost_idx] as i16 + *stages as i16).clamp(-6, 6) as i8;
+                    mon.boosts[*boost_idx] = new_stage;
                 }
+                if *stages > 0 {
+                    mon.stats_raised_this_turn = true;
+                } else if *stages < 0 {
+                    mon.stats_lowered_this_turn = true;
+                }
+            }
         }
         EventKind::BoostsCleared { target } => {
             if let Some(idx) = mon_idx_for_active_slot(state, target)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    mon.boosts = [0; 7];
-                }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                mon.boosts = [0; 7];
+            }
         }
         EventKind::BoostsInverted { target } => {
             if let Some(idx) = mon_idx_for_active_slot(state, target)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    for b in mon.boosts.iter_mut() {
-                        *b = -*b;
-                    }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                for b in mon.boosts.iter_mut() {
+                    *b = -*b;
                 }
+            }
         }
         EventKind::BoostsSwapped { source, target } => {
             let src_idx = mon_idx_for_active_slot(state, source);
@@ -2325,7 +2723,13 @@ fn pass1_apply_event(
                         } else {
                             Unknown::Possibly(data.abilities.clone())
                         };
-                        mon.possible_original_abilities = mega_abilities.clone();
+                        // Mega Evolution replaces the live ability, but an ability
+                        // change earlier in this field tenure (Skill Swap, Mummy,
+                        // etc.) has already saved the simulator's switch-out reset
+                        // target. Preserve that historical ability in the fog state.
+                        if !mon.ability_changed_on_field {
+                            mon.possible_original_abilities = mega_abilities.clone();
+                        }
                         mon.possible_abilities = mega_abilities;
                         // Mega Evolution swaps in a new base-stat table; EVs/IVs/nature are
                         // unaffected, but the achievable final-stat window must be remapped
@@ -2361,23 +2765,21 @@ fn pass1_apply_event(
                     .get(into)
                     .and_then(|d| d.required_item.as_ref().map(|s| Item::from_str(s)));
                 if let Some(stone) = mega_stone
-                    && stone != Item::None {
-                        if let Some(legal) = &ctx.config.legal_items
-                            && !legal.contains(&stone) {
-                                inference_contradiction!(
-                                    idx,
-                                    "Mega Stone {:?} outside legal whitelist",
-                                    stone
-                                );
-                            }
-                        if let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                            unknown_set_known(
-                                &mut mon.item,
-                                stone,
-                                &format!("mon#{idx} mega-stone"),
-                            );
-                        }
+                    && stone != Item::None
+                {
+                    if let Some(legal) = &ctx.config.legal_items
+                        && !legal.contains(&stone)
+                    {
+                        inference_contradiction!(
+                            idx,
+                            "Mega Stone {:?} outside legal whitelist",
+                            stone
+                        );
                     }
+                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                        unknown_set_known(&mut mon.item, stone, &format!("mon#{idx} mega-stone"));
+                    }
+                }
             }
         }
 
@@ -2437,16 +2839,18 @@ fn pass1_apply_event(
 
         EventKind::TypeChanged { slot, new_types } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    mon.possible_types = Unknown::Known(new_types.clone());
-                }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                mon.possible_types = Unknown::Known(new_types.clone());
+            }
         }
 
         EventKind::WeatherChanged { weather } => {
             // Any weather change invalidates pending turn-count clauses for the old
             // weather (they refer to a timer that no longer exists).
             state.predicates.retain(|c| {
-                !c.iter().any(|l| matches!(l, Statement::WeatherTurns { .. }))
+                !c.iter()
+                    .any(|l| matches!(l, Statement::WeatherTurns { .. }))
             });
             state.weather = weather.clone();
             state.weather_turns = weather.as_ref().map(weather_timer);
@@ -2466,24 +2870,29 @@ fn pass1_apply_event(
             // a collapsed timer resolves the item).
             if let (Some(setter), Some(w)) = (state.weather_setter_mon_idx, weather.as_ref())
                 && matches!(&state.weather_turns, Some(Unknown::Possibly(_)))
-                    && let Some(rock) = weather_extension_item(w)
-                        && ctx.config.legal_item_ok(&rock) {
-                            state.predicates.push(vec![
-                                Statement::HasItem { mon_idx: setter, item: rock.clone() },
-                                Statement::WeatherTurns { turns: 5 },
-                            ]);
-                            state.predicates.push(vec![
-                                Statement::Not(Box::new(Statement::HasItem {
-                                    mon_idx: setter,
-                                    item: rock,
-                                })),
-                                Statement::WeatherTurns { turns: 8 },
-                            ]);
-                        }
+                && let Some(rock) = weather_extension_item(w)
+                && ctx.config.legal_item_ok(&rock)
+            {
+                state.predicates.push(vec![
+                    Statement::HasItem {
+                        mon_idx: setter,
+                        item: rock.clone(),
+                    },
+                    Statement::WeatherTurns { turns: 5 },
+                ]);
+                state.predicates.push(vec![
+                    Statement::Not(Box::new(Statement::HasItem {
+                        mon_idx: setter,
+                        item: rock,
+                    })),
+                    Statement::WeatherTurns { turns: 8 },
+                ]);
+            }
         }
         EventKind::TerrainChanged { terrain } => {
             state.predicates.retain(|c| {
-                !c.iter().any(|l| matches!(l, Statement::TerrainTurns { .. }))
+                !c.iter()
+                    .any(|l| matches!(l, Statement::TerrainTurns { .. }))
             });
             state.terrain = terrain.clone();
             state.terrain_turns = terrain.as_ref().map(terrain_timer);
@@ -2496,22 +2905,26 @@ fn pass1_apply_event(
                 None
             };
             if let (Some(setter), Some(_t)) = (state.terrain_setter_mon_idx, terrain.as_ref())
-                && matches!(&state.terrain_turns, Some(Unknown::Possibly(_))) {
-                    let extender = terrain_extension_item(&Terrain::ElectricTerrain);
-                    if ctx.config.legal_item_ok(&extender) {
-                        state.predicates.push(vec![
-                            Statement::HasItem { mon_idx: setter, item: extender.clone() },
-                            Statement::TerrainTurns { turns: 5 },
-                        ]);
-                        state.predicates.push(vec![
-                            Statement::Not(Box::new(Statement::HasItem {
-                                mon_idx: setter,
-                                item: extender,
-                            })),
-                            Statement::TerrainTurns { turns: 8 },
-                        ]);
-                    }
+                && matches!(&state.terrain_turns, Some(Unknown::Possibly(_)))
+            {
+                let extender = terrain_extension_item(&Terrain::ElectricTerrain);
+                if ctx.config.legal_item_ok(&extender) {
+                    state.predicates.push(vec![
+                        Statement::HasItem {
+                            mon_idx: setter,
+                            item: extender.clone(),
+                        },
+                        Statement::TerrainTurns { turns: 5 },
+                    ]);
+                    state.predicates.push(vec![
+                        Statement::Not(Box::new(Statement::HasItem {
+                            mon_idx: setter,
+                            item: extender,
+                        })),
+                        Statement::TerrainTurns { turns: 8 },
+                    ]);
                 }
+            }
         }
         EventKind::PseudoWeatherStart { effect } => {
             if !state.pseudo_weathers.contains(effect) {
@@ -2556,37 +2969,42 @@ fn pass1_apply_event(
                     setter_idx,
                     screen_extension_item(condition),
                     matches!(turns.last(), Some(Unknown::Possibly(_))),
-                )
-                    && ctx.config.legal_item_ok(&clay) {
-                        state.predicates.push(vec![
-                            Statement::HasItem { mon_idx: setter, item: clay.clone() },
-                            Statement::SideConditionTurns {
-                                side: *side,
-                                side_condition: condition.clone(),
-                                turns: 5,
-                            },
-                        ]);
-                        state.predicates.push(vec![
-                            Statement::Not(Box::new(Statement::HasItem {
-                                mon_idx: setter,
-                                item: clay,
-                            })),
-                            Statement::SideConditionTurns {
-                                side: *side,
-                                side_condition: condition.clone(),
-                                turns: 8,
-                            },
-                        ]);
-                    }
+                ) && ctx.config.legal_item_ok(&clay)
+                {
+                    state.predicates.push(vec![
+                        Statement::HasItem {
+                            mon_idx: setter,
+                            item: clay.clone(),
+                        },
+                        Statement::SideConditionTurns {
+                            side: *side,
+                            side_condition: condition.clone(),
+                            turns: 5,
+                        },
+                    ]);
+                    state.predicates.push(vec![
+                        Statement::Not(Box::new(Statement::HasItem {
+                            mon_idx: setter,
+                            item: clay,
+                        })),
+                        Statement::SideConditionTurns {
+                            side: *side,
+                            side_condition: condition.clone(),
+                            turns: 8,
+                        },
+                    ]);
+                }
             }
         }
         EventKind::SideConditionEnd { side, condition } => {
             // Drop pending turn-count clauses for the ending condition (Defog / Brick
             // Break / natural expiry — the timer they refer to is going away).
             state.predicates.retain(|c| {
-                !c.iter().any(|l| matches!(l,
+                !c.iter().any(|l| {
+                    matches!(l,
                     Statement::SideConditionTurns { side: s, side_condition: sc, .. }
-                    if s == side && sc == condition))
+                    if s == side && sc == condition)
+                })
             });
             let (conditions, turns, setters) = match side {
                 Player::P1 => (
@@ -2615,9 +3033,10 @@ fn pass1_apply_event(
             };
             let i = slot.slot_index as usize;
             if let Some(sc_vec) = slot_conds.get_mut(i)
-                && !sc_vec.contains(condition) {
-                    sc_vec.push(condition.clone());
-                }
+                && !sc_vec.contains(condition)
+            {
+                sc_vec.push(condition.clone());
+            }
         }
         EventKind::SlotConditionEnd { slot, condition } => {
             let slot_conds = match slot.player {
@@ -2631,8 +3050,10 @@ fn pass1_apply_event(
                 // For FutureMove, additionally gate on move_name to distinguish concurrent
                 // Future Sight / Doom Desire queued on the same slot.
                 sc_vec.retain(|c| match (c, condition) {
-                    (SlotCondition::FutureMove { move_name: a, .. },
-                     SlotCondition::FutureMove { move_name: b, .. }) => a != b,
+                    (
+                        SlotCondition::FutureMove { move_name: a, .. },
+                        SlotCondition::FutureMove { move_name: b, .. },
+                    ) => a != b,
                     _ => std::mem::discriminant(c) != std::mem::discriminant(condition),
                 });
             }
@@ -2640,29 +3061,31 @@ fn pass1_apply_event(
 
         EventKind::VolatileStart { target, volatile } => {
             if let Some(idx) = mon_idx_for_active_slot(state, target)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    use crate::state::pokemon::VolatileStatusState;
-                    let already = mon.volatiles.iter().any(|v| match v {
-                        VolatileStatusState::TurnStatus(vs, _) => vs == volatile,
-                        VolatileStatusState::MoveStatus(vs, _) => vs == volatile,
-                        VolatileStatusState::Charging(_, _) => false,
-                    });
-                    if !already {
-                        mon.volatiles
-                            .push(VolatileStatusState::TurnStatus(volatile.clone(), 0));
-                    }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                use crate::state::pokemon::VolatileStatusState;
+                let already = mon.volatiles.iter().any(|v| match v {
+                    VolatileStatusState::TurnStatus(vs, _) => vs == volatile,
+                    VolatileStatusState::MoveStatus(vs, _) => vs == volatile,
+                    VolatileStatusState::Charging(_, _) => false,
+                });
+                if !already {
+                    mon.volatiles
+                        .push(VolatileStatusState::TurnStatus(volatile.clone(), 0));
                 }
+            }
         }
         EventKind::VolatileEnd { target, volatile } => {
             if let Some(idx) = mon_idx_for_active_slot(state, target)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    use crate::state::pokemon::VolatileStatusState;
-                    mon.volatiles.retain(|v| match v {
-                        VolatileStatusState::TurnStatus(vs, _) => vs != volatile,
-                        VolatileStatusState::MoveStatus(vs, _) => vs != volatile,
-                        VolatileStatusState::Charging(_, _) => true,
-                    });
-                }
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                use crate::state::pokemon::VolatileStatusState;
+                mon.volatiles.retain(|v| match v {
+                    VolatileStatusState::TurnStatus(vs, _) => vs != volatile,
+                    VolatileStatusState::MoveStatus(vs, _) => vs != volatile,
+                    VolatileStatusState::Charging(_, _) => true,
+                });
+            }
         }
 
         EventKind::ChargingMove { user, move_used } => {
@@ -2671,39 +3094,50 @@ fn pass1_apply_event(
             let mut resolved_species: Option<Species> = None;
             let mut promoted_idx: Option<usize> = None;
             // See `check_move_legal_for_species`'s doc comment.
-            let side_has_unresolved_zoroark_without_hypothesis = match user.player {
-                Player::P1 => state.p1_unresolved_zoroark_count > 0,
-                Player::P2 => state.p2_unresolved_zoroark_count > 0,
-            } && mon_idx_for_active_slot(state, user)
-                .and_then(|idx| get_mon_by_idx(state, idx))
-                .is_some_and(|m| m.possible_illusion_state.is_none());
+            let side_has_unresolved_zoroark_without_hypothesis =
+                match user.player {
+                    Player::P1 => state.p1_unresolved_zoroark_count > 0,
+                    Player::P2 => state.p2_unresolved_zoroark_count > 0,
+                } && mon_idx_for_active_slot(state, user)
+                    .and_then(|idx| get_mon_by_idx(state, idx))
+                    .is_some_and(|m| m.possible_illusion_state.is_none());
             if let Some(idx) = mon_idx_for_active_slot(state, user)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    // Captured BEFORE mirroring can overwrite `possible_species` on a
-                    // `Promoted` outcome — see `finish_illusion_promotion_restore`.
-                    discarded_before = mon.possible_species.clone();
-                    let learnset_dex = &ctx.config.learnset_dex;
-                    let outcome = apply_with_illusion_mirroring(mon, |m| {
-                        reveal_move_on_mon(m, move_used);
-                        check_move_legal_for_species(m, move_used, learnset_dex, side_has_unresolved_zoroark_without_hypothesis);
-                    });
-                    promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
-                    if promoted_illusion {
-                        promoted_idx = Some(idx);
-                        if let Unknown::Known(s) = &mon.possible_species {
-                            resolved_species = Some(s.clone());
-                        }
-                    }
-                    narrow_species_by_learnset(
-                        mon, move_used, &ctx.config.learnset_dex, ctx.dex,
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                // Captured BEFORE mirroring can overwrite `possible_species` on a
+                // `Promoted` outcome — see `finish_illusion_promotion_restore`.
+                discarded_before = mon.possible_species.clone();
+                let learnset_dex = &ctx.config.learnset_dex;
+                let outcome = apply_with_illusion_mirroring(mon, |m| {
+                    reveal_move_on_mon(m, move_used);
+                    check_move_legal_for_species(
+                        m,
+                        move_used,
+                        learnset_dex,
+                        side_has_unresolved_zoroark_without_hypothesis,
                     );
+                });
+                promoted_illusion = matches!(outcome, IllusionMirrorOutcome::Promoted);
+                if promoted_illusion {
+                    promoted_idx = Some(idx);
+                    if let Unknown::Known(s) = &mon.possible_species {
+                        resolved_species = Some(s.clone());
+                    }
                 }
+                narrow_species_by_learnset(mon, move_used, &ctx.config.learnset_dex, ctx.dex);
+            }
             if promoted_illusion {
                 if let Some(idx) = promoted_idx {
                     purge_species_derived_predicates_for_mon(state, idx);
                 }
                 resolve_zoroark_globally(state, user.player);
-                finish_illusion_promotion_restore(state, user.player, discarded_before, ctx.dex, ctx.config);
+                finish_illusion_promotion_restore(
+                    state,
+                    user.player,
+                    discarded_before,
+                    ctx.dex,
+                    ctx.config,
+                );
                 if let Some(resolved) = &resolved_species {
                     remove_stale_zoroark_bench_duplicate(state, user.player, resolved);
                 }
@@ -2721,20 +3155,19 @@ fn pass1_apply_event(
                 return;
             }
             // Determine the holder's defensive types.
-            let holder_types: Vec<PokemonType> = if let Some(idx) =
-                mon_idx_for_active_slot(state, slot)
-            {
-                if let Some(mon) = get_mon_by_idx(state, idx) {
-                    match &mon.possible_types {
-                        Unknown::Known(types) => types.clone(),
-                        _ => return, // Can't form a useful clause without known types.
+            let holder_types: Vec<PokemonType> =
+                if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+                    if let Some(mon) = get_mon_by_idx(state, idx) {
+                        match &mon.possible_types {
+                            Unknown::Known(types) => types.clone(),
+                            _ => return, // Can't form a useful clause without known types.
+                        }
+                    } else {
+                        return;
                     }
                 } else {
                     return;
-                }
-            } else {
-                return;
-            };
+                };
 
             // Collect the opposing side's active mon_idxs.
             let opp_player = match slot.player {
@@ -2773,10 +3206,26 @@ fn pass1_apply_event(
         // seeded, so it already carries whatever this physical mon's own history has
         // taught us (revealed moves, item, etc.), which a from-scratch rebuild would
         // throw away.
-        EventKind::IllusionEnded { slot, actual_species } => {
+        EventKind::IllusionEnded {
+            slot,
+            actual_species,
+        } => {
             if let Some(idx) = mon_idx_for_active_slot(state, slot) {
-                let discarded_species = get_mon_by_idx(state, idx)
-                    .and_then(|m| match &m.possible_species {
+                // The owner already saw the true species at send-out. For that
+                // perspective IllusionEnded confirms the identity we already hold;
+                // rebuilding it as an opponent-style uncertain mon would discard the
+                // owner's exact stats, nature, item, and ability, and can corrupt later
+                // damage inference against this otherwise-known target.
+                if get_mon_by_idx(state, idx).is_some_and(
+                    |mon| matches!(&mon.possible_species, Unknown::Known(s) if s == actual_species),
+                ) {
+                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                        mon.possible_illusion_state = None;
+                    }
+                    return;
+                }
+                let discarded_species =
+                    get_mon_by_idx(state, idx).and_then(|m| match &m.possible_species {
                         Unknown::Known(s) => Some(s.clone()),
                         _ => None,
                     });
@@ -2848,7 +3297,13 @@ fn pass1_apply_event(
                         .iter()
                         .any(|m| unknown_is_known_as(&m.possible_species, &discarded))
                 {
-                    restore_discarded_primary_to_bench(state, slot.player, discarded, ctx.dex, ctx.config);
+                    restore_discarded_primary_to_bench(
+                        state,
+                        slot.player,
+                        discarded,
+                        ctx.dex,
+                        ctx.config,
+                    );
                 }
 
                 // The Illusion forme's OWN benched baseline entry (species known,
@@ -2865,46 +3320,51 @@ fn pass1_apply_event(
         // boosts; its own HP, max HP, item, status, level, nature, EVs, IVs are kept.
         // We read the FOG entry at `into_slot`, so copying our own Known mon yields
         // exact stats and copying a hidden opponent inherits that opponent's bounds.
-        EventKind::Transformed { slot, into_slot, into_species } => {
+        EventKind::Transformed {
+            slot,
+            into_slot,
+            into_species,
+        } => {
             let src_idx = mon_idx_for_active_slot(state, into_slot);
             let dst_idx = mon_idx_for_active_slot(state, slot);
             if let (Some(si), Some(di)) = (src_idx, dst_idx)
                 && let Some(src) = get_mon_by_idx(state, si).cloned()
-                    && let Some(mon) = get_mon_mut_by_idx(state, di) {
-                        // Save the pre-transform snapshot once (revert on switch-out).
-                        if mon.pre_transform.is_none() {
-                            mon.pre_transform = Some(Box::new(mon.clone()));
-                        }
-                        // Displayed species is authoritative (matches what the player
-                        // sees); everything else is copied from the source's fog view.
-                        mon.possible_species = Unknown::Known(into_species.clone());
-                        mon.possible_types = src.possible_types.clone();
-                        mon.possible_weight_hg = src.possible_weight_hg.clone();
-                        mon.possible_genders = src.possible_genders.clone();
-                        mon.possible_abilities = src.possible_abilities.clone();
-                        mon.possible_original_abilities = src.possible_original_abilities.clone();
-                        mon.boosts = src.boosts;
-                        // Moves copied; PP (and max PP) capped at 5 per Transform rules.
-                        mon.known_moves = src.known_moves.clone();
-                        for i in 0..4 {
-                            if src.max_pp[i] >= 0 {
-                                let capped = src.max_pp[i].min(5);
-                                mon.max_pp[i] = capped;
-                                mon.move_pp[i] = capped;
-                            } else {
-                                mon.max_pp[i] = -1;
-                                mon.move_pp[i] = -1;
-                            }
-                        }
-                        // Stats and their EV/IV/nature back-solve inputs come from the
-                        // source for the five non-HP stats; HP (index 0) is NOT copied.
-                        for i in 1..6 {
-                            mon.min_stats[i] = src.min_stats[i];
-                            mon.max_stats[i] = src.max_stats[i];
-                            mon.min_pre_nature_stat[i] = src.min_pre_nature_stat[i];
-                            mon.max_pre_nature_stat[i] = src.max_pre_nature_stat[i];
-                        }
+                && let Some(mon) = get_mon_mut_by_idx(state, di)
+            {
+                // Save the pre-transform snapshot once (revert on switch-out).
+                if mon.pre_transform.is_none() {
+                    mon.pre_transform = Some(Box::new(mon.clone()));
+                }
+                // Displayed species is authoritative (matches what the player
+                // sees); everything else is copied from the source's fog view.
+                mon.possible_species = Unknown::Known(into_species.clone());
+                mon.possible_types = src.possible_types.clone();
+                mon.possible_weight_hg = src.possible_weight_hg.clone();
+                mon.possible_genders = src.possible_genders.clone();
+                mon.possible_abilities = src.possible_abilities.clone();
+                mon.possible_original_abilities = src.possible_original_abilities.clone();
+                mon.boosts = src.boosts;
+                // Moves copied; PP (and max PP) capped at 5 per Transform rules.
+                mon.known_moves = src.known_moves.clone();
+                for i in 0..4 {
+                    if src.max_pp[i] >= 0 {
+                        let capped = src.max_pp[i].min(5);
+                        mon.max_pp[i] = capped;
+                        mon.move_pp[i] = capped;
+                    } else {
+                        mon.max_pp[i] = -1;
+                        mon.move_pp[i] = -1;
                     }
+                }
+                // Stats and their EV/IV/nature back-solve inputs come from the
+                // source for the five non-HP stats; HP (index 0) is NOT copied.
+                for i in 1..6 {
+                    mon.min_stats[i] = src.min_stats[i];
+                    mon.max_stats[i] = src.max_stats[i];
+                    mon.min_pre_nature_stat[i] = src.min_pre_nature_stat[i];
+                    mon.max_pre_nature_stat[i] = src.max_pre_nature_stat[i];
+                }
+            }
             // Pre-transform SpeedComparison / EVIV / HasAbility clauses describe the
             // transformer's OWN pre-copy stats and ability — stale now. Drop them
             // (predicate purge only; setter records are unaffected by a transform).
@@ -2943,6 +3403,96 @@ fn pass1_apply_event(
 
 // ── Pass 1 helpers ────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
+struct PendingSelfSwitchState {
+    boosts: Option<[i8; 7]>,
+    volatiles: Vec<VolatileStatusState>,
+}
+
+fn pending_self_switch_state(
+    state: &UnknownBattleState,
+    slot: &FieldSlot,
+) -> Option<PendingSelfSwitchState> {
+    let (_, switch_type) = state
+        .self_switch_pending
+        .filter(|(pending_slot, _)| pending_slot == slot)?;
+    let mon = match slot.player {
+        Player::P1 => state.p1_active_mons.get(slot.slot_index as usize),
+        Player::P2 => state.p2_active_mons.get(slot.slot_index as usize),
+    }?;
+
+    let (boosts, volatiles) = match switch_type {
+        SelfSwitchType::BatonPass => {
+            use VolatileStatus::*;
+            let passable = mon
+                .volatiles
+                .iter()
+                .filter(|v| {
+                    matches!(
+                        v,
+                        VolatileStatusState::TurnStatus(Confusion, _)
+                            | VolatileStatusState::TurnStatus(FocusEnergy, _)
+                            | VolatileStatusState::TurnStatus(PartiallyTrapped(_), _)
+                            | VolatileStatusState::TurnStatus(LeechSeed, _)
+                            | VolatileStatusState::TurnStatus(Curse, _)
+                            | VolatileStatusState::TurnStatus(Substitute(_), _)
+                            | VolatileStatusState::TurnStatus(Ingrain, _)
+                            | VolatileStatusState::TurnStatus(HealBlock, _)
+                            | VolatileStatusState::TurnStatus(Embargo, _)
+                            | VolatileStatusState::TurnStatus(MagnetRise, _)
+                            | VolatileStatusState::TurnStatus(Telekinesis, _)
+                            | VolatileStatusState::TurnStatus(GastroAcid, _)
+                            | VolatileStatusState::TurnStatus(PerishSong, _)
+                    )
+                })
+                .cloned()
+                .collect();
+            (Some(mon.boosts), passable)
+        }
+        SelfSwitchType::ShedTail => {
+            let substitute = mon
+                .volatiles
+                .iter()
+                .find(|v| {
+                    matches!(
+                        v,
+                        VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)
+                    )
+                })
+                .cloned()
+                .into_iter()
+                .collect();
+            (None, substitute)
+        }
+        SelfSwitchType::Normal | SelfSwitchType::None => (None, Vec::new()),
+    };
+    Some(PendingSelfSwitchState { boosts, volatiles })
+}
+
+fn apply_pending_self_switch_state(
+    state: &mut UnknownBattleState,
+    slot: &FieldSlot,
+    passed: Option<PendingSelfSwitchState>,
+) {
+    let Some(passed) = passed else { return };
+    let mon = match slot.player {
+        Player::P1 => state.p1_active_mons.get_mut(slot.slot_index as usize),
+        Player::P2 => state.p2_active_mons.get_mut(slot.slot_index as usize),
+    };
+    let Some(mon) = mon else { return };
+
+    if let Some(boosts) = passed.boosts {
+        mon.boosts = boosts;
+    }
+    mon.volatiles.extend(passed.volatiles.iter().cloned());
+    if let Some(sub) = mon.possible_illusion_state.as_deref_mut() {
+        if let Some(boosts) = passed.boosts {
+            sub.boosts = boosts;
+        }
+        sub.volatiles.extend(passed.volatiles);
+    }
+}
+
 fn pass1_apply_switch_event(
     state: &mut UnknownBattleState,
     event: &InformationEvent,
@@ -2950,15 +3500,27 @@ fn pass1_apply_switch_event(
 ) {
     match &event.kind {
         EventKind::Switch(sw) => {
+            // Self-switch replacement requests are a separate simulator call from the
+            // move that created them. Preserve the state Baton Pass / Shed Tail carries
+            // across that boundary before the ordinary switch-out reset clears it.
+            let passed_state = pending_self_switch_state(state, &sw.slot);
             // S18: the active mon_idx identifies a SLOT, not a Pokémon — drop every
             // persisted clause/setter record about the outgoing occupant before the
             // slot is re-bound, or they silently constrain the incoming mon.
             purge_mon_scoped_knowledge(state, &sw.slot);
             apply_switch_out_reset(state, &sw.slot);
+            apply_switch_out_forme_change(state, &sw.slot, &sw.species, ctx);
             // B1: preserve the outgoing mon to the bench so its state (HP, move reveals,
             // ability/item narrowing) survives for future re-entry inference.
             bench_outgoing_mon(state, &sw.slot, &sw.species);
             pass1_switch(state, sw, ctx);
+            apply_pending_self_switch_state(state, &sw.slot, passed_state);
+            if state
+                .self_switch_pending
+                .is_some_and(|(slot, _)| slot == sw.slot)
+            {
+                state.self_switch_pending = None;
+            }
             pass1_ability_absence_inference(state, &[sw.slot], &event.reactions, ctx);
         }
         EventKind::SimultaneousSwitch { switches } => {
@@ -2984,6 +3546,7 @@ fn pass1_apply_switch_event(
                 // S18: see the single-switch arm above.
                 purge_mon_scoped_knowledge(state, &sw.slot);
                 apply_switch_out_reset(state, &sw.slot);
+                apply_switch_out_forme_change(state, &sw.slot, &sw.species, ctx);
                 // B1: preserve each outgoing mon before any pass1_switch replaces its slot.
                 bench_outgoing_mon(state, &sw.slot, &sw.species);
             }
@@ -3011,9 +3574,9 @@ fn statement_references_mon(stmt: &Statement, idx: usize) -> bool {
         | Statement::EVIVStatGE { mon_idx, .. }
         | Statement::EVIVStatLE { mon_idx, .. }
         | Statement::KnowsThreateningMove { mon_idx, .. } => *mon_idx == idx,
-        Statement::SpeedComparison { fast_idx, slow_idx, .. } => {
-            *fast_idx == idx || *slow_idx == idx
-        }
+        Statement::SpeedComparison {
+            fast_idx, slow_idx, ..
+        } => *fast_idx == idx || *slow_idx == idx,
         Statement::WeatherTurns { .. }
         | Statement::TerrainTurns { .. }
         | Statement::SideConditionTurns { .. } => false,
@@ -3119,9 +3682,11 @@ fn purge_predicates_and_setters_for_mon(state: &mut UnknownBattleState, idx: usi
 /// Sound by construction (dropping a predicate only widens); the cost is
 /// completeness, not correctness.
 fn purge_species_derived_predicates_for_mon(state: &mut UnknownBattleState, idx: usize) {
-    state
-        .predicates
-        .retain(|clause| !clause.iter().any(|lit| statement_stale_after_species_reveal(lit, idx)));
+    state.predicates.retain(|clause| {
+        !clause
+            .iter()
+            .any(|lit| statement_stale_after_species_reveal(lit, idx))
+    });
 }
 
 /// Boundary-generalized `statement_references_mon`: `true` if `stmt` (recursing
@@ -3137,9 +3702,9 @@ fn statement_references_mon_at_or_beyond(stmt: &Statement, boundary: usize) -> b
         | Statement::EVIVStatGE { mon_idx, .. }
         | Statement::EVIVStatLE { mon_idx, .. }
         | Statement::KnowsThreateningMove { mon_idx, .. } => *mon_idx >= boundary,
-        Statement::SpeedComparison { fast_idx, slow_idx, .. } => {
-            *fast_idx >= boundary || *slow_idx >= boundary
-        }
+        Statement::SpeedComparison {
+            fast_idx, slow_idx, ..
+        } => *fast_idx >= boundary || *slow_idx >= boundary,
         Statement::WeatherTurns { .. }
         | Statement::TerrainTurns { .. }
         | Statement::SideConditionTurns { .. } => false,
@@ -3167,12 +3732,20 @@ fn statement_references_mon_at_or_beyond(stmt: &Statement, boundary: usize) -> b
 /// always sound — it only widens the belief, never falsely narrows it.
 fn purge_facts_at_or_beyond_idx(state: &mut UnknownBattleState, boundary: usize) {
     state.predicates.retain(|clause| {
-        !clause.iter().any(|lit| statement_references_mon_at_or_beyond(lit, boundary))
+        !clause
+            .iter()
+            .any(|lit| statement_references_mon_at_or_beyond(lit, boundary))
     });
-    if state.weather_setter_mon_idx.is_some_and(|idx| idx >= boundary) {
+    if state
+        .weather_setter_mon_idx
+        .is_some_and(|idx| idx >= boundary)
+    {
         state.weather_setter_mon_idx = None;
     }
-    if state.terrain_setter_mon_idx.is_some_and(|idx| idx >= boundary) {
+    if state
+        .terrain_setter_mon_idx
+        .is_some_and(|idx| idx >= boundary)
+    {
         state.terrain_setter_mon_idx = None;
     }
     for setter in state
@@ -3217,7 +3790,11 @@ fn statement_is_ability_literal_for(stmt: &Statement, idx: usize) -> bool {
 /// Truth value of an ability literal about `mon_idx` *in the holding window that just
 /// ended*, given the mon held `outgoing` throughout it. `None` = not an ability
 /// literal about this mon (leave untouched). Mirrors `historical_item_literal_value`.
-fn historical_ability_literal_value(stmt: &Statement, idx: usize, outgoing: &Ability) -> Option<bool> {
+fn historical_ability_literal_value(
+    stmt: &Statement,
+    idx: usize,
+    outgoing: &Ability,
+) -> Option<bool> {
     match stmt {
         Statement::Not(inner) => historical_ability_literal_value(inner, idx, outgoing).map(|b| !b),
         Statement::HasAbility { mon_idx, ability } if *mon_idx == idx => Some(ability == outgoing),
@@ -3247,9 +3824,11 @@ fn resolve_ability_clauses_on_ability_change(
     outgoing: Option<Ability>,
 ) {
     let Some(outgoing) = outgoing else {
-        state
-            .predicates
-            .retain(|clause| !clause.iter().any(|lit| statement_is_ability_literal_for(lit, idx)));
+        state.predicates.retain(|clause| {
+            !clause
+                .iter()
+                .any(|lit| statement_is_ability_literal_for(lit, idx))
+        });
         return;
     };
     let mut i = 0;
@@ -3310,9 +3889,11 @@ fn resolve_item_clauses_on_item_change(
     outgoing: Option<Item>,
 ) {
     let Some(outgoing) = outgoing else {
-        state
-            .predicates
-            .retain(|clause| !clause.iter().any(|lit| statement_is_item_literal_for(lit, idx)));
+        state.predicates.retain(|clause| {
+            !clause
+                .iter()
+                .any(|lit| statement_is_item_literal_for(lit, idx))
+        });
         return;
     };
     let mut i = 0;
@@ -3382,13 +3963,18 @@ fn resolve_item_clauses_on_item_change(
 /// `pass1_switch`'s own S37 guard exactly (the two must agree — see below).
 /// Mirrors `purge_mon_scoped_knowledge`'s own "nothing actually left"
 /// self-guard just above.
-fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming_species: &Species) {
+fn bench_outgoing_mon(
+    state: &mut UnknownBattleState,
+    slot: &FieldSlot,
+    incoming_species: &Species,
+) {
     let slot_i = slot.slot_index as usize;
-    let already_placed = state.turn_number == 0 && match slot.player {
-        Player::P1 => state.p1_active_mons.get(slot_i),
-        Player::P2 => state.p2_active_mons.get(slot_i),
-    }
-    .is_some_and(|m| unknown_is_known_as(&m.possible_species, incoming_species));
+    let already_placed = state.turn_number == 0
+        && match slot.player {
+            Player::P1 => state.p1_active_mons.get(slot_i),
+            Player::P2 => state.p2_active_mons.get(slot_i),
+        }
+        .is_some_and(|m| unknown_is_known_as(&m.possible_species, incoming_species));
     if already_placed {
         return;
     }
@@ -3457,14 +4043,21 @@ fn bench_outgoing_mon(state: &mut UnknownBattleState, slot: &FieldSlot, incoming
 /// `into_battle_state` populate `possible_back` from turn 1 (TODO.md: back mons
 /// must not "immediately show up") is now most of the roster for the whole early
 /// game.
-fn combined_back<'a>(state: &'a UnknownBattleState, player: &Player) -> Vec<&'a UnknownPokemonState> {
+fn combined_back<'a>(
+    state: &'a UnknownBattleState,
+    player: &Player,
+) -> Vec<&'a UnknownPokemonState> {
     match player {
-        Player::P1 => {
-            state.p1_known_back_mons.iter().chain(state.p1_possible_back_mons.iter()).collect()
-        }
-        Player::P2 => {
-            state.p2_known_back_mons.iter().chain(state.p2_possible_back_mons.iter()).collect()
-        }
+        Player::P1 => state
+            .p1_known_back_mons
+            .iter()
+            .chain(state.p1_possible_back_mons.iter())
+            .collect(),
+        Player::P2 => state
+            .p2_known_back_mons
+            .iter()
+            .chain(state.p2_possible_back_mons.iter())
+            .collect(),
     }
 }
 
@@ -3520,11 +4113,12 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     // happens to coincide in species — a stale match there would silently
     // no-op the real replacement instead of running it through the normal
     // bench-matching logic below.
-    let already_placed = state.turn_number == 0 && match player {
-        Player::P1 => state.p1_active_mons.get(slot_i),
-        Player::P2 => state.p2_active_mons.get(slot_i),
-    }
-    .is_some_and(|existing| unknown_is_known_as(&existing.possible_species, species));
+    let already_placed = state.turn_number == 0
+        && match player {
+            Player::P1 => state.p1_active_mons.get(slot_i),
+            Player::P2 => state.p2_active_mons.get(slot_i),
+        }
+        .is_some_and(|existing| unknown_is_known_as(&existing.possible_species, species));
     if already_placed {
         let actives = match player {
             Player::P1 => &mut state.p1_active_mons,
@@ -3562,8 +4156,11 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
             t.possible_illusion_state = None; // defensive; templates never carry one
             t
         } else {
-            let mut new_mon =
-                UnknownPokemonState::from_opponent_species(species.clone(), ctx.dex, ctx.config.level);
+            let mut new_mon = UnknownPokemonState::from_opponent_species(
+                species.clone(),
+                ctx.dex,
+                ctx.config.level,
+            );
             recompute_stats_for_iv_mode(&mut new_mon, species, ctx.dex, ctx.config);
             if let Some(legal) = &ctx.config.legal_items {
                 let mut candidates: Vec<Item> = legal.iter().cloned().collect();
@@ -3577,8 +4174,9 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         // Clause, to be the one entering here in disguise, so its old bench
         // placeholder must not persist as a separate, uncounted roster slot.
         if let Some(baseline) = take_illusion_baseline_from_bench(state, *player) {
-            mon.possible_illusion_state =
-                Some(Box::new(unknowns::seed_illusion_hypothesis_for(&mon, &baseline)));
+            mon.possible_illusion_state = Some(Box::new(unknowns::seed_illusion_hypothesis_for(
+                &mon, &baseline,
+            )));
         }
         apply_switch_state_to_mon(&mut mon, sw, ctx.config);
         let actives = match sw.slot.player {
@@ -3611,8 +4209,9 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         Player::P1 => &mut state.p1_known_back_mons,
         Player::P2 => &mut state.p2_known_back_mons,
     };
-    let back_mon: Option<UnknownPokemonState> = if let Some(pos) =
-        known.iter().position(|m| unknown_is_known_as(&m.possible_species, species))
+    let back_mon: Option<UnknownPokemonState> = if let Some(pos) = known
+        .iter()
+        .position(|m| unknown_is_known_as(&m.possible_species, species))
     {
         Some(known.remove(pos))
     } else {
@@ -3656,8 +4255,8 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     // one else to copy)? Per Bulbapedia, only the true Illusion forme can ever
     // be shown AS the Illusion forme's own species — no other mon can impersonate
     // it — so this positively resolves its location the instant it's seen.
-    let resolves_illusion_forme =
-        unknowns::is_illusion_capable_species(species) && match player {
+    let resolves_illusion_forme = unknowns::is_illusion_capable_species(species)
+        && match player {
             Player::P1 => state.p1_unresolved_zoroark_count > 0,
             Player::P2 => state.p2_unresolved_zoroark_count > 0,
         };
@@ -3680,7 +4279,7 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         // member was already seeded into `possible_back` at team preview (including
         // its Zoroark hypothesis, if eligible) and would have been found by the bench
         // search above, so reaching this branch at all is the defensive case.
-        let mut new_mon = if let Some(template) = find_roster_template(state, *player, species) {
+        if let Some(template) = find_roster_template(state, *player, species) {
             let mut t = template.clone();
             t.possible_illusion_state = None; // defensive; templates never carry one
             t
@@ -3689,8 +4288,11 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
             // configured IV mode (always call — fixes the bug where non-force_max_ivs
             // mode left the mon with the from_opponent_species defaults instead of
             // proper bounds).
-            let mut new_mon =
-                UnknownPokemonState::from_opponent_species(species.clone(), ctx.dex, ctx.config.level);
+            let mut new_mon = UnknownPokemonState::from_opponent_species(
+                species.clone(),
+                ctx.dex,
+                ctx.config.level,
+            );
             recompute_stats_for_iv_mode(&mut new_mon, species, ctx.dex, ctx.config);
             if let Some(legal) = &ctx.config.legal_items {
                 let mut candidates: Vec<Item> = legal.iter().cloned().collect();
@@ -3698,10 +4300,16 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
                 new_mon.item = Unknown::Possibly(candidates);
             }
             new_mon
-        };
-        maybe_seed_fresh_hypothesis(state, *player, &mut new_mon);
-        new_mon
+        }
     };
+
+    // S62: a species-matched bench entry may have correctly rejected its old
+    // Illusion hypothesis while that real individual was previously active. A
+    // later switch showing the same species can nevertheless be the still-benched
+    // Zoroark newly disguising itself as that individual. Re-seed at every incoming
+    // boundary while the side still has an unresolved Illusion forme, including the
+    // ordinary `back_mon` path above, not only the defensive rebuild path.
+    maybe_seed_fresh_hypothesis(state, *player, &mut mon, ctx.dex, ctx.config);
 
     apply_switch_state_to_mon(&mut mon, sw, ctx.config);
 
@@ -3753,9 +4361,10 @@ fn maybe_resolve_illusion_two_in_front(
         Player::P2 => &state.p2_active_mons,
     };
     let slot_i = slot.slot_index as usize;
-    let duplicate_elsewhere = actives.iter().enumerate().any(|(i, m)| {
-        i != slot_i && unknown_is_known_as(&m.possible_species, species)
-    });
+    let duplicate_elsewhere = actives
+        .iter()
+        .enumerate()
+        .any(|(i, m)| i != slot_i && unknown_is_known_as(&m.possible_species, species));
     if !duplicate_elsewhere {
         return;
     }
@@ -3776,8 +4385,9 @@ fn maybe_resolve_illusion_two_in_front(
     if let Some(mon) = actives_mut.get_mut(slot_i)
         && mon.possible_illusion_state.is_none()
     {
-        mon.possible_illusion_state =
-            Some(Box::new(unknowns::seed_illusion_hypothesis_for(mon, &baseline)));
+        mon.possible_illusion_state = Some(Box::new(unknowns::seed_illusion_hypothesis_for(
+            mon, &baseline,
+        )));
     }
     let _ = ctx; // reserved for future dex-dependent refinements
 }
@@ -3884,10 +4494,11 @@ fn recompute_stat_bounds_for_species_change(
         // Widest nature modifier still possible for this stat, over the mon's current
         // (possibly already-narrowed) nature candidates.
         let classes = possible_nature_classes(&mon.possible_natures, stat, si);
-        let (min_mod, max_mod) = classes.iter().fold(
-            (f32::MAX, f32::MIN),
-            |(mn, mx), &(m, _, _)| (mn.min(m), mx.max(m)),
-        );
+        let (min_mod, max_mod) = classes
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(mn, mx), &(m, _, _)| {
+                (mn.min(m), mx.max(m))
+            });
         mon.min_stats[si] = (bsv_lo as f64 * min_mod as f64).floor() as u16;
         mon.max_stats[si] = (bsv_hi as f64 * max_mod as f64).floor() as u16;
     }
@@ -3953,7 +4564,10 @@ fn infer_regenerator_from_hp_delta(
         Player::P2 => &state.p2_side_conditions,
     };
     let has_hazards = entering_conditions.iter().any(|sc| {
-        matches!(sc, SideCondition::StealthRock | SideCondition::Spikes(_) | SideCondition::ToxicSpikes(_))
+        matches!(
+            sc,
+            SideCondition::StealthRock | SideCondition::Spikes(_) | SideCondition::ToxicSpikes(_)
+        )
     });
     if has_hazards {
         return;
@@ -4067,6 +4681,7 @@ pub(crate) fn apply_switch_out_reset(state: &mut UnknownBattleState, slot: &Fiel
         // Live ability resets to the innate ability set on switch-out.
         // Trace / Skill Swap / Mummy / etc. do not persist across a switch.
         mon.possible_abilities = mon.possible_original_abilities.clone();
+        mon.ability_changed_on_field = false;
 
         // Keep a live Zoroark sub-state's own physically-observable fields in
         // lockstep — it describes the same physical mon, just under a different
@@ -4099,6 +4714,7 @@ pub(crate) fn apply_switch_out_reset(state: &mut UnknownBattleState, slot: &Fiel
             sub.last_used_move = None;
             sub.times_hit = 0;
             sub.possible_abilities = sub.possible_original_abilities.clone();
+            sub.ability_changed_on_field = false;
         });
     }
 }
@@ -4160,7 +4776,9 @@ fn check_move_legal_for_species(
     if learnset_dex.is_empty() {
         return;
     }
-    let Unknown::Known(species) = &mon.possible_species else { return };
+    let Unknown::Known(species) = &mon.possible_species else {
+        return;
+    };
     if let Some(moves) = learnset_dex.get(species)
         && !moves.contains(move_used)
     {
@@ -4205,7 +4823,9 @@ fn narrow_species_by_learnset(
         .iter()
         .filter(|s| {
             // Sound: keep species if learnset data is absent (can't confirm illegality).
-            learnset_dex.get(*s).is_none_or(|moves| moves.contains(move_used))
+            learnset_dex
+                .get(*s)
+                .is_none_or(|moves| moves.contains(move_used))
         })
         .cloned()
         .collect();
@@ -4276,9 +4896,10 @@ fn pass1_choice_exclusion(mon: &mut UnknownPokemonState, new_move: &PokemonMove)
 
 fn update_mon_hp(state: &mut UnknownBattleState, slot: &FieldSlot, new_hp: PokemonHP) {
     if let Some(idx) = mon_idx_for_active_slot(state, slot)
-        && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-            mon.hp = new_hp;
-        }
+        && let Some(mon) = get_mon_mut_by_idx(state, idx)
+    {
+        mon.hp = new_hp;
+    }
 }
 
 // ── Ability suppression helpers ────────────────────────────────────────────────
@@ -4288,9 +4909,11 @@ fn update_mon_hp(state: &mut UnknownBattleState, slot: &FieldSlot, new_hp: Pokem
 /// field scan (below) already cleared the NeutralizingGas check.
 fn has_gastro_acid(mon: &UnknownPokemonState) -> bool {
     mon.volatiles.iter().any(|v| {
-        matches!(v,
+        matches!(
+            v,
             VolatileStatusState::TurnStatus(VolatileStatus::GastroAcid, _)
-            | VolatileStatusState::MoveStatus(VolatileStatus::GastroAcid, _))
+                | VolatileStatusState::MoveStatus(VolatileStatus::GastroAcid, _)
+        )
     })
 }
 
@@ -4303,8 +4926,7 @@ fn neutralizing_gas_definitely_active(state: &UnknownBattleState) -> bool {
         .iter()
         .chain(state.p2_active_mons.iter())
         .any(|m| {
-            !m.fainted
-                && unknown_is_known_as(&m.possible_abilities, &Ability::NeutralizingGas)
+            !m.fainted && unknown_is_known_as(&m.possible_abilities, &Ability::NeutralizingGas)
         })
 }
 
@@ -4317,17 +4939,17 @@ fn unknown_ability_might_be_suppressed(state: &UnknownBattleState, slot: &FieldS
         .iter()
         .chain(state.p2_active_mons.iter())
         .any(|m| {
-            !m.fainted
-                && !unknown_is_excluded(&m.possible_abilities, &Ability::NeutralizingGas)
+            !m.fainted && !unknown_is_excluded(&m.possible_abilities, &Ability::NeutralizingGas)
         });
     if maybe_ng {
         return true;
     }
     // Check per-mon Gastro Acid.
     if let Some(idx) = mon_idx_for_active_slot(state, slot)
-        && let Some(mon) = get_mon_by_idx(state, idx) {
-            return has_gastro_acid(mon);
-        }
+        && let Some(mon) = get_mon_by_idx(state, idx)
+    {
+        return has_gastro_acid(mon);
+    }
     false
 }
 
@@ -4394,9 +5016,10 @@ fn emit_extension_item_if_collapsed(
     // After decrement, if a Possibly collapsed to Known it will now be Known(n).
     // We don't re-check the value here — the caller verifies n > 0.
     if let Some(idx) = setter_idx
-        && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-            unknown_set_known(&mut mon.item, item, "ia-extension-item");
-        }
+        && let Some(mon) = get_mon_mut_by_idx(state, idx)
+    {
+        unknown_set_known(&mut mon.item, item, "ia-extension-item");
+    }
 }
 
 /// Apply internal EOT resets that mirror `end_turn` Phase 5 and
@@ -4433,20 +5056,22 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
     decrement_unknown_turns(&mut state.weather_turns, &mut state.weather);
     if weather_was_possibly
         && let Some(Unknown::Known(n)) = &state.weather_turns
-            && *n > 0
-                && let Some(weather) = &weather_type_snap
-                    && let Some(rock) = weather_extension_item(weather) {
-                        if weather_ended {
-                            // Natural expiry at base duration → the setter has NO rock.
-                            if let Some(idx) = weather_setter
-                                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                                    unknown_exclude(&mut mon.item, &rock, "natural-expiry-no-rock");
-                                }
-                        } else if !weather_overridden {
-                            // Extended duration confirmed (8-turn branch survived).
-                            emit_extension_item_if_collapsed(state, true, weather_setter, rock);
-                        }
-                    }
+        && *n > 0
+        && let Some(weather) = &weather_type_snap
+        && let Some(rock) = weather_extension_item(weather)
+    {
+        if weather_ended {
+            // Natural expiry at base duration → the setter has NO rock.
+            if let Some(idx) = weather_setter
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                unknown_exclude(&mut mon.item, &rock, "natural-expiry-no-rock");
+            }
+        } else if !weather_overridden {
+            // Extended duration confirmed (8-turn branch survived).
+            emit_extension_item_if_collapsed(state, true, weather_setter, rock);
+        }
+    }
 
     // Terrain (same three-way resolution as weather).
     let terrain_was_possibly = matches!(&state.terrain_turns, Some(Unknown::Possibly(_)));
@@ -4460,17 +5085,19 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
     decrement_unknown_turns(&mut state.terrain_turns, &mut state.terrain);
     if terrain_was_possibly
         && let Some(Unknown::Known(n)) = &state.terrain_turns
-            && *n > 0 {
-                let extender = terrain_extension_item(&Terrain::ElectricTerrain); // any Terrain
-                if terrain_ended {
-                    if let Some(idx) = terrain_setter
-                        && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                            unknown_exclude(&mut mon.item, &extender, "natural-expiry-no-extender");
-                        }
-                } else if !terrain_overridden {
-                    emit_extension_item_if_collapsed(state, true, terrain_setter, extender);
-                }
+        && *n > 0
+    {
+        let extender = terrain_extension_item(&Terrain::ElectricTerrain); // any Terrain
+        if terrain_ended {
+            if let Some(idx) = terrain_setter
+                && let Some(mon) = get_mon_mut_by_idx(state, idx)
+            {
+                unknown_exclude(&mut mon.item, &extender, "natural-expiry-no-extender");
             }
+        } else if !terrain_overridden {
+            emit_extension_item_if_collapsed(state, true, terrain_setter, extender);
+        }
+    }
 
     for t in state.pseudo_weather_turns.iter_mut() {
         decrement_unknown_turns_raw(t);
@@ -4487,8 +5114,14 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
         for i in 0..count {
             let (was_possibly, sc) = {
                 let (conditions, turns) = match player {
-                    Player::P1 => (&state.p1_side_conditions, &mut state.p1_side_condition_turns),
-                    Player::P2 => (&state.p2_side_conditions, &mut state.p2_side_condition_turns),
+                    Player::P1 => (
+                        &state.p1_side_conditions,
+                        &mut state.p1_side_condition_turns,
+                    ),
+                    Player::P2 => (
+                        &state.p2_side_conditions,
+                        &mut state.p2_side_condition_turns,
+                    ),
                 };
                 let was_possibly = matches!(&turns[i], Unknown::Possibly(_));
                 decrement_unknown_turns_raw(&mut turns[i]);
@@ -4501,30 +5134,33 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
                 };
                 matches!(&turns[i], Unknown::Known(n) if *n > 0)
             };
-            if was_possibly && collapsed_positive
-                && let Some(clay) = screen_extension_item(&sc) {
-                    let setter = match player {
-                        Player::P1 => state.p1_side_condition_setters.get(i).copied().flatten(),
-                        Player::P2 => state.p2_side_condition_setters.get(i).copied().flatten(),
-                    };
-                    // Screens have no "override" case (re-setting fails while up), and
-                    // forced removals (Brick Break / Defog / Court Change) happen at
-                    // move time, never nested under EndOfTurn — so an EOT-nested
-                    // SideConditionEnd for this exact side+condition is a natural expiry.
-                    let ends_this_turn = any_reaction_deep(&event.reactions, &|k| {
-                        matches!(k, EventKind::SideConditionEnd { side, condition }
+            if was_possibly
+                && collapsed_positive
+                && let Some(clay) = screen_extension_item(&sc)
+            {
+                let setter = match player {
+                    Player::P1 => state.p1_side_condition_setters.get(i).copied().flatten(),
+                    Player::P2 => state.p2_side_condition_setters.get(i).copied().flatten(),
+                };
+                // Screens have no "override" case (re-setting fails while up), and
+                // forced removals (Brick Break / Defog / Court Change) happen at
+                // move time, never nested under EndOfTurn — so an EOT-nested
+                // SideConditionEnd for this exact side+condition is a natural expiry.
+                let ends_this_turn = any_reaction_deep(&event.reactions, &|k| {
+                    matches!(k, EventKind::SideConditionEnd { side, condition }
                             if *side == player && *condition == sc)
-                    });
-                    if ends_this_turn {
-                        // Natural expiry at base duration → the setter has no Light Clay.
-                        if let Some(idx) = setter
-                            && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                                unknown_exclude(&mut mon.item, &clay, "natural-expiry-no-clay");
-                            }
-                    } else {
-                        emit_extension_item_if_collapsed(state, true, setter, clay);
+                });
+                if ends_this_turn {
+                    // Natural expiry at base duration → the setter has no Light Clay.
+                    if let Some(idx) = setter
+                        && let Some(mon) = get_mon_mut_by_idx(state, idx)
+                    {
+                        unknown_exclude(&mut mon.item, &clay, "natural-expiry-no-clay");
                     }
+                } else {
+                    emit_extension_item_if_collapsed(state, true, setter, clay);
                 }
+            }
         }
     }
 
@@ -4587,11 +5223,13 @@ fn apply_end_of_turn(state: &mut UnknownBattleState, event: &InformationEvent) {
         mon.switched_in_this_turn = false;
         // Turn-scoped volatiles (Roost, Electrify).
         mon.volatiles.retain(|v| {
-            !matches!(v,
+            !matches!(
+                v,
                 VolatileStatusState::TurnStatus(VolatileStatus::Roost, _)
-                | VolatileStatusState::TurnStatus(VolatileStatus::Electrify, _)
-                | VolatileStatusState::MoveStatus(VolatileStatus::Roost, _)
-                | VolatileStatusState::MoveStatus(VolatileStatus::Electrify, _))
+                    | VolatileStatusState::TurnStatus(VolatileStatus::Electrify, _)
+                    | VolatileStatusState::MoveStatus(VolatileStatus::Roost, _)
+                    | VolatileStatusState::MoveStatus(VolatileStatus::Electrify, _)
+            )
         });
     }
     state.round_used_this_turn = false;
@@ -4633,9 +5271,7 @@ fn weather_timer(w: &Weather) -> Unknown<u8> {
             Unknown::Possibly(vec![5, 8])
         }
         // Primordial weathers (from Abilities): never tick down.
-        Weather::HeavyRain | Weather::ExtremeSunlight | Weather::StrongWinds => {
-            Unknown::Known(0)
-        }
+        Weather::HeavyRain | Weather::ExtremeSunlight | Weather::StrongWinds => Unknown::Known(0),
     }
 }
 
@@ -4664,15 +5300,15 @@ fn pseudo_weather_timer(pw: &PseudoWeather) -> Unknown<u8> {
 fn side_condition_timer(sc: &SideCondition) -> Unknown<u8> {
     match sc {
         // Screens: base 5; Light Clay extends to 8.
-        SideCondition::Reflect
-        | SideCondition::LightScreen
-        | SideCondition::AuroraVeil => Unknown::Possibly(vec![5, 8]),
+        SideCondition::Reflect | SideCondition::LightScreen | SideCondition::AuroraVeil => {
+            Unknown::Possibly(vec![5, 8])
+        }
         // Tailwind: exactly 4 turns (Gen V+).  Formerly Possibly([5,8]) — UNSOUND.
         SideCondition::TailWind => Unknown::Known(4),
         // Fixed 5-turn side conditions.
-        SideCondition::SafeGuard
-        | SideCondition::Mist
-        | SideCondition::LuckyChant => Unknown::Known(5),
+        SideCondition::SafeGuard | SideCondition::Mist | SideCondition::LuckyChant => {
+            Unknown::Known(5)
+        }
         // One-turn protections (expire at end of the turn they are used).
         SideCondition::QuickGuard
         | SideCondition::WideGuard
@@ -4694,7 +5330,10 @@ fn decrement_unknown_turns_raw(t: &mut Unknown<u8>) {
             }
         }
         Unknown::Possibly(v) => {
-            *v = v.iter().filter_map(|&n| if n > 1 { Some(n - 1) } else { None }).collect();
+            *v = v
+                .iter()
+                .filter_map(|&n| if n > 1 { Some(n - 1) } else { None })
+                .collect();
             if v.len() == 1 {
                 *t = Unknown::Known(v[0]);
             }
@@ -4791,9 +5430,10 @@ fn intimidate_drop_would_be_visible(state: &UnknownBattleState, entering_slot: &
         // If the foe's ability is Known and blocks/redirects the drop, the −1 won't appear
         // even when Intimidate is present.
         if let Unknown::Known(ref ability) = mon.possible_abilities
-            && blocks_visible_drop(ability) {
-                return false;
-            }
+            && blocks_visible_drop(ability)
+        {
+            return false;
+        }
         // Atk already at −6: the drop is clamped to zero, nothing emitted.
         if mon.boosts[0] <= -6 {
             return false;
@@ -4839,16 +5479,19 @@ fn pass1_ability_absence_inference(
         // Even if NeutralizingGas might be present, we literally observed the
         // boost fire and must record it to prevent future false-exclusions on
         // re-entry.
-        let intrepid_fired = any_reaction_deep(reactions, &|k| {
-            matches!(k, EventKind::BoostChanged { target, boost_idx: 0, stages: 1 } if target == slot)
-        });
-        let dauntless_fired = any_reaction_deep(reactions, &|k| {
-            matches!(k, EventKind::BoostChanged { target, boost_idx: 1, stages: 1 } if target == slot)
-        });
+        let intrepid_fired = any_reaction_deep(
+            reactions,
+            &|k| matches!(k, EventKind::BoostChanged { target, boost_idx: 0, stages: 1 } if target == slot),
+        );
+        let dauntless_fired = any_reaction_deep(
+            reactions,
+            &|k| matches!(k, EventKind::BoostChanged { target, boost_idx: 1, stages: 1 } if target == slot),
+        );
         if (intrepid_fired || dauntless_fired)
-            && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                mon.one_time_ability_used = true;
-            }
+            && let Some(mon) = get_mon_mut_by_idx(state, idx)
+        {
+            mon.one_time_ability_used = true;
+        }
 
         // Skip if ability might be suppressed (sound: conservative).
         // Absence inferences below are gated here; presence-recording above is not.
@@ -4902,9 +5545,8 @@ fn pass1_ability_absence_inference(
             if sole_possible_setter && !already_known {
                 for ab in WEATHER_SETTING_ABILITIES {
                     let ability_would_no_op = current_is_strong_weather
-                        || weather_setting_ability_target(ab).is_some_and(|target| {
-                            state.weather.as_ref() == Some(&target)
-                        });
+                        || weather_setting_ability_target(ab)
+                            .is_some_and(|target| state.weather.as_ref() == Some(&target));
                     if ability_would_no_op {
                         continue;
                     }
@@ -4949,13 +5591,14 @@ fn pass1_ability_absence_inference(
                 // the −1 Atk drop.  If any foe has Clear Body, Inner Focus, Guard Dog,
                 // Mirror Armor, Contrary, etc., no −1 would appear even WITH Intimidate.
                 if intimidate_drop_would_be_visible(state, slot)
-                    && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                        unknown_exclude(
-                            &mut mon.possible_abilities,
-                            &Ability::Intimidate,
-                            "ability-absence-intimidate",
-                        );
-                    }
+                    && let Some(mon) = get_mon_mut_by_idx(state, idx)
+                {
+                    unknown_exclude(
+                        &mut mon.possible_abilities,
+                        &Ability::Intimidate,
+                        "ability-absence-intimidate",
+                    );
+                }
             }
         }
 
@@ -4963,24 +5606,28 @@ fn pass1_ability_absence_inference(
         // `intrepid_fired`/`dauntless_fired` were computed above (before the
         // suppression guard) — only exclude when the boost was NOT seen and
         // no prior use has been recorded.
-        if !intrepid_fired && entered_slots.len() == 1
+        if !intrepid_fired
+            && entered_slots.len() == 1
             && let Some(mon) = get_mon_mut_by_idx(state, idx)
-                && !mon.one_time_ability_used {
-                    unknown_exclude(
-                        &mut mon.possible_abilities,
-                        &Ability::IntrepidSword,
-                        "ability-absence-intrepid",
-                    );
-                }
-        if !dauntless_fired && entered_slots.len() == 1
+            && !mon.one_time_ability_used
+        {
+            unknown_exclude(
+                &mut mon.possible_abilities,
+                &Ability::IntrepidSword,
+                "ability-absence-intrepid",
+            );
+        }
+        if !dauntless_fired
+            && entered_slots.len() == 1
             && let Some(mon) = get_mon_mut_by_idx(state, idx)
-                && !mon.one_time_ability_used {
-                    unknown_exclude(
-                        &mut mon.possible_abilities,
-                        &Ability::DauntlessShield,
-                        "ability-absence-dauntless",
-                    );
-                }
+            && !mon.one_time_ability_used
+        {
+            unknown_exclude(
+                &mut mon.possible_abilities,
+                &Ability::DauntlessShield,
+                "ability-absence-dauntless",
+            );
+        }
     }
 }
 
@@ -4998,13 +5645,14 @@ fn only_slot_with_abilities(
             continue;
         }
         if let Some(idx) = mon_idx_for_active_slot(state, slot)
-            && let Some(mon) = get_mon_by_idx(state, idx) {
-                for ab in abilities {
-                    if !unknown_is_excluded(&mon.possible_abilities, ab) {
-                        return false;
-                    }
+            && let Some(mon) = get_mon_by_idx(state, idx)
+        {
+            for ab in abilities {
+                if !unknown_is_excluded(&mon.possible_abilities, ab) {
+                    return false;
                 }
             }
+        }
     }
     true
 }
@@ -5031,7 +5679,12 @@ fn only_slot_with_ability(
     this_slot: &FieldSlot,
     ability: &Ability,
 ) -> bool {
-    only_slot_with_abilities(state, entered_slots, this_slot, std::slice::from_ref(ability))
+    only_slot_with_abilities(
+        state,
+        entered_slots,
+        this_slot,
+        std::slice::from_ref(ability),
+    )
 }
 
 // ── Pass 2: Item presence/absence from behaviour ──────────────────────────────
@@ -5064,9 +5717,10 @@ fn pass2_item_from_move(
         // If no opponent took HP damage, the absence of LO recoil is uninformative —
         // excluding LO based on it would be unsound.
         let hit_any_opponent = targets.iter().any(|t| {
-            event.reactions.iter().any(|r| {
-                matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == t)
-            })
+            event
+                .reactions
+                .iter()
+                .any(|r| matches!(&r.kind, EventKind::DamageDealt { target, .. } if target == t))
         });
 
         let has_lo_recoil = event
@@ -5090,161 +5744,164 @@ fn pass2_item_from_move(
         // absence is only evidence when neither can be in play.
         let items_suppressed = state.pseudo_weathers.contains(&PseudoWeather::MagicDeluge);
 
-        if hit_any_opponent && !user_fainted && !items_suppressed
+        if hit_any_opponent
+            && !user_fainted
+            && !items_suppressed
             && let Some(user_idx) = mon_idx_for_active_slot(state, user)
-                && !has_lo_recoil {
-                    // S24 epoch note: these ability reads are post-move, which is
-                    // sound here — a mid-move ability change (Mummy on contact)
-                    // replaces Magic Guard BEFORE the LO chip fires in the sim, so
-                    // "no recoil + post-move non-MG ability + Life Orb" is genuinely
-                    // impossible and the exclusion below remains valid.
-                    let (could_mg, could_sf, could_klutz, has_secondary) = {
-                        let um = get_mon_by_idx(state, user_idx);
-                        (
-                            um.is_some_and(|m| {
-                                !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
-                            }),
-                            um.is_some_and(|m| {
-                                !unknown_is_excluded(&m.possible_abilities, &Ability::SheerForce)
-                            }),
-                            um.is_some_and(|m| {
-                                !unknown_is_excluded(&m.possible_abilities, &Ability::Klutz)
-                            }),
-                            !move_data.secondaries.is_empty(),
-                        )
-                    };
+            && !has_lo_recoil
+        {
+            // S24 epoch note: these ability reads are post-move, which is
+            // sound here — a mid-move ability change (Mummy on contact)
+            // replaces Magic Guard BEFORE the LO chip fires in the sim, so
+            // "no recoil + post-move non-MG ability + Life Orb" is genuinely
+            // impossible and the exclusion below remains valid.
+            let (could_mg, could_sf, could_klutz, has_secondary) = {
+                let um = get_mon_by_idx(state, user_idx);
+                (
+                    um.is_some_and(|m| {
+                        !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
+                    }),
+                    um.is_some_and(|m| {
+                        !unknown_is_excluded(&m.possible_abilities, &Ability::SheerForce)
+                    }),
+                    um.is_some_and(|m| {
+                        !unknown_is_excluded(&m.possible_abilities, &Ability::Klutz)
+                    }),
+                    !move_data.secondaries.is_empty(),
+                )
+            };
 
-                    if !(could_mg || could_klutz || could_sf && has_secondary) {
-                        // Definitively no Life Orb on this mon.
-                        if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
-                            unknown_exclude(&mut mon.item, &Item::LifeOrb, "no-lo-recoil");
-                        }
-                    } else {
-                        // Predicate: Not(LifeOrb) ∨ MagicGuard ∨ (SheerForce ∧ secondary) ∨ Klutz
-                        let mut clause = vec![Statement::Not(Box::new(Statement::HasItem {
-                            mon_idx: user_idx,
-                            item: Item::LifeOrb,
-                        }))];
-                        if could_mg {
-                            clause.push(Statement::HasAbility {
-                                mon_idx: user_idx,
-                                ability: Ability::MagicGuard,
-                            });
-                        }
-                        if could_sf && has_secondary {
-                            clause.push(Statement::HasAbility {
-                                mon_idx: user_idx,
-                                ability: Ability::SheerForce,
-                            });
-                        }
-                        // S21: Klutz silences the LO chip while the orb stays held.
-                        if could_klutz {
-                            clause.push(Statement::HasAbility {
-                                mon_idx: user_idx,
-                                ability: Ability::Klutz,
-                            });
-                        }
-                        state.predicates.push(clause);
-                    }
-                } // end hit_any_opponent
+            if !(could_mg || could_klutz || could_sf && has_secondary) {
+                // Definitively no Life Orb on this mon.
+                if let Some(mon) = get_mon_mut_by_idx(state, user_idx) {
+                    unknown_exclude(&mut mon.item, &Item::LifeOrb, "no-lo-recoil");
+                }
+            } else {
+                // Predicate: Not(LifeOrb) ∨ MagicGuard ∨ (SheerForce ∧ secondary) ∨ Klutz
+                let mut clause = vec![Statement::Not(Box::new(Statement::HasItem {
+                    mon_idx: user_idx,
+                    item: Item::LifeOrb,
+                }))];
+                if could_mg {
+                    clause.push(Statement::HasAbility {
+                        mon_idx: user_idx,
+                        ability: Ability::MagicGuard,
+                    });
+                }
+                if could_sf && has_secondary {
+                    clause.push(Statement::HasAbility {
+                        mon_idx: user_idx,
+                        ability: Ability::SheerForce,
+                    });
+                }
+                // S21: Klutz silences the LO chip while the orb stays held.
+                if could_klutz {
+                    clause.push(Statement::HasAbility {
+                        mon_idx: user_idx,
+                        ability: Ability::Klutz,
+                    });
+                }
+                state.predicates.push(clause);
+            }
+        } // end hit_any_opponent
     } // end is_damaging
 
     // ── Bright Powder / Lax Incense from 100%-accurate miss ───────────────────
     for reaction in &event.reactions {
         if let EventKind::Missed { target } = &reaction.kind
-            && matches!(move_data.accuracy, AccuracyType::Percent(100)) {
-                // No stat-stage accuracy/evasion modifiers in play?
-                let user_acc_stage = mon_idx_for_active_slot(state, user)
-                    .and_then(|ui| get_mon_by_idx(state, ui))
-                    .map(|m| m.boosts[5])
-                    .unwrap_or(0);
-                let tgt_eva_stage = mon_idx_for_active_slot(state, target)
-                    .and_then(|ti| get_mon_by_idx(state, ti))
-                    .map(|m| m.boosts[6])
-                    .unwrap_or(0);
+            && matches!(move_data.accuracy, AccuracyType::Percent(100))
+        {
+            // No stat-stage accuracy/evasion modifiers in play?
+            let user_acc_stage = mon_idx_for_active_slot(state, user)
+                .and_then(|ui| get_mon_by_idx(state, ui))
+                .map(|m| m.boosts[5])
+                .unwrap_or(0);
+            let tgt_eva_stage = mon_idx_for_active_slot(state, target)
+                .and_then(|ti| get_mon_by_idx(state, ti))
+                .map(|m| m.boosts[6])
+                .unwrap_or(0);
 
-                if user_acc_stage >= 0 && tgt_eva_stage <= 0
-                    && let Some(tgt_idx) = mon_idx_for_active_slot(state, target) {
-                        let legal_ok = |item: &Item| ctx.config.legal_item_ok(item);
-                        let mut clause = Vec::new();
-                        if legal_ok(&Item::BrightPowder) {
-                            clause.push(Statement::HasItem {
-                                mon_idx: tgt_idx,
-                                item: Item::BrightPowder,
-                            });
-                        }
-                        if legal_ok(&Item::LaxIncense) {
-                            clause.push(Statement::HasItem {
-                                mon_idx: tgt_idx,
-                                item: Item::LaxIncense,
-                            });
-                        }
-                        // Soundness: a 100%-accurate move can also miss due to evasion
-                        // *abilities* whose activating condition is currently met.  Each
-                        // possible such ability must appear as a disjunct so the clause
-                        // does not falsely exclude the true world.
-                        //
-                        // Omitting a disjunct is NARROWER (not wider) — it would force
-                        // the item to be BrightPowder/LaxIncense even when a Sand-Veil
-                        // mon in sandstorm caused the miss, leading to either a wrong
-                        // item deduction or an inference_contradiction! panic.
-                        //
-                        // We snapshot the relevant target state before borrowing state
-                        // mutably (via predicates.push).
-                        let (tgt_abilities, tgt_has_confusion) = {
-                            let tm = get_mon_by_idx(state, tgt_idx);
-                            let abilities = tm.map(|m| m.possible_abilities.clone());
-                            let has_confusion = tm.is_some_and(|m| {
-                                m.volatiles.iter().any(|v| {
-                                    matches!(
-                                        v,
-                                        VolatileStatusState::TurnStatus(
-                                            VolatileStatus::Confusion, _
-                                        ) | VolatileStatusState::MoveStatus(
-                                            VolatileStatus::Confusion, _
-                                        )
-                                    )
-                                })
-                            });
-                            (abilities, has_confusion)
-                        };
-                        let ability_not_excluded = |ab: &Ability| {
-                            tgt_abilities
-                                .as_ref()
-                                .is_none_or(|u| !unknown_is_excluded(u, ab))
-                        };
-                        // Sand Veil: active under Sandstorm.
-                        if matches!(state.weather, Some(Weather::Sandstorm))
-                            && ability_not_excluded(&Ability::SandVeil)
-                        {
-                            clause.push(Statement::HasAbility {
-                                mon_idx: tgt_idx,
-                                ability: Ability::SandVeil,
-                            });
-                        }
-                        // Snow Cloak: active under Snow (Gen IX "Snow" covers both
-                        // classic Snow and Hail weather).
-                        if matches!(state.weather, Some(Weather::Snow))
-                            && ability_not_excluded(&Ability::SnowCloak)
-                        {
-                            clause.push(Statement::HasAbility {
-                                mon_idx: tgt_idx,
-                                ability: Ability::SnowCloak,
-                            });
-                        }
-                        // Tangled Feet: active while the holder is confused.
-                        if tgt_has_confusion && ability_not_excluded(&Ability::TangledFeet) {
-                            clause.push(Statement::HasAbility {
-                                mon_idx: tgt_idx,
-                                ability: Ability::TangledFeet,
-                            });
-                        }
+            if user_acc_stage >= 0
+                && tgt_eva_stage <= 0
+                && let Some(tgt_idx) = mon_idx_for_active_slot(state, target)
+            {
+                let legal_ok = |item: &Item| ctx.config.legal_item_ok(item);
+                let mut clause = Vec::new();
+                if legal_ok(&Item::BrightPowder) {
+                    clause.push(Statement::HasItem {
+                        mon_idx: tgt_idx,
+                        item: Item::BrightPowder,
+                    });
+                }
+                if legal_ok(&Item::LaxIncense) {
+                    clause.push(Statement::HasItem {
+                        mon_idx: tgt_idx,
+                        item: Item::LaxIncense,
+                    });
+                }
+                // Soundness: a 100%-accurate move can also miss due to evasion
+                // *abilities* whose activating condition is currently met.  Each
+                // possible such ability must appear as a disjunct so the clause
+                // does not falsely exclude the true world.
+                //
+                // Omitting a disjunct is NARROWER (not wider) — it would force
+                // the item to be BrightPowder/LaxIncense even when a Sand-Veil
+                // mon in sandstorm caused the miss, leading to either a wrong
+                // item deduction or an inference_contradiction! panic.
+                //
+                // We snapshot the relevant target state before borrowing state
+                // mutably (via predicates.push).
+                let (tgt_abilities, tgt_has_confusion) = {
+                    let tm = get_mon_by_idx(state, tgt_idx);
+                    let abilities = tm.map(|m| m.possible_abilities.clone());
+                    let has_confusion = tm.is_some_and(|m| {
+                        m.volatiles.iter().any(|v| {
+                            matches!(
+                                v,
+                                VolatileStatusState::TurnStatus(VolatileStatus::Confusion, _)
+                                    | VolatileStatusState::MoveStatus(VolatileStatus::Confusion, _)
+                            )
+                        })
+                    });
+                    (abilities, has_confusion)
+                };
+                let ability_not_excluded = |ab: &Ability| {
+                    tgt_abilities
+                        .as_ref()
+                        .is_none_or(|u| !unknown_is_excluded(u, ab))
+                };
+                // Sand Veil: active under Sandstorm.
+                if matches!(state.weather, Some(Weather::Sandstorm))
+                    && ability_not_excluded(&Ability::SandVeil)
+                {
+                    clause.push(Statement::HasAbility {
+                        mon_idx: tgt_idx,
+                        ability: Ability::SandVeil,
+                    });
+                }
+                // Snow Cloak: active under Snow (Gen IX "Snow" covers both
+                // classic Snow and Hail weather).
+                if matches!(state.weather, Some(Weather::Snow))
+                    && ability_not_excluded(&Ability::SnowCloak)
+                {
+                    clause.push(Statement::HasAbility {
+                        mon_idx: tgt_idx,
+                        ability: Ability::SnowCloak,
+                    });
+                }
+                // Tangled Feet: active while the holder is confused.
+                if tgt_has_confusion && ability_not_excluded(&Ability::TangledFeet) {
+                    clause.push(Statement::HasAbility {
+                        mon_idx: tgt_idx,
+                        ability: Ability::TangledFeet,
+                    });
+                }
 
-                        if !clause.is_empty() {
-                            state.predicates.push(clause);
-                        }
-                    }
+                if !clause.is_empty() {
+                    state.predicates.push(clause);
+                }
             }
+        }
     }
 
     let _ = targets; // suppress unused warning
@@ -5276,20 +5933,51 @@ fn pass2_flinch_holder_from_cant(
         return;
     }
 
+    // S64: attribution must consider every landed hit, including friendly fire.
+    // An ally's Fake Out (or any other intrinsic-flinch move) can be the complete
+    // explanation for this Cant event; ignoring same-side hits would then falsely
+    // pin King's Rock/Razor Fang/Stench on an unrelated opponent that also damaged
+    // the target earlier in the turn. A same-side hit without an intrinsic
+    // secondary can likewise explain the flinch whenever its observation-time
+    // item/ability still admits one of those effects.
+    let any_other_hit_can_explain = ctx.damaging_hits_this_turn.iter().any(|hit| {
+        if hit.target_slot != *t_slot {
+            return false;
+        }
+        let intrinsic = ctx.move_dex.get(&hit.move_used).is_some_and(|move_data| {
+            move_data.secondaries.iter().any(|secondary| {
+                secondary.effect.volatile_status == Some(VolatileStatus::Flinch)
+                    || secondary
+                        .random_choices
+                        .iter()
+                        .any(|choice| choice.volatile_status == Some(VolatileStatus::Flinch))
+            })
+        });
+        intrinsic
+            || (hit.attacker_slot.player == t_slot.player
+                && (!unknown_is_excluded(&hit.attacker_at_hit.item, &Item::KingsRock)
+                    || !unknown_is_excluded(&hit.attacker_at_hit.item, &Item::RazorFang)
+                    || !unknown_is_excluded(
+                        &hit.attacker_at_hit.possible_abilities,
+                        &Ability::Stench,
+                    )))
+    });
+    if any_other_hit_can_explain {
+        return;
+    }
+
     // Walk this turn's hits to find opposing attackers that landed damage on T.
     // We need exactly one unique attacker for unambiguous attribution.
-    let mut attacker_slot: Option<&FieldSlot> = None;
-    let mut move_used: Option<&PokemonMove> = None;
+    let mut attributed_hit: Option<&DamagingHit> = None;
     let mut ambiguous = false;
 
-    for (a, t, m) in &ctx.damaging_hits_this_turn {
-        if t == t_slot && a.player != t_slot.player {
-            match attacker_slot {
+    for hit in &ctx.damaging_hits_this_turn {
+        if hit.target_slot == *t_slot && hit.attacker_slot.player != t_slot.player {
+            match attributed_hit {
                 None => {
-                    attacker_slot = Some(a);
-                    move_used = Some(m);
+                    attributed_hit = Some(hit);
                 }
-                Some(existing) if existing == a => {
+                Some(existing) if existing.attacker_slot == hit.attacker_slot => {
                     // Same attacker, different hit (e.g. multi-hit move recorded twice for
                     // different targets — shouldn't happen after dedup, but safe).
                 }
@@ -5302,15 +5990,16 @@ fn pass2_flinch_holder_from_cant(
         }
     }
 
-    if ambiguous || attacker_slot.is_none() {
+    if ambiguous || attributed_hit.is_none() {
         // Either ambiguous (multiple attackers) or no damaging hit recorded this turn.
         // In the latter case the flinch came from a move secondary, which is already
         // explained by the move; no item/ability deduction is sound.
         return;
     }
 
-    let attacker_slot = attacker_slot.unwrap();
-    let move_used = move_used.unwrap();
+    let attributed_hit = attributed_hit.unwrap();
+    let attacker_slot = &attributed_hit.attacker_slot;
+    let move_used = &attributed_hit.move_used;
 
     // If the attacker's slot had any switch this turn, `mon_idx_for_active_slot` below
     // would resolve to whoever currently occupies it — not necessarily the mon that
@@ -5374,8 +6063,82 @@ fn pass2_flinch_holder_from_cant(
     // An empty clause would be an unsatisfiable constraint (flinch impossible under the
     // current model), which indicates a model error — skip rather than panic here.
     if !clause.is_empty() {
-        state.predicates.push(clause);
+        push_temporal_clause(
+            state,
+            ctx,
+            attacker_slot,
+            &attributed_hit.attacker_at_hit,
+            ai,
+            clause,
+        );
     }
+}
+
+/// Apply persistent/reverting forme changes that happen specifically when the
+/// current occupant leaves the field. These changes are not separate visible
+/// reactions in the switch event, but they determine the species that must be
+/// stored on the bench and matched on the next entry.
+fn apply_switch_out_forme_change(
+    state: &mut UnknownBattleState,
+    slot: &FieldSlot,
+    incoming_species: &Species,
+    ctx: &BattleContext,
+) {
+    let slot_i = slot.slot_index as usize;
+    let actives = match slot.player {
+        Player::P1 => &mut state.p1_active_mons,
+        Player::P2 => &mut state.p2_active_mons,
+    };
+    let Some(mon) = actives.get_mut(slot_i) else {
+        return;
+    };
+
+    // Team-preview lead announcements are represented as Switch events even
+    // though no occupant actually left. Do not trigger switch-out abilities there.
+    if state.turn_number == 0 && unknown_is_known_as(&mon.possible_species, incoming_species) {
+        return;
+    }
+
+    let next_species = match &mon.possible_species {
+        Unknown::Known(Species::Palafin)
+            if !mon.fainted
+                && !unknown_is_excluded(&mon.possible_abilities, &Ability::ZerotoHero) =>
+        {
+            Some(Species::PalafinHero)
+        }
+        Unknown::Known(Species::AegislashBlade)
+            if !unknown_is_excluded(&mon.possible_abilities, &Ability::StanceChange) =>
+        {
+            Some(Species::Aegislash)
+        }
+        _ => None,
+    };
+    let Some(next_species) = next_species else {
+        return;
+    };
+    let Some(data) = ctx.dex.get(&next_species) else {
+        return;
+    };
+
+    mon.possible_species = Unknown::Known(next_species);
+    mon.possible_types = Unknown::Known(data.types.clone());
+    mon.possible_weight_hg = Unknown::Known(data.weight);
+    let forme_abilities = if data.abilities.is_empty() {
+        Unknown::Not(Vec::new())
+    } else {
+        Unknown::Possibly(data.abilities.clone())
+    };
+    // Preserve exact knowledge (especially the viewer's own mon) when the new
+    // forme retains the same ability; otherwise use the forme's legal set.
+    if let Unknown::Known(known) = &mon.possible_abilities
+        && data.abilities.contains(known)
+    {
+        mon.possible_original_abilities = Unknown::Known(known.clone());
+    } else {
+        mon.possible_original_abilities = forme_abilities.clone();
+        mon.possible_abilities = forme_abilities;
+    }
+    recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
 }
 
 // ── Pass 2b: Contact-reaction absence inference ───────────────────────────────
@@ -5397,7 +6160,12 @@ fn pass2_contact_absence(
     event: &InformationEvent,
     ctx: &BattleContext,
 ) {
-    let EventKind::MoveUsed { user, targets, move_used } = &event.kind else {
+    let EventKind::MoveUsed {
+        user,
+        targets,
+        move_used,
+    } = &event.kind
+    else {
         return;
     };
     let Some(move_data) = ctx.move_dex.get(move_used) else {
@@ -5410,22 +6178,26 @@ fn pass2_contact_absence(
     }
 
     // --- Attacker-side escape checks (if any apply, skip — sound: wider) ---
-    let attacker_idx = mon_idx_for_active_slot(state, user);
     let attacker_escapes = {
-        let am = attacker_idx.and_then(|i| get_mon_by_idx(state, i));
+        // A contact move may switch its user out. Use the hit-time snapshot rather
+        // than whichever Pokemon occupies the slot after nested reactions.
+        let am = ctx
+            .move_context
+            .as_ref()
+            .and_then(|mc| mc.pre_move_attacker.as_ref())
+            .or_else(|| {
+                mon_idx_for_active_slot(state, user).and_then(|i| get_mon_by_idx(state, i))
+            });
         // Long Reach (attacker ability) makes the move non-contact.
-        let might_be_long_reach = am.is_some_and(|m| {
-            !unknown_is_excluded(&m.possible_abilities, &Ability::LongReach)
-        });
+        let might_be_long_reach =
+            am.is_some_and(|m| !unknown_is_excluded(&m.possible_abilities, &Ability::LongReach));
         // Protective Pads (attacker item) prevents contact-triggered effects.
-        let might_have_pads = am.is_some_and(|m| {
-            !unknown_is_excluded(&m.item, &Item::ProtectivePads)
-        });
+        let might_have_pads =
+            am.is_some_and(|m| !unknown_is_excluded(&m.item, &Item::ProtectivePads));
         // Magic Guard on the attacker prevents ALL three contact chips (Rough Skin,
         // Iron Barbs, Rocky Helmet — indirect damage). Gates every exclusion below.
-        let might_have_magic_guard = am.is_some_and(|m| {
-            !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard)
-        });
+        let might_have_magic_guard =
+            am.is_some_and(|m| !unknown_is_excluded(&m.possible_abilities, &Ability::MagicGuard));
         // Mold Breaker / Turboblaze / Teravolt on the attacker silently suppresses the
         // defender's Rough Skin / Iron Barbs (both are on the canonical `ability_is_ignorable`
         // list the real engine checks in `apply_contact_hit_reactions` — the ability holder is
@@ -5439,9 +6211,15 @@ fn pass2_contact_absence(
                     || !unknown_is_excluded(&m.possible_abilities, &Ability::Turboblaze)
                     || !unknown_is_excluded(&m.possible_abilities, &Ability::Teravolt))
         });
-        (might_be_long_reach, might_have_pads, might_have_magic_guard, might_break_mold)
+        (
+            might_be_long_reach,
+            might_have_pads,
+            might_have_magic_guard,
+            might_break_mold,
+        )
     };
-    let (long_reach_possible, pads_possible, magic_guard_possible, mold_breaker_possible) = attacker_escapes;
+    let (long_reach_possible, pads_possible, magic_guard_possible, mold_breaker_possible) =
+        attacker_escapes;
 
     // If either Long Reach or Protective Pads is possible, no contact reaction is
     // guaranteed — skip all exclusions (sound).
@@ -5454,10 +6232,32 @@ fn pass2_contact_absence(
             continue;
         };
 
-        // A missed/blocked move fires no DamageDealt reaction, so this doubles as the hit check.
-        let hit_landed = event.reactions.iter().any(|r| {
-            matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
+        // Forced-switch moves replace the target slot before this parent-level
+        // absence pass runs. Never apply an absence deduction to the incoming
+        // Pokemon: the contact hit (and missing reaction) concerned the snapshot
+        // occupant. Comparing the stable roster identity is conservative when an
+        // Illusion resolution changed what is known about that identity.
+        let Some(pre_target) = ctx
+            .move_context
+            .as_ref()
+            .and_then(|mc| mc.pre_move_targets.iter().find(|(slot, _)| slot == target))
+            .map(|(_, mon)| mon)
+        else {
+            continue;
+        };
+        let same_target_identity = get_mon_by_idx(state, target_idx).is_some_and(|live| {
+            live.possible_mon_id == pre_target.possible_mon_id
+                && live.possible_species == pre_target.possible_species
         });
+        if !same_target_identity {
+            continue;
+        }
+
+        // A missed/blocked move fires no DamageDealt reaction, so this doubles as the hit check.
+        let hit_landed = event
+            .reactions
+            .iter()
+            .any(|r| matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target));
         if !hit_landed {
             continue;
         }
@@ -5481,11 +6281,12 @@ fn pass2_contact_absence(
         // genuinely held, so absence is only evidence when neither can be in play.
         let items_suppressed = state.pseudo_weathers.contains(&PseudoWeather::MagicDeluge);
 
+        let defender_klutz_possible =
+            !unknown_is_excluded(&pre_target.possible_abilities, &Ability::Klutz);
+
         let Some(mon) = get_mon_mut_by_idx(state, target_idx) else {
             continue;
         };
-        let defender_klutz_possible =
-            !unknown_is_excluded(&mon.possible_abilities, &Ability::Klutz);
 
         // S24 epoch note: `mon.item` here is post-move — if the observed hit consumed
         // the defender's berry, the item is already `Known(None)` and the exclusion
@@ -5495,7 +6296,10 @@ fn pass2_contact_absence(
         // Rocky Helmet: Magic Guard on the attacker prevents the chip, so Helmet
         // absence is only certain when Magic Guard is also excluded — and (S21) when
         // the Helmet itself cannot have been inert (Magic Room / defender Klutz).
-        if !helmet_revealed && !magic_guard_possible && !items_suppressed && !defender_klutz_possible
+        if !helmet_revealed
+            && !magic_guard_possible
+            && !items_suppressed
+            && !defender_klutz_possible
         {
             unknown_exclude(&mut mon.item, &Item::RockyHelmet, "no-helmet-chip");
         }
@@ -5555,7 +6359,12 @@ fn pass2_unseen_fist_absence(
     event: &InformationEvent,
     ctx: &BattleContext,
 ) {
-    let EventKind::MoveUsed { user, targets, move_used } = &event.kind else {
+    let EventKind::MoveUsed {
+        user,
+        targets,
+        move_used,
+    } = &event.kind
+    else {
         return;
     };
     let Some(move_data) = ctx.move_dex.get(move_used) else {
@@ -5585,37 +6394,46 @@ fn pass2_unseen_fist_absence(
     // not per-target, so if it were active every protect-blockable target this move
     // hit would have bypassed.
     let blocked_any_target = targets.iter().any(|target| {
-        reaction_contains(event, &|k| matches!(k, EventKind::Blocked { target: t } if t == target))
+        reaction_contains(
+            event,
+            &|k| matches!(k, EventKind::Blocked { target: t } if t == target),
+        )
     });
     if !blocked_any_target {
         return;
     }
     if let Some(mon) = get_mon_mut_by_idx(state, attacker_idx) {
-        unknown_exclude(&mut mon.possible_abilities, &Ability::UnseenFist, "no-unseen-fist-bypass");
+        unknown_exclude(
+            &mut mon.possible_abilities,
+            &Ability::UnseenFist,
+            "no-unseen-fist-bypass",
+        );
     }
 }
 
 /// Recursively scan `event` and all nested reactions for any event satisfying `pred`.
 fn reaction_contains<F: Fn(&EventKind) -> bool>(event: &InformationEvent, pred: &F) -> bool {
-    event.reactions.iter().any(|r| pred(&r.kind) || reaction_contains(r, pred))
+    event
+        .reactions
+        .iter()
+        .any(|r| pred(&r.kind) || reaction_contains(r, pred))
 }
 
 /// Like [`reaction_contains`], but starting from a reaction slice (checks each node's
 /// own kind, then recurses). Used where the caller holds `&[InformationEvent]` rather
 /// than the parent event.
 fn any_reaction_deep<F: Fn(&EventKind) -> bool>(reactions: &[InformationEvent], pred: &F) -> bool {
-    reactions.iter().any(|r| pred(&r.kind) || any_reaction_deep(&r.reactions, pred))
+    reactions
+        .iter()
+        .any(|r| pred(&r.kind) || any_reaction_deep(&r.reactions, pred))
 }
 
 /// `true` if a nested `ItemRevealed` names `item` on `slot` anywhere under `event`.
-fn reaction_contains_item_reveal(
-    event: &InformationEvent,
-    slot: &FieldSlot,
-    item: &Item,
-) -> bool {
-    reaction_contains(event, &|k| {
-        matches!(k, EventKind::ItemRevealed { slot: s, item: i } if s == slot && i == item)
-    })
+fn reaction_contains_item_reveal(event: &InformationEvent, slot: &FieldSlot, item: &Item) -> bool {
+    reaction_contains(
+        event,
+        &|k| matches!(k, EventKind::ItemRevealed { slot: s, item: i } if s == slot && i == item),
+    )
 }
 
 fn reaction_contains_ability_reveal(
@@ -5623,9 +6441,53 @@ fn reaction_contains_ability_reveal(
     slot: &FieldSlot,
     ability: &Ability,
 ) -> bool {
-    reaction_contains(event, &|k| {
-        matches!(k, EventKind::AbilityRevealed { slot: s, ability: a } if s == slot && a == ability)
-    })
+    reaction_contains(
+        event,
+        &|k| matches!(k, EventKind::AbilityRevealed { slot: s, ability: a } if s == slot && a == ability),
+    )
+}
+
+/// Whether this move's observed 1-HP result was produced by a survival mechanic.
+///
+/// Focus Sash, Focus Band, Sturdy, and Endure replace a would-be KO's damage with
+/// exactly enough damage to leave 1 HP. Consequently the visible HP loss is only
+/// a lower bound on the damage the move actually rolled, just like an ordinary
+/// overkill that ends at 0 HP. Restrict the check to the 1-HP display bucket so a
+/// Sash activation on one hit of a multi-hit move does not censor later hits.
+fn damage_was_survival_censored(
+    event: &InformationEvent,
+    move_ctx: &MoveContext,
+    target_slot: &FieldSlot,
+    new_hp: &PokemonHP,
+) -> bool {
+    let ended_at_one = matches!(new_hp, PokemonHP::Number(1) | PokemonHP::Percent(1));
+    if !ended_at_one {
+        return false;
+    }
+
+    let sash_activated = move_ctx
+        .item_losses
+        .iter()
+        .any(|(slot, item)| slot == target_slot && *item == Item::FocusSash);
+    let band_activated = reaction_contains_item_reveal(event, target_slot, &Item::FocusBand);
+    let sturdy_activated = reaction_contains_ability_reveal(event, target_slot, &Ability::Sturdy);
+    let endure_active = move_ctx
+        .pre_move_targets
+        .iter()
+        .find(|(slot, _)| slot == target_slot)
+        .is_some_and(|(_, mon)| {
+            mon.volatiles.iter().any(|volatile| {
+                matches!(
+                    volatile,
+                    crate::state::pokemon::VolatileStatusState::TurnStatus(
+                        VolatileStatus::Endure,
+                        _
+                    )
+                )
+            })
+        });
+
+    sash_activated || band_activated || sturdy_activated || endure_active
 }
 
 /// Returns `true` if a damaging move's reactions include `DamageDealt` for `target`
@@ -5635,9 +6497,10 @@ fn reaction_contains_ability_reveal(
 /// `is_damaging` selects which check to apply.
 fn move_hit_target(event: &InformationEvent, target: &FieldSlot, is_damaging: bool) -> bool {
     if is_damaging {
-        event.reactions.iter().any(|r| {
-            matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target)
-        })
+        event
+            .reactions
+            .iter()
+            .any(|r| matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == target))
     } else {
         !event.reactions.iter().any(|r| {
             matches!(
@@ -5675,7 +6538,12 @@ fn pass2_prankster_immunity(
     event: &InformationEvent,
     ctx: &BattleContext,
 ) {
-    let EventKind::MoveUsed { user, targets, move_used } = &event.kind else {
+    let EventKind::MoveUsed {
+        user,
+        targets,
+        move_used,
+    } = &event.kind
+    else {
         return;
     };
     let Some(move_data) = ctx.move_dex.get(move_used) else {
@@ -5696,9 +6564,7 @@ fn pass2_prankster_immunity(
         return;
     }
     // Prankster already excluded — no clause needed.
-    if user_mon.is_some_and(|m| {
-        unknown_is_excluded(&m.possible_abilities, &Ability::Prankster)
-    }) {
+    if user_mon.is_some_and(|m| unknown_is_excluded(&m.possible_abilities, &Ability::Prankster)) {
         return;
     }
 
@@ -5710,23 +6576,25 @@ fn pass2_prankster_immunity(
 
     for target in targets {
         // Only the `Immune` reaction matches the Dark bounce ("It doesn't affect…").
-        let immune = event.reactions.iter().any(|r| {
-            matches!(&r.kind, EventKind::Immune { target: t } if t == target)
-        });
+        let immune = event
+            .reactions
+            .iter()
+            .any(|r| matches!(&r.kind, EventKind::Immune { target: t } if t == target));
         if !immune {
             continue;
         }
 
         // A nested ability reveal on the target (absorb abilities etc.) explains the
         // immunity without Prankster.
-        if reaction_contains(event, &|k| {
-            matches!(k, EventKind::AbilityRevealed { slot, .. } if slot == target)
-        }) {
+        if reaction_contains(
+            event,
+            &|k| matches!(k, EventKind::AbilityRevealed { slot, .. } if slot == target),
+        ) {
             continue;
         }
 
-        let Some(tm) = mon_idx_for_active_slot(state, target)
-            .and_then(|i| get_mon_by_idx(state, i))
+        let Some(tm) =
+            mon_idx_for_active_slot(state, target).and_then(|i| get_mon_by_idx(state, i))
         else {
             continue;
         };
@@ -5768,9 +6636,13 @@ fn ability_grants_move_immunity(ability: &Ability, move_type: &PokemonType) -> b
     use PokemonType::*;
     matches!(
         (move_type, ability),
-        (Electric, Ability::VoltAbsorb | Ability::MotorDrive | Ability::LightningRod)
-            | (Water, Ability::WaterAbsorb | Ability::StormDrain | Ability::DrySkin)
-            | (Grass, Ability::SapSipper)
+        (
+            Electric,
+            Ability::VoltAbsorb | Ability::MotorDrive | Ability::LightningRod
+        ) | (
+            Water,
+            Ability::WaterAbsorb | Ability::StormDrain | Ability::DrySkin
+        ) | (Grass, Ability::SapSipper)
             | (Fire, Ability::FlashFire | Ability::WellBakedBody)
             | (Ground, Ability::EarthEater | Ability::Levitate)
             | (_, Ability::GoodasGold)
@@ -5795,7 +6667,10 @@ fn pass2_powder_immunity(
     event: &InformationEvent,
     ctx: &BattleContext,
 ) {
-    let EventKind::MoveUsed { targets, move_used, .. } = &event.kind else {
+    let EventKind::MoveUsed {
+        targets, move_used, ..
+    } = &event.kind
+    else {
         return;
     };
     let Some(move_data) = ctx.move_dex.get(move_used) else {
@@ -5819,9 +6694,10 @@ fn pass2_powder_immunity(
             continue;
         }
 
-        let immune = event.reactions.iter().any(|r| {
-            matches!(&r.kind, EventKind::Immune { target: t } if t == target)
-        });
+        let immune = event
+            .reactions
+            .iter()
+            .any(|r| matches!(&r.kind, EventKind::Immune { target: t } if t == target));
         if !immune {
             continue;
         }
@@ -5832,10 +6708,16 @@ fn pass2_powder_immunity(
         if legal_ok(&Item::SafetyGoggles)
             && tm.is_none_or(|m| !unknown_is_excluded(&m.item, &Item::SafetyGoggles))
         {
-            clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::SafetyGoggles });
+            clause.push(Statement::HasItem {
+                mon_idx: target_idx,
+                item: Item::SafetyGoggles,
+            });
         }
         if tm.is_none_or(|m| !unknown_is_excluded(&m.possible_abilities, &Ability::Overcoat)) {
-            clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Overcoat });
+            clause.push(Statement::HasAbility {
+                mon_idx: target_idx,
+                ability: Ability::Overcoat,
+            });
         }
         if !clause.is_empty() {
             state.predicates.push(clause);
@@ -5858,7 +6740,12 @@ fn pass2_guaranteed_status_absence(
     event: &InformationEvent,
     ctx: &BattleContext,
 ) {
-    let EventKind::MoveUsed { user: _, targets, move_used } = &event.kind else {
+    let EventKind::MoveUsed {
+        user: _,
+        targets,
+        move_used,
+    } = &event.kind
+    else {
         return;
     };
     let Some(move_data) = ctx.move_dex.get(move_used) else {
@@ -5867,15 +6754,14 @@ fn pass2_guaranteed_status_absence(
 
     // Find all guaranteed statuses in this move's secondaries.
     // A "guaranteed status secondary" has chance==100, one status, and no random choices.
-    let is_damaging = matches!(move_data.category, MoveCategory::Physical | MoveCategory::Special);
+    let is_damaging = matches!(
+        move_data.category,
+        MoveCategory::Physical | MoveCategory::Special
+    );
     let guaranteed_statuses: Vec<(Status, bool)> = move_data
         .secondaries
         .iter()
-        .filter(|s| {
-            s.chance == 100
-                && s.effect.status.is_some()
-                && s.random_choices.is_empty()
-        })
+        .filter(|s| s.chance == 100 && s.effect.status.is_some() && s.random_choices.is_empty())
         .map(|s| (s.effect.status.clone().unwrap(), is_damaging))
         .collect();
 
@@ -5904,9 +6790,9 @@ fn pass2_guaranteed_status_absence(
             continue;
         }
 
-        let status_inflicted = event.reactions.iter().any(|r| {
-            matches!(&r.kind, EventKind::StatusInflicted { target: t, .. } if t == target)
-        });
+        let status_inflicted = event.reactions.iter().any(
+            |r| matches!(&r.kind, EventKind::StatusInflicted { target: t, .. } if t == target),
+        );
         if status_inflicted {
             continue; // Status did land — nothing to infer.
         }
@@ -5918,11 +6804,13 @@ fn pass2_guaranteed_status_absence(
             let tm = get_mon_by_idx(state, target_idx);
             let already_statused = tm.is_some_and(|m| m.status.is_some());
             let has_sub = tm.is_some_and(|m| {
-                m.volatiles.iter().any(|v| matches!(
-                    v,
-                    VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)
-                    | VolatileStatusState::MoveStatus(VolatileStatus::Substitute(_), _)
-                ))
+                m.volatiles.iter().any(|v| {
+                    matches!(
+                        v,
+                        VolatileStatusState::TurnStatus(VolatileStatus::Substitute(_), _)
+                            | VolatileStatusState::MoveStatus(VolatileStatus::Substitute(_), _)
+                    )
+                })
             });
             (already_statused, has_sub)
         };
@@ -5950,14 +6838,19 @@ fn pass2_guaranteed_status_absence(
         }
 
         // LeafGuard only prevents status under harsh sun — snapshot weather now.
-        let is_sun = matches!(state.weather, Some(Weather::Sun) | Some(Weather::ExtremeSunlight));
+        let is_sun = matches!(
+            state.weather,
+            Some(Weather::Sun) | Some(Weather::ExtremeSunlight)
+        );
 
         let mut pending_clauses: Vec<Vec<Statement>> = Vec::new();
 
         for (status, from_secondary) in &guaranteed_statuses {
             // Type-immune check (known types only — absent knowledge is not immunity).
             let type_immune = match status {
-                Status::Burn => known_types.as_ref().is_some_and(|ts| ts.contains(&PokemonType::Fire)),
+                Status::Burn => known_types
+                    .as_ref()
+                    .is_some_and(|ts| ts.contains(&PokemonType::Fire)),
                 Status::Paralysis => known_types.as_ref().is_some_and(|ts| {
                     // Electric-type: unconditional paralysis immunity (Gen VI+).
                     // Ground-type: only immune to Electric-type paralysis moves (Thunder Wave,
@@ -5969,7 +6862,9 @@ fn pass2_guaranteed_status_absence(
                 Status::Poison | Status::ToxicPoison(_) => known_types.as_ref().is_some_and(|ts| {
                     ts.contains(&PokemonType::Poison) || ts.contains(&PokemonType::Steel)
                 }),
-                Status::Frozen(_) => known_types.as_ref().is_some_and(|ts| ts.contains(&PokemonType::Ice)),
+                Status::Frozen(_) => known_types
+                    .as_ref()
+                    .is_some_and(|ts| ts.contains(&PokemonType::Ice)),
                 Status::Sleep(_) => false, // No blanket type immunity to sleep
             };
             if type_immune {
@@ -5980,8 +6875,10 @@ fn pass2_guaranteed_status_absence(
             // Misty Terrain: mons immune to all status.
             // Electric Terrain: mons immune to sleep.
             let terrain_immune = match status {
-                Status::Sleep(_) => state.terrain == Some(Terrain::MistyTerrain)
-                    || state.terrain == Some(Terrain::ElectricTerrain),
+                Status::Sleep(_) => {
+                    state.terrain == Some(Terrain::MistyTerrain)
+                        || state.terrain == Some(Terrain::ElectricTerrain)
+                }
                 _ => state.terrain == Some(Terrain::MistyTerrain),
             };
             if terrain_immune {
@@ -6000,10 +6897,14 @@ fn pass2_guaranteed_status_absence(
 
             // Covert Cloak: blocks secondary effects of damaging moves.
             let legal_ok = |item: &Item| ctx.config.legal_item_ok(item);
-            let item_excluded_cc = tm_item.as_ref()
+            let item_excluded_cc = tm_item
+                .as_ref()
                 .is_some_and(|it| unknown_is_excluded(it, &Item::CovertCloak));
             if *from_secondary && legal_ok(&Item::CovertCloak) && !item_excluded_cc {
-                clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::CovertCloak });
+                clause.push(Statement::HasItem {
+                    mon_idx: target_idx,
+                    item: Item::CovertCloak,
+                });
             }
 
             // Shield Dust: blocks the additional effects of damaging moves (same scope as
@@ -6011,7 +6912,8 @@ fn pass2_guaranteed_status_absence(
             // an Ignorable ability (Mold Breaker bypasses), but including it as a disjunct
             // is sound regardless.
             if *from_secondary {
-                let sd_excluded = tm_abilities.as_ref()
+                let sd_excluded = tm_abilities
+                    .as_ref()
                     .is_some_and(|pa| unknown_is_excluded(pa, &Ability::ShieldDust));
                 if !sd_excluded {
                     clause.push(Statement::HasAbility {
@@ -6074,10 +6976,14 @@ fn pass2_guaranteed_status_absence(
                 if *ab == Ability::LeafGuard && !is_sun {
                     continue;
                 }
-                let ab_excluded = tm_abilities.as_ref()
+                let ab_excluded = tm_abilities
+                    .as_ref()
                     .is_some_and(|pa| unknown_is_excluded(pa, ab));
                 if !ab_excluded {
-                    clause.push(Statement::HasAbility { mon_idx: target_idx, ability: ab.clone() });
+                    clause.push(Statement::HasAbility {
+                        mon_idx: target_idx,
+                        ability: ab.clone(),
+                    });
                 }
             }
 
@@ -6111,7 +7017,10 @@ fn pass_eot_heal(
     // This is a conservative skip — if uncertain, don't infer Leftovers.
     let our_mon_is_seeded = state.p1_active_mons.iter().any(|m| {
         m.volatiles.iter().any(|v| {
-            matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::LeechSeed, _))
+            matches!(
+                v,
+                VolatileStatusState::TurnStatus(VolatileStatus::LeechSeed, _)
+            )
         })
     });
 
@@ -6138,19 +7047,27 @@ fn pass_eot_heal(
             let tm = get_mon_by_idx(state, target_idx);
             let has_aqua_ring = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| {
-                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::AquaRing, _))
+                    matches!(
+                        v,
+                        VolatileStatusState::TurnStatus(VolatileStatus::AquaRing, _)
+                    )
                 })
             });
             let has_ingrain = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| {
-                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, _))
+                    matches!(
+                        v,
+                        VolatileStatusState::TurnStatus(VolatileStatus::Ingrain, _)
+                    )
                 })
             });
             let has_wish = state
                 .p2_slot_conditions
                 .get(target.slot_index as usize)
                 .is_some_and(|conds| {
-                    conds.iter().any(|c| matches!(c, SlotCondition::Wish { .. }))
+                    conds
+                        .iter()
+                        .any(|c| matches!(c, SlotCondition::Wish { .. }))
                 });
             (has_aqua_ring, has_ingrain, has_wish)
         };
@@ -6161,7 +7078,10 @@ fn pass_eot_heal(
         }
 
         // Skip if the item is already known.
-        if tm_item.as_ref().is_some_and(|it| matches!(it, Unknown::Known(_))) {
+        if tm_item
+            .as_ref()
+            .is_some_and(|it| matches!(it, Unknown::Known(_)))
+        {
             continue;
         }
 
@@ -6193,7 +7113,10 @@ fn pass_eot_heal(
                 .as_ref()
                 .is_none_or(|it| !unknown_is_excluded(it, &Item::Leftovers))
         {
-            clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::Leftovers });
+            clause.push(Statement::HasItem {
+                mon_idx: target_idx,
+                item: Item::Leftovers,
+            });
         }
         // Black Sludge heals Poison-types at the same rate; add to the disjunction.
         if is_poison
@@ -6201,30 +7124,37 @@ fn pass_eot_heal(
             && tm_item
                 .as_ref()
                 .is_none_or(|it| !unknown_is_excluded(it, &Item::BlackSludge))
-            && tm_abilities
-                .as_ref()
-                .is_none_or(|_| true) // BlackSludge is unconditional on Poison types
+            && tm_abilities.as_ref().is_none_or(|_| true)
+        // BlackSludge is unconditional on Poison types
         {
-            clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::BlackSludge });
+            clause.push(Statement::HasItem {
+                mon_idx: target_idx,
+                item: Item::BlackSludge,
+            });
         }
 
         // Weather-based passive heals produce the same EOT `Healed` signal as Leftovers:
         // Rain Dish / Dry Skin heal in rain, Ice Body heals in snow. Widen the disjunction
         // so a weather heal is not misattributed to Leftovers (widening is always sound).
-        let weather_heal_abilities: &[Ability] =
-            if matches!(state.weather, Some(Weather::Rain) | Some(Weather::HeavyRain)) {
-                &[Ability::RainDish, Ability::DrySkin]
-            } else if matches!(state.weather, Some(Weather::Snow)) {
-                &[Ability::IceBody]
-            } else {
-                &[]
-            };
+        let weather_heal_abilities: &[Ability] = if matches!(
+            state.weather,
+            Some(Weather::Rain) | Some(Weather::HeavyRain)
+        ) {
+            &[Ability::RainDish, Ability::DrySkin]
+        } else if matches!(state.weather, Some(Weather::Snow)) {
+            &[Ability::IceBody]
+        } else {
+            &[]
+        };
         for ab in weather_heal_abilities {
             let excluded = tm_abilities
                 .as_ref()
                 .is_some_and(|pa| unknown_is_excluded(pa, ab));
             if !excluded {
-                clause.push(Statement::HasAbility { mon_idx: target_idx, ability: ab.clone() });
+                clause.push(Statement::HasAbility {
+                    mon_idx: target_idx,
+                    ability: ab.clone(),
+                });
             }
         }
 
@@ -6310,9 +7240,9 @@ fn pass_eot_sand_immunity(
             continue;
         }
 
-        let took_sand_chip = event.reactions.iter().any(|r| {
-            matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == &field_slot)
-        });
+        let took_sand_chip = event.reactions.iter().any(
+            |r| matches!(&r.kind, EventKind::DamageDealt { target: t, .. } if t == &field_slot),
+        );
         if took_sand_chip {
             continue;
         }
@@ -6341,7 +7271,10 @@ fn pass_eot_sand_immunity(
                 .as_ref()
                 .is_none_or(|it| !unknown_is_excluded(it, &Item::SafetyGoggles))
         {
-            clause.push(Statement::HasItem { mon_idx, item: Item::SafetyGoggles });
+            clause.push(Statement::HasItem {
+                mon_idx,
+                item: Item::SafetyGoggles,
+            });
         }
 
         for ab in &[
@@ -6355,7 +7288,10 @@ fn pass_eot_sand_immunity(
                 .as_ref()
                 .is_some_and(|pa| unknown_is_excluded(pa, ab));
             if !excluded {
-                clause.push(Statement::HasAbility { mon_idx, ability: ab.clone() });
+                clause.push(Statement::HasAbility {
+                    mon_idx,
+                    ability: ab.clone(),
+                });
             }
         }
 
@@ -6411,7 +7347,9 @@ fn pass_eot_self_status(
         // Extract needed state before any mutable borrow.
         let (mon_item, had_prior_status) = {
             let mon = get_mon_by_idx(state, target_idx);
-            let item = mon.map(|m| m.item.clone()).unwrap_or(Unknown::Not(Vec::new()));
+            let item = mon
+                .map(|m| m.item.clone())
+                .unwrap_or(Unknown::Not(Vec::new()));
             // pass1 hasn't processed this StatusInflicted yet (recursive descent runs
             // after this pass for EndOfTurn reactions), so mon.status is the pre-EOT value.
             let had_status = mon.is_some_and(|m| m.status.is_some());
@@ -6472,7 +7410,10 @@ fn pass2_ground_immune_clause(
     event: &InformationEvent,
     ctx: &BattleContext,
 ) {
-    let EventKind::MoveUsed { targets, move_used, .. } = &event.kind else {
+    let EventKind::MoveUsed {
+        targets, move_used, ..
+    } = &event.kind
+    else {
         return;
     };
     let Some(move_data) = ctx.move_dex.get(move_used) else {
@@ -6494,9 +7435,10 @@ fn pass2_ground_immune_clause(
             continue;
         }
 
-        let immune_on_target = event.reactions.iter().any(|r| {
-            matches!(&r.kind, EventKind::Immune { target: t } if t == target)
-        });
+        let immune_on_target = event
+            .reactions
+            .iter()
+            .any(|r| matches!(&r.kind, EventKind::Immune { target: t } if t == target));
         if !immune_on_target {
             continue;
         }
@@ -6510,12 +7452,18 @@ fn pass2_ground_immune_clause(
             let tm = get_mon_by_idx(state, target_idx);
             let has_magnet_rise = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| {
-                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, _))
+                    matches!(
+                        v,
+                        VolatileStatusState::TurnStatus(VolatileStatus::MagnetRise, _)
+                    )
                 })
             });
             let has_telekinesis = tm.is_some_and(|m| {
                 m.volatiles.iter().any(|v| {
-                    matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::Telekinesis, _))
+                    matches!(
+                        v,
+                        VolatileStatusState::TurnStatus(VolatileStatus::Telekinesis, _)
+                    )
                 })
             });
             (has_magnet_rise, has_telekinesis)
@@ -6542,7 +7490,10 @@ fn pass2_ground_immune_clause(
             .as_ref()
             .is_some_and(|it| unknown_is_excluded(it, &Item::AirBalloon));
         if !ab_excluded {
-            clause.push(Statement::HasItem { mon_idx: target_idx, item: Item::AirBalloon });
+            clause.push(Statement::HasItem {
+                mon_idx: target_idx,
+                item: Item::AirBalloon,
+            });
         }
 
         // Levitate ability.
@@ -6550,7 +7501,10 @@ fn pass2_ground_immune_clause(
             .as_ref()
             .is_some_and(|ab| unknown_is_excluded(ab, &Ability::Levitate));
         if !lev_excluded {
-            clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Levitate });
+            clause.push(Statement::HasAbility {
+                mon_idx: target_idx,
+                ability: Ability::Levitate,
+            });
         }
 
         // Eelevate ability (custom ability with Levitate effect).
@@ -6558,7 +7512,10 @@ fn pass2_ground_immune_clause(
             .as_ref()
             .is_some_and(|ab| unknown_is_excluded(ab, &Ability::Eelevate));
         if !eel_excluded {
-            clause.push(Statement::HasAbility { mon_idx: target_idx, ability: Ability::Eelevate });
+            clause.push(Statement::HasAbility {
+                mon_idx: target_idx,
+                ability: Ability::Eelevate,
+            });
         }
 
         // Earth Eater ability (absorbs Ground-type moves).
@@ -6608,8 +7565,8 @@ fn pass3_damage_to_stats(
     ctx: &BattleContext,
 ) {
     use crate::information::materialize::{materialize_battle, materialize_pokemon};
-    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
     use crate::simulator::DamageConfig;
+    use crate::simulator::helpers::calculate_damage_outcomes_for_target_with_options;
 
     let EventKind::MoveUsed {
         user,
@@ -6661,6 +7618,9 @@ fn pass3_damage_to_stats(
     let Some(user_idx) = mon_idx_for_active_slot(state, user) else {
         return;
     };
+    if ctx.form_changed_slots_this_turn.contains(user) {
+        return;
+    }
 
     // Whether the move has variable BP determined by speed stats (Gyro Ball / Electro Ball).
     let speed_dep_bp = is_speed_dependent_bp(move_used);
@@ -6669,6 +7629,9 @@ fn pass3_damage_to_stats(
     // Multi-hit moves produce multiple DamageDealt reactions per target; we process
     // each hit independently to intersect BSV feasibility constraints.
     for target_slot in targets {
+        if ctx.form_changed_slots_this_turn.contains(target_slot) {
+            continue;
+        }
         let Some(target_idx) = mon_idx_for_active_slot(state, target_slot) else {
             continue;
         };
@@ -6722,7 +7685,8 @@ fn pass3_damage_to_stats(
 
         for reaction in &event.reactions {
             let new_hp = match &reaction.kind {
-                EventKind::Healed { target, new_hp, .. } | EventKind::SetHp { target, new_hp, .. }
+                EventKind::Healed { target, new_hp, .. }
+                | EventKind::SetHp { target, new_hp, .. }
                     if target == target_slot =>
                 {
                     // Baseline moves without being a damaging hit.
@@ -6750,6 +7714,8 @@ fn pass3_damage_to_stats(
                 .reactions
                 .iter()
                 .any(|r| matches!(&r.kind, EventKind::Crit { target } if target == target_slot));
+            let survival_censored =
+                damage_was_survival_censored(event, move_ctx, target_slot, new_hp);
 
             // Per-hit BP override for fixed-BP multi-hit moves (Triple Kick etc.).
             // None for normal multi-hit moves (each hit uses move's base_power).
@@ -6778,7 +7744,7 @@ fn pass3_damage_to_stats(
                         // itself. Any attacker offense strong enough to overkill by an
                         // arbitrary margin produces the exact same observed (0 HP, Faint)
                         // outcome. See `pass3_direction_b`'s `lethal` parameter.
-                        let lethal = *post == 0;
+                        let lethal = *post == 0 || survival_censored;
                         pass3_direction_b(
                             state,
                             event,
@@ -6822,6 +7788,7 @@ fn pass3_damage_to_stats(
                             &current_hp,
                             *pre_pct,
                             *post_pct,
+                            survival_censored,
                             bp_override,
                             speed_dep_bp,
                         );
@@ -6842,7 +7809,8 @@ fn pass3_damage_to_stats(
 fn analytic_fired(ctx: &BattleContext, user_slot: &FieldSlot) -> bool {
     ctx.analytic_last_movers
         .get(ctx.turn_segment)
-        .and_then(|o| o.as_ref()) == Some(user_slot)
+        .and_then(|o| o.as_ref())
+        == Some(user_slot)
 }
 
 /// Returns `true` for moves whose base power depends on one or both mons' Speed stats.
@@ -6858,7 +7826,10 @@ fn is_speed_dependent_bp(move_used: &PokemonMove) -> bool {
 fn is_hp_dependent_bp_move(move_used: &PokemonMove) -> bool {
     matches!(
         move_used,
-        PokemonMove::Eruption | PokemonMove::WaterSpout | PokemonMove::Flail | PokemonMove::Reversal
+        PokemonMove::Eruption
+            | PokemonMove::WaterSpout
+            | PokemonMove::Flail
+            | PokemonMove::Reversal
     )
 }
 
@@ -6940,7 +7911,9 @@ pub(crate) fn offensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Abili
         Ability::Galvanize,
         Ability::Normalize,
         Ability::Dragonize,
-        Ability::Eelevate,
+        // Unaware changes damage whenever the defender has a relevant stat stage:
+        // an attacking holder ignores both positive and negative defensive stages.
+        Ability::Unaware,
         // Analytic: ×1.3 when moving last. In oracle calls the action_queue is empty,
         // so attacker_is_last_mover always returns true → Analytic always fires.
         Ability::Analytic,
@@ -6998,11 +7971,11 @@ fn pruning_move_type(atk_ability: &Ability, move_data: &MoveData) -> PokemonType
     }
     if matches!(move_data.pokemon_type, PokemonType::Normal) {
         let converted = match atk_ability {
-            Ability::Aerilate    => Some(PokemonType::Flying),
-            Ability::Pixilate    => Some(PokemonType::Fairy),
+            Ability::Aerilate => Some(PokemonType::Flying),
+            Ability::Pixilate => Some(PokemonType::Fairy),
             Ability::Refrigerate => Some(PokemonType::Ice),
-            Ability::Dragonize   => Some(PokemonType::Dragon),
-            Ability::Galvanize   => Some(PokemonType::Electric),
+            Ability::Dragonize => Some(PokemonType::Dragon),
+            Ability::Galvanize => Some(PokemonType::Electric),
             _ => None,
         };
         if let Some(t) = converted {
@@ -7012,23 +7985,64 @@ fn pruning_move_type(atk_ability: &Ability, move_data: &MoveData) -> PokemonType
     move_data.pokemon_type.clone()
 }
 
+/// Every effective type this move can have under the attacker's still-possible
+/// type-converting abilities. Pass 3 enumerates item and ability assignments as
+/// pairs, so pruning a type booster against only the move's printed type is
+/// unsound: e.g. Pixilate Hyper Beam is Fairy-type and Fairy Feather boosts it.
+fn possible_pruning_move_types(
+    attacker: &UnknownPokemonState,
+    move_data: &MoveData,
+) -> Vec<PokemonType> {
+    let mut types = vec![move_data.pokemon_type.clone()];
+    let mut add_for = |ability: Ability| {
+        if !unknown_is_excluded(&attacker.possible_abilities, &ability) {
+            let converted = pruning_move_type(&ability, move_data);
+            if !types.contains(&converted) {
+                types.push(converted);
+            }
+        }
+    };
+
+    if matches!(move_data.pokemon_type, PokemonType::Normal) {
+        for ability in [
+            Ability::Aerilate,
+            Ability::Pixilate,
+            Ability::Refrigerate,
+            Ability::Dragonize,
+            Ability::Galvanize,
+        ] {
+            add_for(ability);
+        }
+    }
+    if move_has_flag(move_data, &MoveFlag::Sound) {
+        add_for(Ability::LiquidVoice);
+    }
+    if !unknown_is_excluded(&attacker.possible_abilities, &Ability::Normalize)
+        && !types.contains(&PokemonType::Normal)
+    {
+        types.push(PokemonType::Normal);
+    }
+
+    types
+}
+
 /// Returns the type a type-resist berry absorbs, or `None` for non-berry items.
 fn type_resist_berry_type(item: &Item) -> Option<PokemonType> {
     match item {
-        Item::OccaBerry   => Some(PokemonType::Fire),
+        Item::OccaBerry => Some(PokemonType::Fire),
         Item::PasshoBerry => Some(PokemonType::Water),
-        Item::WacanBerry  => Some(PokemonType::Electric),
-        Item::RindoBerry  => Some(PokemonType::Grass),
-        Item::YacheBerry  => Some(PokemonType::Ice),
+        Item::WacanBerry => Some(PokemonType::Electric),
+        Item::RindoBerry => Some(PokemonType::Grass),
+        Item::YacheBerry => Some(PokemonType::Ice),
         Item::ChopleBerry => Some(PokemonType::Fighting),
-        Item::KebiaBerry  => Some(PokemonType::Poison),
-        Item::ShucaBerry  => Some(PokemonType::Ground),
-        Item::CobaBerry   => Some(PokemonType::Flying),
+        Item::KebiaBerry => Some(PokemonType::Poison),
+        Item::ShucaBerry => Some(PokemonType::Ground),
+        Item::CobaBerry => Some(PokemonType::Flying),
         Item::PayapaBerry => Some(PokemonType::Psychic),
-        Item::TangaBerry  => Some(PokemonType::Bug),
+        Item::TangaBerry => Some(PokemonType::Bug),
         Item::ChartiBerry => Some(PokemonType::Rock),
-        Item::KasibBerry  => Some(PokemonType::Ghost),
-        Item::HabanBerry  => Some(PokemonType::Dragon),
+        Item::KasibBerry => Some(PokemonType::Ghost),
+        Item::HabanBerry => Some(PokemonType::Dragon),
         Item::ColburBerry => Some(PokemonType::Dark),
         Item::BabiriBerry => Some(PokemonType::Steel),
         Item::RoseliBerry => Some(PokemonType::Fairy),
@@ -7040,22 +8054,22 @@ fn type_resist_berry_type(item: &Item) -> Option<PokemonType> {
 /// Returns the type amplified by a type-specific offensive item, or `None`.
 fn type_boosting_item_type(item: &Item) -> Option<PokemonType> {
     match item {
-        Item::Charcoal     => Some(PokemonType::Fire),
-        Item::MysticWater  => Some(PokemonType::Water),
-        Item::SharpBeak    => Some(PokemonType::Flying),
+        Item::Charcoal => Some(PokemonType::Fire),
+        Item::MysticWater => Some(PokemonType::Water),
+        Item::SharpBeak => Some(PokemonType::Flying),
         Item::TwistedSpoon => Some(PokemonType::Psychic),
         Item::BlackGlasses => Some(PokemonType::Dark),
-        Item::PoisonBarb   => Some(PokemonType::Poison),
-        Item::SoftSand     => Some(PokemonType::Ground),
-        Item::HardStone    => Some(PokemonType::Rock),
-        Item::Magnet       => Some(PokemonType::Electric),
-        Item::MetalCoat    => Some(PokemonType::Steel),
+        Item::PoisonBarb => Some(PokemonType::Poison),
+        Item::SoftSand => Some(PokemonType::Ground),
+        Item::HardStone => Some(PokemonType::Rock),
+        Item::Magnet => Some(PokemonType::Electric),
+        Item::MetalCoat => Some(PokemonType::Steel),
         Item::NeverMeltIce => Some(PokemonType::Ice),
-        Item::SilkScarf    => Some(PokemonType::Normal),
-        Item::BlackBelt    => Some(PokemonType::Fighting),
-        Item::SpellTag     => Some(PokemonType::Ghost),
-        Item::MiracleSeed  => Some(PokemonType::Grass),
-        Item::DragonFang   => Some(PokemonType::Dragon),
+        Item::SilkScarf => Some(PokemonType::Normal),
+        Item::BlackBelt => Some(PokemonType::Fighting),
+        Item::SpellTag => Some(PokemonType::Ghost),
+        Item::MiracleSeed => Some(PokemonType::Grass),
+        Item::DragonFang => Some(PokemonType::Dragon),
         Item::FairyFeather => Some(PokemonType::Fairy),
         Item::SilverPowder => Some(PokemonType::Bug),
         _ => None,
@@ -7128,20 +8142,20 @@ pub(crate) fn defensive_damage_items(mon: &UnknownPokemonState) -> Vec<Item> {
 /// above the true value for defenders that could have that ability.
 pub(crate) fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Ability> {
     let mut abilities: Vec<Ability> = [
-        Ability::Filter,       // ×0.75 on super-effective hits
-        Ability::SolidRock,    // ×0.75 on super-effective hits
-        Ability::PrismArmor,   // ×0.75 on super-effective hits (pierces Mold Breaker)
-        Ability::Multiscale,   // ×0.5 at full HP
-        Ability::ShadowShield, // ×0.5 at full HP (Lunala only)
-        Ability::TeraShell,    // all moves → not-very-effective (≈×0.5) at full HP
+        Ability::Filter,        // ×0.75 on super-effective hits
+        Ability::SolidRock,     // ×0.75 on super-effective hits
+        Ability::PrismArmor,    // ×0.75 on super-effective hits (pierces Mold Breaker)
+        Ability::Multiscale,    // ×0.5 at full HP
+        Ability::ShadowShield,  // ×0.5 at full HP (Lunala only)
+        Ability::TeraShell,     // all moves → not-very-effective (≈×0.5) at full HP
         Ability::PurifyingSalt, // ×0.5 to Ghost-type moves
-        Ability::ThickFat,     // ×0.5 to Fire and Ice moves
-        Ability::FurCoat,      // ×0.5 to Physical moves
-        Ability::IceScales,    // ×0.5 to Special moves
-        Ability::Heatproof,    // ×0.5 to Fire moves
-        Ability::Fluffy,       // ×0.5 to contact moves (but ×2 to Fire — oracle handles both)
-        Ability::PunkRock,     // ×0.5 to sound-based moves received
-        Ability::WaterBubble,  // ×0.5 to Fire moves received
+        Ability::ThickFat,      // ×0.5 to Fire and Ice moves
+        Ability::FurCoat,       // ×0.5 to Physical moves
+        Ability::IceScales,     // ×0.5 to Special moves
+        Ability::Heatproof,     // ×0.5 to Fire moves
+        Ability::Fluffy,        // ×0.5 to contact moves (but ×2 to Fire — oracle handles both)
+        Ability::PunkRock,      // ×0.5 to sound-based moves received
+        Ability::WaterBubble,   // ×0.5 to Fire moves received
         // FairyAura: field ability, ×5448/4096 to all Fairy moves for ALL Pokémon on
         // field. When the DEFENDER holds FairyAura, incoming Fairy moves are boosted →
         // a lower defensive BSV + FairyAura can explain the same observed Fairy damage,
@@ -7150,6 +8164,10 @@ pub(crate) fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Abili
         // DrySkin: ×1.25 multiplier on received Fire damage. When the defender has
         // DrySkin, the same Fire damage can be explained by a lower defensive BSV.
         Ability::DrySkin,
+        // A defending Unaware holder ignores both positive and negative offensive
+        // stages on the attacker. This can either reduce or increase damage, so it
+        // belongs in the complete candidate union rather than only the reducers.
+        Ability::Unaware,
     ]
     .iter()
     .filter(|a| !unknown_is_excluded(&mon.possible_abilities, a))
@@ -7184,8 +8202,16 @@ pub(crate) fn achievable_defender_hp_values(
 ) -> Vec<u16> {
     let hp_lo = mon.min_stats[0];
     let hp_hi = mon.max_stats[0];
-    let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.min_ivs[0] };
-    let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.max_ivs[0] };
+    let iv_lo: u8 = if config.force_max_ivs {
+        31
+    } else {
+        mon.min_ivs[0]
+    };
+    let iv_hi: u8 = if config.force_max_ivs {
+        31
+    } else {
+        mon.max_ivs[0]
+    };
 
     // `EV_LATTICE` is only the legal EV set under `--stat-points` mode (`8p-4`).
     // Under full-EV mode every value 0..=252 is legal, so gate on the config the
@@ -7195,7 +8221,11 @@ pub(crate) fn achievable_defender_hp_values(
     // whenever its HP EV isn't one of the 33 lattice values, over-narrowing the
     // Pass 3 defensive-stat search (unsound exclusion).
     let full_ev_range: Vec<u8> = (0..=252).collect();
-    let ev_candidates: &[u8] = if config.use_stat_points { &EV_LATTICE } else { &full_ev_range };
+    let ev_candidates: &[u8] = if config.use_stat_points {
+        &EV_LATTICE
+    } else {
+        &full_ev_range
+    };
 
     let mut vals: Vec<u16> = Vec::with_capacity(33);
     for iv in iv_lo..=iv_hi {
@@ -7287,8 +8317,16 @@ struct NatureClassBound {
 /// `(global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi, per_class,
 /// primary-only CNF booster/reducer items, primary-only CNF booster/reducer
 /// abilities, stat index)`.
-type StatBoundsSearchResult =
-    Option<(Option<u16>, Option<u16>, Option<u16>, Option<u16>, Vec<NatureClassBound>, Vec<Item>, Vec<Ability>, usize)>;
+type StatBoundsSearchResult = Option<(
+    Option<u16>,
+    Option<u16>,
+    Option<u16>,
+    Option<u16>,
+    Vec<NatureClassBound>,
+    Vec<Item>,
+    Vec<Ability>,
+    usize,
+)>;
 
 /// Returns the still-possible nature classes for `stat` on `possible_natures`.
 ///
@@ -7306,9 +8344,12 @@ fn possible_nature_classes(
     si: usize,
 ) -> Vec<(f32, bool, bool)> {
     let boost_natures = bcp::boosting_natures_for_stat(stat);
-    let nerf_natures  = bcp::nerfing_natures_for_stat(stat);
+    let nerf_natures = bcp::nerfing_natures_for_stat(stat);
     let mut classes = Vec::new();
-    if boost_natures.iter().any(|n| !unknown_is_excluded(possible_natures, n)) {
+    if boost_natures
+        .iter()
+        .any(|n| !unknown_is_excluded(possible_natures, n))
+    {
         classes.push((1.1_f32, true, false));
     }
     let any_neutral = ALL_NATURES.iter().any(|n| {
@@ -7319,7 +8360,11 @@ fn possible_nature_classes(
     if any_neutral {
         classes.push((1.0_f32, false, false));
     }
-    if si != 0 && nerf_natures.iter().any(|n| !unknown_is_excluded(possible_natures, n)) {
+    if si != 0
+        && nerf_natures
+            .iter()
+            .any(|n| !unknown_is_excluded(possible_natures, n))
+    {
         classes.push((0.9_f32, false, true));
     }
     classes
@@ -7389,7 +8434,12 @@ fn apply_unconditional_tightening(
 ) -> Option<CrossedBound> {
     let mon = get_mon_mut_by_idx(state, mon_idx)?;
     apply_unconditional_tightening_to_mon(
-        mon, si, global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
+        mon,
+        si,
+        global_bsv_lo,
+        global_bsv_hi,
+        global_stat_lo,
+        global_stat_hi,
     )
 }
 
@@ -7437,10 +8487,18 @@ fn apply_unconditional_tightening_to_mon(
     global_stat_lo: Option<u16>,
     global_stat_hi: Option<u16>,
 ) -> Option<CrossedBound> {
-    let new_bsv_min = global_bsv_lo.map_or(mon.min_pre_nature_stat[si], |lo| lo.max(mon.min_pre_nature_stat[si]));
-    let new_bsv_max = global_bsv_hi.map_or(mon.max_pre_nature_stat[si], |hi| hi.min(mon.max_pre_nature_stat[si]));
+    let new_bsv_min = global_bsv_lo.map_or(mon.min_pre_nature_stat[si], |lo| {
+        lo.max(mon.min_pre_nature_stat[si])
+    });
+    let new_bsv_max = global_bsv_hi.map_or(mon.max_pre_nature_stat[si], |hi| {
+        hi.min(mon.max_pre_nature_stat[si])
+    });
     if new_bsv_min > new_bsv_max {
-        return Some(CrossedBound { window: "pre-nature BSV", min: new_bsv_min, max: new_bsv_max });
+        return Some(CrossedBound {
+            window: "pre-nature BSV",
+            min: new_bsv_min,
+            max: new_bsv_max,
+        });
     }
     mon.min_pre_nature_stat[si] = new_bsv_min;
     mon.max_pre_nature_stat[si] = new_bsv_max;
@@ -7448,7 +8506,11 @@ fn apply_unconditional_tightening_to_mon(
     let new_stat_min = global_stat_lo.map_or(mon.min_stats[si], |lo| lo.max(mon.min_stats[si]));
     let new_stat_max = global_stat_hi.map_or(mon.max_stats[si], |hi| hi.min(mon.max_stats[si]));
     if new_stat_min > new_stat_max {
-        return Some(CrossedBound { window: "post-nature stat", min: new_stat_min, max: new_stat_max });
+        return Some(CrossedBound {
+            window: "post-nature stat",
+            min: new_stat_min,
+            max: new_stat_max,
+        });
     }
     mon.min_stats[si] = new_stat_min;
     mon.max_stats[si] = new_stat_max;
@@ -7479,6 +8541,9 @@ fn apply_unconditional_tightening_to_mon(
 /// stable throughout the loop.
 fn emit_nature_conditional_bounds(
     state: &mut UnknownBattleState,
+    ctx: &BattleContext,
+    observation_slot: &FieldSlot,
+    observation_mon: &UnknownPokemonState,
     mon_idx: usize,
     stat: &crate::state::dex_data::PokemonStat,
     per_class: &[NatureClassBound],
@@ -7499,14 +8564,23 @@ fn emit_nature_conditional_bounds(
             }))],
             // neutral: exclude the class when the nature is definitely a booster or nerf
             (false, false) => vec![
-                Statement::NatureBoostsStat { mon_idx, stat: *stat },
-                Statement::NatureNerfsStat  { mon_idx, stat: *stat },
+                Statement::NatureBoostsStat {
+                    mon_idx,
+                    stat: *stat,
+                },
+                Statement::NatureNerfsStat {
+                    mon_idx,
+                    stat: *stat,
+                },
             ],
         };
 
         let gear_literals: Vec<Statement> = gear_items
             .iter()
-            .map(|i| Statement::HasItem { mon_idx, item: i.clone() })
+            .map(|i| Statement::HasItem {
+                mon_idx,
+                item: i.clone(),
+            })
             .chain(gear_abilities.iter().map(|a| Statement::HasAbility {
                 mon_idx,
                 ability: a.clone(),
@@ -7528,27 +8602,160 @@ fn emit_nature_conditional_bounds(
         // force the bound only once `not_kappa_guards` is independently proven false (i.e.
         // this class is confirmed), the same safe path the gear-escape branch already used.
         if let Some(lo) = cr.bsv_lo_neutral
-            && lo > current_pre_min {
-                let mut clause = not_kappa_guards.clone();
-                clause.push(Statement::EVIVStatGE {
-                    mon_idx,
-                    stat: *stat,
-                    value: lo,
-                });
-                clause.extend(gear_literals.clone());
-                state.predicates.push(clause);
-            }
+            && lo > current_pre_min
+        {
+            let mut clause = not_kappa_guards.clone();
+            clause.push(Statement::EVIVStatGE {
+                mon_idx,
+                stat: *stat,
+                value: lo,
+            });
+            clause.extend(gear_literals.clone());
+            push_temporal_clause(
+                state,
+                ctx,
+                observation_slot,
+                observation_mon,
+                mon_idx,
+                clause,
+            );
+        }
         if let Some(hi) = cr.bsv_hi_neutral
-            && hi < current_pre_max {
-                let mut clause = not_kappa_guards.clone();
-                clause.push(Statement::EVIVStatLE {
-                    mon_idx,
-                    stat: *stat,
-                    value: hi,
-                });
-                clause.extend(gear_literals.clone());
-                state.predicates.push(clause);
+            && hi < current_pre_max
+        {
+            let mut clause = not_kappa_guards.clone();
+            clause.push(Statement::EVIVStatLE {
+                mon_idx,
+                stat: *stat,
+                value: hi,
+            });
+            clause.extend(gear_literals.clone());
+            push_temporal_clause(
+                state,
+                ctx,
+                observation_slot,
+                observation_mon,
+                mon_idx,
+                clause,
+            );
+        }
+    }
+}
+
+/// Build the minimal damage-oracle field without changing either combatant's
+/// observed slot. The old skeleton always stored both Pokemon at index 0 while
+/// still passing the real `FieldSlot`s to damage calculation; a slot-1 attacker
+/// or defender was therefore absent from field lookups used by several modifiers.
+/// Fainted, inert placeholders preserve doubles indexing without introducing
+/// ally abilities or items that are not part of this oracle hypothesis.
+fn materialize_positioned_oracle_battle(
+    state: &UnknownBattleState,
+    attacker: &crate::state::pokemon::PokemonState,
+    target: &crate::state::pokemon::PokemonState,
+    user_slot: &FieldSlot,
+    target_slot: &FieldSlot,
+) -> crate::state::battle::BattleState {
+    use crate::information::materialize::materialize_battle;
+
+    let slots = (state.active_per_side as usize)
+        .max(user_slot.slot_index as usize + 1)
+        .max(target_slot.slot_index as usize + 1);
+    let mut inert = attacker.clone();
+    inert.hp = 0;
+    inert.fainted = true;
+    inert.item = Item::None;
+    inert.ability = Ability::None;
+    inert.volatiles.clear();
+    inert.boosts = [0; 7];
+
+    let mut p1 = vec![inert.clone(); slots];
+    let mut p2 = vec![inert; slots];
+    match user_slot.player {
+        Player::P1 => p1[user_slot.slot_index as usize] = attacker.clone(),
+        Player::P2 => p2[user_slot.slot_index as usize] = attacker.clone(),
+    }
+    match target_slot.player {
+        Player::P1 => p1[target_slot.slot_index as usize] = target.clone(),
+        Player::P2 => p2[target_slot.slot_index as usize] = target.clone(),
+    }
+    materialize_battle(state, p1, p2)
+}
+
+/// Store a clause whose item/ability literals describe the instant of a damage
+/// observation. Pass 3 runs after the complete reaction tree, so a berry may
+/// already be consumed, Knock Off may already have removed an item, or a live
+/// ability may already have changed. Such literals must be resolved against the
+/// observation-time value instead of being left for BCP to evaluate against the
+/// post-reaction state.
+fn push_temporal_clause(
+    state: &mut UnknownBattleState,
+    ctx: &BattleContext,
+    observation_slot: &FieldSlot,
+    observation_mon: &UnknownPokemonState,
+    mon_idx: usize,
+    clause: Vec<Statement>,
+) {
+    let current = get_mon_by_idx(state, mon_idx).cloned();
+    let Some(current) = current else {
+        return;
+    };
+
+    let exact_lost_item = ctx
+        .move_context
+        .as_ref()
+        .and_then(|mc| {
+            mc.item_losses
+                .iter()
+                .find(|(slot, _)| slot == observation_slot)
+        })
+        .map(|(_, item)| item.clone());
+    let observed_item = exact_lost_item
+        .clone()
+        .map(Unknown::Known)
+        .unwrap_or_else(|| observation_mon.item.clone());
+    let item_epoch_ended = exact_lost_item.is_some() || observed_item != current.item;
+    let observed_ability = observation_mon.possible_abilities.clone();
+    let ability_epoch_ended = observed_ability != current.possible_abilities;
+
+    if !item_epoch_ended && !ability_epoch_ended {
+        state.predicates.push(clause);
+        return;
+    }
+
+    let mut normalized = Vec::with_capacity(clause.len());
+    for literal in clause {
+        if item_epoch_ended && statement_is_item_literal_for(&literal, mon_idx) {
+            let value = match &observed_item {
+                Unknown::Known(item) => historical_item_literal_value(&literal, mon_idx, item),
+                _ => None,
+            };
+            match value {
+                Some(true) => return, // historical item satisfies the whole clause
+                Some(false) => continue,
+                None => return, // cannot encode an unresolved historical item safely
             }
+        }
+        if ability_epoch_ended && statement_is_ability_literal_for(&literal, mon_idx) {
+            let value = match &observed_ability {
+                Unknown::Known(ability) => {
+                    historical_ability_literal_value(&literal, mon_idx, ability)
+                }
+                _ => None,
+            };
+            match value {
+                Some(true) => return,
+                Some(false) => continue,
+                None => return,
+            }
+        }
+        normalized.push(literal);
+    }
+
+    // An empty result means every observation-time alternative was definitively
+    // false. The clause itself is therefore not trustworthy evidence; dropping it
+    // is the only sound update and is strictly widening.
+    if !normalized.is_empty() {
+        state.predicates.push(normalized);
     }
 }
 
@@ -7594,9 +8801,22 @@ fn pass3_direction_b(
         .as_ref()
         .and_then(|mc| mc.pre_move_attacker.clone())
         .or_else(|| get_mon_by_idx(state, user_idx).cloned());
-    let Some(attacker_unk) = attacker_unk else {
+    let Some(mut attacker_unk) = attacker_unk else {
         return;
     };
+    // S63: Pass 1 can promote an Illusion hypothesis on this same MoveUsed event
+    // (most commonly because the revealed move is illegal for the disguise).
+    // Pass 3 must still use an observation-time snapshot, but it must use the
+    // snapshot of the identity that survived promotion. Otherwise disguise-species
+    // BSV bounds are computed correctly and then written onto the now-Zoroark live
+    // entry at the same mon_idx.
+    if let Some(live) = get_mon_by_idx(state, user_idx)
+        && !same_known_species(&attacker_unk, live)
+        && let Some(hypothesis) = attacker_unk.possible_illusion_state.as_deref()
+        && same_known_species(hypothesis, live)
+    {
+        attacker_unk = hypothesis.clone();
+    }
     // S26: a Transformed attacker's Atk/SpA are COPIED from the copy source, not
     // derived from its own species base — the BSV inversion here would bound the
     // wrong thing. Skip (the copy source's own stat inference stands on its own).
@@ -7619,16 +8839,39 @@ fn pass3_direction_b(
     // S23: materialize the target at the HP this hit was actually taken at.
     target_unk.hp = hit_pre_hp.clone();
 
-    if let Some((global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi, per_class, booster_items, booster_abilities, si)) =
-        compute_attacker_stat_bounds(
-            state, &attacker_unk, &target_unk, user_slot, target_slot, move_data, off_stat,
-            ctx, is_crit, exact_damage, lethal, bp_override, speed_dep_bp,
-        )
-    {
+    if let Some((
+        global_bsv_lo,
+        global_bsv_hi,
+        global_stat_lo,
+        global_stat_hi,
+        per_class,
+        booster_items,
+        booster_abilities,
+        si,
+    )) = compute_attacker_stat_bounds(
+        state,
+        &attacker_unk,
+        &target_unk,
+        user_slot,
+        target_slot,
+        move_data,
+        off_stat,
+        ctx,
+        is_crit,
+        exact_damage,
+        lethal,
+        bp_override,
+        speed_dep_bp,
+    ) {
         // Apply unconditional tightening.
         if let Some(crossed) = apply_unconditional_tightening(
-            state, user_idx, si,
-            global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
+            state,
+            user_idx,
+            si,
+            global_bsv_lo,
+            global_bsv_hi,
+            global_stat_lo,
+            global_stat_hi,
         ) {
             // Self-heal (S33-style): the oracle's synthetic single-attacker-vs-single-
             // target skeleton doesn't fully reconstruct every piece of party/field state
@@ -7658,8 +8901,15 @@ fn pass3_direction_b(
         // disjuncts. `current_pre_min/max` are read from the pre-tightening clone
         // (attacker_unk) so the "worth emitting" gate is stable throughout the loop.
         emit_nature_conditional_bounds(
-            state, user_idx, off_stat,
-            &per_class, &booster_items, &booster_abilities,
+            state,
+            ctx,
+            user_slot,
+            &attacker_unk,
+            user_idx,
+            off_stat,
+            &per_class,
+            &booster_items,
+            &booster_abilities,
             attacker_unk.min_pre_nature_stat[si],
             attacker_unk.max_pre_nature_stat[si],
         );
@@ -7670,8 +8920,21 @@ fn pass3_direction_b(
     // to key a hypothesis's clause to) — see the plan's scope note.
     if let Some(hyp) = attacker_unk.possible_illusion_state.clone() {
         mirror_pass3_direction_b_onto_hypothesis(
-            state, user_idx, target_idx, *hyp, &target_unk, user_slot, target_slot,
-            move_data, off_stat, ctx, is_crit, exact_damage, lethal, bp_override, speed_dep_bp,
+            state,
+            user_idx,
+            target_idx,
+            *hyp,
+            &target_unk,
+            user_slot,
+            target_slot,
+            move_data,
+            off_stat,
+            ctx,
+            is_crit,
+            exact_damage,
+            lethal,
+            bp_override,
+            speed_dep_bp,
         );
     }
 }
@@ -7715,9 +8978,7 @@ fn resolve_bp_override(
         return bp_override;
     }
     match move_data.name {
-        PokemonMove::LastRespects => {
-            Some(50 + 50 * side_fainted_count(state, user_slot.player))
-        }
+        PokemonMove::LastRespects => Some(50 + 50 * side_fainted_count(state, user_slot.player)),
         PokemonMove::Payback => {
             let target_already_acted = ctx.move_users_this_turn.contains(target_slot);
             Some(if target_already_acted {
@@ -7743,15 +9004,20 @@ fn resolve_bp_override(
 fn side_fainted_count(state: &UnknownBattleState, player: Player) -> u16 {
     let (active, known_back, possible_back, fainted_bucket) = match player {
         Player::P1 => (
-            &state.p1_active_mons, &state.p1_known_back_mons,
-            &state.p1_possible_back_mons, &state.p1_fainted_mons,
+            &state.p1_active_mons,
+            &state.p1_known_back_mons,
+            &state.p1_possible_back_mons,
+            &state.p1_fainted_mons,
         ),
         Player::P2 => (
-            &state.p2_active_mons, &state.p2_known_back_mons,
-            &state.p2_possible_back_mons, &state.p2_fainted_mons,
+            &state.p2_active_mons,
+            &state.p2_known_back_mons,
+            &state.p2_possible_back_mons,
+            &state.p2_fainted_mons,
         ),
     };
-    let still_active_fainted = active.iter()
+    let still_active_fainted = active
+        .iter()
         .chain(known_back.iter())
         .chain(possible_back.iter())
         .filter(|m| m.fainted)
@@ -7806,7 +9072,8 @@ fn compute_attacker_stat_bounds(
     // user's true fainted roster count and Payback's on the target's true turn-order
     // position, neither of which that skeleton can see; resolve both here from the
     // real `state`/`ctx` before it reaches the oracle.
-    let bp_override = resolve_bp_override(state, user_slot, target_slot, move_data, ctx, bp_override);
+    let bp_override =
+        resolve_bp_override(state, user_slot, target_slot, move_data, ctx, bp_override);
 
     // Need known attacker species for BSV-based inference.
     let base_stats = match &attacker_unk.possible_species {
@@ -7838,19 +9105,17 @@ fn compute_attacker_stat_bounds(
     // as a conservative effective type — this is sound because all type-converting
     // abilities (LiquidVoice, -ate) are themselves already in `booster_abilities` and
     // therefore in the oracle run; non-type-converting entries use the raw type.
-    let eff_type_b = move_data.pokemon_type.clone();
+    let possible_eff_types_b = possible_pruning_move_types(attacker_unk, move_data);
     let booster_items = {
         let mut items = offensive_damage_items(attacker_unk);
-        items.retain(|item| {
-            match item {
-                Item::MuscleBand  => matches!(move_data.category, MoveCategory::Physical),
-                Item::WiseGlasses => matches!(move_data.category, MoveCategory::Special),
-                _ => {
-                    if let Some(boost_type) = type_boosting_item_type(item) {
-                        return boost_type == eff_type_b;
-                    }
-                    true
+        items.retain(|item| match item {
+            Item::MuscleBand => matches!(move_data.category, MoveCategory::Physical),
+            Item::WiseGlasses => matches!(move_data.category, MoveCategory::Special),
+            _ => {
+                if let Some(boost_type) = type_boosting_item_type(item) {
+                    return possible_eff_types_b.contains(&boost_type);
                 }
+                true
             }
         });
         items
@@ -7859,16 +9124,19 @@ fn compute_attacker_stat_bounds(
         let mut abilities = offensive_damage_abilities(attacker_unk);
         abilities.retain(|ability| {
             match ability {
-                Ability::IronFist     => move_has_flag(move_data, &MoveFlag::Punch),
-                Ability::StrongJaw    => move_has_flag(move_data, &MoveFlag::Bite),
-                Ability::Sharpness    => move_has_flag(move_data, &MoveFlag::Slicing),
+                Ability::IronFist => move_has_flag(move_data, &MoveFlag::Punch),
+                Ability::StrongJaw => move_has_flag(move_data, &MoveFlag::Bite),
+                Ability::Sharpness => move_has_flag(move_data, &MoveFlag::Slicing),
                 Ability::MegaLauncher => move_has_flag(move_data, &MoveFlag::Pulse),
-                Ability::ToughClaws   => move_has_flag(move_data, &MoveFlag::Contact),
-                Ability::WaterBubble  => matches!(eff_type_b, PokemonType::Water),
-                Ability::FairyAura    => matches!(eff_type_b, PokemonType::Fairy),
-                Ability::LiquidVoice  => move_has_flag(move_data, &MoveFlag::Sound),
+                Ability::ToughClaws => move_has_flag(move_data, &MoveFlag::Contact),
+                Ability::WaterBubble => possible_eff_types_b.contains(&PokemonType::Water),
+                Ability::FairyAura => possible_eff_types_b.contains(&PokemonType::Fairy),
+                Ability::LiquidVoice => move_has_flag(move_data, &MoveFlag::Sound),
                 // MegaSol: perceives Sun → affects Fire (×1.5) and Water (×0.5) only.
-                Ability::MegaSol => matches!(eff_type_b, PokemonType::Fire | PokemonType::Water),
+                Ability::MegaSol => {
+                    possible_eff_types_b.contains(&PokemonType::Fire)
+                        || possible_eff_types_b.contains(&PokemonType::Water)
+                }
                 // Analytic: ×1.3 only when the holder moves LAST this turn.
                 // The oracle's empty action_queue makes attacker_is_last_mover always
                 // true, so keep the ability in the union only when the attacker really
@@ -7952,7 +9220,8 @@ fn compute_attacker_stat_bounds(
     {
         let max_hp = attacker_unk.min_stats[0].max(1) as f64;
         let p = *p as f64;
-        let hp_lo = (((p - 0.5) * max_hp / 100.0).floor() as i64).clamp(1, max_hp as i64 - 1) as u16;
+        let hp_lo =
+            (((p - 0.5) * max_hp / 100.0).floor() as i64).clamp(1, max_hp as i64 - 1) as u16;
         let hp_hi = (((p + 0.5) * max_hp / 100.0).ceil() as i64).clamp(1, max_hp as i64 - 1) as u16;
         attacker_hp_variants.push(Some(PokemonHP::Number(hp_lo)));
         attacker_hp_variants.push(Some(PokemonHP::Number(hp_hi)));
@@ -8098,9 +9367,39 @@ fn compute_attacker_stat_bounds(
         }
     }
 
+    #[cfg(test)]
+    if std::env::var_os("POKERUST_PASS3_TRACE").is_some() {
+        eprintln!(
+            "[PASS3-B] species={:?} move={:?} slots={user_slot:?}->{target_slot:?} \
+             exact_damage={exact_damage} lethal={lethal} crit={is_crit} stat={off_stat:?} \
+             input_bsv=[{bsv_lo},{bsv_hi}] nature_classes={:?} result_bsv={:?}..{:?} \
+             result_stat={:?}..{:?} item={:?} ability={:?} boosts={:?} target_species={:?} \
+             target_stats={:?} target_hp={:?}",
+            attacker_unk.possible_species,
+            move_data.name,
+            nature_classes,
+            global_bsv_lo,
+            global_bsv_hi,
+            global_stat_lo,
+            global_stat_hi,
+            attacker_unk.item,
+            attacker_unk.possible_abilities,
+            attacker_unk.boosts,
+            target_unk.possible_species,
+            target_unk.min_stats,
+            target_unk.hp,
+        );
+    }
+
     Some((
-        global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
-        per_class, booster_items, booster_abilities, si,
+        global_bsv_lo,
+        global_bsv_hi,
+        global_stat_lo,
+        global_stat_hi,
+        per_class,
+        booster_items,
+        booster_abilities,
+        si,
     ))
 }
 
@@ -8159,8 +9458,8 @@ fn mirror_pass3_direction_b_onto_hypothesis(
     // unmodeled joint approximation is not). In practice Direction B only ever fires
     // when the target is the viewer's own (Number-HP-tracked) mon, which never
     // carries a hypothesis, so this is a defensive guard, not a live path today.
-    let target_has_hyp = get_mon_by_idx(state, target_idx)
-        .is_some_and(|t| t.possible_illusion_state.is_some());
+    let target_has_hyp =
+        get_mon_by_idx(state, target_idx).is_some_and(|t| t.possible_illusion_state.is_some());
     // S26 (mirrored): a Transformed hypothesis can't be soundly analyzed this way.
     if target_has_hyp || hyp.pre_transform.is_some() {
         write_back_pass3_hypothesis(state, user_idx, Some(Box::new(hyp)));
@@ -8168,8 +9467,19 @@ fn mirror_pass3_direction_b_onto_hypothesis(
     }
 
     let feasible = match compute_attacker_stat_bounds(
-        state, &hyp, target_unk, user_slot, target_slot, move_data, off_stat,
-        ctx, is_crit, exact_damage, lethal, bp_override, speed_dep_bp,
+        state,
+        &hyp,
+        target_unk,
+        user_slot,
+        target_slot,
+        move_data,
+        off_stat,
+        ctx,
+        is_crit,
+        exact_damage,
+        lethal,
+        bp_override,
+        speed_dep_bp,
     ) {
         None => true, // no new evidence derivable from this hit for this identity
         Some((bsv_lo, bsv_hi, stat_lo, stat_hi, _per_class, _items, _abilities, si)) => {
@@ -8331,20 +9641,20 @@ fn find_feasible_bsv_range_b(
     // search (probes × speed endpoints × item/ability configs) dominated Pass-3 setup
     // cost. RefCell because `run_oracle` is shared by the can_produce / roll_band
     // closures below.
-    let atk_is_p1 = user_slot.player == crate::state::battle::Player::P1;
     let initial_atk = make_atk(bsv_lo, speed_endpoints[0]);
-    let battle_cell = std::cell::RefCell::new(if atk_is_p1 {
-        materialize_battle(state, vec![initial_atk], vec![target_ps.clone()])
-    } else {
-        materialize_battle(state, vec![target_ps.clone()], vec![initial_atk])
-    });
+    let battle_cell = std::cell::RefCell::new(materialize_positioned_oracle_battle(
+        state,
+        &initial_atk,
+        &target_ps,
+        user_slot,
+        target_slot,
+    ));
     let run_oracle = |bsv: u16, spe: u16| -> Vec<(u16, bool, f64)> {
         let atk_ps = make_atk(bsv, spe);
         let mut battle = battle_cell.borrow_mut();
-        if atk_is_p1 {
-            battle.p1_active_mons[0] = atk_ps.clone();
-        } else {
-            battle.p2_active_mons[0] = atk_ps.clone();
+        match user_slot.player {
+            Player::P1 => battle.p1_active_mons[user_slot.slot_index as usize] = atk_ps.clone(),
+            Player::P2 => battle.p2_active_mons[user_slot.slot_index as usize] = atk_ps.clone(),
         }
         calculate_damage_outcomes_for_target_with_options(
             &battle,
@@ -8368,7 +9678,12 @@ fn find_feasible_bsv_range_b(
     let can_produce = |bsv: u16| -> bool {
         speed_endpoints.iter().any(|&spe| {
             run_oracle(bsv, spe).iter().any(|(dmg, crit, _)| {
-                *crit == is_crit && if lethal { *dmg >= exact_damage } else { *dmg == exact_damage }
+                *crit == is_crit
+                    && if lethal {
+                        *dmg >= exact_damage
+                    } else {
+                        *dmg == exact_damage
+                    }
             })
         })
     };
@@ -8478,16 +9793,16 @@ fn find_feasible_bsv_range_a(
     //
     // The battle skeleton is materialized ONCE with a placeholder in the defender
     // slot and swapped per probe — see find_feasible_bsv_range_b for rationale.
-    let atk_is_p1 = user_slot.player == crate::state::battle::Player::P1;
-    let battle_cell = std::cell::RefCell::new(materialize_battle(
+    let battle_cell = std::cell::RefCell::new(materialize_positioned_oracle_battle(
         state,
-        vec![atk_ps.clone()],
-        vec![atk_ps.clone()],
+        atk_ps,
+        atk_ps,
+        user_slot,
+        target_slot,
     ));
     let run_oracle = |bsv: u16, def_spe: u16| -> Vec<(u16, bool, f64)> {
         let item_stat_mult: f64 = match def_item {
-            Item::AssaultVest
-                if matches!(move_data.category, MoveCategory::Special) => 1.5,
+            Item::AssaultVest if matches!(move_data.category, MoveCategory::Special) => 1.5,
             Item::Eviolite => 1.5,
             _ => 1.0,
         };
@@ -8505,20 +9820,32 @@ fn find_feasible_bsv_range_a(
         }
         def_stats[5] = def_spe;
         let def_ps = materialize_pokemon(
-            defender_unk, def_stats, def_item.clone(), def_ability.clone(),
+            defender_unk,
+            def_stats,
+            def_item.clone(),
+            def_ability.clone(),
         );
         let mut battle = battle_cell.borrow_mut();
-        if atk_is_p1 {
-            battle.p1_active_mons[0] = atk_ps.clone();
-            battle.p2_active_mons[0] = def_ps.clone();
-        } else {
-            battle.p1_active_mons[0] = def_ps.clone();
-            battle.p2_active_mons[0] = atk_ps.clone();
+        match user_slot.player {
+            Player::P1 => battle.p1_active_mons[user_slot.slot_index as usize] = atk_ps.clone(),
+            Player::P2 => battle.p2_active_mons[user_slot.slot_index as usize] = atk_ps.clone(),
+        }
+        match target_slot.player {
+            Player::P1 => battle.p1_active_mons[target_slot.slot_index as usize] = def_ps.clone(),
+            Player::P2 => battle.p2_active_mons[target_slot.slot_index as usize] = def_ps.clone(),
         }
         calculate_damage_outcomes_for_target_with_options(
-            &battle, atk_ps, &def_ps,
-            *user_slot, *target_slot,
-            move_data, oracle_config, targets_mult, 1.0, bp_override, None,
+            &battle,
+            atk_ps,
+            &def_ps,
+            *user_slot,
+            *target_slot,
+            move_data,
+            oracle_config,
+            targets_mult,
+            1.0,
+            bp_override,
+            None,
         )
     };
 
@@ -8579,6 +9906,9 @@ fn pass3_direction_a(
     // display buckets, not from the delta alone.
     pre_pct: u8,
     post_pct: u8,
+    // S61: a survival mechanic capped the hit at 1 HP, so the display delta is
+    // only a lower bound on the move's true damage.
+    survival_censored: bool,
     // Per-hit base power override for multi-hit moves.
     bp_override: Option<u16>,
     // True for Gyro Ball / Electro Ball — defender's speed affects BP.
@@ -8631,6 +9961,26 @@ fn pass3_direction_a(
     let Some(mut defender_unk) = defender_unk else {
         return;
     };
+    // S63 mirrored for Direction A: direct damage may emit IllusionEnded before
+    // Pass 3 runs, so select the promoted hypothesis' pre-hit identity rather than
+    // applying disguise-derived defensive bounds to the resolved live mon.
+    if let Some(live) = get_mon_by_idx(state, target_idx)
+        && !same_known_species(&defender_unk, live)
+        && let Some(hypothesis) = defender_unk.possible_illusion_state.as_deref()
+        && same_known_species(hypothesis, live)
+    {
+        defender_unk = hypothesis.clone();
+    }
+    // A damaging forced-switch move nests the replacement Switch under the same
+    // MoveUsed event. Pass 3 runs after that reaction tree, so `target_idx` may now
+    // name the incoming PokÃ©mon even though `defender_unk` correctly snapshots the
+    // outgoing damage recipient. Never write the outgoing species' bounds onto its
+    // replacement (Dragon Tail/Circle Throw/Roar-style lifecycle).
+    if get_mon_by_idx(state, target_idx)
+        .is_some_and(|live| !same_known_species(&defender_unk, live))
+    {
+        return;
+    }
     // S23: materialize the defender at the HP this hit was actually taken at, so
     // full-HP-gated reducers (Multiscale / Shadow Shield / Tera Shell) stay live for
     // the hit that broke full HP.
@@ -8680,16 +10030,40 @@ fn pass3_direction_a(
     };
     let atk_ps = materialize_pokemon(&attacker_unk, atk_stats, atk_item, atk_ability);
 
-    if let Some((global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi, per_class_a, reducer_items, reducer_abilities, si)) =
-        compute_defender_stat_bounds(
-            state, &defender_unk, &atk_ps, user_slot, target_slot, move_data, def_stat,
-            ctx, is_crit, pre_pct, post_pct, bp_override, speed_dep_bp,
-        )
-    {
+    if let Some((
+        global_bsv_lo,
+        global_bsv_hi,
+        global_stat_lo,
+        global_stat_hi,
+        per_class_a,
+        reducer_items,
+        reducer_abilities,
+        si,
+    )) = compute_defender_stat_bounds(
+        state,
+        &defender_unk,
+        &atk_ps,
+        user_slot,
+        target_slot,
+        move_data,
+        def_stat,
+        ctx,
+        is_crit,
+        pre_pct,
+        post_pct,
+        survival_censored,
+        bp_override,
+        speed_dep_bp,
+    ) {
         // Apply unconditional tightening.
         if let Some(crossed) = apply_unconditional_tightening(
-            state, target_idx, si,
-            global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
+            state,
+            target_idx,
+            si,
+            global_bsv_lo,
+            global_bsv_hi,
+            global_stat_lo,
+            global_stat_hi,
         ) {
             // Self-heal (S33-style) — see the identical comment on Direction B's call
             // site for the rationale: a crossed bound here means this hit's derived
@@ -8711,8 +10085,15 @@ fn pass3_direction_a(
         // Direction B's booster role. `current_pre_min/max` come from the
         // pre-tightening clone (defender_unk).
         emit_nature_conditional_bounds(
-            state, target_idx, def_stat,
-            &per_class_a, &reducer_items, &reducer_abilities,
+            state,
+            ctx,
+            target_slot,
+            &defender_unk,
+            target_idx,
+            def_stat,
+            &per_class_a,
+            &reducer_items,
+            &reducer_abilities,
             defender_unk.min_pre_nature_stat[si],
             defender_unk.max_pre_nature_stat[si],
         );
@@ -8727,8 +10108,21 @@ fn pass3_direction_a(
     // enumeration input, not an output written back).
     if let Some(hyp) = defender_unk.possible_illusion_state.clone() {
         mirror_pass3_direction_a_onto_hypothesis(
-            state, target_idx, *hyp, &atk_ps, user_slot, target_slot, move_data,
-            def_stat, ctx, is_crit, pre_pct, post_pct, bp_override, speed_dep_bp,
+            state,
+            target_idx,
+            *hyp,
+            &atk_ps,
+            user_slot,
+            target_slot,
+            move_data,
+            def_stat,
+            ctx,
+            is_crit,
+            pre_pct,
+            post_pct,
+            survival_censored,
+            bp_override,
+            speed_dep_bp,
         );
     }
 }
@@ -8764,6 +10158,7 @@ fn compute_defender_stat_bounds(
     is_crit: bool,
     pre_pct: u8,
     post_pct: u8,
+    survival_censored: bool,
     bp_override: Option<u16>,
     speed_dep_bp: bool,
 ) -> StatBoundsSearchResult {
@@ -8773,7 +10168,8 @@ fn compute_defender_stat_bounds(
     // power depends on the ATTACKER's (user_slot's) true fainted roster count, and
     // Payback's on the TARGET's (target_slot's) true turn-order position — neither of
     // which the oracle's empty-bench/action_queue synthetic skeleton can see on its own.
-    let bp_override = resolve_bp_override(state, user_slot, target_slot, move_data, ctx, bp_override);
+    let bp_override =
+        resolve_bp_override(state, user_slot, target_slot, move_data, ctx, bp_override);
 
     // Need known defender species for BSV inference.
     let base_stats = match &defender_unk.possible_species {
@@ -8852,11 +10248,27 @@ fn compute_defender_stat_bounds(
     let item_presence_dependent_move = move_data.name == PokemonMove::KnockOff;
     let def_items = {
         let mut items = defensive_damage_items(defender_unk);
+        // ItemLost is nested under this same hit, so by the time Pass 3 runs we
+        // know the exact observation-time item even though the live defender is
+        // already empty. Knock Off's 1.5x power depends on the presence of any
+        // removable held item, including mechanically neutral items that are not
+        // part of `defensive_damage_items` (Light Clay, Life Orb, Sitrus Berry,
+        // etc.). Include that exact item in the oracle union.
+        if item_presence_dependent_move
+            && let Some(item) = ctx.move_context.as_ref().and_then(|mc| {
+                mc.item_losses
+                    .iter()
+                    .find(|(slot, _)| slot == target_slot)
+                    .map(|(_, item)| item.clone())
+            })
+            && !items.contains(&item)
+        {
+            items.push(item);
+        }
         items.retain(|item| {
             // AssaultVest: stat-bake handled in run_def_oracle (×1.5 SpD Special only).
             // For Physical moves it contributes nothing — identical to neutral item run.
-            if *item == Item::AssaultVest
-                && matches!(move_data.category, MoveCategory::Physical) {
+            if *item == Item::AssaultVest && matches!(move_data.category, MoveCategory::Physical) {
                 return false;
             }
             // Type-resist berries only trigger when the berry's type matches the
@@ -8875,14 +10287,14 @@ fn compute_defender_stat_bounds(
             match ability {
                 // Category-gated.
                 Ability::IceScales => matches!(move_data.category, MoveCategory::Special),
-                Ability::FurCoat   => matches!(move_data.category, MoveCategory::Physical),
+                Ability::FurCoat => matches!(move_data.category, MoveCategory::Physical),
                 // Type-gated.
-                Ability::Heatproof    => matches!(eff_move_type, PokemonType::Fire),
-                Ability::WaterBubble  => matches!(eff_move_type, PokemonType::Fire),
-                Ability::ThickFat     => matches!(eff_move_type, PokemonType::Fire | PokemonType::Ice),
+                Ability::Heatproof => matches!(eff_move_type, PokemonType::Fire),
+                Ability::WaterBubble => matches!(eff_move_type, PokemonType::Fire),
+                Ability::ThickFat => matches!(eff_move_type, PokemonType::Fire | PokemonType::Ice),
                 Ability::PurifyingSalt => matches!(eff_move_type, PokemonType::Ghost),
-                Ability::FairyAura    => matches!(eff_move_type, PokemonType::Fairy),
-                Ability::DrySkin      => matches!(eff_move_type, PokemonType::Fire),
+                Ability::FairyAura => matches!(eff_move_type, PokemonType::Fairy),
+                Ability::DrySkin => matches!(eff_move_type, PokemonType::Fire),
                 // Flag-gated.
                 Ability::PunkRock => move_has_flag(move_data, &MoveFlag::Sound),
                 // Fluffy: ×0.5 to contact, ×2 to Fire — prune only if neither.
@@ -8919,8 +10331,11 @@ fn compute_defender_stat_bounds(
     let mut per_class_a: Vec<NatureClassBound> = nature_classes
         .iter()
         .map(|&(m, b, n)| NatureClassBound {
-            mod_f32: m, is_boost: b, is_nerf: n,
-            bsv_lo_neutral: None, bsv_hi_neutral: None,
+            mod_f32: m,
+            is_boost: b,
+            is_nerf: n,
+            bsv_lo_neutral: None,
+            bsv_hi_neutral: None,
         })
         .collect();
 
@@ -8948,18 +10363,37 @@ fn compute_defender_stat_bounds(
         // inverted (damage non-increasing in defense) monotonicity. `d_lo` remains
         // sound (a genuine lower bound on true damage) and still constrains the
         // *maximum* defensive BSV (`p_hi`) normally.
-        let d_hi = if post_pct == 0 { u16::MAX } else { d_hi };
+        let d_hi = if post_pct == 0 || survival_censored {
+            u16::MAX
+        } else {
+            d_hi
+        };
 
         for (class_idx, (nat_mod, _is_boost, _is_nerf)) in nature_classes.iter().enumerate() {
             // Thin wrapper so the two call sites below don't repeat the full argument list.
             // Mirrors the shape of Direction B's find_feasible_bsv_range_b calls.
             let search = |di: &Item, da: &Ability| {
                 find_feasible_bsv_range_a(
-                    state, defender_unk, atk_ps,
-                    user_slot, target_slot, move_data,
-                    oracle_config, targets_mult, *nat_mod, si, bsv_lo, bsv_hi,
-                    hp_cand, di, da, &defender_speed_endpoints,
-                    d_lo, d_hi, is_crit, bp_override,
+                    state,
+                    defender_unk,
+                    atk_ps,
+                    user_slot,
+                    target_slot,
+                    move_data,
+                    oracle_config,
+                    targets_mult,
+                    *nat_mod,
+                    si,
+                    bsv_lo,
+                    bsv_hi,
+                    hp_cand,
+                    di,
+                    da,
+                    &defender_speed_endpoints,
+                    d_lo,
+                    d_hi,
+                    is_crit,
+                    bp_override,
                 )
             };
 
@@ -8983,11 +10417,12 @@ fn compute_defender_stat_bounds(
                 for def_ability in &def_abilities {
                     // Reuse the already-computed neutral-gear result when we hit that combo;
                     // find_feasible_bsv_range_a runs a bracketed binary search — not free.
-                    let (lo, hi) = if def_item == &neutral_def_item && def_ability == &neutral_def_ability {
-                        (neutral_lo, neutral_hi)
-                    } else {
-                        search(def_item, def_ability)
-                    };
+                    let (lo, hi) =
+                        if def_item == &neutral_def_item && def_ability == &neutral_def_ability {
+                            (neutral_lo, neutral_hi)
+                        } else {
+                            search(def_item, def_ability)
+                        };
                     if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
                         found_lo_local = Some(found_lo_local.map_or(lo_v, |g: u16| g.min(lo_v)));
                         found_hi_local = Some(found_hi_local.map_or(hi_v, |g: u16| g.max(hi_v)));
@@ -9018,8 +10453,14 @@ fn compute_defender_stat_bounds(
         .collect();
 
     Some((
-        global_bsv_lo, global_bsv_hi, global_stat_lo, global_stat_hi,
-        per_class_a, reducer_items, reducer_abilities, si,
+        global_bsv_lo,
+        global_bsv_hi,
+        global_stat_lo,
+        global_stat_hi,
+        per_class_a,
+        reducer_items,
+        reducer_abilities,
+        si,
     ))
 }
 
@@ -9044,6 +10485,7 @@ fn mirror_pass3_direction_a_onto_hypothesis(
     is_crit: bool,
     pre_pct: u8,
     post_pct: u8,
+    survival_censored: bool,
     bp_override: Option<u16>,
     speed_dep_bp: bool,
 ) {
@@ -9054,8 +10496,20 @@ fn mirror_pass3_direction_a_onto_hypothesis(
     }
 
     let feasible = match compute_defender_stat_bounds(
-        state, &hyp, atk_ps, user_slot, target_slot, move_data, def_stat,
-        ctx, is_crit, pre_pct, post_pct, bp_override, speed_dep_bp,
+        state,
+        &hyp,
+        atk_ps,
+        user_slot,
+        target_slot,
+        move_data,
+        def_stat,
+        ctx,
+        is_crit,
+        pre_pct,
+        post_pct,
+        survival_censored,
+        bp_override,
+        speed_dep_bp,
     ) {
         None => true, // no new evidence derivable from this hit for this identity
         Some((bsv_lo, bsv_hi, stat_lo, stat_hi, _per_class, _items, _abilities, si)) => {
@@ -9101,7 +10555,11 @@ fn snapshot_item_ability_type(
     let tm_item = tm.map(|m| m.item.clone());
     let tm_abilities = tm.map(|m| m.possible_abilities.clone());
     let known_types = tm.and_then(|m| {
-        if let Unknown::Known(ts) = &m.possible_types { Some(ts.clone()) } else { None }
+        if let Unknown::Known(ts) = &m.possible_types {
+            Some(ts.clone())
+        } else {
+            None
+        }
     });
     (tm_item, tm_abilities, known_types)
 }
@@ -9122,9 +10580,7 @@ fn effective_move_priority(
     base_priority: i8,
     terrain: &Option<Terrain>,
 ) -> i8 {
-    if *move_used == PokemonMove::GrassyGlide
-        && *terrain == Some(Terrain::GrassyTerrain)
-    {
+    if *move_used == PokemonMove::GrassyGlide && *terrain == Some(Terrain::GrassyTerrain) {
         base_priority + 1
     } else {
         base_priority
@@ -9182,7 +10638,10 @@ fn priority_lift_escapes(
     if fast_md.category == MoveCategory::Status
         && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Prankster)
     {
-        escapes.push(Statement::HasAbility { mon_idx: fast_idx, ability: Ability::Prankster });
+        escapes.push(Statement::HasAbility {
+            mon_idx: fast_idx,
+            ability: Ability::Prankster,
+        });
     }
     // Gale Wings: +1 to Flying-type moves at full HP (Gen VIII+ condition).
     let fast_at_full_hp = matches!(fast_m.hp, PokemonHP::Percent(100));
@@ -9190,20 +10649,32 @@ fn priority_lift_escapes(
         && fast_at_full_hp
         && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::GaleWings)
     {
-        escapes.push(Statement::HasAbility { mon_idx: fast_idx, ability: Ability::GaleWings });
+        escapes.push(Statement::HasAbility {
+            mon_idx: fast_idx,
+            ability: Ability::GaleWings,
+        });
     }
     // Triage: +3 to draining/healing moves.
     if fast_md.heal_fraction != [0, 0]
         && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Triage)
     {
-        escapes.push(Statement::HasAbility { mon_idx: fast_idx, ability: Ability::Triage });
+        escapes.push(Statement::HasAbility {
+            mon_idx: fast_idx,
+            ability: Ability::Triage,
+        });
     }
     // Quick Claw / Quick Draw (random first-mover item / ability).
     if !unknown_is_excluded(&fast_m.item, &Item::QuickClaw) {
-        escapes.push(Statement::HasItem { mon_idx: fast_idx, item: Item::QuickClaw });
+        escapes.push(Statement::HasItem {
+            mon_idx: fast_idx,
+            item: Item::QuickClaw,
+        });
     }
     if !unknown_is_excluded(&fast_m.possible_abilities, &Ability::QuickDraw) {
-        escapes.push(Statement::HasAbility { mon_idx: fast_idx, ability: Ability::QuickDraw });
+        escapes.push(Statement::HasAbility {
+            mon_idx: fast_idx,
+            ability: Ability::QuickDraw,
+        });
     }
 
     escapes
@@ -9241,6 +10712,10 @@ struct Mover {
     weather: Option<Weather>,
     /// S32: terrain as of just before this mover acted, for the Surge Surfer escape.
     terrain: Option<Terrain>,
+    /// Encore can replace the queued move at execution time. The visible MoveUsed
+    /// event names the replacement, whose priority may differ from the priority that
+    /// actually positioned this action in the queue.
+    priority_may_differ: bool,
 }
 
 /// Deep-scan `reactions` for events that change a mon's Spe boost stage, paralysis
@@ -9265,6 +10740,7 @@ fn update_speed_snapshot_from_reactions(
     trick_room: &mut bool,
     weather: &mut Option<Weather>,
     terrain: &mut Option<Terrain>,
+    priority_may_differ: &mut HashSet<usize>,
 ) {
     for r in reactions {
         match &r.kind {
@@ -9278,7 +10754,11 @@ fn update_speed_snapshot_from_reactions(
                     paralyzed.insert(idx, false);
                 }
             }
-            EventKind::BoostChanged { target, boost_idx: 4, stages } => {
+            EventKind::BoostChanged {
+                target,
+                boost_idx: 4,
+                stages,
+            } => {
                 if let Some(idx) = mon_idx_for_active_slot(state, target) {
                     let cur = *spe_boost.get(&idx).unwrap_or(&0);
                     spe_boost.insert(idx, (cur as i16 + *stages as i16).clamp(-6, 6) as i8);
@@ -9295,16 +10775,45 @@ fn update_speed_snapshot_from_reactions(
                     spe_boost.insert(idx, -cur);
                 }
             }
-            EventKind::SideConditionStart { side, condition: SideCondition::TailWind } => {
+            EventKind::VolatileStart {
+                target,
+                volatile: VolatileStatus::Encore(_),
+            } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    priority_may_differ.insert(idx);
+                }
+            }
+            // A reveal nested under an earlier action may be a live ability change
+            // (Skill Swap, Entrainment, Mummy, etc.). If the recipient acts later,
+            // its execution-time priority can differ from the turn-start ability in
+            // `state`, most visibly when it acquires or loses Prankster. The event
+            // alone cannot distinguish a change from a first reveal, so skipping
+            // this turn's order inference for that later mover is conservative.
+            EventKind::AbilityRevealed { slot, .. } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+                    priority_may_differ.insert(idx);
+                }
+            }
+            EventKind::SideConditionStart {
+                side,
+                condition: SideCondition::TailWind,
+            } => {
                 tailwind.insert(*side, true);
             }
-            EventKind::SideConditionEnd { side, condition: SideCondition::TailWind } => {
+            EventKind::SideConditionEnd {
+                side,
+                condition: SideCondition::TailWind,
+            } => {
                 tailwind.insert(*side, false);
             }
-            EventKind::PseudoWeatherStart { effect: PseudoWeather::TrickRoom } => {
+            EventKind::PseudoWeatherStart {
+                effect: PseudoWeather::TrickRoom,
+            } => {
                 *trick_room = true;
             }
-            EventKind::PseudoWeatherEnd { effect: PseudoWeather::TrickRoom } => {
+            EventKind::PseudoWeatherEnd {
+                effect: PseudoWeather::TrickRoom,
+            } => {
                 *trick_room = false;
             }
             EventKind::WeatherChanged { weather: w } => {
@@ -9316,7 +10825,15 @@ fn update_speed_snapshot_from_reactions(
             _ => {}
         }
         update_speed_snapshot_from_reactions(
-            state, &r.reactions, spe_boost, paralyzed, tailwind, trick_room, weather, terrain,
+            state,
+            &r.reactions,
+            spe_boost,
+            paralyzed,
+            tailwind,
+            trick_room,
+            weather,
+            terrain,
+            priority_may_differ,
         );
     }
 }
@@ -9363,11 +10880,24 @@ fn pass4_speed_from_order(
     let mut spe_boost: HashMap<usize, i8> = HashMap::new();
     let mut paralyzed: HashMap<usize, bool> = HashMap::new();
     let mut tailwind: HashMap<Player, bool> = HashMap::new();
-    tailwind.insert(Player::P1, seed_state.p1_side_conditions.contains(&SideCondition::TailWind));
-    tailwind.insert(Player::P2, seed_state.p2_side_conditions.contains(&SideCondition::TailWind));
-    let mut trick_room = seed_state.pseudo_weathers.contains(&PseudoWeather::TrickRoom);
+    tailwind.insert(
+        Player::P1,
+        seed_state
+            .p1_side_conditions
+            .contains(&SideCondition::TailWind),
+    );
+    tailwind.insert(
+        Player::P2,
+        seed_state
+            .p2_side_conditions
+            .contains(&SideCondition::TailWind),
+    );
+    let mut trick_room = seed_state
+        .pseudo_weathers
+        .contains(&PseudoWeather::TrickRoom);
     let mut weather = seed_state.weather.clone();
     let mut terrain = seed_state.terrain.clone();
+    let mut priority_may_differ: HashSet<usize> = HashSet::new();
 
     // Collect one Mover per top-level MoveUsed event, each carrying a snapshot taken
     // AS OF the point in the scan just before its own MoveUsed — i.e. reflecting
@@ -9388,26 +10918,50 @@ fn pass4_speed_from_order(
         // handler uses, directly to `state`, so later Movers in this scan see the
         // correct value. Idempotent: the real walk applies the identical overwrite
         // again later for real, to the same target values.
-        if let EventKind::MegaEvolution { slot, into } | EventKind::FormeChange { slot, into, .. } = &event.kind
-            && let Some(idx) = mon_idx_for_active_slot(state, slot) {
-                if let (Some(mon), Some(data)) = (get_mon_mut_by_idx(state, idx), dex.get(into)) {
-                    mon.possible_species = Unknown::Known(into.clone());
-                    recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
-                }
-                // Same purge the real walk's MegaEvolution/FormeChange handler performs
-                // (`statement_stale_after_species_reveal`) — applied here too, since this
-                // early recompute now makes a pre-existing SpeedComparison/EVIVStatGE/LE
-                // clause derived against the OLD base-stat table stale immediately, not
-                // just once the real walk gets around to processing this same event.
-                // Without this, the very next line's synchronous `propagate_collected`
-                // can apply a stale pre-mega cap to the freshly-widened bound and panic
-                // before the real walk ever runs.
-                state.predicates.retain(|clause| {
-                    !clause
-                        .iter()
-                        .any(|lit| statement_stale_after_species_reveal(lit, idx))
-                });
+        if let EventKind::MegaEvolution { slot, into } | EventKind::FormeChange { slot, into, .. } =
+            &event.kind
+            && let Some(idx) = mon_idx_for_active_slot(state, slot)
+        {
+            // Pass 4 runs again after the event walk. A later forced switch can
+            // already have replaced this slot by then (Dragon Tail is commonly a
+            // nested reaction); never replay the earlier forme change onto that
+            // different physical PokÃ©mon.
+            let same_individual = matches!(
+                (get_mon_by_idx(seed_state, idx), get_mon_by_idx(state, idx)),
+                (Some(seed), Some(live)) if same_known_species(seed, live)
+            );
+            if !same_individual {
+                update_speed_snapshot_from_reactions(
+                    state,
+                    &event.reactions,
+                    &mut spe_boost,
+                    &mut paralyzed,
+                    &mut tailwind,
+                    &mut trick_room,
+                    &mut weather,
+                    &mut terrain,
+                    &mut priority_may_differ,
+                );
+                continue;
             }
+            if let (Some(mon), Some(data)) = (get_mon_mut_by_idx(state, idx), dex.get(into)) {
+                mon.possible_species = Unknown::Known(into.clone());
+                recompute_stat_bounds_for_species_change(mon, data.base_stats, mon.level);
+            }
+            // Same purge the real walk's MegaEvolution/FormeChange handler performs
+            // (`statement_stale_after_species_reveal`) — applied here too, since this
+            // early recompute now makes a pre-existing SpeedComparison/EVIVStatGE/LE
+            // clause derived against the OLD base-stat table stale immediately, not
+            // just once the real walk gets around to processing this same event.
+            // Without this, the very next line's synchronous `propagate_collected`
+            // can apply a stale pre-mega cap to the freshly-widened bound and panic
+            // before the real walk ever runs.
+            state.predicates.retain(|clause| {
+                !clause
+                    .iter()
+                    .any(|lit| statement_stale_after_species_reveal(lit, idx))
+            });
+        }
         if let EventKind::MoveUsed {
             user, move_used, ..
         } = &event.kind
@@ -9416,12 +10970,13 @@ fn pass4_speed_from_order(
             let mut eff_prio = effective_move_priority(move_used, base_prio, &terrain);
             if let Some(idx) = mon_idx_for_active_slot(state, user) {
                 // Fold in Known priority-lifting abilities to get the tightest bracket.
-                if let (Some(mon), Some(md)) = (get_mon_by_idx(state, idx), move_dex.get(move_used)) {
+                if let (Some(mon), Some(md)) = (get_mon_by_idx(state, idx), move_dex.get(move_used))
+                {
                     eff_prio = fold_known_ability_priority(md, eff_prio, mon);
                 }
-                let s_boost = *spe_boost.entry(idx).or_insert_with(|| {
-                    get_mon_by_idx(seed_state, idx).map_or(0, |m| m.boosts[4])
-                });
+                let s_boost = *spe_boost
+                    .entry(idx)
+                    .or_insert_with(|| get_mon_by_idx(seed_state, idx).map_or(0, |m| m.boosts[4]));
                 let s_para = *paralyzed.entry(idx).or_insert_with(|| {
                     get_mon_by_idx(seed_state, idx)
                         .is_some_and(|m| matches!(m.status, Some(Status::Paralysis)))
@@ -9441,20 +10996,51 @@ fn pass4_speed_from_order(
                     trick_room,
                     weather: weather.clone(),
                     terrain: terrain.clone(),
+                    priority_may_differ: priority_may_differ.contains(&idx),
                 });
             }
         }
         update_speed_snapshot_from_reactions(
-            state, &event.reactions, &mut spe_boost, &mut paralyzed, &mut tailwind,
-            &mut trick_room, &mut weather, &mut terrain,
+            state,
+            &event.reactions,
+            &mut spe_boost,
+            &mut paralyzed,
+            &mut tailwind,
+            &mut trick_room,
+            &mut weather,
+            &mut terrain,
+            &mut priority_may_differ,
         );
     }
 
     for window in move_order.windows(2) {
         let mover0 = &window[0];
         let mover1 = &window[1];
+        if mover0.priority_may_differ || mover1.priority_may_differ {
+            continue;
+        }
         let (p0, idx0, mv0) = (mover0.eff_prio, mover0.mon_idx, &mover0.move_used);
         let (p1, idx1) = (mover1.eff_prio, mover1.mon_idx);
+
+        // Pass 4 runs once before and once after the event walk. On the second run,
+        // a forced switch nested under an earlier move (Dragon Tail / Circle Throw)
+        // may already have rebound one of these active-slot indices to the incoming
+        // Pokemon. The switch handler purged the outgoing occupant's predicates; do
+        // not immediately recreate its historical move-order clause against the new
+        // occupant merely because it now occupies the same slot. The first Pass-4
+        // run already captured the valid pre-switch comparison, and purging it when
+        // that individual leaves is the intended soundness/completeness tradeoff.
+        let occupant_changed = |idx: usize| -> bool {
+            !matches!(
+                (get_mon_by_idx(seed_state, idx), get_mon_by_idx(state, idx)),
+                (Some(seed), Some(live))
+                    if seed.possible_mon_id == live.possible_mon_id
+                        && seed.possible_species == live.possible_species
+            )
+        };
+        if occupant_changed(idx0) || occupant_changed(idx1) {
+            continue;
+        }
 
         // S57: skip this pairing ENTIRELY (both the cross-bracket and same-bracket
         // paths below) if either mon's ability visibly changed LIVE (Skill Swap,
@@ -9473,7 +11059,9 @@ fn pass4_speed_from_order(
         // its own self-heal — silently losing the escape the first call and the
         // ability-change resolution together already captured correctly.
         let ability_changed_live = |idx: usize| -> bool {
-            let (Some(seed_m), Some(live_m)) = (get_mon_by_idx(seed_state, idx), get_mon_by_idx(state, idx)) else {
+            let (Some(seed_m), Some(live_m)) =
+                (get_mon_by_idx(seed_state, idx), get_mon_by_idx(state, idx))
+            else {
                 return false;
             };
             let Unknown::Known(live_ab) = &live_m.possible_abilities else {
@@ -9483,6 +11071,21 @@ fn pass4_speed_from_order(
                 && unknown_is_excluded(&seed_m.possible_abilities, live_ab)
         };
         if ability_changed_live(idx0) || ability_changed_live(idx1) {
+            continue;
+        }
+        // A consumed/removed/transferred item can itself be the historical reason
+        // for this ordering (Choice Scarf, Quick Claw, Custap, Iron Ball, etc.). The
+        // first Pass-4 run records that escape and the item-change handler resolves it
+        // against the outgoing item. Re-deriving the pairing after the event walk
+        // would attach the old ordering to the new item epoch and falsely force the
+        // SpeedComparison, so do not recreate it.
+        let item_changed_live = |idx: usize| -> bool {
+            matches!(
+                (get_mon_by_idx(seed_state, idx), get_mon_by_idx(state, idx)),
+                (Some(seed), Some(live)) if seed.item != live.item
+            )
+        };
+        if item_changed_live(idx0) || item_changed_live(idx1) {
             continue;
         }
 
@@ -9503,7 +11106,8 @@ fn pass4_speed_from_order(
                 // escapes unless a mid-turn switch replaced this slot's occupant.
                 let fast_m_seed = get_mon_by_idx(seed_state, fast_idx);
                 let fast_m_live = get_mon_by_idx(state, fast_idx);
-                let fast_m = if matches!((fast_m_seed, fast_m_live), (Some(s), Some(l)) if s.possible_mon_id == l.possible_mon_id) {
+                let fast_m = if matches!((fast_m_seed, fast_m_live), (Some(s), Some(l)) if s.possible_mon_id == l.possible_mon_id)
+                {
                     fast_m_seed
                 } else {
                     fast_m_live
@@ -9523,11 +11127,11 @@ fn pass4_speed_from_order(
         // FIRST of this pair acted, i.e. as of the moment this pairing's ordering was
         // actually determined — rather than a single global read at Pass 4's call time.
         let trick_room_active = mover0.trick_room;
-        let (fast_idx, slow_idx, fast_move, fast_snap, slow_snap) = if trick_room_active {
+        let (fast_idx, slow_idx, fast_snap, slow_snap) = if trick_room_active {
             // mover1 went second → is the faster mon in normal ordering.
-            (idx1, idx0, mover1.move_used.clone(), mover1, mover0)
+            (idx1, idx0, mover1, mover0)
         } else {
-            (idx0, idx1, mv0.clone(), mover0, mover1)
+            (idx0, idx1, mover0, mover1)
         };
 
         // S36: Tailwind is looked up from `mover0` — the TEMPORALLY EARLIER mover,
@@ -9582,7 +11186,8 @@ fn pass4_speed_from_order(
         // (`possible_mon_id` unchanged — a mid-turn switch replaces the slot's
         // occupant, at which point `seed_state` describes the WRONG mon and falling
         // back to live `state` is the safe/sound choice, same as the status quo).
-        let same_individual = |seed_m: Option<&UnknownPokemonState>, live_m: Option<&UnknownPokemonState>| {
+        let same_individual = |seed_m: Option<&UnknownPokemonState>,
+                               live_m: Option<&UnknownPokemonState>| {
             matches!((seed_m, live_m), (Some(s), Some(l)) if s.possible_mon_id == l.possible_mon_id)
         };
         let fast_mon_seed = get_mon_by_idx(seed_state, fast_idx);
@@ -9599,6 +11204,22 @@ fn pass4_speed_from_order(
         } else {
             slow_mon_live
         };
+        // Forced-first/forced-last effects attach to the PokÃ©mon actually observed
+        // earlier/later, independent of Trick Room's raw-Speed relabeling.
+        let earlier_mon_seed = get_mon_by_idx(seed_state, idx0);
+        let earlier_mon_live = get_mon_by_idx(state, idx0);
+        let earlier_mon = if same_individual(earlier_mon_seed, earlier_mon_live) {
+            earlier_mon_seed
+        } else {
+            earlier_mon_live
+        };
+        let later_mon_seed = get_mon_by_idx(seed_state, idx1);
+        let later_mon_live = get_mon_by_idx(state, idx1);
+        let later_mon = if same_individual(later_mon_seed, later_mon_live) {
+            later_mon_seed
+        } else {
+            later_mon_live
+        };
 
         let mut clause: Vec<Statement> = vec![Statement::SpeedComparison {
             fast_idx,
@@ -9610,16 +11231,26 @@ fn pass4_speed_from_order(
         // (1)+(2) Priority-lift escapes: Quick Claw, Quick Draw, Prankster, Gale Wings, Triage.
         // Extracted from the cross-bracket path (where these are the *whole* clause) to
         // avoid the identical logic being maintained in two places.
-        clause.extend(priority_lift_escapes(fast_mon, fast_idx, &fast_move, move_dex));
+        clause.extend(priority_lift_escapes(earlier_mon, idx0, mv0, move_dex));
 
         // (3) Stall on the slow mon: Stall forces the holder to always go last
         //     within its priority bracket regardless of speed.
-        if slow_mon.is_some_and(|m| {
-            !unknown_is_excluded(&m.possible_abilities, &Ability::Stall)
-        }) {
+        if later_mon.is_some_and(|m| !unknown_is_excluded(&m.possible_abilities, &Ability::Stall)) {
             clause.push(Statement::HasAbility {
-                mon_idx: slow_idx,
+                mon_idx: idx1,
                 ability: Ability::Stall,
+            });
+        }
+        if move_dex
+            .get(&mover1.move_used)
+            .is_some_and(|md| md.category == MoveCategory::Status)
+            && later_mon.is_some_and(|m| {
+                !unknown_is_excluded(&m.possible_abilities, &Ability::MyceliumMight)
+            })
+        {
+            clause.push(Statement::HasAbility {
+                mon_idx: idx1,
+                ability: Ability::MyceliumMight,
             });
         }
 
@@ -9632,14 +11263,24 @@ fn pass4_speed_from_order(
             });
         }
 
-        // (5) Speed-reducing items on the slow mon: these force the holder to go last
-        //     in its bracket, explaining the ordering without implying a speed edge.
-        if let Some(slow_m) = slow_mon {
-            for slow_item in [Item::IronBall, Item::LaggingTail, Item::FullIncense] {
-                if !unknown_is_excluded(&slow_m.item, &slow_item) {
+        // (5) Iron Ball halves Speed, so it belongs on the raw-speed loser (the
+        // observed earlier mover under Trick Room).
+        if let Some(slow_m) = slow_mon
+            && !unknown_is_excluded(&slow_m.item, &Item::IronBall)
+        {
+            clause.push(Statement::HasItem {
+                mon_idx: slow_idx,
+                item: Item::IronBall,
+            });
+        }
+        // Lagging Tail and Full Incense force their holder to be the observed later
+        // mover regardless of Trick Room; unlike Iron Ball they do not alter Speed.
+        if let Some(later_m) = later_mon {
+            for item in [Item::LaggingTail, Item::FullIncense] {
+                if !unknown_is_excluded(&later_m.item, &item) {
                     clause.push(Statement::HasItem {
-                        mon_idx: slow_idx,
-                        item: slow_item,
+                        mon_idx: idx1,
+                        item,
                     });
                 }
             }
@@ -9648,17 +11289,17 @@ fn pass4_speed_from_order(
         // (5b) Custap Berry on the fast mon: activates at ≤25% HP and forces the holder
         //      to move first in its priority bracket regardless of speed. Include as an
         //      escape disjunct when the fast mon might be at ≤25% HP (S3 soundness fix).
-        if let Some(fast_m) = fast_mon {
-            let custap_possible = match &fast_m.hp {
+        if let Some(earlier_m) = earlier_mon {
+            let custap_possible = match &earlier_m.hp {
                 PokemonHP::Percent(p) => *p <= 25,
                 PokemonHP::Number(n) => {
-                    let max_hp = fast_m.max_stats[0].max(1) as u32;
+                    let max_hp = earlier_m.max_stats[0].max(1) as u32;
                     (*n as u32).saturating_mul(100) / max_hp <= 25
                 }
             };
-            if custap_possible && !unknown_is_excluded(&fast_m.item, &Item::CustapBerry) {
+            if custap_possible && !unknown_is_excluded(&earlier_m.item, &Item::CustapBerry) {
                 clause.push(Statement::HasItem {
-                    mon_idx: fast_idx,
+                    mon_idx: idx0,
                     item: Item::CustapBerry,
                 });
             }
@@ -9671,15 +11312,20 @@ fn pass4_speed_from_order(
         //     end-of-turn weather, not what was active when this pair raced.
         if let Some(fast_m) = fast_mon {
             let pairing_weather = &mover0.weather;
-            let is_rain = matches!(pairing_weather, Some(Weather::Rain) | Some(Weather::HeavyRain));
+            let is_rain = matches!(
+                pairing_weather,
+                Some(Weather::Rain) | Some(Weather::HeavyRain)
+            );
             if is_rain && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::SwiftSwim) {
                 clause.push(Statement::HasAbility {
                     mon_idx: fast_idx,
                     ability: Ability::SwiftSwim,
                 });
             }
-            let is_sun =
-                matches!(pairing_weather, Some(Weather::Sun) | Some(Weather::ExtremeSunlight));
+            let is_sun = matches!(
+                pairing_weather,
+                Some(Weather::Sun) | Some(Weather::ExtremeSunlight)
+            );
             if is_sun && !unknown_is_excluded(&fast_m.possible_abilities, &Ability::Chlorophyll) {
                 clause.push(Statement::HasAbility {
                     mon_idx: fast_idx,
@@ -9770,7 +11416,11 @@ fn compute_speed_multipliers(
     // Stage multiplier as (numerator, denominator).
     let stage_frac = |stage: i8| -> (u32, u32) {
         let s = stage.clamp(-6, 6);
-        if s >= 0 { (2 + s as u32, 2) } else { (2, 2 + (-s) as u32) }
+        if s >= 0 {
+            (2 + s as u32, 2)
+        } else {
+            (2, 2 + (-s) as u32)
+        }
     };
 
     let (fn_, fd) = stage_frac(fast_boost);
@@ -9838,14 +11488,26 @@ pub fn pass5_back_solve(
     // value 0..=252 is legal, and testing only the lattice would incorrectly force
     // `min_evs`/`max_evs` toward lattice values even when the true EV isn't one.
     let full_ev_range: Vec<u8> = (0..=252).collect();
-    let ev_candidates: &[u8] = if config.use_stat_points { &EV_LATTICE } else { &full_ev_range };
+    let ev_candidates: &[u8] = if config.use_stat_points {
+        &EV_LATTICE
+    } else {
+        &full_ev_range
+    };
 
     // ── HP (stat_i = 0, no nature modifier) ──────────────────────────────────
     {
         let s_min = mon.min_stats[0];
         let s_max = mon.max_stats[0];
-        let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.min_ivs[0] };
-        let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.max_ivs[0] };
+        let iv_lo: u8 = if config.force_max_ivs {
+            31
+        } else {
+            mon.min_ivs[0]
+        };
+        let iv_hi: u8 = if config.force_max_ivs {
+            31
+        } else {
+            mon.max_ivs[0]
+        };
         let mut min_ev: Option<u8> = None;
         let mut max_ev: Option<u8> = None;
         let mut any = false;
@@ -9892,13 +11554,15 @@ pub fn pass5_back_solve(
             return pass5_back_solve(mon, idx, config, dex);
         }
         if let Some(lo) = min_ev
-            && lo > mon.min_evs[0] {
-                mon.min_evs[0] = lo;
-            }
+            && lo > mon.min_evs[0]
+        {
+            mon.min_evs[0] = lo;
+        }
         if let Some(hi) = max_ev
-            && hi < mon.max_evs[0] {
-                mon.max_evs[0] = hi;
-            }
+            && hi < mon.max_evs[0]
+        {
+            mon.max_evs[0] = hi;
+        }
     }
 
     // ── Non-HP stats (stat_i = 1..=5) ────────────────────────────────────────
@@ -9984,13 +11648,15 @@ pub fn pass5_back_solve(
         }
 
         if let Some(lo) = global_min_ev
-            && lo > mon.min_evs[stat_i] {
-                mon.min_evs[stat_i] = lo;
-            }
+            && lo > mon.min_evs[stat_i]
+        {
+            mon.min_evs[stat_i] = lo;
+        }
         if let Some(hi) = global_max_ev
-            && hi < mon.max_evs[stat_i] {
-                mon.max_evs[stat_i] = hi;
-            }
+            && hi < mon.max_evs[stat_i]
+        {
+            mon.max_evs[stat_i] = hi;
+        }
     }
 
     // Eliminate natures that were impossible for any stat.
@@ -10018,7 +11684,11 @@ pub fn pass5_back_solve(
     // Invariant: Σ_i evs[i] ≤ cap  →  evs[i] ≤ cap − Σ_{j≠i} min_evs[j].
     if let Some(cap) = config.ev_total_cap {
         let min_ev_sum: u16 = (0..6).map(|i| mon.min_evs[i] as u16).sum();
-        let ev_lattice = if config.use_stat_points { Some(ev_candidates) } else { None };
+        let ev_lattice = if config.use_stat_points {
+            Some(ev_candidates)
+        } else {
+            None
+        };
 
         for stat_i in 0..6 {
             let other_min_sum = min_ev_sum - mon.min_evs[stat_i] as u16;
@@ -10075,4 +11745,3 @@ const ALL_NATURES: &[Nature] = &[
     Nature::Naive,
     Nature::Serious,
 ];
-

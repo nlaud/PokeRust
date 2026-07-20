@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom'
 import NavBar from './components/layout/NavBar'
 import SettingsSidebar from './components/layout/SettingsSidebar'
+import BenchmarkingPage from './pages/BenchmarkingPage'
 import SimulatePage from './pages/SimulatePage'
 import TeamsPage from './pages/TeamsPage'
 import FormatsPage from './pages/FormatsPage'
@@ -15,6 +16,7 @@ export default function App() {
           <Route path="/" element={<TeamsPage />} />
           <Route path="/formats" element={<FormatsPage />} />
           <Route path="/simulate" element={<SimulatePage />} />
+          <Route path="/benchmark" element={<BenchmarkingPage />} />
         </Routes>
       </main>
       <SettingsSidebar />

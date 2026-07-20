@@ -2,6 +2,14 @@
 
 > Keep `CLAUDE.md` and `AGENTS.md` synchronized: whenever either file is updated, apply the same update to the other.
 
+## Documentation map
+
+- `README.md` (repo root) — CLI/web-UI usage and benchmark commands.
+- `frontend/README.md` — web UI: running the dev server, architecture, frontend-specific mechanics notes.
+- `poke_rust/src/information/README.md` — design doc for the fog-of-war inference engine; read before touching that module.
+- `meta_scraper/README.md` — Python tool that caches Pokémon Champions competitive usage stats.
+- `poke_rust/benches/RESULTS.md` — recorded turn-resolution benchmark results and analysis.
+
 ## Project Status
 
 The backend is a mature, heavily-tested probabilistic battle simulator: turn
@@ -130,11 +138,10 @@ information/              Fog-of-war inference engine (partial-information
   materialize.rs            Turns a fog-of-war hypothesis back into a concrete
                           PokemonState/BattleState for the damage calc to use
   README.md                Full design doc for this module — read before touching it
-  AUDIT.md                 Running soundness-bug log (S1–S29) with regression tests
 tests/
   simulator_tests.rs        Main battle-mechanics test suite (~33,700 lines)
   inference_tests.rs         Inference-engine regression tests, named
-                          test_s<NN>_*/roundtrip_s<NN>_* after the AUDIT.md finding
+                          test_s<NN>_*/roundtrip_s<NN>_* after the soundness finding
   simuilator_test_helpers.rs Test builders/helpers (battle builders, damage
                           helpers, assert functions)
 helper_scripts/            Python scripts to regenerate data/ enums from Showdown source files
@@ -217,10 +224,11 @@ presence-absence → damage→stat-bounds → EV/IV/nature back-solve → boolea
 constraint propagation to a fixpoint). The full design — the
 `InformationEvent`/`EventKind` event vocabulary, the `Unknown<T>` lattice, the
 CNF `Statement` predicate store, and each pass in depth — is documented in
-`information/README.md`; don't duplicate that detail here. `information/AUDIT.md`
-logs every soundness bug found and fixed in this engine (S1–S29) with its
-regression test — **read both before modifying this module**, in the same
-spirit as the Bulbapedia research rule above.
+`information/README.md`; don't duplicate that detail here. **Read it before
+modifying this module**, in the same spirit as the Bulbapedia research rule
+above. There is no separate audit log — soundness-bug history lives in inline
+comments, regression tests (`test_s<NN>_*`/`roundtrip_s<NN>_*` in
+`inference_tests.rs`), and git log.
 
 ### Global configuration
 
@@ -243,7 +251,7 @@ Tests live in `tests/simulator_tests.rs` (battle mechanics) and
 - `hit_probability()` — compute hit chance across branches
 
 Inference regression tests are named `test_s<NN>_*` / `roundtrip_s<NN>_*` after
-the `AUDIT.md` finding they cover.
+the soundness finding they cover (see git log for the finding's history).
 
 ## Frontend
 

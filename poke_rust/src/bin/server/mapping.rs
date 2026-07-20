@@ -13,10 +13,12 @@ use poke_rust::information::information::{CantReason, EventKind, InformationEven
 use poke_rust::information::unknowns::{
     PokemonHP, Unknown, UnknownBattleState, UnknownMatchState, UnknownPokemonState,
 };
-use poke_rust::state::battle::{BattleCommand, BattleState, FieldSlot, MatchState, Player, TeamPreviewState};
+use poke_rust::state::battle::{
+    BattleCommand, BattleState, FieldSlot, MatchState, Player, TeamPreviewState,
+};
 use poke_rust::state::dex_data::{SideCondition, SlotCondition, Status, VolatileStatus};
 use poke_rust::state::pokemon::{PokemonState, VolatileStatusState};
-use poke_rust::user::{battle_command_description, back_mon_name, humanize_identifier, move_name};
+use poke_rust::user::{back_mon_name, battle_command_description, humanize_identifier, move_name};
 
 pub fn player_dto(player: Player) -> PlayerDto {
     match player {
@@ -157,7 +159,10 @@ pub fn pokemon_view(mon: &PokemonState, is_own_side: bool) -> PokemonView {
         level: mon.level,
         gender: format!("{:?}", mon.gender),
         types: mon.types.iter().map(|t| format!("{:?}", t)).collect(),
-        hp: ObservedHpDto { exact: Some(mon.hp), percent: None },
+        hp: ObservedHpDto {
+            exact: Some(mon.hp),
+            percent: None,
+        },
         fainted: mon.fainted,
         status: mon.status.as_ref().map(status_dto),
         volatiles: mon.volatiles.iter().map(volatile_dto).collect(),
@@ -246,19 +251,26 @@ fn mask_pokemon_view(
     // `view.volatiles` from the raw ground truth here (rather than trust what
     // `pokemon_view` already put there) so this is the one place that can drop it.
     let item_is_confirmed_choice = |it: &Unknown<Item>| {
-        matches!(it, Unknown::Known(Item::ChoiceBand | Item::ChoiceSpecs | Item::ChoiceScarf))
+        matches!(
+            it,
+            Unknown::Known(Item::ChoiceBand | Item::ChoiceSpecs | Item::ChoiceScarf)
+        )
     };
-    let choice_lock_provable =
-        item_is_confirmed_choice(&unk.item) || hyp.is_some_and(|h| item_is_confirmed_choice(&h.item));
+    let choice_lock_provable = item_is_confirmed_choice(&unk.item)
+        || hyp.is_some_and(|h| item_is_confirmed_choice(&h.item));
     view.volatiles = mon_volatiles
         .iter()
         .filter(|v| {
             choice_lock_provable
-                || !matches!(v, VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(_), _))
+                || !matches!(
+                    v,
+                    VolatileStatusState::TurnStatus(VolatileStatus::ChoiceLock(_), _)
+                )
         })
         .map(volatile_dto)
         .collect();
-    view.ability = describe_unknown_union(&unk.possible_abilities, hyp.map(|h| &h.possible_abilities));
+    view.ability =
+        describe_unknown_union(&unk.possible_abilities, hyp.map(|h| &h.possible_abilities));
     view.moves = (0..4)
         .map(|i| {
             Some(MoveViewDto {
@@ -368,16 +380,26 @@ fn bench_pokemon_view_from_belief(
         evs: merge_evs_min(&unk.min_evs, hyp.map(|h| &h.min_evs)),
         evs_max: merge_evs_max(&unk.max_evs, hyp.map(|h| &h.max_evs)),
         item: None,
-        ability: describe_unknown_union(&unk.possible_abilities, hyp.map(|h| &h.possible_abilities)),
+        ability: describe_unknown_union(
+            &unk.possible_abilities,
+            hyp.map(|h| &h.possible_abilities),
+        ),
         moves: Vec::new(),
         is_tera: unk.is_tera,
-        tera_type: describe_unknown_union(&unk.possible_tera_type, hyp.map(|h| &h.possible_tera_type)),
+        tera_type: describe_unknown_union(
+            &unk.possible_tera_type,
+            hyp.map(|h| &h.possible_tera_type),
+        ),
         is_mega: unk.is_mega,
         is_illusion_suspected: hyp.is_some(),
     };
     view.item = match (&unk.item, hyp) {
         (Unknown::Known(Item::None), None) => None,
-        (primary, _) => Some(describe_unknown_item_union(primary, hyp.map(|h| &h.item), legal_items)),
+        (primary, _) => Some(describe_unknown_item_union(
+            primary,
+            hyp.map(|h| &h.item),
+            legal_items,
+        )),
     };
     view.moves = (0..4)
         .map(|i| {
@@ -453,7 +475,11 @@ fn side_view(
     // back mons are rendered straight from the belief alone (see
     // `bench_pokemon_view_from_belief`'s doc comment for why no concrete pairing is
     // attempted there).
-    let fog = if player != perspective { belief_battle_state(belief) } else { None };
+    let fog = if player != perspective {
+        belief_battle_state(belief)
+    } else {
+        None
+    };
 
     let (active_views, back_views, possible_back_views, fainted_views) = match fog {
         Some(fog) => {
@@ -586,12 +612,17 @@ fn preview_view(
     // The belief's `p1_mons`/`p2_mons` are physically bound (see `side_view`'s doc
     // comment) — mask physical p1 against `belief.p1_mons`, physical p2 against
     // `belief.p2_mons`, never a constant side.
-    let (fog_p1_mons, fog_p2_mons): (Option<&[UnknownPokemonState]>, Option<&[UnknownPokemonState]>) =
-        match belief {
-            Some(UnknownMatchState::TeamPreview(fog)) => (Some(&fog.p1_mons), Some(&fog.p2_mons)),
-            _ => (None, None),
-        };
-    let mask_side = |mons: &[PokemonState], is_own_side: bool, fog_mons: Option<&[UnknownPokemonState]>| -> Vec<PokemonView> {
+    let (fog_p1_mons, fog_p2_mons): (
+        Option<&[UnknownPokemonState]>,
+        Option<&[UnknownPokemonState]>,
+    ) = match belief {
+        Some(UnknownMatchState::TeamPreview(fog)) => (Some(&fog.p1_mons), Some(&fog.p2_mons)),
+        _ => (None, None),
+    };
+    let mask_side = |mons: &[PokemonState],
+                     is_own_side: bool,
+                     fog_mons: Option<&[UnknownPokemonState]>|
+     -> Vec<PokemonView> {
         mons.iter()
             .enumerate()
             .map(|(i, mon)| {
@@ -648,30 +679,66 @@ pub fn battle_view(
         }
         MatchState::BattleState(battle) => {
             view.turn_number = battle.turn_number;
-            view.p1 = Some(side_view(battle, Player::P1, belief, perspective, legal_items));
-            view.p2 = Some(side_view(battle, Player::P2, belief, perspective, legal_items));
+            view.p1 = Some(side_view(
+                battle,
+                Player::P1,
+                belief,
+                perspective,
+                legal_items,
+            ));
+            view.p2 = Some(side_view(
+                battle,
+                Player::P2,
+                belief,
+                perspective,
+                legal_items,
+            ));
             view.field = Some(field_view(battle));
             view.self_switch = battle
                 .self_switch_pending
                 .map(|(slot, _)| field_slot_dto(slot));
             view.belief = belief_battle_state(belief).map(|fog| BeliefView {
-                clauses: fog.predicates.iter().map(|clause| describe_clause(clause, fog)).collect(),
+                clauses: fog
+                    .predicates
+                    .iter()
+                    .map(|clause| describe_clause(clause, fog))
+                    .collect(),
             });
         }
-        MatchState::GameOverState { winner, final_state, .. } => {
+        MatchState::GameOverState {
+            winner,
+            final_state,
+            ..
+        } => {
             view.winner = Some(player_dto(*winner));
             // Show the field as it stood when the battle ended (fainted mon,
             // final HP) behind the winner overlay.
             view.turn_number = final_state.turn_number;
-            view.p1 = Some(side_view(final_state, Player::P1, belief, perspective, legal_items));
-            view.p2 = Some(side_view(final_state, Player::P2, belief, perspective, legal_items));
+            view.p1 = Some(side_view(
+                final_state,
+                Player::P1,
+                belief,
+                perspective,
+                legal_items,
+            ));
+            view.p2 = Some(side_view(
+                final_state,
+                Player::P2,
+                belief,
+                perspective,
+                legal_items,
+            ));
             view.field = Some(field_view(final_state));
             // Mirror the BattleState arm: the belief is still tracked (session.rs
             // never clears belief_p1/belief_p2 at game over), so the Predicates tab's
             // final deductions should stay visible instead of vanishing the instant
             // the match ends.
             view.belief = belief_battle_state(belief).map(|fog| BeliefView {
-                clauses: fog.predicates.iter().map(|clause| describe_clause(clause, fog)).collect(),
+                clauses: fog
+                    .predicates
+                    .iter()
+                    .map(|clause| describe_clause(clause, fog))
+                    .collect(),
             });
         }
     }
@@ -726,7 +793,12 @@ pub fn battle_command_from_dto(dto: &BattleCommandDto) -> BattleCommand {
 
 /// Short label for a command button: the move name for attacks, the incoming
 /// Pokémon for switches.
-fn command_label(state: &BattleState, player: Player, slot_idx: usize, command: &BattleCommand) -> Option<String> {
+fn command_label(
+    state: &BattleState,
+    player: Player,
+    slot_idx: usize,
+    command: &BattleCommand,
+) -> Option<String> {
     let active_mon = match player {
         Player::P1 => state.p1_active_mons.get(slot_idx),
         Player::P2 => state.p2_active_mons.get(slot_idx),
@@ -1017,7 +1089,13 @@ mod tests {
         let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
 
         let preview = simulator::team_preview_state_from_team_strings(
-            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+            TEAM_P1,
+            TEAM_P2,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            1,
+            true,
         );
 
         let belief_p2 = poke_rust::information::unknowns::UnknownMatchState::team_preview_open_sheet_from_perspective(
@@ -1036,7 +1114,10 @@ mod tests {
 
         assert_eq!(view.p1_mons.len(), 1);
         let p1_mon = &view.p1_mons[0];
-        assert_eq!(p1_mon.species, "Aerodactyl", "P1 tab must show P1's species");
+        assert_eq!(
+            p1_mon.species, "Aerodactyl",
+            "P1 tab must show P1's species"
+        );
         assert_eq!(
             p1_mon.item.as_deref(),
             Some("Aerodactylite"),
@@ -1046,7 +1127,12 @@ mod tests {
             p1_mon.ability, "Unnerve",
             "P1's ability must show (Unnerve), not P2's (Multiscale)"
         );
-        let move_names: Vec<&str> = p1_mon.moves.iter().flatten().map(|m| m.name.as_str()).collect();
+        let move_names: Vec<&str> = p1_mon
+            .moves
+            .iter()
+            .flatten()
+            .map(|m| m.name.as_str())
+            .collect();
         assert_eq!(
             move_names,
             vec!["Rock Slide", "Dual Wingbeat", "Tailwind", "Protect"],
@@ -1069,13 +1155,26 @@ mod tests {
         let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
         let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
 
-        let team_p1_two = format!("{TEAM_P1}\nCharizard @ Charizardite Y\nAbility: Blaze\nLevel: 50\nEVs: 32 HP / 10 Def / 11 SpA / 13 Spe\nModest Nature\n- Heat Wave\n- Weather Ball\n- Solar Beam\n- Protect\n");
-        let team_p2_two = format!("{TEAM_P2}\nTyranitar @ Sitrus Berry\nAbility: Sand Stream\nLevel: 50\nEVs: 252 HP / 4 Atk / 252 SpD\nCareful Nature\n- Rock Slide\n- Crunch\n- Earthquake\n- Protect\n");
+        let team_p1_two = format!(
+            "{TEAM_P1}\nCharizard @ Charizardite Y\nAbility: Blaze\nLevel: 50\nEVs: 32 HP / 10 Def / 11 SpA / 13 Spe\nModest Nature\n- Heat Wave\n- Weather Ball\n- Solar Beam\n- Protect\n"
+        );
+        let team_p2_two = format!(
+            "{TEAM_P2}\nTyranitar @ Sitrus Berry\nAbility: Sand Stream\nLevel: 50\nEVs: 252 HP / 4 Atk / 252 SpD\nCareful Nature\n- Rock Slide\n- Crunch\n- Earthquake\n- Protect\n"
+        );
 
         let preview = simulator::team_preview_state_from_team_strings(
-            &team_p1_two, &team_p2_two, &pokemon_dex, &move_dex, 1, 2, true,
+            &team_p1_two,
+            &team_p2_two,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            2,
+            true,
         );
-        let p1_tp = poke_rust::state::battle::TeamPreviewCommand { active_indices: vec![0], back_indices: vec![1] };
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![1],
+        };
         let p2_tp = p1_tp.clone();
         let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
         let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
@@ -1090,8 +1189,10 @@ mod tests {
         };
         let battle_belief_p2 = UnknownMatchState::Battle(tp_belief_p2.into_battle_state(
             Player::P2,
-            &p1_tp.active_indices, &p1_tp.back_indices,
-            &p2_tp.active_indices, &p2_tp.back_indices,
+            &p1_tp.active_indices,
+            &p1_tp.back_indices,
+            &p2_tp.active_indices,
+            &p2_tp.back_indices,
         ));
 
         // Resolve the team-preview -> battle transition through the same public
@@ -1101,7 +1202,13 @@ mod tests {
         // each side's lead out of `possible_back` into `active`).
         let (next_state, events, _prob) = simulator::sample_turn(
             &MatchState::TeamPreviewState(preview),
-            &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1, Some(Player::P2),
+            &p1_cmd,
+            &p2_cmd,
+            &move_dex,
+            &pokemon_dex,
+            false,
+            1,
+            Some(Player::P2),
         );
         let MatchState::BattleState(battle_state) = next_state else {
             panic!("expected BattleState")
@@ -1113,12 +1220,27 @@ mod tests {
             ..Default::default()
         };
         let battle_belief_p2 = poke_rust::information::inference::apply_information(
-            battle_belief_p2, &events, false, &pokemon_dex, &move_dex,
-            &std::collections::HashMap::new(), &inference_config,
+            battle_belief_p2,
+            &events,
+            false,
+            &pokemon_dex,
+            &move_dex,
+            &std::collections::HashMap::new(),
+            &inference_config,
         );
 
-        let view = side_view(&battle_state, Player::P1, Some(&battle_belief_p2), Player::P2, None);
-        let possible_back_species: Vec<&str> = view.possible_back.iter().map(|m| m.species.as_str()).collect();
+        let view = side_view(
+            &battle_state,
+            Player::P1,
+            Some(&battle_belief_p2),
+            Player::P2,
+            None,
+        );
+        let possible_back_species: Vec<&str> = view
+            .possible_back
+            .iter()
+            .map(|m| m.species.as_str())
+            .collect();
         assert_eq!(
             possible_back_species,
             vec!["Charizard"],
@@ -1138,9 +1260,18 @@ mod tests {
         let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
 
         let preview = simulator::team_preview_state_from_team_strings(
-            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+            TEAM_P1,
+            TEAM_P2,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            1,
+            true,
         );
-        let p1_tp = poke_rust::state::battle::TeamPreviewCommand { active_indices: vec![0], back_indices: vec![] };
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![],
+        };
         let p2_tp = p1_tp.clone();
         let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
         let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
@@ -1148,7 +1279,13 @@ mod tests {
         // Real ground-truth BattleState, exactly as the server produces it.
         let (next_state, _events, _prob) = simulator::sample_turn(
             &MatchState::TeamPreviewState(preview.clone()),
-            &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1, None,
+            &p1_cmd,
+            &p2_cmd,
+            &move_dex,
+            &pokemon_dex,
+            false,
+            1,
+            None,
         );
         let MatchState::BattleState(battle_state) = next_state else {
             panic!("expected BattleState")
@@ -1168,11 +1305,15 @@ mod tests {
         };
         let mut battle_belief_p1 = tp_belief_p1.into_battle_state(
             Player::P1,
-            &p1_tp.active_indices, &p1_tp.back_indices,
-            &p2_tp.active_indices, &p2_tp.back_indices,
+            &p1_tp.active_indices,
+            &p1_tp.back_indices,
+            &p2_tp.active_indices,
+            &p2_tp.back_indices,
         );
         let mut fainted_mon = UnknownPokemonState::from_opponent_species(
-            poke_rust::data::species::Species::Snorlax, &pokemon_dex, 50,
+            poke_rust::data::species::Species::Snorlax,
+            &pokemon_dex,
+            50,
         );
         fainted_mon.fainted = true;
         battle_belief_p1.p2_fainted_mons.push(fainted_mon);
@@ -1180,11 +1321,24 @@ mod tests {
 
         // Mask P2 (the opponent) from P1's perspective — the exact call the server
         // makes to render the opponent's sidebar under fog-of-war.
-        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1, None);
+        let view = side_view(
+            &battle_state,
+            Player::P2,
+            Some(&belief_p1),
+            Player::P1,
+            None,
+        );
 
-        assert_eq!(view.fainted.len(), 1, "belief's p2_fainted_mons must surface as SideView.fainted");
+        assert_eq!(
+            view.fainted.len(),
+            1,
+            "belief's p2_fainted_mons must surface as SideView.fainted"
+        );
         assert_eq!(view.fainted[0].species, "Snorlax");
-        assert!(view.fainted[0].fainted, "forwarded fainted-bucket entry must keep fainted: true");
+        assert!(
+            view.fainted[0].fainted,
+            "forwarded fainted-bucket entry must keep fainted: true"
+        );
     }
 
     /// TODO.md: "Should not display Not of items that are not even in the current
@@ -1200,16 +1354,31 @@ mod tests {
         let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
 
         let preview = simulator::team_preview_state_from_team_strings(
-            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+            TEAM_P1,
+            TEAM_P2,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            1,
+            true,
         );
-        let p1_tp = poke_rust::state::battle::TeamPreviewCommand { active_indices: vec![0], back_indices: vec![] };
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![],
+        };
         let p2_tp = p1_tp.clone();
         let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
         let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
 
         let (next_state, _events, _prob) = simulator::sample_turn(
             &MatchState::TeamPreviewState(preview.clone()),
-            &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1, None,
+            &p1_cmd,
+            &p2_cmd,
+            &move_dex,
+            &pokemon_dex,
+            false,
+            1,
+            None,
         );
         let MatchState::BattleState(battle_state) = next_state else {
             panic!("expected BattleState")
@@ -1224,8 +1393,10 @@ mod tests {
         };
         let mut battle_belief_p1 = tp_belief_p1.into_battle_state(
             Player::P1,
-            &p1_tp.active_indices, &p1_tp.back_indices,
-            &p2_tp.active_indices, &p2_tp.back_indices,
+            &p1_tp.active_indices,
+            &p1_tp.back_indices,
+            &p2_tp.active_indices,
+            &p2_tp.back_indices,
         );
         // Hand-seed the exclusion this test cares about, isolated from whatever
         // real inference would derive — mirrors `side_view_forwards_belief_fainted_bucket`'s
@@ -1239,8 +1410,16 @@ mod tests {
             Unknown::Not(vec![Item::ChoiceBand, Item::RockyHelmet]);
         let belief_p1 = UnknownMatchState::Battle(battle_belief_p1);
 
-        let legal: HashSet<Item> = [Item::ChoiceBand, Item::ChoiceScarf, Item::Leftovers].into_iter().collect();
-        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1, Some(&legal));
+        let legal: HashSet<Item> = [Item::ChoiceBand, Item::ChoiceScarf, Item::Leftovers]
+            .into_iter()
+            .collect();
+        let view = side_view(
+            &battle_state,
+            Player::P2,
+            Some(&belief_p1),
+            Player::P1,
+            Some(&legal),
+        );
 
         assert_eq!(
             view.possible_back[0].item.as_deref(),
@@ -1258,29 +1437,51 @@ mod tests {
     /// team-preview -> battle event replay `into_battle_state` normally expects —
     /// this test only needs a belief mon AT the active slot, not a fully-populated
     /// send-in sequence).
-    fn choice_lock_test_fixture() -> (BattleState, poke_rust::information::unknowns::UnknownBattleState) {
+    fn choice_lock_test_fixture() -> (
+        BattleState,
+        poke_rust::information::unknowns::UnknownBattleState,
+    ) {
         let pokemon_dex = parse_pokemon_dex("../pokemon_info/showdownDex.txt");
         let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
 
         let preview = simulator::team_preview_state_from_team_strings(
-            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+            TEAM_P1,
+            TEAM_P2,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            1,
+            true,
         );
-        let p1_tp = poke_rust::state::battle::TeamPreviewCommand { active_indices: vec![0], back_indices: vec![] };
+        let p1_tp = poke_rust::state::battle::TeamPreviewCommand {
+            active_indices: vec![0],
+            back_indices: vec![],
+        };
         let p2_tp = p1_tp.clone();
         let p1_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p1_tp.clone());
         let p2_cmd = poke_rust::state::battle::PlayerCommand::TeamPreview(p2_tp.clone());
 
         let (next_state, _events, _prob) = simulator::sample_turn(
             &MatchState::TeamPreviewState(preview.clone()),
-            &p1_cmd, &p2_cmd, &move_dex, &pokemon_dex, false, 1, None,
+            &p1_cmd,
+            &p2_cmd,
+            &move_dex,
+            &pokemon_dex,
+            false,
+            1,
+            None,
         );
         let MatchState::BattleState(mut battle_state) = next_state else {
             panic!("expected BattleState")
         };
-        battle_state.p2_active_mons[0].volatiles.push(VolatileStatusState::TurnStatus(
-            VolatileStatus::ChoiceLock(poke_rust::data::pokemon_move::PokemonMove::ExtremeSpeed),
-            0,
-        ));
+        battle_state.p2_active_mons[0]
+            .volatiles
+            .push(VolatileStatusState::TurnStatus(
+                VolatileStatus::ChoiceLock(
+                    poke_rust::data::pokemon_move::PokemonMove::ExtremeSpeed,
+                ),
+                0,
+            ));
 
         let UnknownMatchState::TeamPreview(tp_belief_p1) =
             poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
@@ -1291,8 +1492,10 @@ mod tests {
         };
         let mut battle_belief_p1 = tp_belief_p1.into_battle_state(
             Player::P1,
-            &p1_tp.active_indices, &p1_tp.back_indices,
-            &p2_tp.active_indices, &p2_tp.back_indices,
+            &p1_tp.active_indices,
+            &p1_tp.back_indices,
+            &p2_tp.active_indices,
+            &p2_tp.back_indices,
         );
         let p2_mon_belief = battle_belief_p1.p2_possible_back_mons.remove(0);
         battle_belief_p1.p2_active_mons.push(p2_mon_belief);
@@ -1310,9 +1513,19 @@ mod tests {
         battle_belief_p1.p2_active_mons[0].item = Unknown::Not(vec![]);
         let belief_p1 = UnknownMatchState::Battle(battle_belief_p1);
 
-        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1, None);
+        let view = side_view(
+            &battle_state,
+            Player::P2,
+            Some(&belief_p1),
+            Player::P1,
+            None,
+        );
 
-        let names: Vec<&str> = view.active[0].volatiles.iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = view.active[0]
+            .volatiles
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
         assert!(
             !names.iter().any(|n| n.starts_with("Choice Lock")),
             "Choice Lock must not be visible while the belief hasn't confirmed a Choice item; got {names:?}"
@@ -1328,9 +1541,19 @@ mod tests {
         battle_belief_p1.p2_active_mons[0].item = Unknown::Known(Item::ChoiceBand);
         let belief_p1 = UnknownMatchState::Battle(battle_belief_p1);
 
-        let view = side_view(&battle_state, Player::P2, Some(&belief_p1), Player::P1, None);
+        let view = side_view(
+            &battle_state,
+            Player::P2,
+            Some(&belief_p1),
+            Player::P1,
+            None,
+        );
 
-        let names: Vec<&str> = view.active[0].volatiles.iter().map(|v| v.name.as_str()).collect();
+        let names: Vec<&str> = view.active[0]
+            .volatiles
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
         assert!(
             names.iter().any(|n| n.starts_with("Choice Lock")),
             "Choice Lock must render once the belief has confirmed a Choice item; got {names:?}"
@@ -1347,7 +1570,13 @@ mod tests {
         let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
 
         let preview = simulator::team_preview_state_from_team_strings(
-            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+            TEAM_P1,
+            TEAM_P2,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            1,
+            true,
         );
 
         let belief_p2 = poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
@@ -1364,7 +1593,10 @@ mod tests {
         let view = preview_view(&preview, Some(&belief_p2), Player::P2, None);
 
         let p1_mon = &view.p1_mons[0];
-        assert_eq!(p1_mon.species, "Aerodactyl", "species must still be visible at team preview");
+        assert_eq!(
+            p1_mon.species, "Aerodactyl",
+            "species must still be visible at team preview"
+        );
         assert_eq!(
             p1_mon.item.as_deref(),
             Some("Unknown"),
@@ -1384,7 +1616,12 @@ mod tests {
             "the true ability must still be among the candidate set: {}",
             p1_mon.ability
         );
-        let move_names: Vec<&str> = p1_mon.moves.iter().flatten().map(|m| m.name.as_str()).collect();
+        let move_names: Vec<&str> = p1_mon
+            .moves
+            .iter()
+            .flatten()
+            .map(|m| m.name.as_str())
+            .collect();
         assert_eq!(
             move_names,
             vec!["???", "???", "???", "???"],
@@ -1411,7 +1648,13 @@ mod tests {
         let move_dex = parse_move_dex("../pokemon_info/showdownMoves.txt");
 
         let preview = simulator::team_preview_state_from_team_strings(
-            TEAM_P1, TEAM_P2, &pokemon_dex, &move_dex, 1, 1, true,
+            TEAM_P1,
+            TEAM_P2,
+            &pokemon_dex,
+            &move_dex,
+            1,
+            1,
+            true,
         );
 
         let belief_pinned = poke_rust::information::unknowns::UnknownMatchState::team_preview_closed_sheet_from_perspective(
@@ -1427,11 +1670,17 @@ mod tests {
         let stats_pinned = view_pinned.p1_mons[0].stats;
         let stats_unpinned = view_unpinned.p1_mons[0].stats;
         assert!(
-            stats_pinned.iter().zip(stats_unpinned.iter()).all(|(p, u)| p >= u),
+            stats_pinned
+                .iter()
+                .zip(stats_unpinned.iter())
+                .all(|(p, u)| p >= u),
             "force_max_ivs must never lower a min-stat bound: pinned {stats_pinned:?} vs unpinned {stats_unpinned:?}"
         );
         assert!(
-            stats_pinned.iter().zip(stats_unpinned.iter()).any(|(p, u)| p > u),
+            stats_pinned
+                .iter()
+                .zip(stats_unpinned.iter())
+                .any(|(p, u)| p > u),
             "force_max_ivs must strictly tighten at least one min-stat bound (IV 31 floor vs IV 0 floor): pinned {stats_pinned:?} vs unpinned {stats_unpinned:?}"
         );
     }

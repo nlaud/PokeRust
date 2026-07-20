@@ -140,6 +140,10 @@ pub struct UnknownPokemonState {
 
     pub possible_original_abilities: Unknown<Ability>,
     pub possible_abilities: Unknown<Ability>,
+    /// Mirrors `PokemonState::original_ability.is_some()`: a live ability-changing
+    /// effect has saved a switch-out reset target for this field tenure. Mega
+    /// Evolution changes the live ability but must not overwrite that saved target.
+    pub ability_changed_on_field: bool,
 
     pub possible_genders: Unknown<PokemonGender>,
     pub possible_weight_hg: Unknown<u16>, //Also 1:1 with species
@@ -514,7 +518,10 @@ impl UnknownTeamPreviewState {
         p2_back_indices: &[usize],
     ) -> UnknownBattleState {
         let pick = |mons: &[UnknownPokemonState], indices: &[usize]| -> Vec<UnknownPokemonState> {
-            indices.iter().filter_map(|&i| mons.get(i).cloned()).collect()
+            indices
+                .iter()
+                .filter_map(|&i| mons.get(i).cloned())
+                .collect()
         };
 
         // The non-viewer side's ENTIRE roster — including whatever it selected as
@@ -551,12 +558,20 @@ impl UnknownTeamPreviewState {
         // into `known_back` here bypasses that and makes a bench mon "immediately
         // show up" as already-revealed at turn 0.
         let (p1_active_mons, p1_known_back_mons, p1_possible_back_mons) = if viewer == Player::P1 {
-            (pick(&self.p1_mons, p1_active_indices), pick(&self.p1_mons, p1_back_indices), Vec::new())
+            (
+                pick(&self.p1_mons, p1_active_indices),
+                pick(&self.p1_mons, p1_back_indices),
+                Vec::new(),
+            )
         } else {
             (Vec::new(), Vec::new(), self.p1_mons.clone())
         };
         let (p2_active_mons, p2_known_back_mons, p2_possible_back_mons) = if viewer == Player::P2 {
-            (pick(&self.p2_mons, p2_active_indices), pick(&self.p2_mons, p2_back_indices), Vec::new())
+            (
+                pick(&self.p2_mons, p2_active_indices),
+                pick(&self.p2_mons, p2_back_indices),
+                Vec::new(),
+            )
         } else {
             (Vec::new(), Vec::new(), self.p2_mons.clone())
         };
@@ -672,9 +687,7 @@ fn seed_illusion_hypotheses(state: &mut UnknownBattleState, side: Player) {
         Player::P2 => &state.p2_possible_back_mons,
     };
 
-    let is_illusion_entry = |m: &UnknownPokemonState| {
-        matches!(&m.possible_species, Unknown::Known(s) if is_illusion_capable_species(s))
-    };
+    let is_illusion_entry = |m: &UnknownPokemonState| matches!(&m.possible_species, Unknown::Known(s) if is_illusion_capable_species(s));
 
     let count = roster.iter().filter(|m| is_illusion_entry(m)).count() as u8;
     match side {
@@ -690,9 +703,11 @@ fn seed_illusion_hypotheses(state: &mut UnknownBattleState, side: Player) {
     // allowed more than one, the first is used as the template for all of them —
     // a sound simplification (see the plan's multi-Zoroark note), not a precision
     // loss any current format actually exercises.
-    let baseline = roster.iter().find(|m| is_illusion_entry(m)).cloned().expect(
-        "count > 0 implies at least one Illusion-forme entry exists in this roster",
-    );
+    let baseline = roster
+        .iter()
+        .find(|m| is_illusion_entry(m))
+        .cloned()
+        .expect("count > 0 implies at least one Illusion-forme entry exists in this roster");
 
     let roster_mut: &mut Vec<UnknownPokemonState> = match side {
         Player::P1 => &mut state.p1_possible_back_mons,
@@ -761,6 +776,7 @@ pub(crate) fn seed_illusion_hypothesis_for(
     sub.pre_transform = host.pre_transform.clone();
     sub.pre_mimicry_types = host.pre_mimicry_types.clone();
     sub.times_hit = host.times_hit;
+    sub.ability_changed_on_field = host.ability_changed_on_field;
     sub.possible_illusion_state = None; // no nesting — see the field's doc comment
     sub
 }
@@ -843,6 +859,7 @@ impl UnknownPokemonState {
                     .unwrap_or_else(|| mon.ability.clone()),
             ),
             possible_abilities: Unknown::Known(mon.ability.clone()),
+            ability_changed_on_field: mon.original_ability.is_some(),
             possible_genders: Unknown::Known(mon.gender),
             possible_weight_hg: Unknown::Known(mon.weight_hg),
             possible_tera_type: Unknown::Known(mon.tera_type.clone()),
@@ -987,6 +1004,7 @@ impl UnknownPokemonState {
             } else {
                 Unknown::Not(Vec::new())
             },
+            ability_changed_on_field: false,
             possible_genders,
             possible_weight_hg: Unknown::Known(weight_hg),
             possible_tera_type: Unknown::Not(Vec::new()),
@@ -1027,7 +1045,12 @@ impl UnknownPokemonState {
     /// infeasible" contradictions on ordinary turns. See the `test_s34_*` regression
     /// tests below. Shared by `from_opponent_open_sheet` and
     /// `team_preview_closed_sheet_from_perspective`.
-    fn pin_min_ivs_to_max(&mut self, species: &Species, dex: &HashMap<Species, PokemonData>, level: u8) {
+    fn pin_min_ivs_to_max(
+        &mut self,
+        species: &Species,
+        dex: &HashMap<Species, PokemonData>,
+        level: u8,
+    ) {
         self.min_ivs = [31; 6];
         if let Some(data) = dex.get(species) {
             let b = data.base_stats;
@@ -1086,8 +1109,11 @@ impl UnknownPokemonState {
 
         unk.possible_abilities = Unknown::Known(mon.ability.clone());
         unk.possible_original_abilities = Unknown::Known(
-            mon.original_ability.clone().unwrap_or_else(|| mon.ability.clone()),
+            mon.original_ability
+                .clone()
+                .unwrap_or_else(|| mon.ability.clone()),
         );
+        unk.ability_changed_on_field = mon.original_ability.is_some();
         unk.item = Unknown::Known(mon.item.clone());
         unk.known_moves = mon.moves.clone();
         // A sheet reveals move identity, not remaining PP mid-battle — treat this as
@@ -1205,7 +1231,13 @@ impl UnknownMatchState {
         let opp_mons: Vec<UnknownPokemonState> = opponent_team
             .iter()
             .map(|mon| {
-                UnknownPokemonState::from_opponent_open_sheet(mon, dex, level, reveal_nature, force_max_ivs)
+                UnknownPokemonState::from_opponent_open_sheet(
+                    mon,
+                    dex,
+                    level,
+                    reveal_nature,
+                    force_max_ivs,
+                )
             })
             .collect();
 
@@ -1257,7 +1289,8 @@ impl UnknownMatchState {
         let opp_mons: Vec<UnknownPokemonState> = opponent_team
             .iter()
             .map(|mon| {
-                let mut unk = UnknownPokemonState::from_opponent_species(mon.species.clone(), dex, level);
+                let mut unk =
+                    UnknownPokemonState::from_opponent_species(mon.species.clone(), dex, level);
                 if force_max_ivs {
                     unk.pin_min_ivs_to_max(&mon.species, dex, level);
                 }

@@ -1,6 +1,7 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 
+pub mod benchmarking;
 pub mod data;
 pub mod information;
 pub mod simulator;

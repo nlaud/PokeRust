@@ -26,9 +26,11 @@ fn display_name<T: std::fmt::Debug>(value: &T) -> String {
 pub fn describe_unknown<T: std::fmt::Debug>(u: &Unknown<T>) -> String {
     match u {
         Unknown::Known(x) => display_name(x),
-        Unknown::Possibly(candidates) if !candidates.is_empty() => {
-            candidates.iter().map(display_name).collect::<Vec<_>>().join(" or ")
-        }
+        Unknown::Possibly(candidates) if !candidates.is_empty() => candidates
+            .iter()
+            .map(display_name)
+            .collect::<Vec<_>>()
+            .join(" or "),
         Unknown::Possibly(_) | Unknown::Not(_) => "Unknown".to_string(),
     }
 }
@@ -49,7 +51,11 @@ pub fn describe_unknown_item(u: &Unknown<Item>, legal_items: Option<&HashSet<Ite
             if candidates.is_empty() {
                 "Unknown".to_string()
             } else {
-                candidates.iter().map(display_name).collect::<Vec<_>>().join(" or ")
+                candidates
+                    .iter()
+                    .map(display_name)
+                    .collect::<Vec<_>>()
+                    .join(" or ")
             }
         }
         Unknown::Not(excluded) => {
@@ -79,7 +85,11 @@ pub fn describe_unknown_item(u: &Unknown<Item>, legal_items: Option<&HashSet<Ite
                             .collect::<Vec<_>>()
                             .join(", ")
                     } else {
-                        possible.iter().map(display_name).collect::<Vec<_>>().join(" or ")
+                        possible
+                            .iter()
+                            .map(display_name)
+                            .collect::<Vec<_>>()
+                            .join(" or ")
                     }
                 }
                 // No whitelist: with ~1,000 items in the pool, a short exclusion
@@ -108,10 +118,18 @@ pub fn describe_statement(stmt: &Statement, battle: &UnknownBattleState) -> Stri
     match stmt {
         Statement::Not(inner) => format!("NOT ({})", describe_statement(inner, battle)),
         Statement::HasItem { mon_idx, item } => {
-            format!("{}'s item is {}", mon_label(battle, *mon_idx), display_name(item))
+            format!(
+                "{}'s item is {}",
+                mon_label(battle, *mon_idx),
+                display_name(item)
+            )
         }
         Statement::HasAbility { mon_idx, ability } => {
-            format!("{}'s ability is {}", mon_label(battle, *mon_idx), display_name(ability))
+            format!(
+                "{}'s ability is {}",
+                mon_label(battle, *mon_idx),
+                display_name(ability)
+            )
         }
         Statement::WeatherTurns { turns } => {
             format!("The weather lasts {} more turn(s)", turns)
@@ -119,7 +137,11 @@ pub fn describe_statement(stmt: &Statement, battle: &UnknownBattleState) -> Stri
         Statement::TerrainTurns { turns } => {
             format!("The terrain lasts {} more turn(s)", turns)
         }
-        Statement::SideConditionTurns { side, side_condition, turns } => {
+        Statement::SideConditionTurns {
+            side,
+            side_condition,
+            turns,
+        } => {
             format!(
                 "{:?}'s {} lasts {} more turn(s)",
                 side,
@@ -128,12 +150,24 @@ pub fn describe_statement(stmt: &Statement, battle: &UnknownBattleState) -> Stri
             )
         }
         Statement::NatureBoostsStat { mon_idx, stat } => {
-            format!("{}'s nature boosts {}", mon_label(battle, *mon_idx), display_name(stat))
+            format!(
+                "{}'s nature boosts {}",
+                mon_label(battle, *mon_idx),
+                display_name(stat)
+            )
         }
         Statement::NatureNerfsStat { mon_idx, stat } => {
-            format!("{}'s nature lowers {}", mon_label(battle, *mon_idx), display_name(stat))
+            format!(
+                "{}'s nature lowers {}",
+                mon_label(battle, *mon_idx),
+                display_name(stat)
+            )
         }
-        Statement::EVIVStatGE { mon_idx, stat, value } => {
+        Statement::EVIVStatGE {
+            mon_idx,
+            stat,
+            value,
+        } => {
             format!(
                 "{}'s {} (pre-nature) is at least {}",
                 mon_label(battle, *mon_idx),
@@ -141,7 +175,11 @@ pub fn describe_statement(stmt: &Statement, battle: &UnknownBattleState) -> Stri
                 value
             )
         }
-        Statement::EVIVStatLE { mon_idx, stat, value } => {
+        Statement::EVIVStatLE {
+            mon_idx,
+            stat,
+            value,
+        } => {
             format!(
                 "{}'s {} (pre-nature) is at most {}",
                 mon_label(battle, *mon_idx),
@@ -149,15 +187,24 @@ pub fn describe_statement(stmt: &Statement, battle: &UnknownBattleState) -> Stri
                 value
             )
         }
-        Statement::SpeedComparison { fast_idx, slow_idx, .. } => {
+        Statement::SpeedComparison {
+            fast_idx, slow_idx, ..
+        } => {
             format!(
                 "{} is faster than {}",
                 mon_label(battle, *fast_idx),
                 mon_label(battle, *slow_idx)
             )
         }
-        Statement::KnowsThreateningMove { mon_idx, defender_types } => {
-            let types = defender_types.iter().map(display_name).collect::<Vec<_>>().join("/");
+        Statement::KnowsThreateningMove {
+            mon_idx,
+            defender_types,
+        } => {
+            let types = defender_types
+                .iter()
+                .map(display_name)
+                .collect::<Vec<_>>()
+                .join("/");
             format!(
                 "{} knows a move super-effective against {}",
                 mon_label(battle, *mon_idx),
@@ -170,7 +217,11 @@ pub fn describe_statement(stmt: &Statement, battle: &UnknownBattleState) -> Stri
 /// Join a CNF clause's literals with " OR " — this IS the "list of ORs" the
 /// Predicates tab renders, one string per entry in `UnknownBattleState.predicates`.
 pub fn describe_clause(clause: &[Statement], battle: &UnknownBattleState) -> String {
-    clause.iter().map(|s| describe_statement(s, battle)).collect::<Vec<_>>().join(" OR ")
+    clause
+        .iter()
+        .map(|s| describe_statement(s, battle))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 /// A move slot rendered for the masked opponent view: the revealed move's name, or
@@ -219,7 +270,10 @@ pub fn describe_unknown_item_union(
 /// pairing between two different species' movesets is a display convenience, not a
 /// semantic correspondence — this is what lets a suspected Zoroark disguise show
 /// e.g. "Body Slam or Nasty Plot" per slot instead of always "???".
-pub fn describe_move_slot_union(primary: Option<PokemonMove>, hypothesis: Option<PokemonMove>) -> String {
+pub fn describe_move_slot_union(
+    primary: Option<PokemonMove>,
+    hypothesis: Option<PokemonMove>,
+) -> String {
     match (primary, hypothesis) {
         (Some(p), Some(h)) if p != h => format!("{} or {}", move_name(&p), move_name(&h)),
         (Some(p), _) => move_name(&p),

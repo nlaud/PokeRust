@@ -234,7 +234,9 @@ pub enum BattleCommandDto {
         mega_evolve: bool,
     },
     #[serde(rename_all = "camelCase")]
-    Switch { party_index: usize },
+    Switch {
+        party_index: usize,
+    },
     #[serde(rename_all = "camelCase")]
     Struggle {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,7 +249,9 @@ pub enum BattleCommandDto {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PlayerCommandDto {
     #[serde(rename_all = "camelCase")]
-    Battle { commands: Vec<BattleCommandDto> },
+    Battle {
+        commands: Vec<BattleCommandDto>,
+    },
     Pass,
     #[serde(rename_all = "camelCase")]
     TeamPreview {
@@ -293,13 +297,18 @@ pub enum EventKindDto {
         switch: SwitchDto,
     },
     #[serde(rename_all = "camelCase")]
-    SimultaneousSwitch { switches: Vec<SwitchDto> },
+    SimultaneousSwitch {
+        switches: Vec<SwitchDto>,
+    },
     EndOfTurn,
     Faint {
         slot: FieldSlotDto,
     },
     #[serde(rename_all = "camelCase")]
-    MegaEvolution { slot: FieldSlotDto, into: String },
+    MegaEvolution {
+        slot: FieldSlotDto,
+        into: String,
+    },
     #[serde(rename_all = "camelCase")]
     Terastallization {
         slot: FieldSlotDto,
@@ -321,11 +330,19 @@ pub enum EventKindDto {
         reason: String,
     },
     #[serde(rename_all = "camelCase")]
-    ChargingMove { user: FieldSlotDto, r#move: String },
+    ChargingMove {
+        user: FieldSlotDto,
+        r#move: String,
+    },
     #[serde(rename_all = "camelCase")]
-    MustRecharge { slot: FieldSlotDto },
+    MustRecharge {
+        slot: FieldSlotDto,
+    },
     #[serde(rename_all = "camelCase")]
-    SingleMoveOrTurn { slot: FieldSlotDto, r#move: String },
+    SingleMoveOrTurn {
+        slot: FieldSlotDto,
+        r#move: String,
+    },
     #[serde(rename_all = "camelCase")]
     DamageDealt {
         target: FieldSlotDto,
@@ -351,12 +368,17 @@ pub enum EventKindDto {
         target: FieldSlotDto,
     },
     #[serde(rename_all = "camelCase")]
-    MoveFailed { slot: FieldSlotDto },
+    MoveFailed {
+        slot: FieldSlotDto,
+    },
     Blocked {
         target: FieldSlotDto,
     },
     #[serde(rename_all = "camelCase")]
-    HitCount { target: FieldSlotDto, hits: u8 },
+    HitCount {
+        target: FieldSlotDto,
+        hits: u8,
+    },
     #[serde(rename_all = "camelCase")]
     StatusInflicted {
         target: FieldSlotDto,
@@ -368,7 +390,9 @@ pub enum EventKindDto {
         status: StatusDto,
     },
     #[serde(rename_all = "camelCase")]
-    TeamStatusCured { side: PlayerDto },
+    TeamStatusCured {
+        side: PlayerDto,
+    },
     #[serde(rename_all = "camelCase")]
     BoostChanged {
         target: FieldSlotDto,
@@ -376,9 +400,13 @@ pub enum EventKindDto {
         stages: i8,
     },
     #[serde(rename_all = "camelCase")]
-    BoostsCleared { target: FieldSlotDto },
+    BoostsCleared {
+        target: FieldSlotDto,
+    },
     #[serde(rename_all = "camelCase")]
-    BoostsInverted { target: FieldSlotDto },
+    BoostsInverted {
+        target: FieldSlotDto,
+    },
     #[serde(rename_all = "camelCase")]
     BoostsSwapped {
         source: FieldSlotDto,
@@ -390,17 +418,31 @@ pub enum EventKindDto {
         target: FieldSlotDto,
     },
     #[serde(rename_all = "camelCase")]
-    WeatherChanged { weather: Option<String> },
+    WeatherChanged {
+        weather: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
-    TerrainChanged { terrain: Option<String> },
+    TerrainChanged {
+        terrain: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
-    PseudoWeatherStart { effect: String },
+    PseudoWeatherStart {
+        effect: String,
+    },
     #[serde(rename_all = "camelCase")]
-    PseudoWeatherEnd { effect: String },
+    PseudoWeatherEnd {
+        effect: String,
+    },
     #[serde(rename_all = "camelCase")]
-    SideConditionStart { side: PlayerDto, condition: String },
+    SideConditionStart {
+        side: PlayerDto,
+        condition: String,
+    },
     #[serde(rename_all = "camelCase")]
-    SideConditionEnd { side: PlayerDto, condition: String },
+    SideConditionEnd {
+        side: PlayerDto,
+        condition: String,
+    },
     #[serde(rename_all = "camelCase")]
     SlotConditionStart {
         slot: FieldSlotDto,
@@ -427,9 +469,15 @@ pub enum EventKindDto {
         turns_left: u8,
     },
     #[serde(rename_all = "camelCase")]
-    ItemRevealed { slot: FieldSlotDto, item: String },
+    ItemRevealed {
+        slot: FieldSlotDto,
+        item: String,
+    },
     #[serde(rename_all = "camelCase")]
-    ItemGained { slot: FieldSlotDto, item: String },
+    ItemGained {
+        slot: FieldSlotDto,
+        item: String,
+    },
     #[serde(rename_all = "camelCase")]
     ItemLost {
         slot: FieldSlotDto,
@@ -437,9 +485,14 @@ pub enum EventKindDto {
         consumed: bool,
     },
     #[serde(rename_all = "camelCase")]
-    AbilityRevealed { slot: FieldSlotDto, ability: String },
+    AbilityRevealed {
+        slot: FieldSlotDto,
+        ability: String,
+    },
     #[serde(rename_all = "camelCase")]
-    AnticipationShudder { slot: FieldSlotDto },
+    AnticipationShudder {
+        slot: FieldSlotDto,
+    },
     #[serde(rename_all = "camelCase")]
     IllusionEnded {
         slot: FieldSlotDto,
@@ -556,4 +609,60 @@ pub struct TurnResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ApiError {
     pub message: String,
+}
+
+// ── Benchmarking ─────────────────────────────────────────────────────────────
+// See `poke_rust::benchmarking` for the timing logic these DTOs wrap; the
+// request knobs are deliberately small (server-side hard caps clamp them
+// further — see `MAX_TURN_SPEED_PAIRINGS`/`MAX_INFERENCE_GAMES`), since this
+// endpoint runs synchronously for an interactive "Run benchmark" click, not
+// an offline sweep like `cargo bench`.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkRequest {
+    /// Ordered teamsheet pairings to time turn resolution across. Clamped
+    /// server-side; see `poke_rust::benchmarking::run_turn_speed`.
+    #[serde(default = "default_turn_speed_pairings")]
+    pub turn_speed_pairings: usize,
+    /// Full doubles games to play and replay per fog-of-war information mode.
+    /// Clamped server-side; see `poke_rust::benchmarking::run_inference`.
+    #[serde(default = "default_inference_games")]
+    pub inference_games: usize,
+}
+
+fn default_turn_speed_pairings() -> usize {
+    1
+}
+
+fn default_inference_games() -> usize {
+    1
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSpeedRowDto {
+    pub scenario: String,
+    pub mode: String,
+    pub rolls: u8,
+    pub crit: bool,
+    pub avg_time_secs: f64,
+    pub avg_branches: usize,
+    pub pairings: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceRowDto {
+    pub information_mode: String,
+    pub calls: u64,
+    pub avg_time_secs: f64,
+    pub contradictions: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkResponse {
+    pub turn_speed: Vec<TurnSpeedRowDto>,
+    pub inference: Vec<InferenceRowDto>,
 }

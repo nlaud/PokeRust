@@ -122,7 +122,9 @@ pub(super) fn run_bcp(
 /// one raised the slow mon's min Spe above its species maximum → contradiction
 /// panic). BCP prunes definitively-false literals every iteration, so a clause whose
 /// escapes have all been excluded collapses to unit and is picked up here then.
-pub(super) fn collect_speed_comparisons(state: &UnknownBattleState) -> Vec<(usize, usize, u32, u32)> {
+pub(super) fn collect_speed_comparisons(
+    state: &UnknownBattleState,
+) -> Vec<(usize, usize, u32, u32)> {
     let total = super::mons_count_battle(state);
     state
         .predicates
@@ -159,7 +161,8 @@ pub(super) fn propagate_collected(
     let mut changed = false;
     for &(fast_idx, slow_idx, fast_mult, slow_mult) in comparisons {
         // Raise fast's min Spe: base_spe(fast) >= ceil(base_spe(slow)*slow_mult / fast_mult)
-        let slow_min = super::get_mon_by_idx(state, slow_idx).map_or(0u64, |m| m.min_stats[5] as u64);
+        let slow_min =
+            super::get_mon_by_idx(state, slow_idx).map_or(0u64, |m| m.min_stats[5] as u64);
         let new_fast_min = div_ceil(slow_min * slow_mult as u64, fast_mult as u64) as u16;
         // Read both bounds first (immutable borrow) so the panic-message legend below
         // never needs to coexist with a live mutable borrow of `state`.
@@ -219,31 +222,40 @@ pub(super) fn propagate_collected(
 fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
     match lit {
         Statement::Not(inner) => eval_true(state, inner),
-        Statement::HasItem { mon_idx, item } => {
-            super::get_mon_by_idx(state, *mon_idx)
-                .is_some_and(|m| super::unknown_is_excluded(&m.item, item))
-        }
+        Statement::HasItem { mon_idx, item } => super::get_mon_by_idx(state, *mon_idx)
+            .is_some_and(|m| super::unknown_is_excluded(&m.item, item)),
         Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| super::unknown_is_excluded(&m.possible_abilities, ability)),
-        Statement::NatureBoostsStat { mon_idx, stat } => {
-            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
+        Statement::NatureBoostsStat { mon_idx, stat } => super::get_mon_by_idx(state, *mon_idx)
+            .is_some_and(|m| {
                 boosting_natures_for_stat(stat)
                     .iter()
                     .all(|n| super::unknown_is_excluded(&m.possible_natures, n))
-            })
-        }
-        Statement::NatureNerfsStat { mon_idx, stat } => {
-            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
+            }),
+        Statement::NatureNerfsStat { mon_idx, stat } => super::get_mon_by_idx(state, *mon_idx)
+            .is_some_and(|m| {
                 nerfing_natures_for_stat(stat)
                     .iter()
                     .all(|n| super::unknown_is_excluded(&m.possible_natures, n))
-            })
-        }
-        Statement::EVIVStatGE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
+            }),
+        Statement::EVIVStatGE {
+            mon_idx,
+            stat,
+            value,
+        } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] < *value),
-        Statement::EVIVStatLE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
+        Statement::EVIVStatLE {
+            mon_idx,
+            stat,
+            value,
+        } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] > *value),
-        Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
+        Statement::SpeedComparison {
+            fast_idx,
+            slow_idx,
+            fast_mult,
+            slow_mult,
+        } => {
             let fast_max =
                 super::get_mon_by_idx(state, *fast_idx).map_or(999u64, |m| m.max_stats[5] as u64);
             let slow_min =
@@ -261,7 +273,11 @@ fn eval_false(state: &UnknownBattleState, lit: &Statement) -> bool {
             .terrain_turns
             .as_ref()
             .is_some_and(|tt| super::unknown_is_excluded(tt, &(*turns as u8))),
-        Statement::SideConditionTurns { side, side_condition, turns } => {
+        Statement::SideConditionTurns {
+            side,
+            side_condition,
+            turns,
+        } => {
             let (conditions, turns_vec) = match side {
                 Player::P1 => (&state.p1_side_conditions, &state.p1_side_condition_turns),
                 Player::P2 => (&state.p2_side_conditions, &state.p2_side_condition_turns),
@@ -288,37 +304,48 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
             .is_some_and(|m| super::unknown_is_known_as(&m.item, item)),
         Statement::HasAbility { mon_idx, ability } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| super::unknown_is_known_as(&m.possible_abilities, ability)),
-        Statement::EVIVStatGE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
+        Statement::EVIVStatGE {
+            mon_idx,
+            stat,
+            value,
+        } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| m.min_pre_nature_stat[stat_to_stats_idx(stat)] >= *value),
-        Statement::EVIVStatLE { mon_idx, stat, value } => super::get_mon_by_idx(state, *mon_idx)
+        Statement::EVIVStatLE {
+            mon_idx,
+            stat,
+            value,
+        } => super::get_mon_by_idx(state, *mon_idx)
             .is_some_and(|m| m.max_pre_nature_stat[stat_to_stats_idx(stat)] <= *value),
-        Statement::SpeedComparison { fast_idx, slow_idx, fast_mult, slow_mult } => {
+        Statement::SpeedComparison {
+            fast_idx,
+            slow_idx,
+            fast_mult,
+            slow_mult,
+        } => {
             let fast_min =
                 super::get_mon_by_idx(state, *fast_idx).map_or(0u64, |m| m.min_stats[5] as u64);
             let slow_max =
                 super::get_mon_by_idx(state, *slow_idx).map_or(999u64, |m| m.max_stats[5] as u64);
             fast_min * (*fast_mult as u64) >= slow_max * (*slow_mult as u64)
         }
-        Statement::NatureBoostsStat { mon_idx, stat } => {
-            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
+        Statement::NatureBoostsStat { mon_idx, stat } => super::get_mon_by_idx(state, *mon_idx)
+            .is_some_and(|m| {
                 let boosters = boosting_natures_for_stat(stat);
                 match &m.possible_natures {
                     Unknown::Known(n) => boosters.contains(n),
                     Unknown::Possibly(v) => !v.is_empty() && v.iter().all(|n| boosters.contains(n)),
                     Unknown::Not(_) => false,
                 }
-            })
-        }
-        Statement::NatureNerfsStat { mon_idx, stat } => {
-            super::get_mon_by_idx(state, *mon_idx).is_some_and(|m| {
+            }),
+        Statement::NatureNerfsStat { mon_idx, stat } => super::get_mon_by_idx(state, *mon_idx)
+            .is_some_and(|m| {
                 let nerfers = nerfing_natures_for_stat(stat);
                 match &m.possible_natures {
                     Unknown::Known(n) => nerfers.contains(n),
                     Unknown::Possibly(v) => !v.is_empty() && v.iter().all(|n| nerfers.contains(n)),
                     Unknown::Not(_) => false,
                 }
-            })
-        }
+            }),
         Statement::WeatherTurns { turns } => state
             .weather_turns
             .as_ref()
@@ -327,7 +354,11 @@ fn eval_true(state: &UnknownBattleState, lit: &Statement) -> bool {
             .terrain_turns
             .as_ref()
             .is_some_and(|tt| matches!(tt, Unknown::Known(v) if *v == *turns as u8)),
-        Statement::SideConditionTurns { side, side_condition, turns } => {
+        Statement::SideConditionTurns {
+            side,
+            side_condition,
+            turns,
+        } => {
             let (conditions, turns_vec) = match side {
                 Player::P1 => (&state.p1_side_conditions, &state.p1_side_condition_turns),
                 Player::P2 => (&state.p2_side_conditions, &state.p2_side_condition_turns),
@@ -379,7 +410,11 @@ fn force_literal(
                 );
             }
         }
-        Statement::EVIVStatGE { mon_idx, stat, value } => {
+        Statement::EVIVStatGE {
+            mon_idx,
+            stat,
+            value,
+        } => {
             // Same self-heal as the Pass 3 direct-tightening path
             // (`apply_unconditional_tightening_to_mon`'s `CrossedBound` — see its and
             // its callers' doc comments for the rationale): check-then-write, so a
@@ -401,7 +436,11 @@ fn force_literal(
                 }
             }
         }
-        Statement::EVIVStatLE { mon_idx, stat, value } => {
+        Statement::EVIVStatLE {
+            mon_idx,
+            stat,
+            value,
+        } => {
             if let Some(mon) = super::get_mon_mut_by_idx(state, *mon_idx) {
                 let si = stat_to_stats_idx(stat);
                 let new_max = (*value).min(mon.max_pre_nature_stat[si]);
@@ -453,11 +492,21 @@ fn force_literal(
                 );
             }
         }
-        Statement::SideConditionTurns { side, side_condition, turns } => {
+        Statement::SideConditionTurns {
+            side,
+            side_condition,
+            turns,
+        } => {
             let t = *turns as u8;
             let idx = match side {
-                Player::P1 => state.p1_side_conditions.iter().position(|c| c == side_condition),
-                Player::P2 => state.p2_side_conditions.iter().position(|c| c == side_condition),
+                Player::P1 => state
+                    .p1_side_conditions
+                    .iter()
+                    .position(|c| c == side_condition),
+                Player::P2 => state
+                    .p2_side_conditions
+                    .iter()
+                    .position(|c| c == side_condition),
             };
             if let Some(i) = idx {
                 let turns_vec = match side {
@@ -529,7 +578,12 @@ fn div_ceil(a: u64, b: u64) -> u64 {
 
 pub(super) fn boosting_natures_for_stat(stat: &PokemonStat) -> Vec<Nature> {
     match stat {
-        PokemonStat::Atk => vec![Nature::Lonely, Nature::Adamant, Nature::Naughty, Nature::Brave],
+        PokemonStat::Atk => vec![
+            Nature::Lonely,
+            Nature::Adamant,
+            Nature::Naughty,
+            Nature::Brave,
+        ],
         PokemonStat::Def => vec![Nature::Bold, Nature::Impish, Nature::Lax, Nature::Relaxed],
         PokemonStat::SpA => vec![Nature::Modest, Nature::Mild, Nature::Rash, Nature::Quiet],
         PokemonStat::SpD => vec![Nature::Calm, Nature::Gentle, Nature::Careful, Nature::Sassy],
@@ -541,7 +595,12 @@ pub(super) fn nerfing_natures_for_stat(stat: &PokemonStat) -> Vec<Nature> {
     match stat {
         PokemonStat::Atk => vec![Nature::Bold, Nature::Modest, Nature::Calm, Nature::Timid],
         PokemonStat::Def => vec![Nature::Lonely, Nature::Mild, Nature::Gentle, Nature::Hasty],
-        PokemonStat::SpA => vec![Nature::Adamant, Nature::Impish, Nature::Careful, Nature::Jolly],
+        PokemonStat::SpA => vec![
+            Nature::Adamant,
+            Nature::Impish,
+            Nature::Careful,
+            Nature::Jolly,
+        ],
         PokemonStat::SpD => vec![Nature::Naughty, Nature::Lax, Nature::Rash, Nature::Naive],
         PokemonStat::Spe => vec![Nature::Brave, Nature::Relaxed, Nature::Quiet, Nature::Sassy],
     }

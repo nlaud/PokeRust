@@ -1,11 +1,11 @@
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
+use crate::information::information::InformationEvent;
 use crate::state::dex_data::{
     PokemonData, PseudoWeather, SelfSwitchType, SideCondition, SlotCondition, Terrain, Weather,
 };
 use crate::state::pokemon::PokemonState;
-use crate::information::information::InformationEvent;
 use std::collections::HashMap;
 
 fn humanize_identifier(value: impl AsRef<str>) -> String {
@@ -484,8 +484,16 @@ impl PartialEq for MatchState {
             (MatchState::BattleState(a), MatchState::BattleState(b)) => a == b,
             (MatchState::TeamPreviewState(a), MatchState::TeamPreviewState(b)) => a == b,
             (
-                MatchState::GameOverState { winner: w1, pending_events: e1, final_state: _ },
-                MatchState::GameOverState { winner: w2, pending_events: e2, final_state: _ },
+                MatchState::GameOverState {
+                    winner: w1,
+                    pending_events: e1,
+                    final_state: _,
+                },
+                MatchState::GameOverState {
+                    winner: w2,
+                    pending_events: e2,
+                    final_state: _,
+                },
             ) => w1 == w2 && e1 == e2,
             _ => false,
         }
@@ -500,7 +508,11 @@ impl std::hash::Hash for MatchState {
         match self {
             MatchState::BattleState(bs) => bs.hash(state),
             MatchState::TeamPreviewState(tp) => tp.hash(state),
-            MatchState::GameOverState { winner, pending_events, final_state: _ } => {
+            MatchState::GameOverState {
+                winner,
+                pending_events,
+                final_state: _,
+            } => {
                 winner.hash(state);
                 pending_events.hash(state);
             }

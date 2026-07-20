@@ -5,14 +5,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, Query, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use poke_rust::benchmarking;
 use poke_rust::data::item::Item;
 use poke_rust::information::inference::InferenceConfig;
 use poke_rust::information::unknowns::{InformationMode, UnknownMatchState};
@@ -147,69 +148,70 @@ pub async fn create_battle(
     // Perfect Information keeps both beliefs/`inference_config` at `None` — a true
     // zero-overhead no-op that leaves ground-truth behavior byte-identical to
     // before this feature existed.
-    let (belief_p1, belief_p2, inference_config) = if information_mode == InformationMode::PerfectInformation {
-        (None, None, None)
-    } else {
-        let config = InferenceConfig {
-            use_stat_points: req.stat_points,
-            force_max_ivs: req.force_max_ivs,
-            legal_items,
-            learnset_dex: app.dexes.learnset_dex.clone(),
-            ..InferenceConfig::default()
-        };
-        let (belief_p1, belief_p2) = if information_mode == InformationMode::ClosedTeamSheet {
-            let belief_p1 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
-                Player::P1,
-                &preview.p1_mons,
-                &preview.p2_mons,
-                &app.dexes.pokemon_dex,
-                req.active_per_side,
-                req.brought_per_side,
-                50,
-                req.force_max_ivs,
-            );
-            // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
-            // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
-            let belief_p2 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
-                Player::P2,
-                &preview.p2_mons,
-                &preview.p1_mons,
-                &app.dexes.pokemon_dex,
-                req.active_per_side,
-                req.brought_per_side,
-                50,
-                req.force_max_ivs,
-            );
-            (belief_p1, belief_p2)
+    let (belief_p1, belief_p2, inference_config) =
+        if information_mode == InformationMode::PerfectInformation {
+            (None, None, None)
         } else {
-            let belief_p1 = UnknownMatchState::team_preview_open_sheet_from_perspective(
-                Player::P1,
-                &preview.p1_mons,
-                &preview.p2_mons,
-                &app.dexes.pokemon_dex,
-                req.active_per_side,
-                req.brought_per_side,
-                50,
-                information_mode,
-                req.force_max_ivs,
-            );
-            // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
-            // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
-            let belief_p2 = UnknownMatchState::team_preview_open_sheet_from_perspective(
-                Player::P2,
-                &preview.p2_mons,
-                &preview.p1_mons,
-                &app.dexes.pokemon_dex,
-                req.active_per_side,
-                req.brought_per_side,
-                50,
-                information_mode,
-                req.force_max_ivs,
-            );
-            (belief_p1, belief_p2)
+            let config = InferenceConfig {
+                use_stat_points: req.stat_points,
+                force_max_ivs: req.force_max_ivs,
+                legal_items,
+                learnset_dex: app.dexes.learnset_dex.clone(),
+                ..InferenceConfig::default()
+            };
+            let (belief_p1, belief_p2) = if information_mode == InformationMode::ClosedTeamSheet {
+                let belief_p1 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
+                    Player::P1,
+                    &preview.p1_mons,
+                    &preview.p2_mons,
+                    &app.dexes.pokemon_dex,
+                    req.active_per_side,
+                    req.brought_per_side,
+                    50,
+                    req.force_max_ivs,
+                );
+                // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
+                // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
+                let belief_p2 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
+                    Player::P2,
+                    &preview.p2_mons,
+                    &preview.p1_mons,
+                    &app.dexes.pokemon_dex,
+                    req.active_per_side,
+                    req.brought_per_side,
+                    50,
+                    req.force_max_ivs,
+                );
+                (belief_p1, belief_p2)
+            } else {
+                let belief_p1 = UnknownMatchState::team_preview_open_sheet_from_perspective(
+                    Player::P1,
+                    &preview.p1_mons,
+                    &preview.p2_mons,
+                    &app.dexes.pokemon_dex,
+                    req.active_per_side,
+                    req.brought_per_side,
+                    50,
+                    information_mode,
+                    req.force_max_ivs,
+                );
+                // P2's mirror-image belief: viewer=P2, so P2's own team is the known side
+                // and P1's the fogged one — note the my/opp argument swap vs. belief_p1.
+                let belief_p2 = UnknownMatchState::team_preview_open_sheet_from_perspective(
+                    Player::P2,
+                    &preview.p2_mons,
+                    &preview.p1_mons,
+                    &app.dexes.pokemon_dex,
+                    req.active_per_side,
+                    req.brought_per_side,
+                    50,
+                    information_mode,
+                    req.force_max_ivs,
+                );
+                (belief_p1, belief_p2)
+            };
+            (Some(belief_p1), Some(belief_p2), Some(config))
         };
-        (Some(belief_p1), Some(belief_p2), Some(config))
-    };
 
     let session = BattleSession {
         state: poke_rust::state::battle::MatchState::TeamPreviewState(preview),
@@ -301,10 +303,11 @@ pub async fn submit_turn(
     // (both ground-truth state and belief) is left untouched on failure, so the
     // battle is still there to retry or continue against on the next request. See
     // `resolve_turn`'s doc comment for the full atomicity argument.
-    let (events, events_p2, probability) = match session::resolve_turn(session, &app.dexes, &p1_cmd, &p2_cmd) {
-        Ok(result) => result,
-        Err(message) => return internal_error(message),
-    };
+    let (events, events_p2, probability) =
+        match session::resolve_turn(session, &app.dexes, &p1_cmd, &p2_cmd) {
+            Ok(result) => result,
+            Err(message) => return internal_error(message),
+        };
 
     Json(TurnResponse {
         state: session.view(Player::P1),
@@ -323,6 +326,74 @@ pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) 
     } else {
         not_found()
     }
+}
+
+/// Runs a bounded turn-resolution-speed + fog-of-war-inference-speed sweep
+/// (`poke_rust::benchmarking`) and returns the timing table. Needs only
+/// `app.dexes` — no `sessions` lock is taken, so a benchmark run never blocks
+/// battle requests. The sweep is synchronous, CPU-bound Rust (no `.await`
+/// points of its own), so it runs inside `spawn_blocking` rather than on the
+/// async runtime's worker threads, where it would stall every other
+/// in-flight request for its duration.
+pub async fn run_benchmark(
+    State(app): State<AppState>,
+    Json(req): Json<BenchmarkRequest>,
+) -> Response {
+    let dexes = app.dexes.clone();
+    let turn_speed_pairings = req.turn_speed_pairings;
+    let inference_games = req.inference_games;
+
+    let outcome = tokio::task::spawn_blocking(move || {
+        let turn_speed =
+            benchmarking::run_turn_speed(&dexes.pokemon_dex, &dexes.move_dex, turn_speed_pairings);
+        let inference = benchmarking::run_inference(
+            &dexes.pokemon_dex,
+            &dexes.move_dex,
+            &dexes.ability_dex,
+            &dexes.learnset_dex,
+            inference_games,
+        );
+        (turn_speed, inference)
+    })
+    .await;
+
+    let (turn_speed, inference) = match outcome {
+        Ok(pair) => pair,
+        Err(_) => return internal_error("benchmark task panicked"),
+    };
+    let turn_speed = match turn_speed {
+        Ok(rows) => rows,
+        Err(message) => return internal_error(message),
+    };
+    let inference = match inference {
+        Ok(rows) => rows,
+        Err(message) => return internal_error(message),
+    };
+
+    Json(BenchmarkResponse {
+        turn_speed: turn_speed
+            .into_iter()
+            .map(|r| TurnSpeedRowDto {
+                scenario: r.scenario.to_string(),
+                mode: r.mode.to_string(),
+                rolls: r.rolls,
+                crit: r.crit,
+                avg_time_secs: r.avg_time_secs,
+                avg_branches: r.avg_branches,
+                pairings: r.pairings,
+            })
+            .collect(),
+        inference: inference
+            .into_iter()
+            .map(|r| InferenceRowDto {
+                information_mode: r.information_mode.to_string(),
+                calls: r.calls,
+                avg_time_secs: r.avg_time_secs,
+                contradictions: r.contradictions,
+            })
+            .collect(),
+    })
+    .into_response()
 }
 
 /// Sprites live outside the repo on GitHub (see `frontend/src/lib/sprites.ts`); nothing
@@ -362,7 +433,11 @@ pub async fn get_sprite(State(app): State<AppState>, Query(query): Query<SpriteQ
     let remote_path = &url[ALLOWED_SPRITE_HOST_PREFIX.len()..];
     // Reject path traversal / empty segments (e.g. "..", "a//b") before ever joining
     // this onto a filesystem path.
-    if remote_path.is_empty() || remote_path.split('/').any(|seg| seg.is_empty() || seg == "..") {
+    if remote_path.is_empty()
+        || remote_path
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "..")
+    {
         return error(StatusCode::BAD_REQUEST, "invalid sprite path");
     }
 
@@ -383,7 +458,12 @@ pub async fn get_sprite(State(app): State<AppState>, Query(query): Query<SpriteQ
     }
     let bytes = match upstream.bytes().await {
         Ok(b) => b,
-        Err(_) => return error(StatusCode::BAD_GATEWAY, "failed reading sprite upstream body"),
+        Err(_) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                "failed reading sprite upstream body",
+            );
+        }
     };
 
     if let Some(parent) = cache_path.parent() {

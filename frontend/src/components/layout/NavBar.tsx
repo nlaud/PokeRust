@@ -31,9 +31,19 @@ export default function NavBar() {
             </NavLink>
           ))}
         </nav>
+        <NavLink
+          to="/benchmark"
+          className={({ isActive }) =>
+            `lift ml-auto rounded-card px-3 py-1.5 text-sm font-medium ${
+              isActive ? 'bg-primary-soft text-primary' : 'text-ink-muted hover:text-ink'
+            }`
+          }
+        >
+          Benchmark
+        </NavLink>
         <button
           onClick={() => setSidebarOpen(true)}
-          className="lift ml-auto rounded-card p-2 text-ink-muted hover:text-ink"
+          className="lift rounded-card p-2 text-ink-muted hover:text-ink"
           aria-label="Open settings"
           title="Settings"
         >

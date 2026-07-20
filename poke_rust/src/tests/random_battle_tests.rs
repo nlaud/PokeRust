@@ -27,15 +27,20 @@ use crate::data::ability::Ability;
 use crate::data::item::Item;
 use crate::data::pokemon_move::PokemonMove;
 use crate::data::species::Species;
-use crate::information::inference::{apply_information, InferenceConfig};
+use crate::information::inference::{InferenceConfig, apply_information};
 use crate::information::information::mask_events_for;
-use crate::information::subset_check::assert_true_state_subset_of_belief;
-use crate::information::unknowns::UnknownMatchState;
-use crate::simulator::{
-    get_possible_commands_for_active_slot, sample_turn_raw, team_preview_state_from_teamsheets,
-    validate_battle_command_combination,
+use crate::information::subset_check::{
+    SubsetViolation, SubsetViolationKind, assert_true_state_subset_of_belief,
+    collect_true_state_subset_violations,
 };
-use crate::state::battle::{BattleCommand, BattleState, MatchState, Player, PlayerCommand, TeamPreviewCommand};
+use crate::information::unknowns::{Statement, UnknownMatchState};
+use crate::simulator::{
+    get_possible_commands_for_active_slot, sample_turn_raw, scoped_sample_rng,
+    team_preview_state_from_teamsheets, validate_battle_command_combination,
+};
+use crate::state::battle::{
+    BattleCommand, BattleState, MatchState, Player, PlayerCommand, TeamPreviewCommand,
+};
 use crate::state::dex_data::{parse_ability_dex, parse_learnset_dex};
 use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
 
@@ -62,13 +67,51 @@ const ITERATIONS: u64 = 25;
 /// Hang guard only — not a soundness property. Real doubles games settle in a
 /// handful of turns; a few hundred comfortably covers even a PP-stall grind.
 const MAX_TURNS: usize = 400;
+const SAMPLE_SEED_SALT: u64 = 0x5355_4253_4554_4f52;
 
-static ABILITY_DEX: OnceLock<HashMap<Ability, crate::state::dex_data::AbilityData>> = OnceLock::new();
+fn fuzz_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn fuzz_env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(default)
+}
+
+fn statement_shape(statement: &Statement, names: &mut Vec<&'static str>) {
+    let name = match statement {
+        Statement::Not(inner) => {
+            statement_shape(inner, names);
+            "Not"
+        }
+        Statement::HasItem { .. } => "HasItem",
+        Statement::HasAbility { .. } => "HasAbility",
+        Statement::WeatherTurns { .. } => "WeatherTurns",
+        Statement::TerrainTurns { .. } => "TerrainTurns",
+        Statement::SideConditionTurns { .. } => "SideConditionTurns",
+        Statement::NatureBoostsStat { .. } => "NatureBoostsStat",
+        Statement::NatureNerfsStat { .. } => "NatureNerfsStat",
+        Statement::EVIVStatGE { .. } => "EVIVStatGE",
+        Statement::EVIVStatLE { .. } => "EVIVStatLE",
+        Statement::SpeedComparison { .. } => "SpeedComparison",
+        Statement::KnowsThreateningMove { .. } => "KnowsThreateningMove",
+    };
+    names.push(name);
+}
+
+static ABILITY_DEX: OnceLock<HashMap<Ability, crate::state::dex_data::AbilityData>> =
+    OnceLock::new();
 fn ability_dex() -> &'static HashMap<Ability, crate::state::dex_data::AbilityData> {
     ABILITY_DEX.get_or_init(|| parse_ability_dex("../pokemon_info/showdownAbilities.txt"))
 }
 
-static LEARNSET_DEX: OnceLock<HashMap<Species, std::collections::HashSet<PokemonMove>>> = OnceLock::new();
+static LEARNSET_DEX: OnceLock<HashMap<Species, std::collections::HashSet<PokemonMove>>> =
+    OnceLock::new();
 fn learnset_dex() -> &'static HashMap<Species, std::collections::HashSet<PokemonMove>> {
     LEARNSET_DEX.get_or_init(|| parse_learnset_dex("../pokemon_info/showdownLearnsets.txt"))
 }
@@ -85,42 +128,158 @@ fn learnset_dex() -> &'static HashMap<Species, std::collections::HashSet<Pokemon
 /// item-possibility space production battles run under.
 fn champions_legal_items() -> std::collections::HashSet<Item> {
     const GENERAL: &[&str] = &[
-        "Big Root", "Black Belt", "Black Glasses", "Bright Powder", "Charcoal",
-        "Choice Scarf", "Damp Rock", "Dragon Fang", "Expert Belt", "Fairy Feather",
-        "Focus Band", "Focus Sash", "Hard Stone", "Heat Rock", "Icy Rock",
-        "Iron Ball", "King's Rock", "Leftovers", "Life Orb", "Light Ball",
-        "Light Clay", "Magnet", "Mental Herb", "Metal Coat", "Metronome",
-        "Miracle Seed", "Muscle Band", "Mystic Water", "Never-Melt Ice",
-        "Poison Barb", "Quick Claw", "Scope Lens", "Sharp Beak", "Shed Shell",
-        "Shell Bell", "Silk Scarf", "Silver Powder", "Smooth Rock", "Soft Sand",
-        "Spell Tag", "Twisted Spoon", "White Herb", "Wide Lens", "Wise Glasses",
+        "Big Root",
+        "Black Belt",
+        "Black Glasses",
+        "Bright Powder",
+        "Charcoal",
+        "Choice Scarf",
+        "Damp Rock",
+        "Dragon Fang",
+        "Expert Belt",
+        "Fairy Feather",
+        "Focus Band",
+        "Focus Sash",
+        "Hard Stone",
+        "Heat Rock",
+        "Icy Rock",
+        "Iron Ball",
+        "King's Rock",
+        "Leftovers",
+        "Life Orb",
+        "Light Ball",
+        "Light Clay",
+        "Magnet",
+        "Mental Herb",
+        "Metal Coat",
+        "Metronome",
+        "Miracle Seed",
+        "Muscle Band",
+        "Mystic Water",
+        "Never-Melt Ice",
+        "Poison Barb",
+        "Quick Claw",
+        "Scope Lens",
+        "Sharp Beak",
+        "Shed Shell",
+        "Shell Bell",
+        "Silk Scarf",
+        "Silver Powder",
+        "Smooth Rock",
+        "Soft Sand",
+        "Spell Tag",
+        "Twisted Spoon",
+        "White Herb",
+        "Wide Lens",
+        "Wise Glasses",
         "Zoom Lens",
     ];
     const MEGA_STONES: &[&str] = &[
-        "Abomasite", "Absolite", "Aerodactylite", "Aggronite", "Alakazite",
-        "Altarianite", "Ampharosite", "Audinite", "Banettite", "Barbaracite",
-        "Beedrillite", "Blastoisinite", "Blazikenite", "Cameruptite", "Chandelurite",
-        "Charizardite X", "Charizardite Y", "Chesnaughtite", "Chimechite",
-        "Clefablite", "Crabominite", "Delphoxite", "Dragalgite", "Dragoninite",
-        "Drampanite", "Eelektrossite", "Emboarite", "Excadrite", "Falinksite",
-        "Feraligite", "Floettite", "Froslassite", "Galladite", "Garchompite",
-        "Gardevoirite", "Gengarite", "Glalitite", "Glimmoranite", "Golurkite",
-        "Greninjite", "Gyaradosite", "Hawluchanite", "Heracronite", "Houndoominite",
-        "Kangaskhanite", "Lopunnite", "Lucarionite", "Malamarite", "Manectite",
-        "Mawilite", "Medichamite", "Meganiumite", "Meowsticite", "Metagrossite",
-        "Pidgeotite", "Pinsirite", "Pyroarite", "Raichunite X", "Raichunite Y",
-        "Sablenite", "Sceptilite", "Scizorite", "Scolipite", "Scovillainite",
-        "Scraftinite", "Sharpedonite", "Skarmorite", "Slowbronite", "Staraptite",
-        "Starminite", "Steelixite", "Swampertite", "Tyranitarite", "Venusaurite",
+        "Abomasite",
+        "Absolite",
+        "Aerodactylite",
+        "Aggronite",
+        "Alakazite",
+        "Altarianite",
+        "Ampharosite",
+        "Audinite",
+        "Banettite",
+        "Barbaracite",
+        "Beedrillite",
+        "Blastoisinite",
+        "Blazikenite",
+        "Cameruptite",
+        "Chandelurite",
+        "Charizardite X",
+        "Charizardite Y",
+        "Chesnaughtite",
+        "Chimechite",
+        "Clefablite",
+        "Crabominite",
+        "Delphoxite",
+        "Dragalgite",
+        "Dragoninite",
+        "Drampanite",
+        "Eelektrossite",
+        "Emboarite",
+        "Excadrite",
+        "Falinksite",
+        "Feraligite",
+        "Floettite",
+        "Froslassite",
+        "Galladite",
+        "Garchompite",
+        "Gardevoirite",
+        "Gengarite",
+        "Glalitite",
+        "Glimmoranite",
+        "Golurkite",
+        "Greninjite",
+        "Gyaradosite",
+        "Hawluchanite",
+        "Heracronite",
+        "Houndoominite",
+        "Kangaskhanite",
+        "Lopunnite",
+        "Lucarionite",
+        "Malamarite",
+        "Manectite",
+        "Mawilite",
+        "Medichamite",
+        "Meganiumite",
+        "Meowsticite",
+        "Metagrossite",
+        "Pidgeotite",
+        "Pinsirite",
+        "Pyroarite",
+        "Raichunite X",
+        "Raichunite Y",
+        "Sablenite",
+        "Sceptilite",
+        "Scizorite",
+        "Scolipite",
+        "Scovillainite",
+        "Scraftinite",
+        "Sharpedonite",
+        "Skarmorite",
+        "Slowbronite",
+        "Staraptite",
+        "Starminite",
+        "Steelixite",
+        "Swampertite",
+        "Tyranitarite",
+        "Venusaurite",
         "Victreebelite",
     ];
     const BERRIES: &[&str] = &[
-        "Aspear Berry", "Babiri Berry", "Charti Berry", "Cheri Berry", "Chesto Berry",
-        "Chilan Berry", "Chople Berry", "Coba Berry", "Colbur Berry", "Haban Berry",
-        "Kasib Berry", "Kebia Berry", "Leppa Berry", "Lum Berry", "Occa Berry",
-        "Oran Berry", "Passho Berry", "Payapa Berry", "Pecha Berry", "Persim Berry",
-        "Rawst Berry", "Rindo Berry", "Roseli Berry", "Shuca Berry", "Sitrus Berry",
-        "Tanga Berry", "Wacan Berry", "Yache Berry",
+        "Aspear Berry",
+        "Babiri Berry",
+        "Charti Berry",
+        "Cheri Berry",
+        "Chesto Berry",
+        "Chilan Berry",
+        "Chople Berry",
+        "Coba Berry",
+        "Colbur Berry",
+        "Haban Berry",
+        "Kasib Berry",
+        "Kebia Berry",
+        "Leppa Berry",
+        "Lum Berry",
+        "Occa Berry",
+        "Oran Berry",
+        "Passho Berry",
+        "Payapa Berry",
+        "Pecha Berry",
+        "Persim Berry",
+        "Rawst Berry",
+        "Rindo Berry",
+        "Roseli Berry",
+        "Shuca Berry",
+        "Sitrus Berry",
+        "Tanga Berry",
+        "Wacan Berry",
+        "Yache Berry",
     ];
     GENERAL
         .iter()
@@ -144,7 +303,10 @@ fn random_team_preview_command(team_len: usize, rng: &mut StdRng) -> TeamPreview
 
     let active_indices = indices[..active].to_vec();
     let back_indices = indices[active..].to_vec();
-    TeamPreviewCommand { active_indices, back_indices }
+    TeamPreviewCommand {
+        active_indices,
+        back_indices,
+    }
 }
 
 /// Picks one random, jointly-legal `BattleCommand` set for every active slot of
@@ -156,7 +318,11 @@ fn random_team_preview_command(team_len: usize, rng: &mut StdRng) -> TeamPreview
 /// (two active mons can't switch into the same bench slot; at most one
 /// Tera/Mega per team per turn), which `validate_battle_command_combination`
 /// checks.
-fn random_commands_for_player(state: &BattleState, player: Player, rng: &mut StdRng) -> Vec<BattleCommand> {
+fn random_commands_for_player(
+    state: &BattleState,
+    player: Player,
+    rng: &mut StdRng,
+) -> Vec<BattleCommand> {
     let active_len = match player {
         Player::P1 => state.p1_active_mons.len(),
         Player::P2 => state.p2_active_mons.len(),
@@ -164,7 +330,13 @@ fn random_commands_for_player(state: &BattleState, player: Player, rng: &mut Std
 
     let per_slot_options: Vec<Vec<BattleCommand>> = (0..active_len)
         .map(|slot_idx| {
-            get_possible_commands_for_active_slot(state, player, slot_idx, move_dex(), pokemon_dex())
+            get_possible_commands_for_active_slot(
+                state,
+                player,
+                slot_idx,
+                move_dex(),
+                pokemon_dex(),
+            )
         })
         .collect();
 
@@ -221,8 +393,11 @@ fn reseed_for_battle(
     p1_cmd: &PlayerCommand,
     p2_cmd: &PlayerCommand,
 ) -> UnknownMatchState {
-    let (UnknownMatchState::TeamPreview(preview), PlayerCommand::TeamPreview(p1_tp), PlayerCommand::TeamPreview(p2_tp)) =
-        (&belief, p1_cmd, p2_cmd)
+    let (
+        UnknownMatchState::TeamPreview(preview),
+        PlayerCommand::TeamPreview(p1_tp),
+        PlayerCommand::TeamPreview(p2_tp),
+    ) = (&belief, p1_cmd, p2_cmd)
     else {
         return belief;
     };
@@ -266,13 +441,12 @@ fn random_doubles_beliefs_stay_sound_subset() {
 /// characterizing `assert_true_state_subset_of_belief` failures across many
 /// fuzz iterations in one run: catches each subset-oracle panic AND each
 /// contradiction-oracle panic via `catch_unwind` instead of aborting the whole
-/// run, then buckets by field/clause-shape/species. Failures are NOT
-/// reproducible by seed (`sample_turn_raw`'s internal branch sampling uses
-/// `rand::thread_rng()`, not this test's own seeded `StdRng`), so root-causing
-/// a specific instance requires adding temporary `eprintln!` tracing at the
-/// suspect derivation site alongside a run of this harness, then removing the
-/// tracing once the fix lands — see the S57 fix (`pass4_speed_from_order`'s
-/// ability-escape timing) for a worked example. `break`s directly in each
+/// run, then buckets by field/clause-shape/species. Failures are exactly
+/// reproducible by seed: command generation and simulator branch sampling use
+/// deterministic `StdRng`s scoped to each iteration. Set
+/// `POKERUST_FUZZ_SEED_START=<seed>` and `POKERUST_FUZZ_ITERS=1` to replay one
+/// battle; add `POKERUST_FUZZ_REPLAY=1` for full command/event dumps.
+/// `break`s directly in each
 /// `Err` arm (a diverging expression) rather than using a separate correlated
 /// bool — a bool-based version fails to borrow-check across loop iterations
 /// (E0382), confirmed while building this. Run via:
@@ -280,7 +454,7 @@ fn random_doubles_beliefs_stay_sound_subset() {
 #[test]
 #[ignore]
 fn survey_subset_violations() {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     let pdex = pokemon_dex();
     let mdex = move_dex();
@@ -295,25 +469,52 @@ fn survey_subset_violations() {
         ..Default::default()
     };
 
-    let iterations: u64 = 300;
-    let mut failures: Vec<String> = Vec::new();
+    let iterations = fuzz_env_u64("POKERUST_FUZZ_ITERS", 300);
+    let seed_start = fuzz_env_u64("POKERUST_FUZZ_SEED_START", 0);
+    let max_failures = fuzz_env_u64("POKERUST_FUZZ_MAX_FAILURES", u64::MAX);
+    let replay_details = fuzz_env_bool("POKERUST_FUZZ_REPLAY", false);
+    let mut contradictions: Vec<String> = Vec::new();
+    let mut subset_failures: Vec<(String, SubsetViolation)> = Vec::new();
     let mut failed_iters: u64 = 0;
+    let mut attempted_iters: u64 = 0;
 
-    for iter in 0..iterations {
+    for iter in seed_start..seed_start.saturating_add(iterations) {
+        attempted_iters += 1;
         let mut rng = StdRng::seed_from_u64(iter);
+        let _sample_rng = scoped_sample_rng(iter ^ SAMPLE_SEED_SALT);
 
         let p1_path = TEAMSHEETS[rng.gen_range(0..TEAMSHEETS.len())];
         let p2_path = TEAMSHEETS[rng.gen_range(0..TEAMSHEETS.len())];
 
         let preview = team_preview_state_from_teamsheets(
-            p1_path, p2_path, pdex, mdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, true,
+            p1_path,
+            p2_path,
+            pdex,
+            mdex,
+            ACTIVE_PER_SIDE,
+            BROUGHT_PER_SIDE,
+            true,
         );
 
         let mut belief_p1 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
-            Player::P1, &preview.p1_mons, &preview.p2_mons, pdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, true,
+            Player::P1,
+            &preview.p1_mons,
+            &preview.p2_mons,
+            pdex,
+            ACTIVE_PER_SIDE,
+            BROUGHT_PER_SIDE,
+            50,
+            true,
         );
         let mut belief_p2 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
-            Player::P2, &preview.p2_mons, &preview.p1_mons, pdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, true,
+            Player::P2,
+            &preview.p2_mons,
+            &preview.p1_mons,
+            pdex,
+            ACTIVE_PER_SIDE,
+            BROUGHT_PER_SIDE,
+            50,
+            true,
         );
 
         let p1_tp = random_team_preview_command(preview.p1_mons.len(), &mut rng);
@@ -331,11 +532,60 @@ fn survey_subset_violations() {
                 break;
             }
 
+            if replay_details && let MatchState::BattleState(bs) = &state {
+                let active_speed_state: Vec<_> = bs
+                    .p1_active_mons
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, mon)| {
+                        (
+                            Player::P1,
+                            slot,
+                            &mon.species,
+                            mon.stats[1],
+                            mon.stats[5],
+                            mon.boosts,
+                            &mon.status,
+                            &mon.item,
+                            &mon.ability,
+                        )
+                    })
+                    .chain(bs.p2_active_mons.iter().enumerate().map(|(slot, mon)| {
+                        (
+                            Player::P2,
+                            slot,
+                            &mon.species,
+                            mon.stats[1],
+                            mon.stats[5],
+                            mon.boosts,
+                            &mon.status,
+                            &mon.item,
+                            &mon.ability,
+                        )
+                    }))
+                    .collect();
+                eprintln!("[TRUE-ACTIVES] iter={iter} turn={turn} {active_speed_state:?}");
+            }
+
             let was_team_preview = matches!(state, MatchState::TeamPreviewState(_));
 
-            let (next_state, raw_events, _probability) =
-                sample_turn_raw(&state, &p1_cmd, &p2_cmd, mdex, pdex, true, 16, Some(Player::P1));
+            let (next_state, raw_events, _probability) = sample_turn_raw(
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                mdex,
+                pdex,
+                true,
+                16,
+                Some(Player::P1),
+            );
             let raw_events = raw_events.unwrap_or_default();
+            if replay_details {
+                eprintln!(
+                    "[TURN] iter={iter} turn={turn} p1_cmd={p1_cmd:?} p2_cmd={p2_cmd:?} \
+                     raw_events={raw_events:?}"
+                );
+            }
             let events_p1 = mask_events_for(Player::P1, &raw_events);
             let events_p2 = mask_events_for(Player::P2, &raw_events);
 
@@ -357,7 +607,7 @@ fn survey_subset_violations() {
             })) {
                 Ok(b) => b,
                 Err(e) => {
-                    failures.push(format!(
+                    contradictions.push(format!(
                         "[contradiction-p1] {}",
                         e.downcast_ref::<String>().cloned().unwrap_or_default()
                     ));
@@ -370,7 +620,7 @@ fn survey_subset_violations() {
             })) {
                 Ok(b) => b,
                 Err(e) => {
-                    failures.push(format!(
+                    contradictions.push(format!(
                         "[contradiction-p2] {}",
                         e.downcast_ref::<String>().cloned().unwrap_or_default()
                     ));
@@ -384,43 +634,50 @@ fn survey_subset_violations() {
             match &state {
                 MatchState::GameOverState { .. } => break,
                 MatchState::BattleState(bs) => {
-                    let context = format!("iter={iter} turn={turn} matchup=({p1_path} vs {p2_path})");
-                    eprintln!("[CTX] {context}");
+                    let context =
+                        format!("iter={iter} turn={turn} matchup=({p1_path} vs {p2_path})");
                     let mut violated = false;
                     for (belief, observer) in [(&belief_p1, Player::P1), (&belief_p2, Player::P2)] {
-                        let result = catch_unwind(AssertUnwindSafe(|| {
-                            assert_true_state_subset_of_belief(bs, belief, observer, pdex, mdex, &context);
-                        }));
-                        if let Err(e) = result {
-                            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                                s.clone()
-                            } else if let Some(s) = e.downcast_ref::<&str>() {
-                                (*s).to_string()
-                            } else {
-                                "<non-string panic payload>".to_string()
-                            };
-                            failures.push(msg);
+                        let found =
+                            collect_true_state_subset_violations(bs, belief, observer, pdex, mdex);
+                        if !found.is_empty() {
                             violated = true;
+                            if replay_details {
+                                eprintln!(
+                                    "[REPLAY] {context} observer={observer:?} p1_cmd={p1_cmd:?} \
+                                     p2_cmd={p2_cmd:?} raw_events={raw_events:?}"
+                                );
+                            }
+                            subset_failures.extend(
+                                found
+                                    .into_iter()
+                                    .map(|violation| (context.clone(), violation)),
+                            );
                         }
                     }
                     if violated {
                         iter_failed = true;
                         break;
                     }
-                    p1_cmd = PlayerCommand::Battle(random_commands_for_player(bs, Player::P1, &mut rng));
-                    p2_cmd = PlayerCommand::Battle(random_commands_for_player(bs, Player::P2, &mut rng));
+                    p1_cmd =
+                        PlayerCommand::Battle(random_commands_for_player(bs, Player::P1, &mut rng));
+                    p2_cmd =
+                        PlayerCommand::Battle(random_commands_for_player(bs, Player::P2, &mut rng));
                 }
                 MatchState::TeamPreviewState(_) => unreachable!(),
             }
         }
         if iter_failed {
             failed_iters += 1;
+            if failed_iters >= max_failures {
+                break;
+            }
         }
     }
 
     eprintln!(
-        "\n=== SURVEY: {failed_iters}/{iterations} iterations failed ({:.1}%) ===",
-        100.0 * failed_iters as f64 / iterations as f64
+        "\n=== SURVEY: {failed_iters}/{attempted_iters} iterations failed ({:.1}%) ===",
+        100.0 * failed_iters as f64 / attempted_iters.max(1) as f64
     );
 
     let mut field_bucket: HashMap<String, u32> = HashMap::new();
@@ -428,39 +685,39 @@ fn survey_subset_violations() {
     let mut species_bucket: HashMap<String, u32> = HashMap::new();
     let mut clause_count = 0u32;
     let mut field_count = 0u32;
-    let mut contradiction_count = 0u32;
+    let contradiction_count = contradictions.len() as u32;
 
-    for f in &failures {
-        if f.starts_with("[contradiction-p1]") || f.starts_with("[contradiction-p2]") {
-            contradiction_count += 1;
-        } else if let Some(idx) = f.find("clause unsatisfiable by ground truth: [") {
-            clause_count += 1;
-            let rest = &f[idx..];
-            let variants = [
-                "NatureBoostsStat", "NatureNerfsStat", "EVIVStatGE", "EVIVStatLE", "HasItem",
-                "HasAbility", "SpeedComparison", "Not", "WeatherTurns", "TerrainTurns",
-                "SideConditionTurns", "KnowsThreateningMove",
-            ];
-            let mut present: Vec<&str> = variants.iter().filter(|v| rest.contains(*v)).copied().collect();
-            present.sort_unstable();
-            *clause_bucket.entry(present.join("+")).or_insert(0) += 1;
-        } else if let Some(idx) = f.find("violations=[") {
-            field_count += 1;
-            let rest = &f[idx + "violations=[".len()..];
-            let end = rest.find(']').unwrap_or(rest.len());
-            for part in rest[..end].split("\", \"") {
-                let key = part.trim_matches('"').split(':').next().unwrap_or("?").to_string();
-                *field_bucket.entry(key).or_insert(0) += 1;
+    for (_, violation) in &subset_failures {
+        match &violation.kind {
+            SubsetViolationKind::Fields {
+                true_species,
+                violations,
+                ..
+            } => {
+                field_count += 1;
+                *species_bucket
+                    .entry(format!("{true_species:?}"))
+                    .or_insert(0) += 1;
+                for violation in violations {
+                    *field_bucket.entry(violation.field.clone()).or_insert(0) += 1;
+                }
             }
-        }
-        if let Some(idx) = f.find("true_species=") {
-            let rest = &f[idx + "true_species=".len()..];
-            let end = rest.find(' ').unwrap_or(rest.len());
-            *species_bucket.entry(rest[..end].to_string()).or_insert(0) += 1;
+            SubsetViolationKind::Clause { clause } => {
+                clause_count += 1;
+                let mut present = Vec::new();
+                for statement in clause {
+                    statement_shape(statement, &mut present);
+                }
+                present.sort_unstable();
+                present.dedup();
+                *clause_bucket.entry(present.join("+")).or_insert(0) += 1;
+            }
         }
     }
 
-    eprintln!("field violations: {field_count}, clause violations: {clause_count}, contradiction panics: {contradiction_count}");
+    eprintln!(
+        "field violations: {field_count}, clause violations: {clause_count}, contradiction panics: {contradiction_count}"
+    );
     eprintln!("-- field breakdown --");
     for (k, v) in &field_bucket {
         eprintln!("  {k}: {v}");
@@ -474,8 +731,12 @@ fn survey_subset_violations() {
         eprintln!("  {k}: {v}");
     }
     eprintln!("-- sample messages (first 20) --");
-    for f in failures.iter().take(20) {
-        eprintln!("---\n{f}");
+    for (context, violation) in subset_failures.iter().take(20) {
+        eprintln!("---\n[subset violation] context={context} {violation}");
+    }
+    let remaining = 20usize.saturating_sub(subset_failures.len().min(20));
+    for failure in contradictions.iter().take(remaining) {
+        eprintln!("---\n{failure}");
     }
 }
 
@@ -493,22 +754,45 @@ fn run_sweep(iterations: u64, check_subset: bool) {
         ..Default::default()
     };
 
-    for iter in 0..iterations {
+    let iterations = fuzz_env_u64("POKERUST_FUZZ_ITERS", iterations);
+    let seed_start = fuzz_env_u64("POKERUST_FUZZ_SEED_START", 0);
+    for iter in seed_start..seed_start.saturating_add(iterations) {
         let mut rng = StdRng::seed_from_u64(iter);
+        let _sample_rng = scoped_sample_rng(iter ^ SAMPLE_SEED_SALT);
 
         let p1_path = TEAMSHEETS[rng.gen_range(0..TEAMSHEETS.len())];
         let p2_path = TEAMSHEETS[rng.gen_range(0..TEAMSHEETS.len())];
         eprintln!("[iter {iter}] {p1_path} vs {p2_path}");
 
         let preview = team_preview_state_from_teamsheets(
-            p1_path, p2_path, pdex, mdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, true,
+            p1_path,
+            p2_path,
+            pdex,
+            mdex,
+            ACTIVE_PER_SIDE,
+            BROUGHT_PER_SIDE,
+            true,
         );
 
         let mut belief_p1 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
-            Player::P1, &preview.p1_mons, &preview.p2_mons, pdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, true,
+            Player::P1,
+            &preview.p1_mons,
+            &preview.p2_mons,
+            pdex,
+            ACTIVE_PER_SIDE,
+            BROUGHT_PER_SIDE,
+            50,
+            true,
         );
         let mut belief_p2 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
-            Player::P2, &preview.p2_mons, &preview.p1_mons, pdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, true,
+            Player::P2,
+            &preview.p2_mons,
+            &preview.p1_mons,
+            pdex,
+            ACTIVE_PER_SIDE,
+            BROUGHT_PER_SIDE,
+            50,
+            true,
         );
 
         let p1_tp = random_team_preview_command(preview.p1_mons.len(), &mut rng);
@@ -533,8 +817,16 @@ fn run_sweep(iterations: u64, check_subset: bool) {
             // Resolve once; mask twice. Re-resolving per observer would sample two
             // different random trajectories and desync the beliefs from each other
             // and from `next_state` — see `sample_turn_raw`'s doc comment.
-            let (next_state, raw_events, _probability) =
-                sample_turn_raw(&state, &p1_cmd, &p2_cmd, mdex, pdex, true, 16, Some(Player::P1));
+            let (next_state, raw_events, _probability) = sample_turn_raw(
+                &state,
+                &p1_cmd,
+                &p2_cmd,
+                mdex,
+                pdex,
+                true,
+                16,
+                Some(Player::P1),
+            );
             let raw_events = raw_events.unwrap_or_default();
             let events_p1 = mask_events_for(Player::P1, &raw_events);
             let events_p2 = mask_events_for(Player::P2, &raw_events);
@@ -570,13 +862,30 @@ fn run_sweep(iterations: u64, check_subset: bool) {
                     // (soundness against self-contradiction only) cannot. See
                     // `subset_check`'s module doc for the full design.
                     if check_subset {
-                        let context = format!("iter={iter} turn={turn} matchup=({p1_path} vs {p2_path})");
-                        assert_true_state_subset_of_belief(bs, &belief_p1, Player::P1, pdex, mdex, &context);
-                        assert_true_state_subset_of_belief(bs, &belief_p2, Player::P2, pdex, mdex, &context);
+                        let context =
+                            format!("iter={iter} turn={turn} matchup=({p1_path} vs {p2_path})");
+                        assert_true_state_subset_of_belief(
+                            bs,
+                            &belief_p1,
+                            Player::P1,
+                            pdex,
+                            mdex,
+                            &context,
+                        );
+                        assert_true_state_subset_of_belief(
+                            bs,
+                            &belief_p2,
+                            Player::P2,
+                            pdex,
+                            mdex,
+                            &context,
+                        );
                     }
 
-                    p1_cmd = PlayerCommand::Battle(random_commands_for_player(bs, Player::P1, &mut rng));
-                    p2_cmd = PlayerCommand::Battle(random_commands_for_player(bs, Player::P2, &mut rng));
+                    p1_cmd =
+                        PlayerCommand::Battle(random_commands_for_player(bs, Player::P1, &mut rng));
+                    p2_cmd =
+                        PlayerCommand::Battle(random_commands_for_player(bs, Player::P2, &mut rng));
                 }
                 MatchState::TeamPreviewState(_) => {
                     unreachable!("team preview only occurs once, at turn 1")
