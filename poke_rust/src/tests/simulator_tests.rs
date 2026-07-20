@@ -36821,6 +36821,46 @@ Modest Nature
     }
 }
 
+// S56: a teamsheet's "EVs:" line under `--stat-points` (this project's default) must run
+// through `scale_evs_for_stat_points` exactly once. The line parser used to duplicate that
+// scaling inline before also passing the (already-scaled) value into `build_pokemon_state`,
+// which scales again unconditionally on the same flag — the second pass overflowed `u8` and
+// silently wrapped mod 256, producing a bogus final stat with no error signal (e.g. 20
+// points -> scaled once to 156 -> wrapped to (156*8-4) mod 256 = 220). Found via the
+// fuzz-test subset-check oracle (TODO.md) reporting a Skeledirge Def of 162 that no sound
+// nature/EV/IV combination could produce.
+mod teamsheet_stat_points_ev_scaling {
+    use crate::state::pokemon::parse_team_sheet_str;
+    use crate::tests::simuilator_test_helpers::{move_dex, pokemon_dex};
+
+    #[test]
+    fn ev_points_are_scaled_exactly_once() {
+        let sheet = "\
+Skeledirge @ Sitrus Berry
+Ability: Unaware
+Level: 50
+EVs: 31 HP / 20 Def / 14 SpA / 1 SpD
+Bold Nature
+- Torch Song
+- Shadow Ball
+- Slack Off
+- Protect
+";
+        let team = parse_team_sheet_str(sheet, pokemon_dex(), move_dex(), true);
+        assert_eq!(team.len(), 1);
+        let mon = &team[0];
+        // 31/0/20/14/1/0 points -> 8p-4 (clamped at 0), applied exactly once.
+        assert_eq!(
+            mon.evs,
+            [244, 0, 156, 108, 4, 0],
+            "EVs must be scaled exactly once, not twice"
+        );
+        // Bold: Def = floor((2*100 + 31 + 156/4) * 50/100 + 5) * 1.1 = floor(140 * 1.1) = 154.
+        // Double-scaling previously wrapped this to a bogus 162 via u8 overflow.
+        assert_eq!(mon.stats[2], 154);
+    }
+}
+
 // Hospitality's switch-in heal must be reported via a `Healed` event nested
 // under its `AbilityRevealed`, and the ability must not reveal itself at all
 // when it has no valid target (a full-HP ally, or no ally in singles) — see

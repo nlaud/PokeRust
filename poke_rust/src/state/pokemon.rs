@@ -968,16 +968,14 @@ pub fn parse_team_sheet_str(
             } else if let Some(rest) = line.strip_prefix("Tera Type:") {
                 tera_type = Some(parse_type(rest.trim()).unwrap_or(PokemonType::Normal));
             } else if let Some(rest) = line.strip_prefix("EVs:") {
-                let raw = parse_stat_line(rest, 0);
-                evs = Some(if use_stat_points {
-                    let mut scaled = raw;
-                    for v in &mut scaled {
-                        *v = ((i16::from(*v) * 8) - 4).max(0) as u8;
-                    }
-                    scaled
-                } else {
-                    raw
-                });
+                // Store the raw teamsheet points as-is — `build_pokemon_state` is the
+                // single place that applies `scale_evs_for_stat_points` (gated on the
+                // same `use_stat_points` flag threaded through to it below). Scaling
+                // here too double-applied the transform: the second pass ran on an
+                // already-scaled u8, overflowed, and silently wrapped mod 256,
+                // producing a bogus final stat with no error (e.g. 20 points -> scaled
+                // once to 156 -> scaled again to (156*8-4) mod 256 = 220).
+                evs = Some(parse_stat_line(rest, 0));
             } else if let Some(rest) = line.strip_prefix("IVs:") {
                 ivs = Some(parse_stat_line(rest, 31));
             } else if let Some(ns) = line.strip_suffix(" Nature") {

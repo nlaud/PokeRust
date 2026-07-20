@@ -70,11 +70,47 @@
       would cross an EXISTING bound, not an original bound that was simply
       computed wrong from the start (which is what this family shows: the
       violating bound is often the *first* one narrowing that field, no crossing
-      event visible). Not root-caused; verified by hand for one instance
-      (Kingambit, `MA_venusaur_aerodactl.txt`) — pre-nature Def BSV independently
-      recomputed as 155 (base 120, IV 31, EV 116 post `--stat-points` scaling,
-      level 50) against a derived bound of ≤143, confirming this is a genuine
-      engine bug, not an oracle bug.
+      event visible).
+      **ONE root cause found and FIXED (2026-07-19, S56)**: the "genuine engine
+      bug, not an oracle bug" suspicion above was confirmed and traced —
+      `poke_rust/src/state/pokemon.rs`'s teamsheet `EVs:` line parser inline-scaled
+      stat points via `--stat-points`'s `8p-4` formula, then unconditionally
+      passed the ALREADY-scaled value into `build_pokemon_state`, which scales
+      the same value a SECOND time. The second pass overflows `u8` and silently
+      wraps mod 256 (e.g. 20 points → 156 → `(156*8-4) mod 256 = 220`), producing
+      a bogus final stat with no error. Hand-verified byte-exact against all 4 of
+      the Skeledirge instance's non-zero EVs via a temporary ground-truth dump;
+      confirmed `calc_stat` on the wrapped EV=220 reproduces the exact reported
+      true Def (162) that the belief's (CORRECT, singly-scaled) bound excluded.
+      Fixed by removing the redundant inline scaling in the line parser (single
+      point of scaling is now `build_pokemon_state` only). Regression:
+      `teamsheet_stat_points_ev_scaling::ev_points_are_scaled_exactly_once`
+      (`simulator_tests.rs`), verified red-without-fix/green-with-fix.
+      **This is a core engine correctness bug, not just a fuzz-test artifact** —
+      it corrupted the TRUE stats of any teamsheet-loaded Pokémon with non-zero
+      EVs under `--stat-points` (the project default), in real battles too, not
+      only this fuzz test.
+      **Family NOT closed**: a follow-up 300-iteration sweep post-fix measured
+      **37% (111/300)**, statistically unchanged from the pre-fix ~36%/100 —
+      this bug was real and is now fixed, but is NOT the dominant cause of this
+      family; at least one more, still-unfound cause remains in the Pass 3/5
+      back-solve pipeline itself. Confirmed via hand-verification for one
+      instance (Kingambit, `MA_venusaur_aerodactl.txt`) that pre-dates this fix —
+      pre-nature Def BSV recomputed as 155 (base 120, IV 31, EV 116 post
+      `--stat-points` scaling, level 50) against a derived bound of ≤143 — note
+      EV 116 there is a *legitimately single-scaled* value (not itself an
+      instance of the S56 double-scaling bug, since 116 is achievable via a
+      single 8p-4 pass with p=15), so Kingambit's case is a DIFFERENT,
+      not-yet-root-caused cause within this same family. Next step if picked up
+      again: repeat this session's methodology (temporary `[P3A-TRACE]`/
+      `[P3B-TRACE]` instrumentation in `pass3_direction_a`/`pass3_direction_b` at
+      their `apply_unconditional_tightening` call sites, cross-referenced against
+      a `[TRUTH-DUMP]` of the violating mon's raw stats in `subset_check.rs`,
+      run via the `survey_subset_violations` pattern — a `catch_unwind`-based
+      sweep harness that buckets failures across many iterations without
+      aborting on the first one; NOT reproducible by seed, since
+      `sample_turn_raw`'s internal branch sampling uses `rand::thread_rng()`
+      rather than the test's own seeded RNG).
     - **Def-specific 3-literal clause violations** (~7/36) — clauses of the exact
       shape `[NatureBoostsStat{Def}, NatureNerfsStat{Def}, EVIVStatGE|LE{Def,
       value}]`, all unsatisfiable by the true nature+BSV. This is
