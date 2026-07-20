@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 > Keep `CLAUDE.md` and `AGENTS.md` synchronized: whenever either file is updated, apply the same update to the other.
 
