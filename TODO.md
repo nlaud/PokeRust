@@ -225,8 +225,8 @@
       `ctx.switched_slots_this_turn` — confirmed NOT the same bug as S57) but not
       root-caused; if picked up again, apply the SAME live-ability/item-change
       timing lens first (mirroring fixes #1-3 above) before assuming a fresh cause.
-    - **Illusion/Zoroark disguise tracking** (~6/36, highest-priority to
-      investigate given how central Illusion handling is to this engine's
+    - **Illusion/Zoroark disguise tracking** (~6/36, was flagged highest-priority
+      to investigate given how central Illusion handling is to this engine's
       fog-of-war design). The primary belief entry (matching the *displayed*
       disguise species) AND its `possible_illusion_state` hypothesis both fail to
       admit the true, underlying disguised Pokémon — species, ability, weight, and
@@ -234,9 +234,31 @@
       belief had *already* resolved Zoroark's location to a different, fully
       `Known` roster slot (e.g. a bench mon) while the true Zoroark was actually
       active and disguised elsewhere — i.e. the belief committed to the wrong
-      resolution. Not root-caused; needs `information/README.md`'s Zoroark
-      lifecycle section re-read before touching this (see `rearm_zoroark_on_side`,
-      `resolve_zoroark_globally`, `promote_illusion_to_primary`).
+      resolution.
+      **RE-MEASURED (2026-07-19, session 13, phase 3 of the 3-phase plan) — rate
+      dropped to ~0% as a side effect of S57, no code change needed.** Per this
+      family's own hypothesis in the fix plan ("partly downstream of an unrelated
+      over-narrowing triggering a false Zoroark promotion"), re-ran the
+      permanently-checked-in `survey_subset_violations` harness TWICE (300
+      iterations each, 600 total) after the S57 speed-order fix landed. **Zero**
+      `ZoroarkHisui` (or any Illusion-capable species) failures in either sweep —
+      down from consistently being the TOP or near-top offender in every pre-S57
+      sweep this investigation ran (12/65, 19/300, 6/113, 5/113 across several
+      runs). Deliberately did NOT touch `resolve_zoroark_globally`/
+      `apply_with_illusion_mirroring`/`promote_illusion_to_primary` — per this
+      project's own memory, self-healing or loosening the promotion signal there
+      previously broke legitimate-detection tests
+      (`test_zoroark_pass3_pass5_promotion_synergy`,
+      `test_zoroark_learnset_promotes_when_primary_impossible`), and there is
+      no evidence left of a live bug to justify that risk right now. **Not
+      closing this TODO item outright** — 600 iterations is not proof of zero
+      residual rate, and the underlying structural hazard (whichever mon's
+      primary first goes infeasible gets promoted, even if that infeasibility
+      came from an unrelated bug) is still real and undocumented in
+      `information/README.md`. If this resurfaces after future over-narrowing
+      fixes land (e.g. once the Def-clause family above is finally root-caused),
+      re-sweep first before assuming a NEW Illusion-specific bug — it may just
+      be another downstream symptom.
     - **Tested and ruled out as the primary driver**: whether an unrealistically
       wide item-possibility space was inflating the failure rate. The fuzz
       test's `InferenceConfig` previously left `legal_items: None` (~1,000 items
