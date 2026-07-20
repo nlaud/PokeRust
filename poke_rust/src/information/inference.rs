@@ -7176,7 +7176,7 @@ pub(crate) fn defensive_damage_abilities(mon: &UnknownPokemonState) -> Vec<Abili
 ///
 /// When `config.force_max_ivs` is true the IV is fixed at 31; otherwise all 32
 /// IVs are tried.  The returned list is sorted and deduplicated.
-fn achievable_defender_hp_values(
+pub(crate) fn achievable_defender_hp_values(
     base_hp: u16,
     level: u8,
     config: &InferenceConfig,
@@ -7187,9 +7187,19 @@ fn achievable_defender_hp_values(
     let iv_lo: u8 = if config.force_max_ivs { 31 } else { mon.min_ivs[0] };
     let iv_hi: u8 = if config.force_max_ivs { 31 } else { mon.max_ivs[0] };
 
+    // `EV_LATTICE` is only the legal EV set under `--stat-points` mode (`8p-4`).
+    // Under full-EV mode every value 0..=252 is legal, so gate on the config the
+    // same way pass5's EV-total-cap tightening already does (see the
+    // `config.use_stat_points` check a few hundred lines below) — using the
+    // lattice unconditionally here would silently skip a defender's true max HP
+    // whenever its HP EV isn't one of the 33 lattice values, over-narrowing the
+    // Pass 3 defensive-stat search (unsound exclusion).
+    let full_ev_range: Vec<u8> = (0..=252).collect();
+    let ev_candidates: &[u8] = if config.use_stat_points { &EV_LATTICE } else { &full_ev_range };
+
     let mut vals: Vec<u16> = Vec::with_capacity(33);
     for iv in iv_lo..=iv_hi {
-        for &ev in &EV_LATTICE {
+        for &ev in ev_candidates {
             // Also respect the EV bounds tracked on the mon.
             if ev < mon.min_evs[0] || ev > mon.max_evs[0] {
                 continue;
@@ -8828,6 +8838,18 @@ fn compute_defender_stat_bounds(
     // whenever there is any doubt.
     // atk_ability was moved into materialize_pokemon; read from atk_ps which holds the same value.
     let eff_move_type = pruning_move_type(&atk_ps.ability, move_data);
+    // Knock Off's 1.5x power boost fires on ANY held (transferable) item, regardless
+    // of that item's own effect — so for this move, a type-mismatched berry is NOT
+    // "provably inert" the way it is for every other move: its own resist effect
+    // doesn't trigger, but its mere PRESENCE still raises the move's base power.
+    // Without this carve-out, the type-resist prune below drops every non-matching
+    // berry from the candidate set, silently removing the only gear hypothesis that
+    // can explain a Knock-Off-boosted hit — producing an unsound (too-tight)
+    // neutral-class bound (confirmed via a Kingambit/Ariados Knock Off repro: the
+    // true Chople Berry, held until Knock Off's own removal effect fires later in
+    // this same reaction bundle, got pruned here for not resisting Dark, leaving no
+    // candidate able to reproduce the observed boosted damage).
+    let item_presence_dependent_move = move_data.name == PokemonMove::KnockOff;
     let def_items = {
         let mut items = defensive_damage_items(defender_unk);
         items.retain(|item| {
@@ -8837,9 +8859,11 @@ fn compute_defender_stat_bounds(
                 && matches!(move_data.category, MoveCategory::Physical) {
                 return false;
             }
-            // Type-resist berries only trigger when the berry's type matches the move.
+            // Type-resist berries only trigger when the berry's type matches the
+            // move — except for an item-presence-dependent move (Knock Off), where
+            // the berry's own effect is irrelevant but its presence alone matters.
             if let Some(berry_type) = type_resist_berry_type(item) {
-                return berry_type == eff_move_type;
+                return item_presence_dependent_move || berry_type == eff_move_type;
             }
             true
         });
@@ -9809,7 +9833,12 @@ pub fn pass5_back_solve(
         inference_contradiction!("pass5", "no remaining valid natures");
     }
 
-    let ev_candidates: &[u8] = &EV_LATTICE;
+    // Same `use_stat_points` gate as `achievable_defender_hp_values` — the lattice
+    // is only the legal EV set under `--stat-points` mode; under full-EV mode every
+    // value 0..=252 is legal, and testing only the lattice would incorrectly force
+    // `min_evs`/`max_evs` toward lattice values even when the true EV isn't one.
+    let full_ev_range: Vec<u8> = (0..=252).collect();
+    let ev_candidates: &[u8] = if config.use_stat_points { &EV_LATTICE } else { &full_ev_range };
 
     // ── HP (stat_i = 0, no nature modifier) ──────────────────────────────────
     {

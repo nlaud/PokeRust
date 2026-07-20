@@ -4508,6 +4508,86 @@ fn test_s33_pass5_hp_self_heals_instead_of_panicking() {
     );
 }
 
+/// `EV_LATTICE` (the `8p-4` stat-points set) is only the legal EV set under
+/// `--stat-points` mode. Under full-EV mode every value 0..=252 is legal — an
+/// EV whose HP contribution (`ev/4`) is even (e.g. EV=8, contribution=2) is never
+/// produced by the lattice (which only covers contribution 0 and every odd value).
+/// `achievable_defender_hp_values` must widen its EV enumeration to the full range
+/// when `config.use_stat_points` is false, or it silently skips a defender's true
+/// max HP — the exact mechanism suspected of feeding an unsound (too-tight) Pass 3
+/// defensive-stat bound.
+#[test]
+fn test_achievable_defender_hp_values_full_ev_mode_covers_off_lattice_hp() {
+    use crate::information::inference::achievable_defender_hp_values;
+
+    let pd = crate::tests::simuilator_test_helpers::pokemon_dex();
+    // Level 100 makes `(2*base+iv+ev_contrib)*level/100` an exact no-op (no
+    // truncation), so every EV contribution maps to a distinct HP value with no
+    // risk of an adjacent lattice EV accidentally colliding with the true one
+    // (which DOES happen at level 50 — the floor rounding there can make a
+    // lattice-adjacent EV coincidentally reproduce the same HP integer).
+    let mut mon = UnknownPokemonState::from_opponent_species(Species::Charizard, pd, 100);
+    mon.possible_species = Unknown::Known(Species::Charizard);
+    mon.min_evs[0] = 0;
+    mon.max_evs[0] = 252;
+
+    let base_hp = pd.get(&Species::Charizard).unwrap().base_stats[0];
+    // IV=31, EV=8 → HP contribution 2, never produced by EV_LATTICE.
+    let true_hp = crate::state::pokemon::calc_hp(base_hp, 31, 8, 100);
+    // A window strictly wider than the single true point, with `true_hp` NOT at
+    // either endpoint: at level 100 each EV contribution shifts HP by exactly 1
+    // (no truncation), so contribution 0 (`true_hp - 2`) and contribution 4
+    // (`true_hp + 2`) bracket it. This matters because `achievable_defender_hp_values`
+    // has its own empty-fallback that pushes both endpoints unconditionally when
+    // the search finds nothing — a single-point window would trivially "pass" via
+    // that fallback regardless of whether the lattice gating bug is present.
+    mon.min_stats[0] = true_hp - 2;
+    mon.max_stats[0] = true_hp + 2;
+
+    let config = InferenceConfig { use_stat_points: false, force_max_ivs: true, ..InferenceConfig::default() };
+    let vals = achievable_defender_hp_values(base_hp, 100, &config, &mon);
+    assert!(
+        vals.contains(&true_hp),
+        "full-EV mode must test EV=8 (off the stat-points lattice); true_hp={true_hp} not in {vals:?}"
+    );
+}
+
+/// Sibling of the above for `pass5_back_solve`'s own EV/IV back-solve: it must not
+/// falsely trigger the "every candidate nature is infeasible" contradiction (the
+/// same load-bearing panic `apply_with_illusion_mirroring` relies on for legitimate
+/// Zoroark promotion — see `test_zoroark_pass3_pass5_promotion_synergy`) when the
+/// true stat is only reachable via an off-lattice EV under full-EV mode.
+#[test]
+fn test_pass5_back_solve_full_ev_mode_covers_off_lattice_stat() {
+    let pd = crate::tests::simuilator_test_helpers::pokemon_dex();
+    // Level 100 avoids the `*level/100` truncation collisions a lower level can
+    // introduce between adjacent EV contributions (see the sibling HP test above).
+    let mut mon = UnknownPokemonState::from_opponent_species(Species::Charizard, pd, 100);
+    mon.possible_species = Unknown::Known(Species::Charizard);
+    mon.possible_natures = Unknown::Known(crate::state::pokemon::Nature::Hardy); // neutral on every stat
+    mon.min_evs[2] = 0;
+    mon.max_evs[2] = 252;
+    mon.min_ivs[2] = 31;
+    mon.max_ivs[2] = 31;
+
+    let base_def = pd.get(&Species::Charizard).unwrap().base_stats[2];
+    // IV=31, EV=8 → Def contribution 2, never produced by EV_LATTICE.
+    let true_def = crate::state::pokemon::calc_stat(base_def, 31, 8, 100, 1.0);
+    mon.min_stats[2] = true_def;
+    mon.max_stats[2] = true_def;
+    mon.min_pre_nature_stat[2] = true_def;
+    mon.max_pre_nature_stat[2] = true_def;
+
+    let config = InferenceConfig { use_stat_points: false, force_max_ivs: true, ..InferenceConfig::default() };
+    pass5_back_solve(&mut mon, 0, &config, pd); // must not panic
+
+    assert!(
+        mon.min_evs[2] <= 8 && mon.max_evs[2] >= 8,
+        "full-EV mode must narrow Def EV window to include the true off-lattice EV=8; got [{}, {}]",
+        mon.min_evs[2], mon.max_evs[2]
+    );
+}
+
 /// When P2 uses a Status move and might have Prankster (+1 priority to status moves),
 /// Pass 4 must include HasAbility{Prankster} as an escape disjunct so the predicate
 /// stays sound even if Prankster explains the ordering.
@@ -6764,6 +6844,115 @@ fn test_pass3_dir_a_emits_nature_conditional_predicate() {
     assert!(
         has_spd_predicate,
         "Direction A must emit an EVIVStat predicate for the defender's SpD after observing damage %"
+    );
+}
+
+/// S58: Knock Off's 1.5x power boost fires on ANY held (transferable) item,
+/// regardless of that item's own effect — so a type-mismatched berry is NOT
+/// "provably inert" for this move the way it is for every other move (whose
+/// `compute_defender_stat_bounds` E-B pruning rule correctly drops it). Before the
+/// fix, the type-resist-berry retain() filter pruned every non-Dark-resisting berry
+/// out of the candidate item set for a Knock Off hit, silently discarding the only
+/// gear hypothesis (holding SOME item, triggering the boost) that can explain a
+/// Knock-Off-boosted hit — producing an unsound (too-tight) neutral-class BSV bound
+/// that a real fuzz repro (Kingambit/Ariados Knock Off) showed excluding the true
+/// Def value entirely. This test checks the structural fix directly: a Def-stat CNF
+/// clause emitted for a Knock Off hit must still carry a `HasItem` escape disjunct
+/// for a non-Dark-resisting berry (Chople Berry, Fighting-resist) whenever that item
+/// isn't excluded from the defender's belief.
+#[test]
+fn test_s58_knock_off_keeps_type_mismatched_berry_as_item_presence_escape() {
+    use crate::state::dex_data::PokemonStat;
+    use crate::state::pokemon::PokemonGender;
+
+    // P1: our known attacker, fully resolved (species/stats/item/ability) so
+    // Direction A's attacker-known precondition is satisfied.
+    let mut p1_mon = unknown_mon_species(Species::Ariados);
+    p1_mon.possible_species = Unknown::Known(Species::Ariados);
+    p1_mon.hp = PokemonHP::Number(100);
+    p1_mon.min_stats = [100, 100, 100, 100, 100, 100];
+    p1_mon.max_stats = [100, 100, 100, 100, 100, 100];
+    p1_mon.item               = Unknown::Known(Item::None);
+    p1_mon.possible_abilities = Unknown::Known(Ability::None);
+
+    // P2: defender, single Steel type (neutral to Dark — no STAB/resist noise).
+    // Wide pre-nature Def window, neutral nature, item NOT excluded (so Chople
+    // Berry — Fighting-resist, doesn't match Knock Off's Dark type — stays a
+    // candidate unless wrongly pruned).
+    let mut dex = HashMap::new();
+    dex.insert(Species::Kingambit, PokemonData {
+        species:       Species::Kingambit,
+        types:         vec![PokemonType::Steel],
+        base_stats:    [100, 100, 100, 100, 100, 100],
+        weight:        1000,
+        primary_ability: Some(Ability::Defiant),
+        abilities:     vec![Ability::Defiant],
+        base_species:  None,
+        forme:         None,
+        required_item: None,
+        battle_only:   None,
+        default_gender: PokemonGender::Male,
+    });
+    let mut p2_mon = UnknownPokemonState::from_opponent_species(Species::Kingambit, &dex, 50);
+    p2_mon.hp                     = PokemonHP::Percent(100);
+    p2_mon.min_pre_nature_stat[2] = 50;
+    p2_mon.max_pre_nature_stat[2] = 200;
+    p2_mon.min_stats[0]           = 200;
+    p2_mon.max_stats[0]           = 200;
+    // Nature left fully ambiguous (all 25 candidates, the `from_opponent_species`
+    // default) rather than pinned to one — avoids an unrelated pass5 back-solve
+    // contradiction from over-constraining this hand-built scenario; the neutral
+    // CNF class this test checks fires for any Def-neutral nature, not just Hardy.
+    p2_mon.possible_abilities     = Unknown::Known(Ability::None);
+    p2_mon.item                   = Unknown::Not(vec![]); // nothing excluded yet
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut knock_off = normal_physical_move(PokemonMove::KnockOff, 65);
+    knock_off.pokemon_type = PokemonType::Dark;
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::KnockOff, knock_off);
+
+    let result = apply_ex(
+        state,
+        vec![event_with(
+            EventKind::MoveUsed {
+                user:      p1(0),
+                move_used: PokemonMove::KnockOff,
+                targets:   vec![p2(0)],
+            },
+            vec![event(EventKind::DamageDealt { max_hp: 0,
+                target:  p2(0),
+                new_hp:  PokemonHP::Percent(80), // 20% damage
+            })],
+        )],
+        dex,
+        move_dex,
+    );
+
+    // A Def-stat clause must carry a HasItem{ChopleBerry} escape disjunct — Chople
+    // Berry's own resist effect doesn't fire against a Dark move, but its mere
+    // presence still explains Knock Off's power boost, so it must survive the
+    // E-B pruning as a candidate for this move specifically.
+    let has_item_presence_escape = result.predicates.iter().any(|clause| {
+        let has_def_stat = clause.iter().any(|s| {
+            matches!(
+                s,
+                Statement::EVIVStatGE { stat: PokemonStat::Def, .. }
+                | Statement::EVIVStatLE { stat: PokemonStat::Def, .. }
+            )
+        });
+        let has_chople_escape = clause.iter().any(|s| {
+            matches!(s, Statement::HasItem { item: Item::ChopleBerry, .. })
+        });
+        has_def_stat && has_chople_escape
+    });
+    assert!(
+        has_item_presence_escape,
+        "Knock Off's Def-stat clause must keep a type-mismatched berry (Chople Berry) \
+         as a HasItem escape disjunct — its presence alone (not its own resist effect) \
+         explains the power boost. predicates: {:?}",
+        result.predicates,
     );
 }
 
