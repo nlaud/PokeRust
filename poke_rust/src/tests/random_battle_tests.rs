@@ -262,6 +262,223 @@ fn random_doubles_beliefs_stay_sound_subset() {
     run_sweep(ITERATIONS, true);
 }
 
+/// Diagnostic dev tool (not part of the regular suite — `#[ignore]`d) for
+/// characterizing `assert_true_state_subset_of_belief` failures across many
+/// fuzz iterations in one run: catches each subset-oracle panic AND each
+/// contradiction-oracle panic via `catch_unwind` instead of aborting the whole
+/// run, then buckets by field/clause-shape/species. Failures are NOT
+/// reproducible by seed (`sample_turn_raw`'s internal branch sampling uses
+/// `rand::thread_rng()`, not this test's own seeded `StdRng`), so root-causing
+/// a specific instance requires adding temporary `eprintln!` tracing at the
+/// suspect derivation site alongside a run of this harness, then removing the
+/// tracing once the fix lands — see the S57 fix (`pass4_speed_from_order`'s
+/// ability-escape timing) for a worked example. `break`s directly in each
+/// `Err` arm (a diverging expression) rather than using a separate correlated
+/// bool — a bool-based version fails to borrow-check across loop iterations
+/// (E0382), confirmed while building this. Run via:
+/// `cargo test --release -- --ignored survey_subset_violations --nocapture`.
+#[test]
+#[ignore]
+fn survey_subset_violations() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let pdex = pokemon_dex();
+    let mdex = move_dex();
+    let adex = ability_dex();
+    let ldex = learnset_dex();
+
+    let config = InferenceConfig {
+        use_stat_points: true,
+        force_max_ivs: true,
+        legal_items: Some(champions_legal_items()),
+        learnset_dex: ldex.clone(),
+        ..Default::default()
+    };
+
+    let iterations: u64 = 300;
+    let mut failures: Vec<String> = Vec::new();
+    let mut failed_iters: u64 = 0;
+
+    for iter in 0..iterations {
+        let mut rng = StdRng::seed_from_u64(iter);
+
+        let p1_path = TEAMSHEETS[rng.gen_range(0..TEAMSHEETS.len())];
+        let p2_path = TEAMSHEETS[rng.gen_range(0..TEAMSHEETS.len())];
+
+        let preview = team_preview_state_from_teamsheets(
+            p1_path, p2_path, pdex, mdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, true,
+        );
+
+        let mut belief_p1 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
+            Player::P1, &preview.p1_mons, &preview.p2_mons, pdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, true,
+        );
+        let mut belief_p2 = UnknownMatchState::team_preview_closed_sheet_from_perspective(
+            Player::P2, &preview.p2_mons, &preview.p1_mons, pdex, ACTIVE_PER_SIDE, BROUGHT_PER_SIDE, 50, true,
+        );
+
+        let p1_tp = random_team_preview_command(preview.p1_mons.len(), &mut rng);
+        let p2_tp = random_team_preview_command(preview.p2_mons.len(), &mut rng);
+
+        let mut state = MatchState::TeamPreviewState(preview);
+        let mut p1_cmd = PlayerCommand::TeamPreview(p1_tp);
+        let mut p2_cmd = PlayerCommand::TeamPreview(p2_tp);
+
+        let mut turn = 0usize;
+        let mut iter_failed = false;
+        loop {
+            turn += 1;
+            if turn > MAX_TURNS {
+                break;
+            }
+
+            let was_team_preview = matches!(state, MatchState::TeamPreviewState(_));
+
+            let (next_state, raw_events, _probability) =
+                sample_turn_raw(&state, &p1_cmd, &p2_cmd, mdex, pdex, true, 16, Some(Player::P1));
+            let raw_events = raw_events.unwrap_or_default();
+            let events_p1 = mask_events_for(Player::P1, &raw_events);
+            let events_p2 = mask_events_for(Player::P2, &raw_events);
+
+            let seeded_p1 = if was_team_preview {
+                reseed_for_battle(belief_p1, Player::P1, &p1_cmd, &p2_cmd)
+            } else {
+                belief_p1
+            };
+            let seeded_p2 = if was_team_preview {
+                reseed_for_battle(belief_p2, Player::P2, &p1_cmd, &p2_cmd)
+            } else {
+                belief_p2
+            };
+
+            // Diverge (break) directly in each Err arm so belief_p1/p2 are assigned
+            // on every non-diverging path — see the module-level doc comment above.
+            belief_p1 = match catch_unwind(AssertUnwindSafe(|| {
+                apply_information(seeded_p1, &events_p1, false, pdex, mdex, adex, &config)
+            })) {
+                Ok(b) => b,
+                Err(e) => {
+                    failures.push(format!(
+                        "[contradiction-p1] {}",
+                        e.downcast_ref::<String>().cloned().unwrap_or_default()
+                    ));
+                    iter_failed = true;
+                    break;
+                }
+            };
+            belief_p2 = match catch_unwind(AssertUnwindSafe(|| {
+                apply_information(seeded_p2, &events_p2, false, pdex, mdex, adex, &config)
+            })) {
+                Ok(b) => b,
+                Err(e) => {
+                    failures.push(format!(
+                        "[contradiction-p2] {}",
+                        e.downcast_ref::<String>().cloned().unwrap_or_default()
+                    ));
+                    iter_failed = true;
+                    break;
+                }
+            };
+
+            state = next_state;
+
+            match &state {
+                MatchState::GameOverState { .. } => break,
+                MatchState::BattleState(bs) => {
+                    let context = format!("iter={iter} turn={turn} matchup=({p1_path} vs {p2_path})");
+                    eprintln!("[CTX] {context}");
+                    let mut violated = false;
+                    for (belief, observer) in [(&belief_p1, Player::P1), (&belief_p2, Player::P2)] {
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            assert_true_state_subset_of_belief(bs, belief, observer, pdex, mdex, &context);
+                        }));
+                        if let Err(e) = result {
+                            let msg = if let Some(s) = e.downcast_ref::<String>() {
+                                s.clone()
+                            } else if let Some(s) = e.downcast_ref::<&str>() {
+                                (*s).to_string()
+                            } else {
+                                "<non-string panic payload>".to_string()
+                            };
+                            failures.push(msg);
+                            violated = true;
+                        }
+                    }
+                    if violated {
+                        iter_failed = true;
+                        break;
+                    }
+                    p1_cmd = PlayerCommand::Battle(random_commands_for_player(bs, Player::P1, &mut rng));
+                    p2_cmd = PlayerCommand::Battle(random_commands_for_player(bs, Player::P2, &mut rng));
+                }
+                MatchState::TeamPreviewState(_) => unreachable!(),
+            }
+        }
+        if iter_failed {
+            failed_iters += 1;
+        }
+    }
+
+    eprintln!(
+        "\n=== SURVEY: {failed_iters}/{iterations} iterations failed ({:.1}%) ===",
+        100.0 * failed_iters as f64 / iterations as f64
+    );
+
+    let mut field_bucket: HashMap<String, u32> = HashMap::new();
+    let mut clause_bucket: HashMap<String, u32> = HashMap::new();
+    let mut species_bucket: HashMap<String, u32> = HashMap::new();
+    let mut clause_count = 0u32;
+    let mut field_count = 0u32;
+    let mut contradiction_count = 0u32;
+
+    for f in &failures {
+        if f.starts_with("[contradiction-p1]") || f.starts_with("[contradiction-p2]") {
+            contradiction_count += 1;
+        } else if let Some(idx) = f.find("clause unsatisfiable by ground truth: [") {
+            clause_count += 1;
+            let rest = &f[idx..];
+            let variants = [
+                "NatureBoostsStat", "NatureNerfsStat", "EVIVStatGE", "EVIVStatLE", "HasItem",
+                "HasAbility", "SpeedComparison", "Not", "WeatherTurns", "TerrainTurns",
+                "SideConditionTurns", "KnowsThreateningMove",
+            ];
+            let mut present: Vec<&str> = variants.iter().filter(|v| rest.contains(*v)).copied().collect();
+            present.sort_unstable();
+            *clause_bucket.entry(present.join("+")).or_insert(0) += 1;
+        } else if let Some(idx) = f.find("violations=[") {
+            field_count += 1;
+            let rest = &f[idx + "violations=[".len()..];
+            let end = rest.find(']').unwrap_or(rest.len());
+            for part in rest[..end].split("\", \"") {
+                let key = part.trim_matches('"').split(':').next().unwrap_or("?").to_string();
+                *field_bucket.entry(key).or_insert(0) += 1;
+            }
+        }
+        if let Some(idx) = f.find("true_species=") {
+            let rest = &f[idx + "true_species=".len()..];
+            let end = rest.find(' ').unwrap_or(rest.len());
+            *species_bucket.entry(rest[..end].to_string()).or_insert(0) += 1;
+        }
+    }
+
+    eprintln!("field violations: {field_count}, clause violations: {clause_count}, contradiction panics: {contradiction_count}");
+    eprintln!("-- field breakdown --");
+    for (k, v) in &field_bucket {
+        eprintln!("  {k}: {v}");
+    }
+    eprintln!("-- clause shape breakdown --");
+    for (k, v) in &clause_bucket {
+        eprintln!("  [{k}]: {v}");
+    }
+    eprintln!("-- species breakdown --");
+    for (k, v) in &species_bucket {
+        eprintln!("  {k}: {v}");
+    }
+    eprintln!("-- sample messages (first 20) --");
+    for f in failures.iter().take(20) {
+        eprintln!("---\n{f}");
+    }
+}
+
 fn run_sweep(iterations: u64, check_subset: bool) {
     let pdex = pokemon_dex();
     let mdex = move_dex();

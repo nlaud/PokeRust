@@ -4582,6 +4582,74 @@ fn test_pass4_no_prankster_escape_on_physical_move() {
     assert!(!has_prankster_escape, "Physical move must not add Prankster escape (Prankster only affects status moves)");
 }
 
+/// S57: Skill Swap moving first via Prankster, while ALSO swapping Prankster away
+/// as part of the same move, must not leave a doomed `[SpeedComparison ∨
+/// HasAbility(Prankster)]` clause behind. `pass4_speed_from_order` re-derives this
+/// pairing's clause a second time after the event walk (to pick up newly-`Known`
+/// priority abilities); by then P2's `possible_abilities` is already `Known` to
+/// whatever ability Skill Swap just swapped IN (a live change, not a narrowing),
+/// so re-evaluating the Prankster escape against the CURRENT belief falsifies it —
+/// even though Prankster genuinely explains why THIS move went first, before the
+/// swap took effect. Confirmed via the fuzz oracle (TODO.md): a real Sableye
+/// (Ability: Prankster, knows Skill Swap) reliably produced exactly this dead
+/// clause, discarded by `[bcp self-heal] discarding unsatisfiable clause` with
+/// both literals false immediately after construction.
+#[test]
+fn test_s57_skill_swap_does_not_lose_its_own_prankster_escape() {
+    let p1_mon = no_speed_escape_mon(Species::Garchomp);
+    let mut p2_mon = no_speed_escape_mon(Species::Garchomp);
+    // Species-derived ability pool (mirrors Sableye's real Keen Eye/Stall/Prankster
+    // set) — narrow enough that Levitate (the ability Skill Swap swaps IN below)
+    // is NOT already admitted, so the live-change guard's `unknown_is_excluded`
+    // check has something genuine to detect.
+    p2_mon.possible_abilities =
+        Unknown::Possibly(vec![Ability::KeenEye, Ability::Stall, Ability::Prankster]);
+
+    let state = battle_1v1(p1_mon, p2_mon);
+
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::SkillSwap, poke_status_move(PokemonMove::SkillSwap));
+    move_dex.insert(PokemonMove::DragonClaw, normal_physical_move(PokemonMove::DragonClaw, 80));
+
+    let result = apply_ex(
+        state,
+        vec![
+            // P2 moves first (same 0-priority bracket as P1's physical move) — only
+            // explicable by Prankster's +1 to this Status move. Skill Swap's own
+            // resolution reveals P2 now holds Levitate (swapped in from P1) — a live
+            // ability change, not a narrowing of P2's original 3-ability pool.
+            event_with(
+                EventKind::MoveUsed { user: p2(0), move_used: PokemonMove::SkillSwap, targets: vec![p1(0)] },
+                vec![event(EventKind::AbilityRevealed { slot: p2(0), ability: Ability::Levitate })],
+            ),
+            event(EventKind::MoveUsed { user: p1(0), move_used: PokemonMove::DragonClaw, targets: vec![p2(0)] }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    // The live ability change must suppress re-deriving this pairing's clause on
+    // Pass 4's second call — asserting no clause even mentions P2 exists is exactly
+    // the mechanism the fix relies on to avoid ever handing BCP a clause it would
+    // immediately (and validly, from its own narrow per-clause view) discard as
+    // unsatisfiable, discarding the still-live Prankster escape with it.
+    let doomed_clause_present = result.predicates.iter().any(|clause| {
+        clause.iter().any(|s| matches!(s, Statement::SpeedComparison { fast_idx: 1, .. }))
+    });
+    assert!(
+        !doomed_clause_present,
+        "a live ability change (Skill Swap swapping Prankster away) must suppress \
+         re-deriving this pairing's speed-comparison clause, not hand BCP a clause \
+         it will immediately discard along with the still-valid Prankster escape"
+    );
+    // The swap itself must still be correctly reflected — this fix must not block
+    // the ordinary, legitimate ability-change narrowing.
+    assert!(matches!(
+        get_mon_by_idx(&result, 1).map(|m| &m.possible_abilities),
+        Some(Unknown::Known(Ability::Levitate))
+    ));
+}
+
 /// Choice Scarf is a speed-boosting item; its presence on the fast mon makes the
 /// SpeedComparison predicate too strong (unsound) → Pass 4 must add an escape disjunct.
 #[test]

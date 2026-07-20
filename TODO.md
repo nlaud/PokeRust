@@ -120,18 +120,57 @@
       caught here as a predicate-clause violation instead of a direct field-bound
       violation. Disproportionately `Def` in this sample; unclear yet whether
       that's a real pattern or sampling noise. Not root-caused.
-    - **Speed-order alternate-item escape clauses** (~7/36) — clauses like
-      `[HasItem{QuickClaw}, HasItem{ChoiceScarf}]`, `[HasItem{KingsRock},
-      HasItem{RazorFang}]`, `[HasItem{IronBall}, HasItem{LaggingTail},
-      HasItem{FullIncense}]` (sometimes bundled with a `SpeedComparison` literal),
-      all unsatisfiable — the true holder's real item isn't among the clause's
-      named alternatives. **Same item sets as the already-documented `ItemLost`
-      contradiction-panic family above** (QuickClaw/ChoiceScarf,
-      KingsRock/RazorFang) — strong signal this is one shared root cause
-      manifesting as a hard panic in some trajectories and a silent
-      over-narrowing in others. Not root-caused; if picked up again, start from
-      whatever emits these "alternate speed/priority-item explanation"
-      disjunctions rather than treating the two failure modes separately.
+    - **Speed-order alternate-item escape clauses** (~7/36).
+      **ROOT-CAUSED AND FIXED (2026-07-19, S57)** for the dominant instance of this
+      family: a mon whose OWN move changes its OWN priority-lifting ability mid-move
+      (Skill Swap being the clearest case — it swaps abilities between user and
+      target, but Role Play/Entrainment/Trace/Mummy/Wandering Spirit/Simple Beam
+      share the same shape) produced a `[SpeedComparison ∨ HasAbility(Prankster)]`
+      escape clause that got silently discarded. Root cause was THREE compounding
+      timing bugs, all in `information/inference.rs`:
+      1. `pass4_speed_from_order`'s escape-disjunct construction (item/ability
+         candidates for `fast_mon`/`slow_mon`) read the mon's CURRENT (live) belief
+         state, not a turn-start snapshot — unlike every OTHER speed-relevant field
+         in the same function (weather/terrain/boosts/paralysis/Tailwind), which
+         already used `seed_state` specifically to avoid this class of bug. Fixed by
+         preferring `seed_state` for the ability/item lookups too, guarded on
+         `possible_mon_id` staying the same physical individual (falls back to live
+         `state` if a mid-turn switch replaced the slot's occupant, since then
+         `seed_state` describes the wrong mon).
+      2. `EventKind::AbilityRevealed`'s handler overwrote `possible_abilities`
+         directly on a live ability change (Skill Swap etc.) with no resolution step
+         first — the ability-equivalent of the already-fixed S19 `HasItem`
+         staleness bug, just never extended to abilities. Fixed by adding
+         `resolve_ability_clauses_on_ability_change` (mirrors
+         `resolve_item_clauses_on_item_change` exactly), called before the
+         overwrite.
+      3. Even with both fixes, Pass 4's SECOND call (a deliberate re-derivation
+         after the event walk, to pick up newly-`Known` priority abilities) still
+         reconstructed the pairing's clause AFTER the ability-change event had
+         already run — using the historically-correct (seed_state) ability, but
+         handing BCP a BRAND NEW clause that BCP immediately re-evaluated against
+         the NOW-current (already-changed) ability and discarded via its own
+         `[bcp self-heal] discarding unsatisfiable clause` path, since fix #2's
+         resolution had already run and moved on before this new clause existed.
+         Fixed by skipping clause (re-)construction entirely for a pairing when
+         either mon's ability is `Known` to a value `seed_state` couldn't have
+         admitted (a live-change signature, not mere narrowing) — the first call's
+         clause, together with fix #2's resolution at the moment of change, already
+         captured the truth soundly; nothing legitimate is lost by not re-deriving.
+      Confirmed via a fuzz-oracle repro (`MB_gallade_clefable.txt`'s Sableye,
+      Ability: Prankster, knows Skill Swap) that reliably hit exactly this dead
+      clause. Regression: `test_s57_skill_swap_does_not_lose_its_own_prankster_escape`
+      (`inference_tests.rs`), verified red-without-fix/green-with-fix. Re-swept:
+      **28% (84/300)**, down from the ~36-37% baseline — clause-shape diversity in
+      the survey harness's own bucketing collapsed from 6-9 distinct shapes to 2
+      (each a single occurrence), consistent with this family being mostly closed.
+      **Still open**: the `[HasItem{KingsRock}, HasItem{RazorFang}]`/flinch-clause
+      variant of this family (same item sets as the open `ItemLost` contradiction
+      panic) was investigated in parallel (`pass2_flinch_holder_from_cant` already
+      correctly guards against stale mid-turn-switch attribution via
+      `ctx.switched_slots_this_turn` — confirmed NOT the same bug as S57) but not
+      root-caused; if picked up again, apply the SAME live-ability/item-change
+      timing lens first (mirroring fixes #1-3 above) before assuming a fresh cause.
     - **Illusion/Zoroark disguise tracking** (~6/36, highest-priority to
       investigate given how central Illusion handling is to this engine's
       fog-of-war design). The primary belief entry (matching the *displayed*

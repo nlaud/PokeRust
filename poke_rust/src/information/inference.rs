@@ -2205,27 +2205,43 @@ fn pass1_apply_event(
         }
 
         EventKind::AbilityRevealed { slot, ability } => {
-            if let Some(idx) = mon_idx_for_active_slot(state, slot)
-                && let Some(mon) = get_mon_mut_by_idx(state, idx) {
-                    // Narrow-vs-overwrite: if the revealed ability is still possible, narrow
-                    // via `unknown_set_known`. If it's excluded under any `Unknown`
-                    // representation (outside `Possibly`, in a `Not` list, or a different
-                    // `Known` value), a live ability change occurred (Trace, Skill Swap,
-                    // Mummy, Wandering Spirit, …) — overwrite instead of treating it as a
-                    // contradiction. `possible_original_abilities` is untouched either way;
-                    // it tracks the innate ability, which never changes here. S14: previously
-                    // only the `Possibly` case overwrote; `Not`-excluded and `Known(other)`
-                    // wrongly panicked despite being the same live-change scenario.
-                    if unknown_is_excluded(&mon.possible_abilities, ability) {
+            if let Some(idx) = mon_idx_for_active_slot(state, slot) {
+                // Narrow-vs-overwrite: if the revealed ability is still possible, narrow
+                // via `unknown_set_known`. If it's excluded under any `Unknown`
+                // representation (outside `Possibly`, in a `Not` list, or a different
+                // `Known` value), a live ability change occurred (Trace, Skill Swap,
+                // Mummy, Wandering Spirit, …) — overwrite instead of treating it as a
+                // contradiction. `possible_original_abilities` is untouched either way;
+                // it tracks the innate ability, which never changes here. S14: previously
+                // only the `Possibly` case overwrote; `Not`-excluded and `Known(other)`
+                // wrongly panicked despite being the same live-change scenario.
+                let currently_excluded = get_mon_by_idx(state, idx)
+                    .is_some_and(|mon| unknown_is_excluded(&mon.possible_abilities, ability));
+                if currently_excluded {
+                    // S57: resolve any existing HasAbility clauses against the OUTGOING
+                    // ability before overwriting, or a clause emitted to explain something
+                    // that happened before this change (e.g. Prankster's own priority
+                    // boost on the very move that swaps it away) gets silently falsified
+                    // by later BCP re-evaluating it against the mon's new ability.
+                    // Mirrors `resolve_item_clauses_on_item_change` (S19).
+                    let outgoing = get_mon_by_idx(state, idx).and_then(|mon| {
+                        match &mon.possible_abilities {
+                            Unknown::Known(a) => Some(a.clone()),
+                            _ => None,
+                        }
+                    });
+                    resolve_ability_clauses_on_ability_change(state, idx, outgoing);
+                    if let Some(mon) = get_mon_mut_by_idx(state, idx) {
                         mon.possible_abilities = Unknown::Known(ability.clone());
-                    } else {
-                        unknown_set_known(
-                            &mut mon.possible_abilities,
-                            ability.clone(),
-                            &format!("mon#{idx} ability"),
-                        );
                     }
+                } else if let Some(mon) = get_mon_mut_by_idx(state, idx) {
+                    unknown_set_known(
+                        &mut mon.possible_abilities,
+                        ability.clone(),
+                        &format!("mon#{idx} ability"),
+                    );
                 }
+            }
         }
 
         EventKind::BoostChanged {
@@ -3187,6 +3203,84 @@ fn historical_item_literal_value(stmt: &Statement, idx: usize, outgoing: &Item) 
         Statement::Not(inner) => historical_item_literal_value(inner, idx, outgoing).map(|b| !b),
         Statement::HasItem { mon_idx, item } if *mon_idx == idx => Some(item == outgoing),
         _ => None,
+    }
+}
+
+fn statement_is_ability_literal_for(stmt: &Statement, idx: usize) -> bool {
+    match stmt {
+        Statement::Not(inner) => statement_is_ability_literal_for(inner, idx),
+        Statement::HasAbility { mon_idx, .. } => *mon_idx == idx,
+        _ => false,
+    }
+}
+
+/// Truth value of an ability literal about `mon_idx` *in the holding window that just
+/// ended*, given the mon held `outgoing` throughout it. `None` = not an ability
+/// literal about this mon (leave untouched). Mirrors `historical_item_literal_value`.
+fn historical_ability_literal_value(stmt: &Statement, idx: usize, outgoing: &Ability) -> Option<bool> {
+    match stmt {
+        Statement::Not(inner) => historical_ability_literal_value(inner, idx, outgoing).map(|b| !b),
+        Statement::HasAbility { mon_idx, ability } if *mon_idx == idx => Some(ability == outgoing),
+        _ => None,
+    }
+}
+
+/// S57: the ability-equivalent of S19's `resolve_item_clauses_on_item_change`.
+/// A `HasAbility` escape clause (e.g. `pass4_speed_from_order`'s Prankster/Gale
+/// Wings/Triage/Quick Draw escapes) encodes "held ability X *at observation time*"
+/// — but a LIVE ability change (Skill Swap, Role Play, Entrainment, Trace, Mummy,
+/// Wandering Spirit, Simple Beam, …) makes every persisted clause about this mon's
+/// ability stale, and `EventKind::AbilityRevealed`'s handler previously overwrote
+/// `possible_abilities` directly with no resolution step first: a clause emitted to
+/// explain something that happened BEFORE the change (e.g. Prankster boosting the
+/// priority of the very same Skill Swap that then took Prankster away) got silently
+/// falsified by BCP re-evaluating the literal against the mon's NEW ability, even
+/// though the literal correctly described the mon's ability at the moment that
+/// mattered. Resolving against the OUTGOING (pre-change) ability first — mirroring
+/// S19 exactly — keeps every surviving clause consistent with the window it was
+/// actually emitted during. When the outgoing ability is unknown, the clauses
+/// cannot be resolved and are purged — sound, since removing a constraint only
+/// widens.
+fn resolve_ability_clauses_on_ability_change(
+    state: &mut UnknownBattleState,
+    idx: usize,
+    outgoing: Option<Ability>,
+) {
+    let Some(outgoing) = outgoing else {
+        state
+            .predicates
+            .retain(|clause| !clause.iter().any(|lit| statement_is_ability_literal_for(lit, idx)));
+        return;
+    };
+    let mut i = 0;
+    while i < state.predicates.len() {
+        let clause = &state.predicates[i];
+        if clause
+            .iter()
+            .any(|lit| historical_ability_literal_value(lit, idx, &outgoing) == Some(true))
+        {
+            state.predicates.remove(i);
+            continue;
+        }
+        let pruned: Vec<Statement> = clause
+            .iter()
+            .filter(|lit| historical_ability_literal_value(lit, idx, &outgoing) != Some(false))
+            .cloned()
+            .collect();
+        if pruned.is_empty() {
+            inference_contradiction!(
+                idx,
+                "clause has no explanation left after resolving ability literals against \
+                 the outgoing ability {:?}: {:?}\nmon_idx legend: {}",
+                outgoing,
+                clause,
+                mon_idx_legend(state)
+            );
+        }
+        if pruned.len() != state.predicates[i].len() {
+            state.predicates[i] = pruned;
+        }
+        i += 1;
     }
 }
 
@@ -9049,14 +9143,12 @@ fn fold_known_ability_priority(
 /// any future change to these triggers (e.g. Gale Wings full-HP condition) only needs
 /// one edit here.
 fn priority_lift_escapes(
-    state: &UnknownBattleState,
+    fast_m: Option<&UnknownPokemonState>,
     fast_idx: usize,
     fast_move: &PokemonMove,
     move_dex: &HashMap<PokemonMove, MoveData>,
 ) -> Vec<Statement> {
-    let (Some(fast_m), Some(fast_md)) =
-        (get_mon_by_idx(state, fast_idx), move_dex.get(fast_move))
-    else {
+    let (Some(fast_m), Some(fast_md)) = (fast_m, move_dex.get(fast_move)) else {
         return vec![];
     };
 
@@ -9340,6 +9432,36 @@ fn pass4_speed_from_order(
         let (p0, idx0, mv0) = (mover0.eff_prio, mover0.mon_idx, &mover0.move_used);
         let (p1, idx1) = (mover1.eff_prio, mover1.mon_idx);
 
+        // S57: skip this pairing ENTIRELY (both the cross-bracket and same-bracket
+        // paths below) if either mon's ability visibly changed LIVE (Skill Swap,
+        // Trace, Role Play, Entrainment, Mummy, Wandering Spirit, Simple Beam, …)
+        // since `seed_state` — i.e. its current ability is `Known` to a value
+        // `seed_state` couldn't have admitted, not just a narrowing of an
+        // already-possible one. Pass 4 runs a second time (after the event walk)
+        // specifically to pick up newly-`Known` priority abilities; but when the
+        // reason the ability is now `Known` is a live change mid-turn, seed_state's
+        // ability is what actually explains THIS pairing's priority/speed, and
+        // `EventKind::AbilityRevealed`'s handler already resolved any pending
+        // escape clauses against that historical value the moment the change was
+        // observed (`resolve_ability_clauses_on_ability_change`, S57). Re-deriving
+        // and re-pushing a fresh clause here would use the NOW-current (wrong, for
+        // this pairing) ability, which BCP immediately falsifies and discards via
+        // its own self-heal — silently losing the escape the first call and the
+        // ability-change resolution together already captured correctly.
+        let ability_changed_live = |idx: usize| -> bool {
+            let (Some(seed_m), Some(live_m)) = (get_mon_by_idx(seed_state, idx), get_mon_by_idx(state, idx)) else {
+                return false;
+            };
+            let Unknown::Known(live_ab) = &live_m.possible_abilities else {
+                return false;
+            };
+            !matches!(&seed_m.possible_abilities, Unknown::Known(seed_ab) if seed_ab == live_ab)
+                && unknown_is_excluded(&seed_m.possible_abilities, live_ab)
+        };
+        if ability_changed_live(idx0) || ability_changed_live(idx1) {
+            continue;
+        }
+
         // Different effective priority brackets.
         // If the first mover has a *lower* effective priority than the second (p0 < p1),
         // the observation is only explicable by a priority-lifting ability on the first
@@ -9352,7 +9474,17 @@ fn pass4_speed_from_order(
                 // The escapes are exactly the priority-lift abilities/items; no
                 // SpeedComparison literal here since bracket ordering dominates speed.
                 let fast_idx = idx0;
-                let clause = priority_lift_escapes(state, fast_idx, mv0, move_dex);
+                // Same seed-vs-live identity guard as the same-bracket path below (see
+                // its doc comment): prefer the turn-start snapshot for ability/item
+                // escapes unless a mid-turn switch replaced this slot's occupant.
+                let fast_m_seed = get_mon_by_idx(seed_state, fast_idx);
+                let fast_m_live = get_mon_by_idx(state, fast_idx);
+                let fast_m = if matches!((fast_m_seed, fast_m_live), (Some(s), Some(l)) if s.possible_mon_id == l.possible_mon_id) {
+                    fast_m_seed
+                } else {
+                    fast_m_live
+                };
+                let clause = priority_lift_escapes(fast_m, fast_idx, mv0, move_dex);
                 if !clause.is_empty() {
                     state.predicates.push(clause);
                 }
@@ -9411,9 +9543,38 @@ fn pass4_speed_from_order(
         // ── Build escape disjuncts ────────────────────────────────────────────
         // Every escape disjunct D means: "the SpeedComparison OR the escape D explains
         // the observation" — so the predicate remains sound (a wider union).
-
-        let fast_mon = get_mon_by_idx(state, fast_idx);
-        let slow_mon = get_mon_by_idx(state, slow_idx);
+        //
+        // Item/ability escapes must reflect the mon's state AS OF WHEN THIS PAIRING'S
+        // ORDER WAS ACTUALLY DECIDED — the same turn-start-snapshot principle already
+        // applied to weather/terrain/boosts/paralysis/Tailwind above (see this
+        // function's own doc comment), just never extended to items/abilities. Pass 4
+        // runs a second time AFTER the full event walk (to pick up abilities BCP just
+        // forced), by which point `state` can already reflect THIS SAME TURN'S own
+        // moves changing the mon's ability/item — e.g. Skill Swap swapping the fast
+        // mon's ability away, or Mega Evolution locking its item to the mega stone —
+        // silently dropping an escape (e.g. Prankster) that was live at the moment the
+        // move was actually used and explained its priority. Prefer `seed_state`'s
+        // (turn-start) copy when it's provably the same physical individual
+        // (`possible_mon_id` unchanged — a mid-turn switch replaces the slot's
+        // occupant, at which point `seed_state` describes the WRONG mon and falling
+        // back to live `state` is the safe/sound choice, same as the status quo).
+        let same_individual = |seed_m: Option<&UnknownPokemonState>, live_m: Option<&UnknownPokemonState>| {
+            matches!((seed_m, live_m), (Some(s), Some(l)) if s.possible_mon_id == l.possible_mon_id)
+        };
+        let fast_mon_seed = get_mon_by_idx(seed_state, fast_idx);
+        let fast_mon_live = get_mon_by_idx(state, fast_idx);
+        let fast_mon = if same_individual(fast_mon_seed, fast_mon_live) {
+            fast_mon_seed
+        } else {
+            fast_mon_live
+        };
+        let slow_mon_seed = get_mon_by_idx(seed_state, slow_idx);
+        let slow_mon_live = get_mon_by_idx(state, slow_idx);
+        let slow_mon = if same_individual(slow_mon_seed, slow_mon_live) {
+            slow_mon_seed
+        } else {
+            slow_mon_live
+        };
 
         let mut clause: Vec<Statement> = vec![Statement::SpeedComparison {
             fast_idx,
@@ -9425,7 +9586,7 @@ fn pass4_speed_from_order(
         // (1)+(2) Priority-lift escapes: Quick Claw, Quick Draw, Prankster, Gale Wings, Triage.
         // Extracted from the cross-bracket path (where these are the *whole* clause) to
         // avoid the identical logic being maintained in two places.
-        clause.extend(priority_lift_escapes(state, fast_idx, &fast_move, move_dex));
+        clause.extend(priority_lift_escapes(fast_mon, fast_idx, &fast_move, move_dex));
 
         // (3) Stall on the slow mon: Stall forces the holder to always go last
         //     within its priority bracket regardless of speed.
