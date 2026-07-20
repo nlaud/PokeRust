@@ -299,17 +299,9 @@ export interface TurnResponse {
 // ── Benchmarking ────────────────────────────────────────────────────────────
 // Mirrors `poke_rust::benchmarking`'s result rows via
 // `src/bin/server/dto.rs`'s `TurnSpeedRowDto`/`InferenceRowDto`/
-// `BenchmarkResponse`. See `poke_rust/benches/RESULTS.md` for the offline
-// (unbounded) sweep this endpoint runs a small, live-clickable version of.
-
-export interface BenchmarkRequest {
-  /** Ordered teamsheet pairings to time turn resolution across. Server-side
-   * hard-capped regardless of what's requested here. */
-  turnSpeedPairings?: number
-  /** Full doubles games to play + replay per information mode. Server-side
-   * hard-capped regardless of what's requested here. */
-  inferenceGames?: number
-}
+// `BenchmarkResponse`/`BenchmarkProgressDto`. `GET /api/benchmark` streams
+// over Server-Sent Events — no request body/knobs, always the full unbounded
+// sweep matching `poke_rust/benches/RESULTS.md`'s offline numbers.
 
 export interface TurnSpeedRow {
   scenario: 'singles' | 'doubles'
@@ -322,13 +314,27 @@ export interface TurnSpeedRow {
 }
 
 export interface InferenceRow {
+  scenario: 'singles' | 'doubles'
   informationMode: string
   calls: number
   avgTimeSecs: number
   contradictions: number
+  /** A real caught panic message from the first contradiction — always an
+   * `apply_information` panic (typically the `inference_contradiction!`
+   * macro; see known families in `TODO.md`'s "Fixes" section), never a
+   * `[subset violation]` (a separate, unrelated check this sweep never
+   * runs). Absent when `contradictions === 0`. */
+  contradictionSample?: string
 }
 
 export interface BenchmarkResponse {
   turnSpeed: TurnSpeedRow[]
   inference: InferenceRow[]
+}
+
+/** One `progress` SSE event — `stage` is which sweep is currently running. */
+export interface BenchmarkProgress {
+  stage: 'turnSpeed' | 'inference'
+  completed: number
+  total: number
 }

@@ -2,6 +2,7 @@
 //! and a mutex-guarded session map (single-user local tool — coarse locking is fine).
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -9,8 +10,11 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
 use poke_rust::benchmarking;
@@ -328,72 +332,94 @@ pub async fn delete_battle(State(app): State<AppState>, Path(id): Path<String>) 
     }
 }
 
-/// Runs a bounded turn-resolution-speed + fog-of-war-inference-speed sweep
-/// (`poke_rust::benchmarking`) and returns the timing table. Needs only
-/// `app.dexes` — no `sessions` lock is taken, so a benchmark run never blocks
-/// battle requests. The sweep is synchronous, CPU-bound Rust (no `.await`
-/// points of its own), so it runs inside `spawn_blocking` rather than on the
-/// async runtime's worker threads, where it would stall every other
-/// in-flight request for its duration.
+/// Runs the full turn-resolution-speed + fog-of-war-inference-speed sweep
+/// (`poke_rust::benchmarking` — the unbounded grid, matching the offline
+/// `cargo bench` binaries) and streams progress over Server-Sent Events,
+/// ending in one `result` (or `failed`) event. Needs only `app.dexes` — no
+/// `sessions` lock is taken, so a benchmark run never blocks battle requests.
+/// The sweep is synchronous, CPU-bound Rust with no `.await` points of its
+/// own, so it runs inside `spawn_blocking` rather than on the async runtime's
+/// worker threads, where it would stall every other in-flight request for
+/// the run's (now multi-minute) duration. `GET`, not `POST`: there are no
+/// request knobs left to send a body for, and the browser's native
+/// `EventSource` — which the frontend uses to consume this — can only issue
+/// `GET` requests.
 pub async fn run_benchmark(
     State(app): State<AppState>,
-    Json(req): Json<BenchmarkRequest>,
-) -> Response {
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let dexes = app.dexes.clone();
-    let turn_speed_pairings = req.turn_speed_pairings;
-    let inference_games = req.inference_games;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
 
-    let outcome = tokio::task::spawn_blocking(move || {
-        let turn_speed =
-            benchmarking::run_turn_speed(&dexes.pokemon_dex, &dexes.move_dex, turn_speed_pairings);
+    tokio::task::spawn_blocking(move || {
+        // Captures `&tx` (a shared borrow is enough — `blocking_send` only
+        // needs `&self`), so `tx` is still free to send the final event below.
+        let send_progress = |stage: &'static str, completed: usize, total: usize| {
+            let event = Event::default()
+                .event("progress")
+                .json_data(BenchmarkProgressDto {
+                    stage: stage.to_string(),
+                    completed,
+                    total,
+                })
+                .unwrap_or_else(|_| Event::default().event("progress"));
+            let _ = tx.blocking_send(event);
+        };
+
+        let turn_speed = benchmarking::run_turn_speed(
+            &dexes.pokemon_dex,
+            &dexes.move_dex,
+            &mut |completed, total| send_progress("turnSpeed", completed, total),
+        );
         let inference = benchmarking::run_inference(
             &dexes.pokemon_dex,
             &dexes.move_dex,
             &dexes.ability_dex,
             &dexes.learnset_dex,
-            inference_games,
+            &mut |completed, total| send_progress("inference", completed, total),
         );
-        (turn_speed, inference)
-    })
-    .await;
 
-    let (turn_speed, inference) = match outcome {
-        Ok(pair) => pair,
-        Err(_) => return internal_error("benchmark task panicked"),
-    };
-    let turn_speed = match turn_speed {
-        Ok(rows) => rows,
-        Err(message) => return internal_error(message),
-    };
-    let inference = match inference {
-        Ok(rows) => rows,
-        Err(message) => return internal_error(message),
-    };
+        // Named "failed", not "error" — `EventSource` already has its own
+        // built-in connection-level `error` event (a plain `Event`, not a
+        // `MessageEvent` with `.data`); reusing that name here would make a
+        // real server-reported failure indistinguishable from a dropped
+        // connection on the client.
+        let final_event = match (turn_speed, inference) {
+            (Ok(ts), Ok(inf)) => Event::default().event("result").json_data(BenchmarkResponse {
+                turn_speed: ts
+                    .into_iter()
+                    .map(|r| TurnSpeedRowDto {
+                        scenario: r.scenario.to_string(),
+                        mode: r.mode.to_string(),
+                        rolls: r.rolls,
+                        crit: r.crit,
+                        avg_time_secs: r.avg_time_secs,
+                        avg_branches: r.avg_branches,
+                        pairings: r.pairings,
+                    })
+                    .collect(),
+                inference: inf
+                    .into_iter()
+                    .map(|r| InferenceRowDto {
+                        scenario: r.scenario.to_string(),
+                        information_mode: r.information_mode.to_string(),
+                        calls: r.calls,
+                        avg_time_secs: r.avg_time_secs,
+                        contradictions: r.contradictions,
+                        contradiction_sample: r.contradiction_sample,
+                    })
+                    .collect(),
+            }),
+            (Err(message), _) | (_, Err(message)) => {
+                Event::default().event("failed").json_data(ApiError { message })
+            }
+        };
+        let _ = tx.blocking_send(
+            final_event.unwrap_or_else(|_| Event::default().event("failed")),
+        );
+    });
 
-    Json(BenchmarkResponse {
-        turn_speed: turn_speed
-            .into_iter()
-            .map(|r| TurnSpeedRowDto {
-                scenario: r.scenario.to_string(),
-                mode: r.mode.to_string(),
-                rolls: r.rolls,
-                crit: r.crit,
-                avg_time_secs: r.avg_time_secs,
-                avg_branches: r.avg_branches,
-                pairings: r.pairings,
-            })
-            .collect(),
-        inference: inference
-            .into_iter()
-            .map(|r| InferenceRowDto {
-                information_mode: r.information_mode.to_string(),
-                calls: r.calls,
-                avg_time_secs: r.avg_time_secs,
-                contradictions: r.contradictions,
-            })
-            .collect(),
-    })
-    .into_response()
+    let stream = ReceiverStream::new(rx).map(Ok);
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// Sprites live outside the repo on GitHub (see `frontend/src/lib/sprites.ts`); nothing

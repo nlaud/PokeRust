@@ -612,31 +612,20 @@ pub struct ApiError {
 }
 
 // ── Benchmarking ─────────────────────────────────────────────────────────────
-// See `poke_rust::benchmarking` for the timing logic these DTOs wrap; the
-// request knobs are deliberately small (server-side hard caps clamp them
-// further — see `MAX_TURN_SPEED_PAIRINGS`/`MAX_INFERENCE_GAMES`), since this
-// endpoint runs synchronously for an interactive "Run benchmark" click, not
-// an offline sweep like `cargo bench`.
+// See `poke_rust::benchmarking` for the timing logic these DTOs wrap. The
+// sweep is always the full unbounded teamsheet-pairing grid (matching the
+// offline `cargo bench` binaries exactly — no request-configurable knobs),
+// so `GET /api/benchmark` takes no body; it streams `BenchmarkProgressDto`
+// events over Server-Sent Events as it runs, ending in one `BenchmarkResponse`
+// (see `routes.rs::run_benchmark`).
 
-#[derive(Deserialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BenchmarkRequest {
-    /// Ordered teamsheet pairings to time turn resolution across. Clamped
-    /// server-side; see `poke_rust::benchmarking::run_turn_speed`.
-    #[serde(default = "default_turn_speed_pairings")]
-    pub turn_speed_pairings: usize,
-    /// Full doubles games to play and replay per fog-of-war information mode.
-    /// Clamped server-side; see `poke_rust::benchmarking::run_inference`.
-    #[serde(default = "default_inference_games")]
-    pub inference_games: usize,
-}
-
-fn default_turn_speed_pairings() -> usize {
-    1
-}
-
-fn default_inference_games() -> usize {
-    1
+pub struct BenchmarkProgressDto {
+    /// `"turnSpeed"` | `"inference"` — which sweep is currently reporting.
+    pub stage: String,
+    pub completed: usize,
+    pub total: usize,
 }
 
 #[derive(Serialize)]
@@ -654,10 +643,15 @@ pub struct TurnSpeedRowDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceRowDto {
+    pub scenario: String,
     pub information_mode: String,
     pub calls: u64,
     pub avg_time_secs: f64,
     pub contradictions: u64,
+    /// A real caught panic message from the first contradiction — see
+    /// `poke_rust::benchmarking::InferenceRow::contradiction_sample`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contradiction_sample: Option<String>,
 }
 
 #[derive(Serialize)]

@@ -1,5 +1,5 @@
 import type {
-  BenchmarkRequest,
+  BenchmarkProgress,
   BenchmarkResponse,
   CreateBattleRequest,
   CreateBattleResponse,
@@ -60,6 +60,35 @@ export function deleteBattle(battleId: string): Promise<void> {
   return request(`/api/battles/${battleId}`, { method: 'DELETE' })
 }
 
-export function runBenchmark(req: BenchmarkRequest = {}): Promise<BenchmarkResponse> {
-  return request('/api/benchmark', { method: 'POST', body: JSON.stringify(req) })
+/** Consumes the `GET /api/benchmark` Server-Sent Events stream — a full,
+ * unbounded sweep (matching the offline `cargo bench` binaries), so this can
+ * run for several minutes. Named `failed` (not `error`) for the server-side
+ * failure event so it can't be confused with `EventSource`'s own built-in
+ * connection-level `error` (a plain `Event`, not a `MessageEvent` with
+ * `.data`) — that's routed to `onFailed` too, but with a generic message.
+ *
+ * Callers must let this close the connection on `result`/`failed` (done
+ * below) — `EventSource` auto-reconnects by default, which would otherwise
+ * silently re-trigger the whole sweep. The returned function lets a caller
+ * cancel early too (e.g. on unmount). */
+export function streamBenchmark(handlers: {
+  onProgress: (progress: BenchmarkProgress) => void
+  onResult: (result: BenchmarkResponse) => void
+  onFailed: (message: string) => void
+}): () => void {
+  const es = new EventSource('/api/benchmark')
+  es.addEventListener('progress', (e) => handlers.onProgress(JSON.parse(e.data)))
+  es.addEventListener('result', (e) => {
+    handlers.onResult(JSON.parse(e.data))
+    es.close()
+  })
+  es.addEventListener('failed', (e) => {
+    handlers.onFailed(JSON.parse(e.data).message)
+    es.close()
+  })
+  es.onerror = () => {
+    handlers.onFailed('Connection to server lost')
+    es.close()
+  }
+  return () => es.close()
 }

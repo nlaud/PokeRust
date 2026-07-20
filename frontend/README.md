@@ -4,10 +4,12 @@ Minimalist web UI for the PokeRust battle simulator: a **Teams** page
 (Showdown-format teamsheets in localStorage, the default route), a **Formats**
 page (ruleset cards with a curated Pokémon Champions item pool for ban lists),
 a **Simulate** page (hotseat battles against the Rust engine), and a
-**Benchmark** page (right-aligned in the navbar; runs a bounded live sweep of
-turn-resolution and fog-of-war-inference speed via `POST /api/benchmark` —
-see `poke_rust::benchmarking`, and `poke_rust/benches/RESULTS.md` for the
-unbounded offline sweep this is a small, interactive version of).
+**Benchmark** page (right-aligned in the navbar; runs the full turn-resolution
+and fog-of-war-inference speed sweep, streamed live over Server-Sent Events
+from `GET /api/benchmark` — see `poke_rust::benchmarking`. This is the same
+unbounded sweep the offline `cargo bench` binaries run, recorded in
+`poke_rust/benches/RESULTS.md`, so it can take several minutes; the page
+shows real backend-reported progress, not a fake timer).
 React + Vite + TypeScript + Tailwind CSS v4.
 
 ## Running
@@ -47,8 +49,9 @@ src/
   pages/simulate/     SetupPanel, BattleScreen, Arena, ControlPanel,
                       PokemonHUD, FieldIndicators, BattleLogSidebar,
                       TeamInfoSidebar
-  pages/benchmark/    BenchmarkChart — hand-rolled inline-SVG bar chart (no
-                      charting dependency); used by pages/BenchmarkingPage.tsx
+  pages/benchmark/    BenchmarkChart, ProgressBar — hand-rolled inline-SVG bar
+                      chart + determinate progress bar (no charting
+                      dependency); used by pages/BenchmarkingPage.tsx
 ```
 
 ## Notes
