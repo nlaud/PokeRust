@@ -14307,6 +14307,274 @@ mod tests {
             );
         }
 
+        // ─── Type-resist berry edge cases ─────────────────────────────────────
+
+        #[test]
+        fn resist_berry_suppressed_by_unnerve_and_as_one() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make = |ability: Ability, item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Arcanine,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Flamethrower), None, None, None]),
+                    None,
+                    Some(ability),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+                let tgt = build_pokemon_state(
+                    Species::Meganium,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    item,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            for ability in [
+                Ability::Unnerve,
+                Ability::AsOneGlastrier,
+                Ability::AsOneSpectrier,
+            ] {
+                let bare = raw_damage(
+                    &make(ability.clone(), None),
+                    &PokemonMove::Flamethrower,
+                    move_dex,
+                );
+                let suppressed = raw_damage(
+                    &make(ability.clone(), Some(Item::OccaBerry)),
+                    &PokemonMove::Flamethrower,
+                    move_dex,
+                );
+                assert_eq!(
+                    suppressed, bare,
+                    "{ability:?} should suppress Occa Berry's damage reduction"
+                );
+
+                let outcomes = run_single_turn(
+                    &MatchState::BattleState(make(ability.clone(), Some(Item::OccaBerry))),
+                    &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                    &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                    move_dex,
+                    pokemon_dex,
+                );
+                for (state, _) in outcomes {
+                    if let MatchState::BattleState(bs) = state {
+                        assert_eq!(
+                            bs.p2_active_mons[0].item,
+                            Item::OccaBerry,
+                            "{ability:?} should prevent Occa Berry consumption"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn resist_berry_does_not_activate_through_substitute() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let make = |item: Option<Item>| {
+                let atk = build_pokemon_state(
+                    Species::Arcanine,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Flamethrower), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+                let mut tgt = build_pokemon_state(
+                    Species::Meganium,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some([Some(PokemonMove::Splash), None, None, None]),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    item,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+                let substitute_hp = (tgt.stats[0] / 4).max(1);
+                tgt.volatiles.push(VolatileStatusState::TurnStatus(
+                    VolatileStatus::Substitute(substitute_hp),
+                    0,
+                ));
+                battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![])
+            };
+
+            let bare = raw_damage(&make(None), &PokemonMove::Flamethrower, move_dex);
+            let with_berry = raw_damage(
+                &make(Some(Item::OccaBerry)),
+                &PokemonMove::Flamethrower,
+                move_dex,
+            );
+            assert_eq!(
+                with_berry, bare,
+                "a Substitute should take unreduced damage without activating Occa Berry"
+            );
+
+            let initial = make(Some(Item::OccaBerry));
+            let target_hp = initial.p2_active_mons[0].hp;
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(initial),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex,
+                pokemon_dex,
+            );
+            for (state, _) in outcomes {
+                if let MatchState::BattleState(bs) = state {
+                    assert_eq!(bs.p2_active_mons[0].hp, target_hp);
+                    assert_eq!(bs.p2_active_mons[0].item, Item::OccaBerry);
+                    assert_eq!(bs.p2_active_mons[0].consumed_item, None);
+                    assert!(!bs.p2_active_mons[0].ate_berry_this_battle);
+                }
+            }
+        }
+
+        #[test]
+        fn resist_berry_records_consumption_and_triggers_cheek_pouch() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let atk = build_pokemon_state(
+                Species::Snorlax,
+                pokemon_dex,
+                move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            let mut tgt = build_pokemon_state(
+                Species::Lapras,
+                pokemon_dex,
+                move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::CheekPouch),
+                None,
+                Some(Item::ChilanBerry),
+                None,
+                None,
+                None,
+                false,
+            );
+            let max_hp = tgt.stats[0];
+            tgt.hp = max_hp / 2;
+            let state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+            let damage = raw_damage(&state, &PokemonMove::Tackle, move_dex);
+            let expected_hp = (max_hp / 2)
+                .saturating_sub(damage)
+                .saturating_add(max_hp / 3)
+                .min(max_hp);
+
+            let after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex,
+                pokemon_dex,
+            ))
+            .0;
+            let target = &after.p2_active_mons[0];
+            assert_eq!(target.hp, expected_hp);
+            assert_eq!(target.item, Item::None);
+            assert_eq!(target.consumed_item, Some(Item::ChilanBerry));
+            assert!(target.ate_berry_this_battle);
+            assert!(target.item_lost);
+        }
+
+        #[test]
+        fn resist_berry_arms_cud_chew() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+
+            let atk = build_pokemon_state(
+                Species::Snorlax,
+                pokemon_dex,
+                move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Tackle), None, None, None]),
+                None,
+                Some(Ability::None),
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            let tgt = build_pokemon_state(
+                Species::Lapras,
+                pokemon_dex,
+                move_dex,
+                Some(50),
+                Some([Some(PokemonMove::Splash), None, None, None]),
+                None,
+                Some(Ability::CudChew),
+                None,
+                Some(Item::ChilanBerry),
+                None,
+                None,
+                None,
+                false,
+            );
+            let state = battle_state_from_lists(vec![atk], vec![], vec![tgt], vec![]);
+
+            let after = extract_battle_state(run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(simple_attack(Player::P1, vec![0])),
+                &PlayerCommand::Battle(simple_attack(Player::P2, vec![0])),
+                move_dex,
+                pokemon_dex,
+            ))
+            .0;
+            let target = &after.p2_active_mons[0];
+            assert_eq!(target.consumed_item, Some(Item::ChilanBerry));
+            assert_eq!(
+                target.cud_chew_pending,
+                Some((Item::ChilanBerry, true)),
+                "the first end of turn should arm the delayed re-eat"
+            );
+        }
+
         // ─── Status-cure berries ──────────────────────────────────────────────
 
         #[test]

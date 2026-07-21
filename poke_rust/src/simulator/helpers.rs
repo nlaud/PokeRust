@@ -2551,8 +2551,10 @@ fn resist_berry_multiplier(
 /// Called after any successful berry consumption. Centralises post-eat side-effects.
 pub(crate) fn on_berry_eaten(mon: &mut PokemonState, _eaten: &Item, env: &BerryEnv) {
     mon.ate_berry_this_battle = true;
-    // Cheek Pouch: heal ⅓ max HP on top of the berry effect, suppressed by Heal Block.
-    if env.ability_active
+    // Post-consumption abilities cannot rescue a Pokémon that fainted from the hit.
+    // (Damage-reducing berries are consumed before damage, but Cheek Pouch activates after it.)
+    if !mon.fainted
+        && env.ability_active
         && mon.ability == Ability::CheekPouch
         && !has_status_volatile(mon, &VolatileStatus::HealBlock)
     {
@@ -2560,7 +2562,7 @@ pub(crate) fn on_berry_eaten(mon: &mut PokemonState, _eaten: &Item, env: &BerryE
         heal_mon(mon, max_hp / 3);
     }
     // Cud Chew: arm the delayed re-eat for the following EOT.
-    if env.ability_active && mon.ability == Ability::CudChew {
+    if !mon.fainted && env.ability_active && mon.ability == Ability::CudChew {
         mon.cud_chew_pending = Some((_eaten.clone(), false));
     }
 }
@@ -2979,20 +2981,24 @@ pub(crate) fn calculate_damage_outcomes_for_target_with_options(
     } else {
         user_power_item_multiplier(attacker, &move_data.category, effectiveness)
     };
-    let resist_berry_mult = if !item_is_active(_state, target) {
-        1.0
-    } else {
-        let base = resist_berry_multiplier(target, &attack_type, effectiveness);
-        // Ripen halves the resist-berry multiplier again (½ → ¼).
-        if base < 1.0
-            && !pokemon_ability_is_suppressed(_state, target)
-            && target.ability == Ability::Ripen
-        {
-            base / 2.0
+    let berry_blocked_by_substitute = _user_slot.player != _target_slot.player
+        && get_substitute_hp(target) > 0
+        && !attack_bypasses_substitute(_state, _user_slot, move_data);
+    let resist_berry_mult =
+        if berry_env(_state, _target_slot).suppressed || berry_blocked_by_substitute {
+            1.0
         } else {
-            base
-        }
-    };
+            let base = resist_berry_multiplier(target, &attack_type, effectiveness);
+            // Ripen halves the resist-berry multiplier again (½ → ¼).
+            if base < 1.0
+                && !pokemon_ability_is_suppressed(_state, target)
+                && target.ability == Ability::Ripen
+            {
+                base / 2.0
+            } else {
+                base
+            }
+        };
     let attacker_infiltrator = !pokemon_ability_is_suppressed(_state, attacker)
         && attacker.ability == Ability::Infiltrator;
     let screen_mult =
@@ -4248,7 +4254,7 @@ impl BerryEnv {
     }
 }
 
-/// Whether any active, non-suppressed Pokémon on the *opposing* side has Unnerve.
+/// Whether any active, non-suppressed Pokémon on the *opposing* side prevents Berry eating.
 fn opposing_unnerve_active(state: &BattleState, slot: FieldSlot) -> bool {
     let opposing_mons = match slot.player {
         Player::P1 => &state.p2_active_mons,
@@ -4256,7 +4262,10 @@ fn opposing_unnerve_active(state: &BattleState, slot: FieldSlot) -> bool {
     };
     opposing_mons.iter().any(|mon| {
         !mon.fainted
-            && mon.ability == Ability::Unnerve
+            && matches!(
+                mon.ability,
+                Ability::Unnerve | Ability::AsOneGlastrier | Ability::AsOneSpectrier
+            )
             && !pokemon_ability_is_suppressed(state, mon)
     })
 }

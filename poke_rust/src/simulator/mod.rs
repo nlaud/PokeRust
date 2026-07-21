@@ -923,11 +923,12 @@ fn apply_single_hit_branch(
     let target_item_active = simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot)
         .map(|m| simulator_helpers::item_is_active(&branch_state, m))
         .unwrap_or(false);
+    let target_berry_env = simulator_helpers::berry_env(&branch_state, target_slot);
 
     // Evaluate whether the target's resist berry should fire, before any mutation.
     // The number (0.5×) was already baked into `damage` by the pure damage calc;
     // here we only need to decide whether to consume the item.
-    let resist_berry_consume = target_item_active && damage > 0 && {
+    let resist_berry_consume = !target_berry_env.suppressed && damage > 0 && {
         match (
             simulator_helpers::get_pokemon_at_slot(&branch_state, attack_slot),
             simulator_helpers::get_pokemon_at_slot(&branch_state, target_slot),
@@ -1091,6 +1092,9 @@ fn apply_single_hit_branch(
         // monotone in BSV, so an understated delta can exclude the attacker's true stat).
         // The consumed berry rides along so the heal nests under its ItemLost event.
         let mut berry_heal_hp_info: Option<(u16, u16, Item)> = None;
+        // Resist berries are applied by the pure damage calculation, then consumed here.
+        // Capture their shared berry-lifecycle effects for bookkeeping and event emission.
+        let mut resist_berry_consumed: Option<(Item, Option<(u16, u16)>)> = None;
         let target_env = simulator_helpers::berry_env(&bs, target_slot);
         let as_ = simulator_helpers::abilities_are_suppressed(&bs);
 
@@ -1219,7 +1223,14 @@ fn apply_single_hit_branch(
             }
 
             if resist_berry_consume {
+                let berry = target_mon.item.clone();
+                let pre_cheek_pouch_hp = target_mon.hp;
+                target_mon.consumed_item = Some(berry.clone());
                 target_mon.item = crate::data::item::Item::None;
+                simulator_helpers::on_berry_eaten(target_mon, &berry, &target_env);
+                let heal = (target_mon.hp > pre_cheek_pouch_hp)
+                    .then_some((target_mon.hp, target_mon.stats[0].max(1)));
+                resist_berry_consumed = Some((berry, heal));
             }
 
             if target_mon.ability == Ability::SandSpit && !target_mon.fainted {
@@ -1528,6 +1539,34 @@ fn apply_single_hit_branch(
                         max_hp,
                     },
                 );
+            });
+        }
+
+        if let Some((berry, heal)) = resist_berry_consumed {
+            let observed_heal = heal.and_then(|(new_hp, max_hp)| {
+                bs.event_observer.map(|observer| {
+                    (
+                        simulator_helpers::observed_hp_value(
+                            observer,
+                            target_slot.player,
+                            new_hp,
+                            max_hp,
+                        ),
+                        max_hp,
+                    )
+                })
+            });
+            simulator_helpers::emit_item_consumed_with(&mut bs, target_slot, berry, |bs| {
+                if let Some((new_hp, max_hp)) = observed_heal {
+                    simulator_helpers::emit(
+                        bs,
+                        EventKind::Healed {
+                            target: target_slot,
+                            new_hp,
+                            max_hp,
+                        },
+                    );
+                }
             });
         }
 
