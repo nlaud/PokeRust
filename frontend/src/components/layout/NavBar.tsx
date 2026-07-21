@@ -5,6 +5,7 @@ const tabs = [
   { to: '/', label: 'Teams' },
   { to: '/formats', label: 'Formats' },
   { to: '/simulate', label: 'Simulate' },
+  { to: '/tracker', label: 'Tracker' },
 ]
 
 export default function NavBar() {

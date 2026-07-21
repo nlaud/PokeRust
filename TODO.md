@@ -36,7 +36,7 @@
     `POKERUST_FUZZ_*` environment variables documented in the test module.
 
 ### New features
-
+- Cache the benchmarking so that it stays even when you switch tabs until you re-run them.
 - Test the meta sampler & make sure a chunk of the data looks good...
   - Now on the Rust end, create a determinizer that takes in the meta state (we will need a parser for this) + an unknownbattlestate, then, like the simulator, has modes for giving a single random sample state or giving every possible state with probability (This should not consider "other" options, just the normal ones, it should force based on the meta percent and known information items, moves, etc.). It should output complete full states though that should just be able to be put in the simulator and work!
 - Eventually create nash solver and recursive evaluation (When both players have perfect information)

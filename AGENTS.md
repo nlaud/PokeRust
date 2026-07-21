@@ -264,8 +264,9 @@ to know.
 
 `poke_rust` is a lib + two bins: `src/lib.rs` declares the module tree and the
 global statics; `src/main.rs` is the CLI driver; `src/bin/server/` is the HTTP
-server (`main`, `routes`, `session`, `dto`, `mapping`). The in-crate test suite
-imports via `crate::` paths and is unaffected by the split.
+server (`main`, `routes`, `session`, `dto`, `mapping`, plus `tracker`,
+`tracker_parse`, `tracker_effects` for tracker mode — see below). The in-crate
+test suite imports via `crate::` paths and is unaffected by the split.
 
 ### Server design rules
 
@@ -283,6 +284,30 @@ imports via `crate::` paths and is unaffected by the split.
   = `Some(Player::P1)`.
 - Sessions are in-memory (`HashMap` behind a mutex) — a server restart loses
   battles.
+
+### Tracker mode
+
+A second, simpler session kind for following a real battle by typing what
+happened instead of driving a simulated opponent (`/tracker` in the frontend).
+`tracker.rs` owns the session type (`TrackerSession`) and its four handlers;
+`tracker_parse.rs` is the authoritative text→`InformationEvent` grammar (see
+its module doc for the Phase-1 grammar scope and simplifications);
+`tracker_effects.rs` synthesizes the guaranteed reactions a user should never
+have to type (Intimidate's `-1 atk`, a self-boost move's `BoostChanged`, a
+weather setter's `WeatherChanged`, …), applied as a post-process pass over the
+parser's output.
+
+**The belief IS the state — there is no concrete `MatchState` backing a
+tracker session.** `apply_information` already knows how to fold events into a
+fog-of-war belief with no ground truth behind it (that's exactly what a
+battle-mode belief already is); `mapping::battle_view_from_belief` renders a
+`BattleView` straight from it, reusing the same belief-only helpers
+`bench_pokemon_view_from_belief` already used for bench mons. Tracker sessions
+never touch `legal_commands`/`sample_turn_raw` — there is no move selector,
+the user submits free text instead. `POST /api/tracker/{id}/events` requires
+the submitted text to consist of complete, `endofturn`-terminated turns,
+applied to a scratch clone first and only committed if every turn succeeds
+(the same all-or-nothing discipline `session::resolve_turn` uses).
 
 ### Performance constraint (important)
 

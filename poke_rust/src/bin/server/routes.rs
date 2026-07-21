@@ -31,6 +31,10 @@ use crate::session::{self, BattleSession, Dexes, SessionConfig};
 pub struct AppState {
     pub dexes: Arc<Dexes>,
     pub sessions: Arc<Mutex<HashMap<String, BattleSession>>>,
+    /// Tracker-mode sessions — a separate map from `sessions` since a tracker
+    /// session has no opponent-simulating `MatchState` (see `crate::tracker`'s
+    /// module doc). Keyed by its own UUID space, independent of battle ids.
+    pub tracker_sessions: Arc<Mutex<HashMap<String, crate::tracker::TrackerSession>>>,
     /// On-disk sprite cache directory (gitignored) — see `get_sprite`.
     pub sprite_cache_dir: PathBuf,
     /// Shared client for the one-time upstream fetch on a cache miss.

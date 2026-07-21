@@ -5,6 +5,7 @@ import BenchmarkingPage from './pages/BenchmarkingPage'
 import SimulatePage from './pages/SimulatePage'
 import TeamsPage from './pages/TeamsPage'
 import FormatsPage from './pages/FormatsPage'
+import TrackerPage from './pages/TrackerPage'
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="/" element={<TeamsPage />} />
           <Route path="/formats" element={<FormatsPage />} />
           <Route path="/simulate" element={<SimulatePage />} />
+          <Route path="/tracker" element={<TrackerPage />} />
           <Route path="/benchmark" element={<BenchmarkingPage />} />
         </Routes>
       </main>

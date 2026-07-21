@@ -3,9 +3,14 @@ import type {
   BenchmarkResponse,
   CreateBattleRequest,
   CreateBattleResponse,
+  CreateTrackerRequest,
+  CreateTrackerResponse,
   GetBattleResponse,
+  GetTrackerResponse,
   LegalCommands,
   PlayerId,
+  TrackerEventsRequest,
+  TrackerEventsResponse,
   TurnRequest,
   TurnResponse,
 } from './types'
@@ -15,6 +20,16 @@ export class ApiError extends Error {
   constructor(status: number, message: string) {
     super(message)
     this.status = status
+  }
+}
+
+/** Thrown by `postTrackerEvents` on a parse failure — `line` (1-based) lets the
+ * caller point the editor at the offending line instead of just showing text. */
+export class TrackerParseApiError extends ApiError {
+  line: number
+  constructor(line: number, message: string) {
+    super(422, message)
+    this.line = line
   }
 }
 
@@ -58,6 +73,47 @@ export function submitTurn(battleId: string, req: TurnRequest): Promise<TurnResp
 
 export function deleteBattle(battleId: string): Promise<void> {
   return request(`/api/battles/${battleId}`, { method: 'DELETE' })
+}
+
+// ── Tracker mode ────────────────────────────────────────────────────────────
+
+export function createTracker(req: CreateTrackerRequest): Promise<CreateTrackerResponse> {
+  return request('/api/tracker', { method: 'POST', body: JSON.stringify(req) })
+}
+
+export function getTracker(trackerId: string): Promise<GetTrackerResponse> {
+  return request(`/api/tracker/${trackerId}`)
+}
+
+export function deleteTracker(trackerId: string): Promise<void> {
+  return request(`/api/tracker/${trackerId}`, { method: 'DELETE' })
+}
+
+/** Distinct from the generic `request` helper because a parse failure's body
+ * shape is `{ line, message }` (see `TrackerParseApiError`), not the ordinary
+ * `{ message }` `ApiError` body every other endpoint returns. */
+export async function postTrackerEvents(
+  trackerId: string,
+  req: TrackerEventsRequest,
+): Promise<TrackerEventsResponse> {
+  const response = await fetch(`/api/tracker/${trackerId}/events`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!response.ok) {
+    let body: { line?: number; message?: string } = {}
+    try {
+      body = await response.json()
+    } catch {
+      // non-JSON error body; fall through to the generic message below
+    }
+    if (typeof body.line === 'number') {
+      throw new TrackerParseApiError(body.line, body.message ?? response.statusText)
+    }
+    throw new ApiError(response.status, body.message ?? response.statusText)
+  }
+  return response.json() as Promise<TrackerEventsResponse>
 }
 
 /** Consumes the `GET /api/benchmark` Server-Sent Events stream — a full,

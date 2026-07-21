@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactPlayer from 'react-player/youtube'
 import { useBattle } from '../../store/battleStore'
+import { useTracker } from '../../store/trackerStore'
 import { applyAudible, installUnlockListener, usePlayer, type TrackId, type YTPlayer } from '../../store/playerStore'
 
 // Both playlists are constantly shuffled + looped (via `onReady` below, using the
@@ -164,10 +165,16 @@ export default function MusicPlayer() {
       s.view != null &&
       (s.view.phase === 'normal' || s.view.phase === 'selfSwitch' || s.view.phase === 'replacement'),
   )
+  // A tracker session counts as "fighting" too — it's a live battle, just
+  // typed instead of simulated. Its `BattleView.phase` is always `'normal'`
+  // (`mapping::battle_view_from_belief` sets it unconditionally — tracker
+  // mode has no team-preview/self-switch/replacement/game-over phases of its
+  // own), so no phase branching is needed on this side.
+  const trackerFighting = useTracker((s) => s.trackerId != null && s.view != null)
   useEffect(() => {
-    crossfadeTo(fighting ? 'battle' : 'ambient')
+    crossfadeTo(fighting || trackerFighting ? 'battle' : 'ambient')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fighting])
+  }, [fighting, trackerFighting])
 
   const shownTime = scrubValue ?? playedSeconds
 

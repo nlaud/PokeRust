@@ -1,25 +1,26 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { PokemonView } from '../../api/types'
-import { useBattle } from '../../store/battleStore'
-import MonRow from './MonRow'
+import MonRow from '../simulate/MonRow'
+import { useTracker } from '../../store/trackerStore'
+
+// Recreates `pages/simulate/TeamInfoSidebar.tsx`'s tab shell and roster
+// derivation for tracker mode, reusing the same `MonRow` (item/ability/
+// nature/EVs/stat-ranges/boosts/volatiles — exactly what the fog-of-war
+// engine narrows) so a tracked opponent's belief visibly tightens the same
+// way an in-progress simulated battle's does. Two differences from battle
+// mode's sidebar:
+//   - No `currentPlayer`-driven tab auto-switching (tracker has no hotseat
+//     handoff between two players) — the default tab is just a constant.
+//   - The two roster tabs are labeled "Your Team"/"Opponent", not
+//     "Player 1"/"Player 2" — tracker mode is always one fixed perspective.
 
 type Tab = 'p1' | 'p2' | 'predicates'
 
-export default function TeamInfoSidebar() {
-  const view = useBattle((s) => s.view)
-  const currentPlayer = useBattle((s) => s.currentPlayer)
-  // Default (and re-default) to whichever tab is NOT the player we're currently
-  // watching from — i.e. the opposing team — so the hotseat handoff always opens
-  // on the newly-active player's view of their opponent, not a stale manual pick.
-  const opponentTab: Tab = currentPlayer === 'p1' ? 'p2' : 'p1'
-  const [tab, setTab] = useState<Tab>(opponentTab)
-  // Only re-trigger when the watched perspective actually changes — a manual
-  // tab click within the same perspective must not be clobbered.
-  useEffect(() => {
-    setTab(opponentTab)
-  }, [opponentTab])
+export default function TrackerTeamSidebar() {
+  const view = useTracker((s) => s.view)
+  const [tab, setTab] = useState<Tab>('p2')
   // Expansion is keyed by player + monId at the sidebar level, so a mon stays
-  // expanded when flipping between "Player 1" and "Player 2" and back.
+  // expanded when flipping between "Your Team" and "Opponent" and back.
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const toggle = (key: string) => {
@@ -32,51 +33,34 @@ export default function TeamInfoSidebar() {
   }
 
   const hasBelief = view?.belief !== undefined
-  // The Predicates tab only exists under a non-Perfect-Information mode; fall back
-  // to "Your Team" if it was selected in a previous battle that's since ended.
+  // The Predicates tab only exists under a non-Perfect-Information mode; fall
+  // back to "Your Team" if it was selected in a previous session that's
+  // since ended (tracker mode never runs Perfect Information — see
+  // `CreateTrackerRequest.informationMode` — but a stale tab pick from a
+  // prior session is still worth guarding the same way battle mode does).
   const activeTab: Tab = tab === 'predicates' && !hasBelief ? 'p1' : tab
 
   const side = activeTab === 'p1' ? view?.p1 : activeTab === 'p2' ? view?.p2 : undefined
-  // During team preview there are no sides yet, but the preview payload already
-  // carries PokemonViews for both teams — the server masks p2Mons the same way it
-  // masks a battle-phase SideView (see `preview_view` in mapping.rs), so this is
-  // safe to show as-is even for the opponent tab.
-  const previewMons =
-    !side && view?.preview && activeTab !== 'predicates'
-      ? (activeTab === 'p1' ? view.preview.p1Mons : view.preview.p2Mons)
-      : []
   const active = side?.active ?? []
-  const back = side?.back ?? previewMons
+  const back = side?.back ?? []
   const possibleBack = side?.possibleBack ?? []
-  // Opponent mons that fainted and were then replaced: the fog belief tracks these
-  // in their own bucket (rather than dropping them — see `SideView.fainted`'s doc
-  // comment) so their revealed info survives the switch that benched them.
+  // Opponent mons that fainted and were then replaced: the fog belief tracks
+  // these in their own bucket (rather than dropping them) so their revealed
+  // info survives the switch that benched them.
   const faintedBack = side?.fainted ?? []
-  // Real hidden-slot count (not the possibleBack candidate-species count): how many
-  // of this side's brought mons we simply haven't seen yet. Decreases as mons are
-  // revealed and hits 0 once every brought mon has been seen (even if some brought
-  // species are still ambiguous within `possibleBack`). `faintedBack` mons are
-  // already-seen brought mons too, so they count toward "seen" the same as
-  // `active`/`back`.
+  // Real hidden-slot count (not the possibleBack candidate-species count):
+  // how many of this side's brought mons we simply haven't seen yet.
   const hiddenBack = Math.max(
     0,
     (view?.broughtPerSide ?? 0) - (active.length + back.length + faintedBack.length),
   )
-  // Fainted mons get pulled out of the active/back/faintedBack lists into their own
-  // section below "Possibly in the back" — grouping them together (rather than
-  // leaving them dimmed in place) surfaces their revealed info in one predictable
-  // spot. The three source lists are disjoint (a mon lives in exactly one bucket at
-  // a time), so this can't double-count.
   const fainted = [...active, ...back, ...faintedBack].filter((mon) => mon.fainted)
   const liveActive = active.filter((mon) => !mon.fainted)
   const liveBack = back.filter((mon) => !mon.fainted)
 
-  // Keyed by section + list index, not just `mon.monId`: bench mons whose identity
-  // hasn't narrowed yet can share a fallback id (or, historically, all shared the
-  // same placeholder id — see mapping.rs's `bench_pokemon_view_from_belief`), and a
-  // duplicate React key merges those rows' expansion state and corrupts
-  // reconciliation across tab switches. The section+index pair is always unique
-  // within one render regardless of what the belief currently knows about monId.
+  // Keyed by section + list index, not just `mon.monId` — see
+  // `TeamInfoSidebar.tsx`'s identical comment for why (bench mons whose
+  // identity hasn't narrowed yet can share a fallback id).
   const row = (mon: PokemonView, isActive: boolean, section: string, idx: number) => {
     const key = `${activeTab}-${section}-${idx}-${mon.monId}`
     return (
@@ -99,7 +83,7 @@ export default function TeamInfoSidebar() {
             activeTab === 'p1' ? 'border-b-2 border-primary text-primary' : 'text-ink-muted hover:text-ink'
           }`}
         >
-          Player 1
+          Your Team
         </button>
         <button
           onClick={() => setTab('p2')}
@@ -107,7 +91,7 @@ export default function TeamInfoSidebar() {
             activeTab === 'p2' ? 'border-b-2 border-primary text-primary' : 'text-ink-muted hover:text-ink'
           }`}
         >
-          Player 2
+          Opponent
         </button>
         {hasBelief && (
           <button
@@ -138,9 +122,7 @@ export default function TeamInfoSidebar() {
           )
         ) : (
           <>
-            {!side && previewMons.length === 0 && (
-              <p className="p-2 text-xs text-ink-muted">No team data yet.</p>
-            )}
+            {!side && <p className="p-2 text-xs text-ink-muted">No team data yet.</p>}
             {liveActive.map((mon, i) => row(mon, true, 'active', i))}
             {liveBack.map((mon, i) => row(mon, false, 'back', i))}
             {hiddenBack > 0 && (

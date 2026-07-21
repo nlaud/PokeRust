@@ -811,6 +811,29 @@ fn resolve_mega_species(
     fallback
 }
 
+/// Enumerate every possible Mega Evolution form of `base_species_key`,
+/// regardless of held item — the same back-pointer match `resolve_mega_species`
+/// uses (a mega's own dex entry has `base_species`/`battle_only` pointing back
+/// to its base), minus that function's `required_item` filter. `pub` (not
+/// `pub(crate)`) because tracker mode calls this from the `server` binary
+/// crate, not just within this lib crate. Used to auto-fill an unambiguous
+/// `mega` line (exactly one form) or disambiguate a short suffix (`mega y`
+/// for Charizard-Mega-Y) without needing to know which mega stone is held.
+pub fn mega_forms_of(
+    base_species_key: &Species,
+    pokemon_dex: &HashMap<Species, PokemonData>,
+) -> Vec<Species> {
+    pokemon_dex
+        .iter()
+        .filter(|(candidate_key, data)| {
+            let matches_base_species = data.base_species.as_ref() == Some(base_species_key)
+                || data.battle_only.as_ref() == Some(base_species_key);
+            matches_base_species && is_mega_dex_entry(candidate_key, data)
+        })
+        .map(|(candidate_key, _)| candidate_key.clone())
+        .collect()
+}
+
 // --- Team Sheet Parsing ---
 
 /// Parse a "stat_value stat_name" token (e.g. "252 SpA") into (index, value).

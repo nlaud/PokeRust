@@ -6,6 +6,9 @@ mod dto;
 mod mapping;
 mod routes;
 mod session;
+mod tracker;
+mod tracker_effects;
+mod tracker_parse;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -80,6 +83,7 @@ async fn main() {
     let state = AppState {
         dexes,
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        tracker_sessions: Arc::new(Mutex::new(HashMap::new())),
         sprite_cache_dir,
         http: reqwest::Client::new(),
     };
@@ -92,6 +96,12 @@ async fn main() {
         )
         .route("/api/battles/{id}/commands", get(routes::get_commands))
         .route("/api/battles/{id}/turn", post(routes::submit_turn))
+        .route("/api/tracker", post(tracker::create_tracker))
+        .route(
+            "/api/tracker/{id}",
+            get(tracker::get_tracker).delete(tracker::delete_tracker),
+        )
+        .route("/api/tracker/{id}/events", post(tracker::submit_tracker_events))
         .route("/api/benchmark", get(routes::run_benchmark))
         .route("/api/sprites", get(routes::get_sprite))
         .layer(CorsLayer::permissive())

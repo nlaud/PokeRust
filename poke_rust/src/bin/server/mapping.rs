@@ -420,6 +420,184 @@ fn named_turns(name: String, turns: Option<u8>) -> NamedTurnsDto {
     NamedTurnsDto { name, turns }
 }
 
+// ── Tracker mode: rendering a `BattleView` from the belief alone ─────────────
+//
+// Tracker mode has no concrete `MatchState`/`BattleState` to pair against — the
+// belief IS the state (see `bin/server/tracker.rs`'s module doc). These mirror
+// `battle_view`/`side_view`/`field_view` above but read every field, including
+// the tracker viewer's own (always fully `Known`) side, through the same
+// fog-describing helpers ground truth never needed before.
+
+/// Build a `PokemonView` for an ACTIVE Pokemon straight from the belief alone.
+/// Differs from `bench_pokemon_view_from_belief` only in boosts/volatiles: an
+/// active mon's stage boosts and volatile statuses are live battle state, not
+/// the always-reset-on-switch-out `[0;7]`/empty a benched mon gets.
+pub fn pokemon_view_from_belief(
+    unk: &UnknownPokemonState,
+    fallback_id: u8,
+    legal_items: Option<&HashSet<Item>>,
+) -> PokemonView {
+    let mut view = bench_pokemon_view_from_belief(unk, fallback_id, legal_items);
+    view.boosts = unk.boosts;
+    view.volatiles = unk.volatiles.iter().map(volatile_dto).collect();
+    view
+}
+
+/// Tracker-mode counterpart to `battle_view`. The tracker viewer is always
+/// physical `Player::P1` — there is only ever one real perspective in tracker
+/// mode, so unlike `battle_view` there is no `perspective` parameter: P1's side
+/// renders as exact values because its `UnknownPokemonState` entries are
+/// themselves fully `Known` by construction (seeded from the viewer's real
+/// team), and P2's side always renders through the masking-describe helpers.
+pub fn battle_view_from_belief(
+    belief: &UnknownBattleState,
+    active_per_side: u8,
+    brought_per_side: u8,
+    legal_items: Option<&HashSet<Item>>,
+) -> BattleView {
+    BattleView {
+        phase: PhaseDto::Normal,
+        turn_number: belief.turn_number,
+        active_per_side,
+        brought_per_side,
+        preview: None,
+        p1: Some(side_view_from_belief(belief, Player::P1, legal_items)),
+        p2: Some(side_view_from_belief(belief, Player::P2, legal_items)),
+        field: Some(field_view_from_belief(belief)),
+        self_switch: None,
+        winner: None,
+        belief: Some(BeliefView {
+            clauses: belief
+                .predicates
+                .iter()
+                .map(|clause| describe_clause(clause, belief))
+                .collect(),
+        }),
+    }
+}
+
+fn side_view_from_belief(
+    belief: &UnknownBattleState,
+    player: Player,
+    legal_items: Option<&HashSet<Item>>,
+) -> SideView {
+    #[allow(clippy::type_complexity)]
+    let (active, known_back, possible_back, fainted, can_tera, can_mega, conditions, condition_turns, slot_conditions): (
+        &Vec<UnknownPokemonState>,
+        &Vec<UnknownPokemonState>,
+        &Vec<UnknownPokemonState>,
+        &Vec<UnknownPokemonState>,
+        bool,
+        bool,
+        &Vec<SideCondition>,
+        &Vec<Unknown<u8>>,
+        &Vec<Vec<SlotCondition>>,
+    ) = match player {
+        Player::P1 => (
+            &belief.p1_active_mons,
+            &belief.p1_known_back_mons,
+            &belief.p1_possible_back_mons,
+            &belief.p1_fainted_mons,
+            belief.p1_has_tera,
+            belief.p1_has_mega,
+            &belief.p1_side_conditions,
+            &belief.p1_side_condition_turns,
+            &belief.p1_slot_conditions,
+        ),
+        Player::P2 => (
+            &belief.p2_active_mons,
+            &belief.p2_known_back_mons,
+            &belief.p2_possible_back_mons,
+            &belief.p2_fainted_mons,
+            belief.p2_has_tera,
+            belief.p2_has_mega,
+            &belief.p2_side_conditions,
+            &belief.p2_side_condition_turns,
+            &belief.p2_slot_conditions,
+        ),
+    };
+
+    SideView {
+        active: active
+            .iter()
+            .enumerate()
+            // Base 50+: clear of real party-order ids (0..=5) and of the
+            // 100+/150+/200+ bases the bench/possible/fainted buckets below use
+            // (see `bench_pokemon_view_from_belief`'s doc comment).
+            .map(|(i, unk)| pokemon_view_from_belief(unk, 50 + i as u8, legal_items))
+            .collect(),
+        back: known_back
+            .iter()
+            .enumerate()
+            .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 100 + i as u8, legal_items))
+            .collect(),
+        possible_back: possible_back
+            .iter()
+            .enumerate()
+            .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 150 + i as u8, legal_items))
+            .collect(),
+        fainted: fainted
+            .iter()
+            .enumerate()
+            .map(|(i, unk)| bench_pokemon_view_from_belief(unk, 200 + i as u8, legal_items))
+            .collect(),
+        can_tera,
+        can_mega,
+        side_conditions: conditions
+            .iter()
+            .zip(condition_turns.iter())
+            .map(|(c, t)| {
+                named_turns(
+                    side_condition_name(c),
+                    match t {
+                        Unknown::Known(n) => Some(*n),
+                        _ => None,
+                    },
+                )
+            })
+            .collect(),
+        slot_conditions: slot_conditions
+            .iter()
+            .map(|conds| conds.iter().map(slot_condition_name).collect())
+            .collect(),
+    }
+}
+
+fn field_view_from_belief(belief: &UnknownBattleState) -> FieldView {
+    let turns_of = |t: &Option<Unknown<u8>>| match t {
+        Some(Unknown::Known(n)) => Some(*n),
+        _ => None,
+    };
+    FieldView {
+        weather: belief.weather.as_ref().map(|w| {
+            named_turns(
+                humanize_identifier(format!("{:?}", w)),
+                turns_of(&belief.weather_turns),
+            )
+        }),
+        terrain: belief.terrain.as_ref().map(|t| {
+            named_turns(
+                humanize_identifier(format!("{:?}", t)),
+                turns_of(&belief.terrain_turns),
+            )
+        }),
+        pseudo_weathers: belief
+            .pseudo_weathers
+            .iter()
+            .zip(belief.pseudo_weather_turns.iter())
+            .map(|(pw, t)| {
+                named_turns(
+                    humanize_identifier(format!("{:?}", pw)),
+                    match t {
+                        Unknown::Known(n) => Some(*n),
+                        _ => None,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
 /// The belief's battle-phase fog state for `player`, when one is being tracked and
 /// has already transitioned past team preview. `None` under Perfect Information, or
 /// (defensively) if the belief hasn't reached the `Battle` variant yet — masking is

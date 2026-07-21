@@ -3,8 +3,9 @@
 Minimalist web UI for the PokeRust battle simulator: a **Teams** page
 (Showdown-format teamsheets in localStorage, the default route), a **Formats**
 page (ruleset cards with a curated Pokémon Champions item pool for ban lists),
-a **Simulate** page (hotseat battles against the Rust engine), and a
-**Benchmark** page (right-aligned in the navbar; runs the full turn-resolution
+a **Simulate** page (hotseat battles against the Rust engine), a **Tracker**
+page (follow a real battle by typing what happened instead of driving a
+simulated opponent — see "Tracker mode" below), and a **Benchmark** page (right-aligned in the navbar; runs the full turn-resolution
 and fog-of-war-inference speed sweep, streamed live over Server-Sent Events
 from `GET /api/benchmark` — see `poke_rust::benchmarking`. This is the same
 unbounded sweep the offline `cargo bench` binaries run, recorded in
@@ -49,10 +50,42 @@ src/
   pages/simulate/     SetupPanel, BattleScreen, Arena, ControlPanel,
                       PokemonHUD, FieldIndicators, BattleLogSidebar,
                       TeamInfoSidebar
+  pages/tracker/      TrackerSetupPanel, TrackerScreen, TrackerLogSidebar —
+                      reuses PokemonHUD/FieldIndicators/eventText.ts unchanged
   pages/benchmark/    BenchmarkChart, ProgressBar — hand-rolled inline-SVG bar
                       chart + determinate progress bar (no charting
                       dependency); used by pages/BenchmarkingPage.tsx
+  store/trackerStore.ts  single-perspective session store for tracker mode —
+                      no hotseat flip, no command wizard; `submitText` posts
+                      raw tracker-syntax text to the server each turn
 ```
+
+## Tracker mode
+
+Follows a real battle you're playing or watching elsewhere: instead of a move
+selector, you type what happened (`o1 switch garchomp`, `p1 thunderbolt o1
+45%`, `endofturn`, …) into a plain textarea and the server translates it into
+the same `InformationEvent`/fog-of-war machinery the Simulate page's inference
+engine already runs on. There is no simulated opponent and no per-slot command
+flow — `POST /api/tracker/{id}/events` is the only turn-advancing call, and it
+expects one or more complete turns (each ending in an `endofturn` line) in a
+single request.
+
+Because there's no opponent to simulate, `BattleView.p1`/`p2` for a tracker
+session are rendered straight from the fog-of-war belief on the Rust side (see
+`poke_rust/src/bin/server/tracker.rs`'s module doc) — the client-side handling
+is unchanged from battle mode: `TrackerScreen` reuses `PokemonHUD` and
+`FieldIndicators` as-is, and `TrackerLogSidebar` reuses `lib/eventText.ts`'s
+`renderLog` unchanged, since both are pure functions of `BattleView`/
+`TurnLogEntry[]` with no assumption baked in about where that data came from.
+
+This is a Phase-1 MVP: a plain multiline textarea, not the rich inline editor
+(ghost-text completions, autocomplete, arrow-key event navigation) described
+in the tracker-mode design doc — that's a planned follow-up on top of this
+same pipeline. `tracker_parse.rs`'s module doc lists the current grammar's
+scope and known simplifications (e.g. every targeted move needs an explicit
+target slot; guaranteed effects cover a starter set of abilities/moves, not
+the full dex yet).
 
 ## Notes
 

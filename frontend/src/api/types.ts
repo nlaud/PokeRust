@@ -338,3 +338,60 @@ export interface BenchmarkProgress {
   completed: number
   total: number
 }
+
+// ── Tracker mode ────────────────────────────────────────────────────────────
+// A second, simpler session kind for following a real battle by typing what
+// happened instead of driving a simulated opponent — mirrors the tracker DTOs
+// in `poke_rust/src/bin/server/dto.rs`. There's no `PlayerCommand`/turn-
+// resolution flow here: the server translates submitted text into the same
+// event vocabulary `BattleView`/`EventNode` above already use, so a tracker
+// session renders through the exact same `BattleView` type and log/field
+// components as battle mode.
+
+export interface CreateTrackerRequest {
+  /** The tracker viewer's own full roster, as a Showdown teamsheet. */
+  myTeam: string
+  /** The opponent's roster: a Showdown teamsheet, OR 6 comma-separated species
+   * names (the server splits a single comma-separated line into per-mon
+   * blocks). Only species matters — the server discards any item/ability/
+   * moves this happens to specify. */
+  opponent: string
+  activePerSide: number
+  broughtPerSide: number
+  statPoints?: boolean
+  forceMaxIvs?: boolean
+  /** `'closedSheet'` (default) | `'openSheet'` | `'openSheetNatures'` — no
+   * `'perfect'` option here, it has no meaning without a simulated opponent. */
+  informationMode?: 'closedSheet' | 'openSheet' | 'openSheetNatures'
+  legalItems?: string[]
+}
+
+export interface CreateTrackerResponse {
+  trackerId: string
+  state: BattleView
+}
+
+export interface GetTrackerResponse {
+  state: BattleView
+  log: TurnLogEntry[]
+}
+
+export interface TrackerEventsRequest {
+  /** One or more complete turns of tracker-syntax text, each terminated by an
+   * `endofturn` line. */
+  text: string
+}
+
+/** Returned (422) when the text fails to parse — points at the offending line
+ * rather than a generic message. */
+export interface TrackerParseError {
+  line: number
+  message: string
+}
+
+export interface TrackerEventsResponse {
+  state: BattleView
+  /** The newly-committed turn(s) this submission produced — append to the
+   * client's existing log rather than replacing it. */
+  logDelta: TurnLogEntry[]
+}

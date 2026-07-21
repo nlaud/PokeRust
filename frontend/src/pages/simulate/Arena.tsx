@@ -98,7 +98,7 @@ export default function Arena() {
       <div className="absolute right-6 top-6 flex w-[45%] max-w-[38rem] justify-end gap-4">
         {renderSide(opponent)}
       </div>
-      <div className="absolute bottom-24 left-6 flex w-[48%] max-w-[42rem] gap-4">
+      <div className="absolute bottom-40 left-6 flex w-[48%] max-w-[42rem] gap-4">
         {renderSide(viewer)}
       </div>
     </div>

@@ -611,6 +611,80 @@ pub struct ApiError {
     pub message: String,
 }
 
+// ── Tracker mode ─────────────────────────────────────────────────────────────
+// A second, simpler kind of session for following a real battle: no opponent is
+// simulated, so there is no `PlayerCommand`/turn-resolution flow here — the
+// user submits free text describing what happened and the server translates it
+// into the same `InformationEvent` vocabulary the inference engine already
+// consumes. See `bin/server/tracker.rs` and `bin/server/tracker_parse.rs`.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTrackerRequest {
+    /// The tracker viewer's own full roster, as a Showdown teamsheet — every
+    /// detail (item/ability/nature/EVs/moves) is genuinely known, exactly like
+    /// battle mode's `p1Team`.
+    pub my_team: String,
+    /// The opponent's roster: either a Showdown teamsheet, or 6 comma-separated
+    /// species names (the server normalizes commas into the blank-line-
+    /// separated blocks `parse_team_sheet_str` expects — see
+    /// `tracker::normalize_opponent_text`). Only species matters here; any
+    /// item/ability/moves the input happens to specify are discarded — closed/
+    /// open-sheet fog treats the opponent identically to battle mode.
+    pub opponent: String,
+    pub active_per_side: u8,
+    pub brought_per_side: u8,
+    #[serde(default = "default_true")]
+    pub stat_points: bool,
+    #[serde(default = "default_true")]
+    pub force_max_ivs: bool,
+    /// `"closedSheet"` (default) | `"openSheet"` | `"openSheetNatures"`.
+    /// `"perfect"` is rejected — Perfect Information has no meaning in tracker
+    /// mode (there's no second simulated team to have perfect knowledge of).
+    #[serde(default = "default_info_mode")]
+    pub information_mode: String,
+    #[serde(default)]
+    pub legal_items: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTrackerResponse {
+    pub tracker_id: String,
+    pub state: BattleView,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetTrackerResponse {
+    pub state: BattleView,
+    pub log: Vec<TurnLogEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerEventsRequest {
+    /// One or more complete turns of tracker-syntax text, each terminated by an
+    /// `endofturn` line — see `tracker_parse`'s module doc for the grammar.
+    pub text: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerParseErrorDto {
+    pub line: usize,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerEventsResponse {
+    pub state: BattleView,
+    /// The newly-committed turn(s) this submission produced, in order — append
+    /// these to the client's existing log rather than replacing it.
+    pub log_delta: Vec<TurnLogEntry>,
+}
+
 // ── Benchmarking ─────────────────────────────────────────────────────────────
 // See `poke_rust::benchmarking` for the timing logic these DTOs wrap. The
 // sweep is always the full unbounded teamsheet-pairing grid (matching the
