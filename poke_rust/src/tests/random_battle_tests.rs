@@ -456,6 +456,13 @@ fn random_doubles_beliefs_stay_sound_subset() {
 fn survey_subset_violations() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
+    // This diagnostic deliberately catches inference panics so it can survey the
+    // entire seed range. Silence the default hook: the structured report below is
+    // more useful than thousands of unlabelled panic messages, and includes the
+    // deterministic seed/turn needed for replay.
+    let previous_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
     let pdex = pokemon_dex();
     let mdex = move_dex();
     let adex = ability_dex();
@@ -473,6 +480,7 @@ fn survey_subset_violations() {
     let seed_start = fuzz_env_u64("POKERUST_FUZZ_SEED_START", 0);
     let max_failures = fuzz_env_u64("POKERUST_FUZZ_MAX_FAILURES", u64::MAX);
     let replay_details = fuzz_env_bool("POKERUST_FUZZ_REPLAY", false);
+    let sample_limit = fuzz_env_u64("POKERUST_FUZZ_SAMPLE_LIMIT", 50) as usize;
     let mut contradictions: Vec<String> = Vec::new();
     let mut subset_failures: Vec<(String, SubsetViolation)> = Vec::new();
     let mut failed_iters: u64 = 0;
@@ -531,6 +539,7 @@ fn survey_subset_violations() {
             if turn > MAX_TURNS {
                 break;
             }
+            let context = format!("iter={iter} turn={turn} matchup=({p1_path} vs {p2_path})");
 
             if replay_details && let MatchState::BattleState(bs) = &state {
                 let active_speed_state: Vec<_> = bs
@@ -600,6 +609,63 @@ fn survey_subset_violations() {
                 belief_p2
             };
 
+            if replay_details {
+                for (observer, seeded) in [(Player::P1, &seeded_p1), (Player::P2, &seeded_p2)] {
+                    if let UnknownMatchState::Battle(battle) = seeded {
+                        eprintln!(
+                            "[BELIEF-BEFORE] iter={iter} turn={turn} observer={observer:?} \
+                             unresolved=({}, {}) active_species=({:?}, {:?}) back=({:?}, {:?})",
+                            battle.p1_unresolved_zoroark_count,
+                            battle.p2_unresolved_zoroark_count,
+                            battle
+                                .p1_active_mons
+                                .iter()
+                                .map(|mon| {
+                                    (
+                                        &mon.possible_species,
+                                        mon.possible_illusion_state.is_some(),
+                                        mon.min_stats[5],
+                                        mon.max_stats[5],
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                            battle
+                                .p2_active_mons
+                                .iter()
+                                .map(|mon| {
+                                    (
+                                        &mon.possible_species,
+                                        mon.possible_illusion_state.is_some(),
+                                        mon.min_stats[5],
+                                        mon.max_stats[5],
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                            battle
+                                .p1_known_back_mons
+                                .iter()
+                                .chain(battle.p1_possible_back_mons.iter())
+                                .map(|mon| (
+                                    &mon.possible_species,
+                                    mon.possible_illusion_state.is_some(),
+                                    &mon.item,
+                                ))
+                                .collect::<Vec<_>>(),
+                            battle
+                                .p2_known_back_mons
+                                .iter()
+                                .chain(battle.p2_possible_back_mons.iter())
+                                .map(|mon| (
+                                    &mon.possible_species,
+                                    mon.possible_illusion_state.is_some(),
+                                    &mon.item,
+                                ))
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                }
+            }
+
             // Diverge (break) directly in each Err arm so belief_p1/p2 are assigned
             // on every non-diverging path — see the module-level doc comment above.
             belief_p1 = match catch_unwind(AssertUnwindSafe(|| {
@@ -608,7 +674,7 @@ fn survey_subset_violations() {
                 Ok(b) => b,
                 Err(e) => {
                     contradictions.push(format!(
-                        "[contradiction-p1] {}",
+                        "[contradiction-p1] {context} {}",
                         e.downcast_ref::<String>().cloned().unwrap_or_default()
                     ));
                     iter_failed = true;
@@ -621,7 +687,7 @@ fn survey_subset_violations() {
                 Ok(b) => b,
                 Err(e) => {
                     contradictions.push(format!(
-                        "[contradiction-p2] {}",
+                        "[contradiction-p2] {context} {}",
                         e.downcast_ref::<String>().cloned().unwrap_or_default()
                     ));
                     iter_failed = true;
@@ -634,8 +700,6 @@ fn survey_subset_violations() {
             match &state {
                 MatchState::GameOverState { .. } => break,
                 MatchState::BattleState(bs) => {
-                    let context =
-                        format!("iter={iter} turn={turn} matchup=({p1_path} vs {p2_path})");
                     let mut violated = false;
                     for (belief, observer) in [(&belief_p1, Player::P1), (&belief_p2, Player::P2)] {
                         let found =
@@ -672,6 +736,9 @@ fn survey_subset_violations() {
             if failed_iters >= max_failures {
                 break;
             }
+        }
+        if attempted_iters % 1000 == 0 {
+            eprintln!("[survey progress] attempted={attempted_iters} failed={failed_iters}");
         }
     }
 
@@ -730,14 +797,16 @@ fn survey_subset_violations() {
     for (k, v) in &species_bucket {
         eprintln!("  {k}: {v}");
     }
-    eprintln!("-- sample messages (first 20) --");
-    for (context, violation) in subset_failures.iter().take(20) {
+    eprintln!("-- subset samples (first {sample_limit}) --");
+    for (context, violation) in subset_failures.iter().take(sample_limit) {
         eprintln!("---\n[subset violation] context={context} {violation}");
     }
-    let remaining = 20usize.saturating_sub(subset_failures.len().min(20));
-    for failure in contradictions.iter().take(remaining) {
+    eprintln!("-- contradiction samples (first {sample_limit}) --");
+    for failure in contradictions.iter().take(sample_limit) {
         eprintln!("---\n{failure}");
     }
+
+    std::panic::set_hook(previous_panic_hook);
 }
 
 fn run_sweep(iterations: u64, check_subset: bool) {

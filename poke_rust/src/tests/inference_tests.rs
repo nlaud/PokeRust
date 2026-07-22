@@ -1994,6 +1994,11 @@ fn test_doubles_restores_conservative_build_envelope() {
     let mut p2_first = unknown_mon_species(Species::Garchomp);
     p2_first.min_evs = [8; 6];
     p2_first.max_evs = [200; 6];
+    // Deliberately impossible for level-50 Garchomp. Doubles must reach the
+    // conservative widening step without Pass 5 panicking on this transient
+    // damage-oracle window first.
+    p2_first.min_stats[5] = 72;
+    p2_first.max_stats[5] = 72;
 
     let mut state = battle_nvn(p1, vec![p2_first, unknown_mon_species(Species::Garchomp)]);
     state.predicates.push(vec![Statement::EVIVStatLE {
@@ -2020,26 +2025,223 @@ fn test_doubles_restores_conservative_build_envelope() {
     }));
 }
 
+/// Illusion changes only what the opponent sees, not the disguised Pokémon's
+/// real Speed. A move-order clause derived from the shown species can therefore
+/// be false even when the real ordering is natural (fuzz seed 454: a Zoroark
+/// displayed as Tyranitar outran Vivillon). Defer speed inference until the
+/// identity hypothesis resolves.
+#[test]
+fn test_doubles_skips_speed_comparison_for_unresolved_illusion() {
+    let splash = normal_physical_move(PokemonMove::Splash, 0);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Splash, splash);
+
+    let zoroark = unknown_mon_species(Species::ZoroarkHisui);
+    let mut disguised = unknown_mon_species(Species::Tyranitar);
+    seed_zoroark_hypothesis_on(&mut disguised, &zoroark);
+
+    let state = battle_nvn(
+        vec![
+            unknown_mon_species(Species::Vivillon),
+            unknown_mon_species(Species::Sylveon),
+        ],
+        vec![disguised, unknown_mon_species(Species::Garchomp)],
+    );
+    let result = apply_ex(
+        state,
+        vec![
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+            event(EventKind::MoveUsed {
+                user: p1(0),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        result
+            .predicates
+            .iter()
+            .all(|clause| clause.iter().all(|lit| {
+                !matches!(
+                    lit,
+                    Statement::SpeedComparison { fast_idx: 2, .. }
+                        | Statement::SpeedComparison { slow_idx: 2, .. }
+                )
+            }))
+    );
+}
+
 // ── Regression: S4 — Pass 4 must use speed-relevant state AS OF the comparison ──
 
+/// The remaining action order is recalculated immediately after a Speed change.
+/// Under Trick Room, Wyrdeer (85 Spe) can move before an initially faster
+/// Overqwil (105), paralyze it, and leave the now-slower Overqwil as the next
+/// mover. Those selections used different speed snapshots, so Pass 4 must not
+/// back-project paralysis and invent an item explanation (fuzz seed 350).
+#[test]
+fn test_pass4_skips_pair_when_speed_changes_between_moves() {
+    let thunderbolt = normal_physical_move(PokemonMove::Thunderbolt, 90);
+    let splash = normal_physical_move(PokemonMove::Splash, 0);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Thunderbolt, thunderbolt);
+    move_dex.insert(PokemonMove::Splash, splash);
+
+    let mut wyrdeer = unknown_mon_species(Species::Wyrdeer);
+    wyrdeer.min_stats[5] = 85;
+    wyrdeer.max_stats[5] = 85;
+    let mut overqwil = unknown_mon_species(Species::Overqwil);
+    overqwil.min_stats[5] = 105;
+    overqwil.max_stats[5] = 105;
+
+    let mut state = battle_nvn(
+        vec![wyrdeer, unknown_mon_species(Species::Sylveon)],
+        vec![unknown_mon_species(Species::ClefableMega), overqwil],
+    );
+    state.pseudo_weathers = vec![PseudoWeather::TrickRoom];
+    state.pseudo_weather_turns = vec![Unknown::Known(3)];
+
+    let result = apply_ex(
+        state,
+        vec![
+            event_with(
+                EventKind::MoveUsed {
+                    user: p1(0),
+                    move_used: PokemonMove::Thunderbolt,
+                    targets: vec![p2(1)],
+                },
+                vec![event(EventKind::StatusInflicted {
+                    target: p2(1),
+                    status: Status::Paralysis,
+                })],
+            ),
+            event(EventKind::MoveUsed {
+                user: p2(1),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        result
+            .predicates
+            .iter()
+            .all(|clause| clause.iter().all(|lit| {
+                !matches!(
+                    lit,
+                    Statement::SpeedComparison {
+                        fast_idx: 0,
+                        slow_idx: 3,
+                        ..
+                    } | Statement::SpeedComparison {
+                        fast_idx: 3,
+                        slow_idx: 0,
+                        ..
+                    } | Statement::HasItem {
+                        mon_idx: 0 | 3,
+                        item: Item::QuickClaw | Item::IronBall | Item::CustapBerry,
+                    }
+                )
+            }))
+    );
+}
+
+/// Speed updates for mons that have not moved yet must start from their
+/// turn-start stages, not zero. After a prior -1 Zoroark and +1 Tyranitar both
+/// take Icy Wind, their new stages are -2 and 0; the later Tyranitar→Zoroark
+/// comparison therefore needs 8:4 multipliers (fuzz seed 9073).
+#[test]
+fn test_pass4_mid_turn_boost_change_preserves_unmoved_mons_seed_stages() {
+    let icy_wind = normal_physical_move(PokemonMove::IcyWind, 55);
+    let splash = normal_physical_move(PokemonMove::Splash, 0);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::IcyWind, icy_wind);
+    move_dex.insert(PokemonMove::Splash, splash);
+
+    let p1a = no_speed_escape_mon(Species::Pikachu);
+    let p1b = no_speed_escape_mon(Species::Sylveon);
+    let mut zoroark = no_speed_escape_mon(Species::ZoroarkHisui);
+    zoroark.boosts[4] = -1;
+    zoroark.min_stats[5] = 1;
+    zoroark.max_stats[5] = 200;
+    // Keep the comparison disjunctive so BCP retains the emitted clause for a
+    // direct multiplier assertion.
+    zoroark.item = Unknown::Possibly(vec![Item::FocusSash, Item::IronBall]);
+    let mut tyranitar = no_speed_escape_mon(Species::TyranitarMega);
+    tyranitar.boosts[4] = 1;
+    tyranitar.min_stats[5] = 1;
+    tyranitar.max_stats[5] = 200;
+
+    let result = apply_ex(
+        battle_nvn(vec![p1a, p1b], vec![zoroark, tyranitar]),
+        vec![
+            event_with(
+                EventKind::MoveUsed {
+                    user: p1(0),
+                    move_used: PokemonMove::IcyWind,
+                    targets: vec![p2(0), p2(1)],
+                },
+                vec![
+                    event(EventKind::BoostChanged {
+                        target: p2(0),
+                        boost_idx: 4,
+                        stages: -1,
+                    }),
+                    event(EventKind::BoostChanged {
+                        target: p2(1),
+                        boost_idx: 4,
+                        stages: -1,
+                    }),
+                ],
+            ),
+            event(EventKind::MoveUsed {
+                user: p2(1),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+            event(EventKind::MoveUsed {
+                user: p2(0),
+                move_used: PokemonMove::Splash,
+                targets: vec![],
+            }),
+        ],
+        HashMap::new(),
+        move_dex,
+    );
+
+    assert!(
+        result
+            .predicates
+            .iter()
+            .any(|clause| clause.iter().any(|lit| {
+                matches!(
+                    lit,
+                    Statement::SpeedComparison {
+                        fast_idx: 3,
+                        slow_idx: 2,
+                        fast_mult: 8,
+                        slow_mult: 4,
+                    }
+                )
+            })),
+        "predicates={:#?}",
+        result.predicates
+    );
+}
+
 /// A doubles turn where P1's Thunder Wave paralyzes a P2 mon mid-turn, and that
-/// SAME mon then acts later in the SAME turn against its own ally: the paralysis
-/// ×½ factor must be baked into the resulting Spe-bound tightening for that later
-/// pairing.
-///
-/// Before the S4 fix, Pass 4 read `mon.status`/boosts live from `state` at its
-/// call time (either before the turn's events were walked, when the paralysis
-/// hadn't happened yet, or after the whole turn including EndOfTurn, which can
-/// also disagree) — never "as of the moment this specific pairing's order was
-/// actually observed". That produced a numeric fast_mult/slow_mult that didn't
-/// match what actually determined the order, which `propagate_speed_comparisons`
-/// then uses to derive hard Spe bounds — a soundness risk (not just imprecision).
-///
-/// P2b (fast) is pinned to an exact known speed (60) so the tightening effect on
-/// P2a's (slow) max Spe bound is directly observable: with the paralysis factor
-/// correctly applied, `slow.max_stats[5] <= floor(60*8/4) = 120`. Without it (the
-/// pre-fix bug, using the neutral 1:1 ratio), `slow.max_stats[5] <= floor(60*4/4)
-/// = 60` — an unsound over-tightening that excludes any true Spe in (60, 120].
+/// SAME mon then acts later in the SAME turn against its own ally. A comparison
+/// made wholly after the paralysis must retain the paralysis multiplier.
 #[test]
 fn test_pass4_speed_bound_reflects_mid_turn_paralysis() {
     let mut thunder_wave = normal_physical_move(PokemonMove::ThunderWave, 0);
@@ -7643,6 +7845,55 @@ fn test_mega_evolution_real_species_change_does_not_panic() {
     );
 }
 
+/// S61: nature arithmetic during a forme change must use the simulator's f32
+/// calculation. Mega Camerupt's 40 pre-nature Speed with a hindering nature is
+/// exactly 36 in-engine; widening 0.9f32 to f64 first incorrectly floors it to 35.
+#[test]
+fn test_mega_recompute_matches_simulator_nature_rounding() {
+    use crate::state::pokemon::{Nature, PokemonGender};
+
+    let mut camerupt = unknown_mon_species(Species::Camerupt);
+    camerupt.possible_mon_id = Unknown::Known(0);
+    camerupt.possible_natures = Unknown::Known(Nature::Quiet);
+    camerupt.min_evs = [0; 6];
+    camerupt.max_evs = [0; 6];
+    camerupt.min_ivs = [31; 6];
+    camerupt.max_ivs = [31; 6];
+    let mut state = battle_1v1(camerupt, unknown_mon_species(Species::Torkoal));
+    state.p1_has_mega = true;
+
+    let mut dex = HashMap::new();
+    dex.insert(
+        Species::CameruptMega,
+        PokemonData {
+            species: Species::CameruptMega,
+            types: vec![PokemonType::Fire, PokemonType::Ground],
+            base_stats: [70, 120, 100, 145, 105, 20],
+            weight: 3205,
+            primary_ability: Some(Ability::SheerForce),
+            abilities: vec![Ability::SheerForce],
+            base_species: Some(Species::Camerupt),
+            forme: None,
+            required_item: Some("Cameruptite".to_owned()),
+            battle_only: Some(Species::Camerupt),
+            default_gender: PokemonGender::Male,
+        },
+    );
+
+    let result = apply_ex(
+        state,
+        vec![event(EventKind::MegaEvolution {
+            slot: p1(0),
+            into: Species::CameruptMega,
+        })],
+        dex,
+        HashMap::new(),
+    );
+
+    assert_eq!(result.p1_active_mons[0].min_stats[5], 36);
+    assert_eq!(result.p1_active_mons[0].max_stats[5], 36);
+}
+
 /// If Skill Swap (or another live ability replacement) happened before Mega
 /// Evolution, the simulator keeps the pre-swap ability in `original_ability` and
 /// restores it on switch-out. Mega changes only the live ability in that case.
@@ -10460,6 +10711,43 @@ fn test_screen_timer_collapse_reveals_light_clay() {
         "a screen persisting past 5 turns must pin Light Clay on the setter; item = {:?}",
         result.p2_active_mons[0].item
     );
+}
+
+/// S62: an extension timer confirms the item held when the screen was set. If
+/// Knock Off removes Light Clay on the exact EOT where the base-duration branch
+/// dies, that confirmation must not overwrite the holder's current `None` item.
+#[test]
+fn test_screen_timer_collapse_respects_removed_item_epoch() {
+    let mut setter = unknown_mon_species(Species::Grimmsnarl);
+    setter.item = Unknown::Known(Item::LightClay);
+    let state = battle_with_p2(vec![setter]);
+    let mut move_dex = HashMap::new();
+    move_dex.insert(PokemonMove::Reflect, poke_status_move(PokemonMove::Reflect));
+    let mut events = vec![event_with(
+        EventKind::MoveUsed {
+            user: p2(0),
+            move_used: PokemonMove::Reflect,
+            targets: vec![],
+        },
+        vec![event(EventKind::SideConditionStart {
+            side: Player::P2,
+            condition: SideCondition::Reflect,
+        })],
+    )];
+    for _ in 0..4 {
+        events.push(event(EventKind::EndOfTurn));
+    }
+    events.push(event(EventKind::ItemLost {
+        slot: p2(0),
+        item: Item::LightClay,
+        consumed: false,
+    }));
+    events.push(event(EventKind::EndOfTurn));
+
+    let result = apply_ex(state, events, HashMap::new(), move_dex);
+    let setter = &result.p2_active_mons[0];
+    assert_eq!(setter.item, Unknown::Known(Item::None));
+    assert_eq!(setter.removed_item, Some(Item::LightClay));
 }
 
 #[test]
@@ -17942,5 +18230,295 @@ mod information_mode_tests {
             result.p2_active_mons[1].possible_illusion_state.is_some(),
             "the newly-arrived duplicate-species slot must carry a Zoroark hypothesis"
         );
+    }
+
+    /// S59: the outgoing real mon and the incoming disguised Zoroark can show the
+    /// same species in the same slot. The outgoing entry must remain benched while
+    /// the arrival receives the Zoroark hypothesis.
+    #[test]
+    fn test_pass1_same_slot_same_species_switch_seeds_illusion_hypothesis() {
+        let mut state = battle_nvn(
+            vec![unknown_mon_species(Species::Pikachu)],
+            vec![unknown_mon_species(Species::Basculegion)],
+        );
+        state.p2_possible_back_mons = vec![unknown_mon_species(Species::ZoroarkHisui)];
+        state.p2_unresolved_zoroark_count = 1;
+        // Self-switch replacement can occur before the first EndOfTurn; a lone
+        // Switch is still not the initial lead reveal.
+        state.turn_number = 0;
+
+        let result = apply(state, vec![switch_in(Species::Basculegion, p2(0))]);
+
+        let active = &result.p2_active_mons[0];
+        assert_eq!(
+            active.possible_species,
+            Unknown::Known(Species::Basculegion)
+        );
+        assert!(
+            active
+                .possible_illusion_state
+                .as_deref()
+                .is_some_and(|hypothesis| {
+                    hypothesis.possible_species == Unknown::Known(Species::ZoroarkHisui)
+                }),
+            "same-slot collision must attach the benched Zoroark-Hisui baseline"
+        );
+        assert!(
+            result.p2_known_back_mons.iter().any(|mon| {
+                mon.possible_species == Unknown::Known(Species::Basculegion)
+                    && mon.possible_illusion_state.is_none()
+            }),
+            "the real outgoing Basculegion must remain represented on the bench"
+        );
+    }
+
+    /// S63: once both same-species candidates have been materialized, another
+    /// same-species switch must exchange their physical records. Looking up the
+    /// incoming mon only after benching the outgoing one re-selected that freshly
+    /// pushed record, then fabricated a third copy on a later collision. The fuzz
+    /// symptom was item-clause exclusions landing on duplicate Milotic/Gholdengo/
+    /// Garchomp entries.
+    #[test]
+    fn test_pass1_repeated_same_slot_illusion_switch_swaps_existing_records() {
+        let zoroark = unknown_mon_species(Species::ZoroarkHisui);
+        let mut outgoing = unknown_mon_species(Species::Milotic);
+        outgoing.item = Unknown::Known(Item::Leftovers);
+        seed_zoroark_hypothesis_on(&mut outgoing, &zoroark);
+
+        let mut incoming = unknown_mon_species(Species::Milotic);
+        incoming.item = Unknown::Known(Item::SitrusBerry);
+        seed_zoroark_hypothesis_on(&mut incoming, &zoroark);
+
+        let mut state = battle_nvn(vec![unknown_mon_species(Species::Pikachu)], vec![outgoing]);
+        state.p2_known_back_mons = vec![incoming];
+        state.p2_unresolved_zoroark_count = 1;
+        state.turn_number = 4;
+
+        let result = apply(state, vec![switch_in(Species::Milotic, p2(0))]);
+
+        assert_eq!(
+            result.p2_active_mons[0].item,
+            Unknown::Known(Item::SitrusBerry),
+            "the pre-existing bench record must become active"
+        );
+        let milotic_back: Vec<_> = result
+            .p2_known_back_mons
+            .iter()
+            .filter(|mon| mon.possible_species == Unknown::Known(Species::Milotic))
+            .collect();
+        assert_eq!(
+            milotic_back.len(),
+            1,
+            "the swap must preserve exactly one same-species counterpart on the bench"
+        );
+        assert_eq!(milotic_back[0].item, Unknown::Known(Item::Leftovers));
+    }
+
+    /// S64: resolving a Zoroark after it has worn more than one disguise can
+    /// leave an older same-species alternate on the bench. Once the true
+    /// Zoroark is located, Species Clause proves that a bench Garchomp matching
+    /// the active real Garchomp is stale and must be removed.
+    #[test]
+    fn test_illusion_resolution_removes_bench_duplicate_of_active_species() {
+        let zoroark = unknown_mon_species(Species::ZoroarkHisui);
+        let mut disguised = unknown_mon_species(Species::Basculegion);
+        seed_zoroark_hypothesis_on(&mut disguised, &zoroark);
+
+        let mut state = battle_nvn(
+            vec![unknown_mon_species(Species::Pikachu)],
+            vec![unknown_mon_species(Species::Garchomp), disguised],
+        );
+        state.active_per_side = 2;
+        let mut stale_milotic = unknown_mon_species(Species::Milotic);
+        stale_milotic.item = Unknown::Not(vec![Item::Leftovers]);
+        let mut real_milotic = unknown_mon_species(Species::Milotic);
+        real_milotic.item = Unknown::Known(Item::Leftovers);
+        state.p2_known_back_mons = vec![
+            unknown_mon_species(Species::Garchomp),
+            stale_milotic,
+            real_milotic,
+        ];
+        state.p2_possible_back_mons = vec![zoroark];
+        state.p2_unresolved_zoroark_count = 1;
+        state.p2_slot_conditions = vec![vec![], vec![]];
+
+        let result = apply(
+            state,
+            vec![event(EventKind::IllusionEnded {
+                slot: p2(1),
+                actual_species: Species::ZoroarkHisui,
+            })],
+        );
+
+        assert_eq!(
+            result.p2_active_mons[1].possible_species,
+            Unknown::Known(Species::ZoroarkHisui)
+        );
+        assert!(
+            result
+                .p2_known_back_mons
+                .iter()
+                .chain(result.p2_possible_back_mons.iter())
+                .all(|mon| mon.possible_species != Unknown::Known(Species::Garchomp)),
+            "the active Garchomp must be the side's only Garchomp after resolution"
+        );
+        let milotic: Vec<_> = result
+            .p2_known_back_mons
+            .iter()
+            .chain(result.p2_possible_back_mons.iter())
+            .filter(|mon| mon.possible_species == Unknown::Known(Species::Milotic))
+            .collect();
+        assert_eq!(milotic.len(), 1, "bench-only duplicates must collapse too");
+        assert!(
+            !unknown_is_excluded(&milotic[0].item, &Item::Leftovers),
+            "the conservative union must retain the real duplicate's item"
+        );
+    }
+
+    /// S65: the placement phase of a simultaneous switch must not treat an
+    /// outgoing occupant in another switching slot as cross-slot Illusion proof.
+    #[test]
+    fn test_simultaneous_switch_ignores_same_species_outgoing_other_slot() {
+        let mut milotic = unknown_mon_species(Species::Milotic);
+        let zoroark = unknown_mon_species(Species::ZoroarkHisui);
+        seed_zoroark_hypothesis_on(&mut milotic, &zoroark);
+        let mut state = battle_nvn(
+            vec![unknown_mon_species(Species::Pikachu)],
+            vec![unknown_mon_species(Species::Garchomp), milotic],
+        );
+        state.active_per_side = 2;
+        state.p2_possible_back_mons = vec![unknown_mon_species(Species::Basculegion), zoroark];
+        state.p2_unresolved_zoroark_count = 1;
+        state.p2_slot_conditions = vec![vec![], vec![]];
+        state.turn_number = 4;
+        let switched = |species, slot| SwitchState {
+            disguise_species: None,
+            max_hp: 0,
+            slot,
+            species,
+            level: 50,
+            hp: PokemonHP::Percent(100),
+            status: None,
+            tera_type: None,
+        };
+
+        let result = apply(
+            state,
+            vec![event(EventKind::SimultaneousSwitch {
+                switches: vec![
+                    switched(Species::Milotic, p2(0)),
+                    switched(Species::Basculegion, p2(1)),
+                ],
+            })],
+        );
+
+        let milotic_count = result
+            .p2_active_mons
+            .iter()
+            .chain(result.p2_known_back_mons.iter())
+            .chain(result.p2_possible_back_mons.iter())
+            .filter(|mon| mon.possible_species == Unknown::Known(Species::Milotic))
+            .count();
+        assert_eq!(
+            milotic_count, 1,
+            "the outgoing slot-1 Milotic and incoming slot-0 Milotic are one tracked record"
+        );
+    }
+
+    /// S66: unresolved Illusion bookkeeping may temporarily leave two bench
+    /// records with the same shown species. A returning mon's observed HP/status
+    /// must select the matching physical history rather than whichever duplicate
+    /// happens to appear first, or revealed items migrate to the phantom record.
+    #[test]
+    fn test_switch_prefers_same_species_bench_record_with_matching_history() {
+        let zoroark = unknown_mon_species(Species::ZoroarkHisui);
+        let mut stale = unknown_mon_species(Species::Gholdengo);
+        stale.hp = PokemonHP::Percent(100);
+        stale.item = Unknown::Not(vec![Item::LifeOrb]);
+        seed_zoroark_hypothesis_on(&mut stale, &zoroark);
+
+        let mut real = unknown_mon_species(Species::Gholdengo);
+        real.hp = PokemonHP::Percent(75);
+        real.item = Unknown::Known(Item::LifeOrb);
+
+        let mut state = battle_nvn(
+            vec![unknown_mon_species(Species::Pikachu)],
+            vec![unknown_mon_species(Species::Snorlax)],
+        );
+        state.p2_known_back_mons = vec![stale, real];
+        state.p2_possible_back_mons = vec![zoroark];
+        state.p2_unresolved_zoroark_count = 1;
+        state.turn_number = 4;
+
+        let result = apply(
+            state,
+            vec![event(EventKind::Switch(SwitchState {
+                disguise_species: None,
+                max_hp: 0,
+                slot: p2(0),
+                species: Species::Gholdengo,
+                level: 50,
+                hp: PokemonHP::Percent(75),
+                status: None,
+                tera_type: None,
+            }))],
+        );
+
+        assert_eq!(result.p2_active_mons[0].item, Unknown::Known(Item::LifeOrb));
+        assert!(result.p2_known_back_mons.iter().any(|mon| {
+            mon.possible_species == Unknown::Known(Species::Gholdengo)
+                && mon.item == Unknown::Not(vec![Item::LifeOrb])
+        }));
+    }
+
+    /// S67: when a fresh Illusion hypothesis is seeded from a previously used
+    /// same-species bench record, its old HP/status belong to that benched real
+    /// mon. The incoming SwitchState must overwrite those physical fields on both
+    /// identities before IllusionEnded can promote the hypothesis.
+    #[test]
+    fn test_switch_visible_state_is_applied_to_fresh_illusion_hypothesis() {
+        let mut barbaracle = unknown_mon_species(Species::BarbaracleMega);
+        barbaracle.hp = PokemonHP::Percent(60);
+        barbaracle.status = Some(Status::Poison);
+        let zoroark = unknown_mon_species(Species::ZoroarkHisui);
+
+        let mut state = battle_nvn(
+            vec![unknown_mon_species(Species::Pikachu)],
+            vec![unknown_mon_species(Species::Gholdengo)],
+        );
+        state.p2_known_back_mons = vec![barbaracle];
+        state.p2_possible_back_mons = vec![zoroark];
+        state.p2_unresolved_zoroark_count = 1;
+        state.turn_number = 4;
+
+        let result = apply(
+            state,
+            vec![
+                event(EventKind::Switch(SwitchState {
+                    disguise_species: Some(Species::BarbaracleMega),
+                    max_hp: 0,
+                    slot: p2(0),
+                    species: Species::BarbaracleMega,
+                    level: 50,
+                    hp: PokemonHP::Percent(100),
+                    status: None,
+                    tera_type: None,
+                })),
+                event(EventKind::IllusionEnded {
+                    slot: p2(0),
+                    actual_species: Species::ZoroarkHisui,
+                }),
+                event(EventKind::StatusInflicted {
+                    target: p2(0),
+                    status: Status::Burn,
+                }),
+            ],
+        );
+
+        assert_eq!(
+            result.p2_active_mons[0].possible_species,
+            Unknown::Known(Species::ZoroarkHisui)
+        );
+        assert_eq!(result.p2_active_mons[0].status, Some(Status::Burn));
     }
 }

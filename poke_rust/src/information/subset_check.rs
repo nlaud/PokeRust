@@ -147,7 +147,7 @@ pub fn collect_true_state_subset_violations(
         Player::P2 => Player::P1,
     };
 
-    let mapping = build_mon_idx_map(true_state, belief, opponent);
+    let mapping = build_mon_idx_map(true_state, belief, opponent, pdex);
     let legend = mon_idx_legend(belief);
     let mut violations = Vec::new();
 
@@ -155,7 +155,9 @@ pub fn collect_true_state_subset_violations(
     idxs.sort();
     for idx in idxs {
         let truth = mapping[idx];
-        if let Some(field_violations) = mon_violation(belief, *idx, truth, pdex) {
+        if let Some(field_violations) =
+            mon_violation_with_illusion_alternates(belief, opponent, *idx, truth, pdex)
+        {
             violations.push(SubsetViolation {
                 observer,
                 kind: SubsetViolationKind::Fields {
@@ -181,6 +183,51 @@ pub fn collect_true_state_subset_violations(
         }
     }
     violations
+}
+
+/// Active slots are normally positional, but the parallel Illusion abstraction
+/// can temporarily leave two physical records with the same shown species whose
+/// locations are correlated but not represented. In that narrow unresolved case,
+/// the sound marginal for build fields is the union across those complete records.
+fn mon_violation_with_illusion_alternates(
+    belief: &UnknownBattleState,
+    opponent: Player,
+    idx: usize,
+    truth: &PokemonState,
+    pdex: &HashMap<Species, PokemonData>,
+) -> Option<Vec<FieldViolation>> {
+    let direct = mon_violation(belief, idx, truth, pdex)?;
+    let unresolved = match opponent {
+        Player::P1 => belief.p1_unresolved_zoroark_count,
+        Player::P2 => belief.p2_unresolved_zoroark_count,
+    };
+    if unresolved == 0 {
+        return Some(direct);
+    }
+    let alternatives: Box<dyn Iterator<Item = &UnknownPokemonState> + '_> = match opponent {
+        Player::P1 => Box::new(
+            belief
+                .p1_active_mons
+                .iter()
+                .chain(belief.p1_known_back_mons.iter())
+                .chain(belief.p1_possible_back_mons.iter()),
+        ),
+        Player::P2 => Box::new(
+            belief
+                .p2_active_mons
+                .iter()
+                .chain(belief.p2_known_back_mons.iter())
+                .chain(belief.p2_possible_back_mons.iter()),
+        ),
+    };
+    if alternatives
+        .filter(|entry| !unknown_is_excluded(&entry.possible_species, &truth.species))
+        .any(|entry| entry_admits_truth(entry, truth, pdex))
+    {
+        None
+    } else {
+        Some(direct)
+    }
 }
 
 // ── B2: mon_idx -> true PokemonState mapping ────────────────────────────────────
@@ -221,6 +268,7 @@ fn build_mon_idx_map<'a>(
     true_state: &'a BattleState,
     belief: &UnknownBattleState,
     opponent: Player,
+    pdex: &HashMap<Species, PokemonData>,
 ) -> HashMap<usize, &'a PokemonState> {
     let mut map = HashMap::new();
     let (active_start, known_back_start, possible_back_start) =
@@ -266,12 +314,22 @@ fn build_mon_idx_map<'a>(
             !claimed.contains(idx)
                 && matches!(&m.possible_mon_id, Unknown::Known(id) if *id == true_mon.mon_id)
         });
-        let chosen = by_id.or_else(|| {
-            bench_candidates.iter().find(|(idx, m)| {
+        let species_candidates = || {
+            bench_candidates.iter().filter(|(idx, m)| {
                 !claimed.contains(idx)
                     && !unknown_is_excluded(&m.possible_species, &true_mon.species)
             })
-        });
+        };
+        // Illusion can leave two distinct physical records carrying the same
+        // shown species while their identity correlation is unresolved. This
+        // mapping is documented as existential, so prefer a candidate whose
+        // complete primary OR hypothesis admits the true mon instead of greedily
+        // assigning the first species match (which can be the stale disguise).
+        // Keep a species-only fallback so a genuine exclusion is still mapped and
+        // reported rather than silently skipped.
+        let chosen = by_id
+            .or_else(|| species_candidates().find(|(_, m)| entry_admits_truth(m, true_mon, pdex)))
+            .or_else(|| species_candidates().next());
         match chosen {
             Some((idx, _)) => {
                 claimed.push(*idx);
@@ -287,6 +345,18 @@ fn build_mon_idx_map<'a>(
     }
 
     map
+}
+
+fn entry_admits_truth(
+    entry: &UnknownPokemonState,
+    truth: &PokemonState,
+    pdex: &HashMap<Species, PokemonData>,
+) -> bool {
+    field_violations(entry, truth, pdex).is_empty()
+        || entry
+            .possible_illusion_state
+            .as_deref()
+            .is_some_and(|hypothesis| field_violations(hypothesis, truth, pdex).is_empty())
 }
 
 // ── B1: per-mon field containment ───────────────────────────────────────────────

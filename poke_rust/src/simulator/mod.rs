@@ -3195,7 +3195,11 @@ fn possible_damage_outcomes_for_move(
                         &move_data.target,
                     );
                     if redirected.is_empty() {
-                        return vec![(MatchState::BattleState(next_state), 1.0)];
+                        return no_effect_outcome(
+                            &next_state,
+                            action,
+                            &confusion_self_hit_outcomes,
+                        );
                     }
                     redirected
                 } else {
@@ -3210,7 +3214,7 @@ fn possible_damage_outcomes_for_move(
                     &move_data.target,
                 );
                 if targets.is_empty() {
-                    return vec![(MatchState::BattleState(next_state), 1.0)];
+                    return no_effect_outcome(&next_state, action, &confusion_self_hit_outcomes);
                 }
                 targets
             }

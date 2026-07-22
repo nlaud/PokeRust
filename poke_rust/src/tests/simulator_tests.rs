@@ -7,7 +7,9 @@ mod tests {
     use crate::simulator::DamageConfig;
     use crate::simulator::helpers as simulator_helpers;
     use crate::simulator::helpers::coalesce_branches;
-    use crate::state::battle::{Action, MatchState, MoveAction, PlayerCommand, SwitchCommand};
+    use crate::state::battle::{
+        Action, AttackCommand, MatchState, MoveAction, PlayerCommand, SwitchCommand,
+    };
     use crate::state::battle::{BattleCommand, BattleState, FieldSlot, Player};
     use crate::state::dex_data::{PseudoWeather, Status, Terrain, VolatileStatus, Weather};
     use crate::state::pokemon::{Nature, PokemonState, VolatileStatusState, build_pokemon_state};
@@ -19502,6 +19504,116 @@ mod tests {
             });
             assert!(has_tackle, "Tackle (locked move) should still be available");
             assert!(!has_body_slam, "Body Slam should be blocked by choice lock");
+        }
+
+        #[test]
+        fn choice_item_locks_when_all_targets_faint_before_move() {
+            let pokemon_dex = pokemon_dex();
+            let move_dex = move_dex();
+            let build = |species, moves, item| {
+                build_pokemon_state(
+                    species,
+                    pokemon_dex,
+                    move_dex,
+                    Some(50),
+                    Some(moves),
+                    None,
+                    Some(Ability::None),
+                    None,
+                    item,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+            };
+            let mut hydreigon = build(
+                Species::Hydreigon,
+                [
+                    Some(PokemonMove::EarthPower),
+                    Some(PokemonMove::DarkPulse),
+                    None,
+                    None,
+                ],
+                Some(Item::ChoiceScarf),
+            );
+            hydreigon.stats[5] = 1;
+            let ally = build(
+                Species::DeoxysSpeed,
+                [Some(PokemonMove::Tackle), None, None, None],
+                None,
+            );
+            let mut target = build(
+                Species::Shuckle,
+                [Some(PokemonMove::Splash), None, None, None],
+                None,
+            );
+            target.hp = 1;
+            let sacrifice = build(
+                Species::DeoxysSpeed,
+                [Some(PokemonMove::Memento), None, None, None],
+                None,
+            );
+            let bench = build(
+                Species::Snorlax,
+                [Some(PokemonMove::Splash), None, None, None],
+                None,
+            );
+            let state = battle_state_from_lists(
+                vec![hydreigon, ally],
+                vec![],
+                vec![target, sacrifice],
+                vec![bench],
+            );
+            let attack = |move_slot, target| {
+                BattleCommand::Attack(AttackCommand {
+                    move_slot,
+                    target: Some(target),
+                    terastallize: false,
+                    mega_evolve: false,
+                })
+            };
+            let outcomes = run_single_turn(
+                &MatchState::BattleState(state),
+                &PlayerCommand::Battle(vec![
+                    attack(
+                        0,
+                        FieldSlot {
+                            player: Player::P2,
+                            slot_index: 0,
+                        },
+                    ),
+                    attack(
+                        0,
+                        FieldSlot {
+                            player: Player::P2,
+                            slot_index: 0,
+                        },
+                    ),
+                ]),
+                &PlayerCommand::Battle(vec![
+                    BattleCommand::Pass,
+                    attack(
+                        0,
+                        FieldSlot {
+                            player: Player::P1,
+                            slot_index: 0,
+                        },
+                    ),
+                ]),
+                move_dex,
+                pokemon_dex,
+            );
+            let (state_after, _) = extract_battle_state(outcomes);
+            assert!(state_after.p1_active_mons[0].volatiles.iter().any(|v| {
+                matches!(
+                    v,
+                    VolatileStatusState::TurnStatus(
+                        VolatileStatus::ChoiceLock(PokemonMove::EarthPower),
+                        _
+                    )
+                )
+            }));
         }
 
         #[test]
@@ -52840,6 +52952,7 @@ Bold Nature
 // partner is full hp".
 mod hospitality_event_visibility {
     use crate::data::ability::Ability;
+    use crate::data::item::Item;
     use crate::data::pokemon_move::PokemonMove;
     use crate::data::species::Species;
     use crate::information::information::{EventKind, InformationEvent};
@@ -52958,6 +53071,63 @@ mod hospitality_event_visibility {
                 EventKind::Healed { target, .. } if *target == p1s0())),
             "the ally's heal must be reported via a nested Healed event;\n\
              switch reactions = {:#?}",
+            sw.reactions
+        );
+    }
+
+    #[test]
+    fn hospitality_emits_consumption_for_triggered_sitrus_berry() {
+        let mut ally = mon(Species::Weavile, Ability::Pickpocket);
+        ally.item = Item::SitrusBerry;
+        let max_hp = ally.stats[0];
+        ally.hp = 1;
+        let hospitality_heal = (max_hp / 4).max(1);
+        let expected_hp = 1 + hospitality_heal + max_hp / 4;
+
+        let filler = mon(Species::Snorlax, Ability::None);
+        let hospitality_mon = mon(Species::Chansey, Ability::Hospitality);
+        let state = MatchState::BattleState(battle_state_from_lists(
+            vec![ally, filler],
+            vec![hospitality_mon],
+            vec![
+                mon(Species::Shuckle, Ability::None),
+                mon(Species::Shuckle, Ability::None),
+            ],
+            vec![],
+        ));
+
+        let outcomes = crate::simulator::simulate_turn(
+            &state,
+            &PlayerCommand::Battle(vec![
+                BattleCommand::Pass,
+                BattleCommand::Switch(SwitchCommand { party_index: 0 }),
+            ]),
+            &PlayerCommand::Battle(vec![BattleCommand::Pass, BattleCommand::Pass]),
+            move_dex(),
+            pokemon_dex(),
+            false,
+            1,
+            Some(Player::P1),
+        );
+        let (s, events, _) = outcomes.into_iter().next().unwrap();
+        let MatchState::BattleState(bs) = s else {
+            panic!("battle continues")
+        };
+        assert_eq!(bs.p1_active_mons[0].item, Item::None);
+        assert_eq!(bs.p1_active_mons[0].hp, expected_hp);
+
+        let events = events.expect("observer requested");
+        let sw = find_switch(&events, p1s1());
+        assert!(
+            tree_contains(&sw.reactions, &|kind| matches!(
+                kind,
+                EventKind::ItemLost {
+                    slot,
+                    item: Item::SitrusBerry,
+                    consumed: true,
+                } if *slot == p1s0()
+            )),
+            "Hospitality-triggered Sitrus consumption must be observable: {:#?}",
             sw.reactions
         );
     }

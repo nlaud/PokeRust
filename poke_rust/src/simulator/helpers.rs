@@ -6692,17 +6692,33 @@ fn apply_send_out_only_ability_effects(
         // reporting; the batch is emitted as `Healed` nested under the dispatcher's
         // `AbilityRevealed` wrapper.
         Ability::Hospitality => {
-            let mut batch: Vec<(FieldSlot, u16, u16)> = Vec::new();
             for (ally_slot, heal) in hospitality_heal_targets(state, slot) {
                 let ally_env = berry_env(state, ally_slot);
-                if let Some(mon) = get_pokemon_at_slot_mut(state, ally_slot) {
-                    gain_hp(mon, heal, ally_env);
-                }
-                if let Some(mon) = get_pokemon_at_slot(state, ally_slot) {
-                    batch.push((ally_slot, mon.hp, mon.stats[0].max(1)));
+                let outcome = get_pokemon_at_slot_mut(state, ally_slot).map(|mon| {
+                    let item_before = mon.item.clone();
+                    heal_mon(mon, heal);
+                    let hospitality_hp = mon.hp;
+                    on_hp_change(mon, &ally_env);
+                    let consumed = (mon.item == Item::None
+                        && item_before != Item::None
+                        && mon.consumed_item.as_ref() == Some(&item_before))
+                    .then_some(item_before);
+                    (hospitality_hp, mon.hp, mon.stats[0].max(1), consumed)
+                });
+                if let Some((hospitality_hp, final_hp, max_hp, consumed)) = outcome {
+                    // Keep Hospitality's own heal distinct from an HP Berry it
+                    // subsequently triggers. The berry consumption is observable
+                    // and must wrap its additional heal, just like the mid-hit path.
+                    emit_healed_batch(state, &[(ally_slot, hospitality_hp, max_hp)]);
+                    if let Some(berry) = consumed {
+                        emit_item_consumed_with(state, ally_slot, berry, |bs| {
+                            if final_hp != hospitality_hp {
+                                emit_healed_batch(bs, &[(ally_slot, final_hp, max_hp)]);
+                            }
+                        });
+                    }
                 }
             }
-            emit_healed_batch(state, &batch);
         }
 
         // Remove Light Screen, Reflect, and Aurora Veil from BOTH sides.

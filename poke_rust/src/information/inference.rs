@@ -337,6 +337,169 @@ pub(super) fn resolve_zoroark_globally(state: &mut UnknownBattleState, side: Pla
         for mon in side_mons_mut(state, side) {
             mon.possible_illusion_state = None;
         }
+        reconcile_resolved_illusion_duplicates(state, side);
+    }
+}
+
+/// Same-species Illusion switches can temporarily require two records with the
+/// same shown identity: one for the genuine Pokémon and one for Zoroark's
+/// alternate physical identity. Once Zoroark is positively located and all
+/// hypotheses are cleared, Species Clause makes any bench/fainted record whose
+/// species is also currently active a proven stale alternate, not a second real
+/// teammate. Remove active-vs-bench duplicates and collapse bench-only duplicates
+/// into one conservative union immediately, so later item-clause propagation
+/// cannot treat a phantom as another physical holder.
+fn reconcile_resolved_illusion_duplicates(state: &mut UnknownBattleState, side: Player) {
+    let active_species: HashSet<Species> = match side {
+        Player::P1 => &state.p1_active_mons,
+        Player::P2 => &state.p2_active_mons,
+    }
+    .iter()
+    .filter_map(|mon| match &mon.possible_species {
+        Unknown::Known(species) => Some(species.clone()),
+        _ => None,
+    })
+    .collect();
+    let back = match side {
+        Player::P1 => state
+            .p1_known_back_mons
+            .iter()
+            .chain(state.p1_possible_back_mons.iter()),
+        Player::P2 => state
+            .p2_known_back_mons
+            .iter()
+            .chain(state.p2_possible_back_mons.iter()),
+    };
+    let mut seen = HashSet::new();
+    let has_indexed_duplicate = back
+        .filter_map(known_species)
+        .any(|species| active_species.contains(species) || !seen.insert(species.clone()));
+
+    if has_indexed_duplicate {
+        // Removing a back entry shifts the flat mon_idx layout. Dropping facts
+        // from this side's back boundary onward is conservative and prevents a
+        // surviving clause/setter attribution from binding to another Pokémon.
+        let boundary = MonSegments::of(state).ranges()[match side {
+            Player::P1 => 2,
+            Player::P2 => 3,
+        }]
+        .start;
+        purge_facts_at_or_beyond_idx(state, boundary);
+    }
+
+    let is_duplicate = |mon: &UnknownPokemonState| matches!(&mon.possible_species, Unknown::Known(species) if active_species.contains(species));
+    match side {
+        Player::P1 => {
+            state.p1_known_back_mons.retain(|mon| !is_duplicate(mon));
+            state.p1_possible_back_mons.retain(|mon| !is_duplicate(mon));
+            state.p1_fainted_mons.retain(|mon| !is_duplicate(mon));
+            collapse_duplicate_back_species(
+                &mut state.p1_known_back_mons,
+                &mut state.p1_possible_back_mons,
+            );
+        }
+        Player::P2 => {
+            state.p2_known_back_mons.retain(|mon| !is_duplicate(mon));
+            state.p2_possible_back_mons.retain(|mon| !is_duplicate(mon));
+            state.p2_fainted_mons.retain(|mon| !is_duplicate(mon));
+            collapse_duplicate_back_species(
+                &mut state.p2_known_back_mons,
+                &mut state.p2_possible_back_mons,
+            );
+        }
+    }
+}
+
+fn known_species(mon: &UnknownPokemonState) -> Option<&Species> {
+    match &mon.possible_species {
+        Unknown::Known(species) => Some(species),
+        _ => None,
+    }
+}
+
+/// Widen `keeper` so it admits either physical record. The newest record remains
+/// the operational shell (HP/status/volatile history), while every oracle-checked
+/// build field and item/ability domain becomes the union of both candidates.
+fn widen_duplicate_mon(keeper: &mut UnknownPokemonState, other: &UnknownPokemonState) {
+    keeper.possible_mon_id = unknown_union(&keeper.possible_mon_id, &other.possible_mon_id);
+    keeper.possible_types = unknown_union(&keeper.possible_types, &other.possible_types);
+    keeper.item = unknown_union(&keeper.item, &other.item);
+    keeper.possible_natures = unknown_union(&keeper.possible_natures, &other.possible_natures);
+    keeper.possible_original_abilities = unknown_union(
+        &keeper.possible_original_abilities,
+        &other.possible_original_abilities,
+    );
+    keeper.possible_abilities =
+        unknown_union(&keeper.possible_abilities, &other.possible_abilities);
+    keeper.possible_genders = unknown_union(&keeper.possible_genders, &other.possible_genders);
+    keeper.possible_weight_hg =
+        unknown_union(&keeper.possible_weight_hg, &other.possible_weight_hg);
+    keeper.possible_tera_type =
+        unknown_union(&keeper.possible_tera_type, &other.possible_tera_type);
+    keeper.mega_species = unknown_union(&keeper.mega_species, &other.mega_species);
+    keeper.mega_ability = unknown_union(&keeper.mega_ability, &other.mega_ability);
+    for i in 0..6 {
+        keeper.min_evs[i] = keeper.min_evs[i].min(other.min_evs[i]);
+        keeper.max_evs[i] = keeper.max_evs[i].max(other.max_evs[i]);
+        keeper.min_ivs[i] = keeper.min_ivs[i].min(other.min_ivs[i]);
+        keeper.max_ivs[i] = keeper.max_ivs[i].max(other.max_ivs[i]);
+        keeper.min_stats[i] = keeper.min_stats[i].min(other.min_stats[i]);
+        keeper.max_stats[i] = keeper.max_stats[i].max(other.max_stats[i]);
+        keeper.min_pre_nature_stat[i] =
+            keeper.min_pre_nature_stat[i].min(other.min_pre_nature_stat[i]);
+        keeper.max_pre_nature_stat[i] =
+            keeper.max_pre_nature_stat[i].max(other.max_pre_nature_stat[i]);
+    }
+    for i in 0..4 {
+        if keeper.known_moves[i] != other.known_moves[i] {
+            keeper.known_moves[i] = None;
+            keeper.move_pp[i] = -1;
+            keeper.max_pp[i] = -1;
+        }
+    }
+    if keeper.consumed_item != other.consumed_item {
+        keeper.consumed_item = None;
+    }
+    if keeper.removed_item != other.removed_item {
+        keeper.removed_item = None;
+    }
+    keeper.item_lost |= other.item_lost;
+    keeper.item_was_transferred |= other.item_was_transferred;
+}
+
+fn collapse_duplicate_back_species(
+    known: &mut Vec<UnknownPokemonState>,
+    possible: &mut Vec<UnknownPokemonState>,
+) {
+    let entries: Vec<(bool, UnknownPokemonState)> = std::mem::take(known)
+        .into_iter()
+        .map(|mon| (true, mon))
+        .chain(std::mem::take(possible).into_iter().map(|mon| (false, mon)))
+        .collect();
+    let mut collapsed: Vec<(bool, UnknownPokemonState)> = Vec::new();
+    for (was_known, mon) in entries {
+        let Some(species) = known_species(&mon).cloned() else {
+            collapsed.push((was_known, mon));
+            continue;
+        };
+        if let Some(pos) = collapsed
+            .iter()
+            .position(|(_, existing)| known_species(existing) == Some(&species))
+        {
+            let (previously_known, previous) = collapsed.remove(pos);
+            let mut newest = mon;
+            widen_duplicate_mon(&mut newest, &previous);
+            collapsed.push((was_known || previously_known, newest));
+        } else {
+            collapsed.push((was_known, mon));
+        }
+    }
+    for (was_known, mon) in collapsed {
+        if was_known {
+            known.push(mon);
+        } else {
+            possible.push(mon);
+        }
     }
 }
 
@@ -1478,6 +1641,17 @@ fn run_pass5_all_mons(
     config: &InferenceConfig,
     dex: &HashMap<Species, PokemonData>,
 ) {
+    // Doubles deliberately discards all inferred build precision at the end of
+    // each update because Pass 3 still has unmodeled cross-target/temporal
+    // interactions. Do not back-solve those transient bounds first: an unsound
+    // intermediate window can panic here before the conservative envelope gets
+    // its chance to widen it, and any EV/IV/nature precision produced here would
+    // be thrown away moments later anyway. Singles retains the full Pass 5 path,
+    // including its Illusion-promotion backstop.
+    if state.active_per_side > 1 {
+        return;
+    }
+
     let total = mons_count_battle(state);
     for idx in 0..total {
         // S38: skip mons whose EVs are ALREADY fully pinned (`min_evs == max_evs` on
@@ -1818,21 +1992,21 @@ fn restore_final_stat_marginal_envelopes(state: &mut UnknownBattleState) {
             if mon.min_pre_nature_stat[stat_i] == 0 && mon.max_pre_nature_stat[stat_i] == u16::MAX {
                 continue;
             }
-            let mut min_mod = f64::INFINITY;
-            let mut max_mod = f64::NEG_INFINITY;
+            let mut min_mod = f32::INFINITY;
+            let mut max_mod = f32::NEG_INFINITY;
             for nature in ALL_NATURES {
                 if unknown_is_excluded(&mon.possible_natures, nature) {
                     continue;
                 }
-                let modifier = nature_stat_modifiers(nature)[stat_i - 1] as f64;
+                let modifier = nature_stat_modifiers(nature)[stat_i - 1];
                 min_mod = min_mod.min(modifier);
                 max_mod = max_mod.max(modifier);
             }
             if !min_mod.is_finite() {
                 continue;
             }
-            let admitted_min = (mon.min_pre_nature_stat[stat_i] as f64 * min_mod).floor() as u16;
-            let admitted_max = (mon.max_pre_nature_stat[stat_i] as f64 * max_mod).floor() as u16;
+            let admitted_min = apply_nature_modifier(mon.min_pre_nature_stat[stat_i], min_mod);
+            let admitted_max = apply_nature_modifier(mon.max_pre_nature_stat[stat_i], max_mod);
             mon.min_stats[stat_i] = mon.min_stats[stat_i].min(admitted_min);
             mon.max_stats[stat_i] = mon.max_stats[stat_i].max(admitted_max);
         }
@@ -3500,6 +3674,37 @@ fn pass1_apply_switch_event(
 ) {
     match &event.kind {
         EventKind::Switch(sw) => {
+            // Capture this before benching/rebinding the outgoing occupant.  A
+            // mid-battle switch that displays the exact species which just left
+            // this slot cannot be a second individual under Species Clause; with
+            // an unresolved Illusion forme it is positive disguise evidence (S59).
+            // A lone `Switch` is never the initial lead reveal (that is emitted as
+            // `SimultaneousSwitch`), so this also applies during a turn-0
+            // self-switch replacement phase before the first EndOfTurn (S59).
+            let same_slot_illusion_collision = match sw.slot.player {
+                Player::P1 => state.p1_unresolved_zoroark_count > 0,
+                Player::P2 => state.p2_unresolved_zoroark_count > 0,
+            } && match sw.slot.player {
+                Player::P1 => state.p1_active_mons.get(sw.slot.slot_index as usize),
+                Player::P2 => state.p2_active_mons.get(sw.slot.slot_index as usize),
+            }
+            .is_some_and(|mon| unknown_is_known_as(&mon.possible_species, &sw.species));
+            // If an earlier same-species collision already left both physical
+            // candidates represented (the real shown species and the disguised
+            // Illusion forme), this event is a genuine swap between those two
+            // records. Remove the pre-existing bench candidate before benching
+            // the outgoing record, otherwise the ordinary species lookup below
+            // immediately re-selects the record it just pushed and silently
+            // turns the switch into a no-op.
+            let same_slot_incoming = same_slot_illusion_collision
+                .then(|| take_matching_bench_mon(state, sw.slot.player, sw))
+                .flatten();
+            let cross_slot_illusion_collision = species_active_elsewhere_on_side(
+                state,
+                sw.slot.player,
+                sw.slot.slot_index as usize,
+                &sw.species,
+            );
             // Self-switch replacement requests are a separate simulator call from the
             // move that created them. Preserve the state Baton Pass / Shed Tail carries
             // across that boundary before the ordinary switch-out reset clears it.
@@ -3512,8 +3717,15 @@ fn pass1_apply_switch_event(
             apply_switch_out_forme_change(state, &sw.slot, &sw.species, ctx);
             // B1: preserve the outgoing mon to the bench so its state (HP, move reveals,
             // ability/item narrowing) survives for future re-entry inference.
-            bench_outgoing_mon(state, &sw.slot, &sw.species);
-            pass1_switch(state, sw, ctx);
+            bench_outgoing_mon(state, &sw.slot, &sw.species, same_slot_illusion_collision);
+            pass1_switch(
+                state,
+                sw,
+                ctx,
+                same_slot_illusion_collision,
+                same_slot_incoming,
+                cross_slot_illusion_collision,
+            );
             apply_pending_self_switch_state(state, &sw.slot, passed_state);
             if state
                 .self_switch_pending
@@ -3542,16 +3754,92 @@ fn pass1_apply_switch_event(
             let mut switches_by_slot: Vec<&SwitchState> = switches.iter().collect();
             switches_by_slot.sort_by_key(|sw| sw.slot.slot_index);
 
-            for sw in &switches_by_slot {
+            let same_slot_illusion_collisions: Vec<bool> = switches_by_slot
+                .iter()
+                .map(|sw| {
+                    state.turn_number > 0
+                        && match sw.slot.player {
+                            Player::P1 => state.p1_unresolved_zoroark_count > 0,
+                            Player::P2 => state.p2_unresolved_zoroark_count > 0,
+                        }
+                        && match sw.slot.player {
+                            Player::P1 => state.p1_active_mons.get(sw.slot.slot_index as usize),
+                            Player::P2 => state.p2_active_mons.get(sw.slot.slot_index as usize),
+                        }
+                        .is_some_and(|mon| unknown_is_known_as(&mon.possible_species, &sw.species))
+                })
+                .collect();
+
+            // Select any already-materialized same-species counterpart before
+            // the first loop pushes the outgoing records into the same buckets.
+            // Keeping these values aligned with `switches_by_slot` makes the
+            // later placement loop perform a real identity swap.
+            let same_slot_incoming: Vec<Option<UnknownPokemonState>> = switches_by_slot
+                .iter()
+                .zip(same_slot_illusion_collisions.iter())
+                .map(|(sw, collision)| {
+                    collision
+                        .then(|| take_matching_bench_mon(state, sw.slot.player, sw))
+                        .flatten()
+                })
+                .collect();
+
+            // Snapshot legitimate cross-slot collisions before mutating either
+            // active array. An old occupant in another slot that is ALSO leaving
+            // in this event must not count: during the two-phase bench-then-place
+            // implementation it remains visible until placement and previously
+            // fabricated a phantom duplicate. An earlier same-species arrival in
+            // this sorted placement order does count, since it will still be active.
+            let cross_slot_illusion_collisions: Vec<bool> = switches_by_slot
+                .iter()
+                .enumerate()
+                .map(|(position, sw)| {
+                    let player = sw.slot.player;
+                    let slot_i = sw.slot.slot_index as usize;
+                    let actives = match player {
+                        Player::P1 => &state.p1_active_mons,
+                        Player::P2 => &state.p2_active_mons,
+                    };
+                    let persistent_active_match = actives.iter().enumerate().any(|(i, mon)| {
+                        i != slot_i
+                            && !switches_by_slot.iter().any(|other| {
+                                other.slot.player == player && other.slot.slot_index as usize == i
+                            })
+                            && unknown_is_known_as(&mon.possible_species, &sw.species)
+                    });
+                    let earlier_incoming_match = switches_by_slot[..position]
+                        .iter()
+                        .any(|other| other.slot.player == player && other.species == sw.species);
+                    persistent_active_match || earlier_incoming_match
+                })
+                .collect();
+
+            for (sw, same_slot_illusion_collision) in switches_by_slot
+                .iter()
+                .zip(same_slot_illusion_collisions.iter().copied())
+            {
                 // S18: see the single-switch arm above.
                 purge_mon_scoped_knowledge(state, &sw.slot);
                 apply_switch_out_reset(state, &sw.slot);
                 apply_switch_out_forme_change(state, &sw.slot, &sw.species, ctx);
                 // B1: preserve each outgoing mon before any pass1_switch replaces its slot.
-                bench_outgoing_mon(state, &sw.slot, &sw.species);
+                bench_outgoing_mon(state, &sw.slot, &sw.species, same_slot_illusion_collision);
             }
-            for sw in &switches_by_slot {
-                pass1_switch(state, sw, ctx);
+            for (((sw, same_slot_illusion_collision), same_slot_incoming), cross_slot_collision) in
+                switches_by_slot
+                    .iter()
+                    .zip(same_slot_illusion_collisions)
+                    .zip(same_slot_incoming)
+                    .zip(cross_slot_illusion_collisions)
+            {
+                pass1_switch(
+                    state,
+                    sw,
+                    ctx,
+                    same_slot_illusion_collision,
+                    same_slot_incoming,
+                    cross_slot_collision,
+                );
             }
             // Ability-absence inference cares about the REAL activation order (e.g.
             // Unnerve vs Sand Stream) — keep the original (speed-encoded) event
@@ -3967,9 +4255,11 @@ fn bench_outgoing_mon(
     state: &mut UnknownBattleState,
     slot: &FieldSlot,
     incoming_species: &Species,
+    force_bench: bool,
 ) {
     let slot_i = slot.slot_index as usize;
-    let already_placed = state.turn_number == 0
+    let already_placed = !force_bench
+        && state.turn_number == 0
         && match slot.player {
             Player::P1 => state.p1_active_mons.get(slot_i),
             Player::P2 => state.p2_active_mons.get(slot_i),
@@ -4082,7 +4372,73 @@ fn species_active_elsewhere_on_side(
         .any(|(i, m)| i != slot_i && unknown_is_known_as(&m.possible_species, species))
 }
 
-fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleContext) {
+/// Remove and return the best bench record for an incoming switch.
+///
+/// During unresolved Illusion bookkeeping there can temporarily be two records
+/// with the same shown species.  Their last observed HP/status is the only
+/// physical-history discriminator carried by `SwitchState`, so prefer an exact
+/// match before falling back to the historical known-before-possible ordering.
+/// Choosing the first same-species record unconditionally can swap their item
+/// histories (for example, selecting a full-HP phantom Gholdengo instead of the
+/// real 90%-HP Life Orb holder).
+/// This is deliberately shared by the ordinary switch path and the same-slot
+/// Illusion swap preselection so both use the same known-before-possible bucket
+/// priority.
+fn take_matching_bench_mon(
+    state: &mut UnknownBattleState,
+    player: Player,
+    sw: &SwitchState,
+) -> Option<UnknownPokemonState> {
+    fn take_from_buckets(
+        known: &mut Vec<UnknownPokemonState>,
+        possible: &mut Vec<UnknownPokemonState>,
+        sw: &SwitchState,
+    ) -> Option<UnknownPokemonState> {
+        let exact_history = |m: &UnknownPokemonState| {
+            unknown_is_known_as(&m.possible_species, &sw.species)
+                && m.hp == sw.hp
+                && m.status == sw.status
+        };
+        if let Some(pos) = known.iter().position(exact_history) {
+            return Some(known.remove(pos));
+        }
+        if let Some(pos) = possible.iter().position(exact_history) {
+            return Some(possible.remove(pos));
+        }
+        if let Some(pos) = known
+            .iter()
+            .position(|m| unknown_is_known_as(&m.possible_species, &sw.species))
+        {
+            return Some(known.remove(pos));
+        }
+        possible
+            .iter()
+            .position(|m| unknown_is_known_as(&m.possible_species, &sw.species))
+            .map(|pos| possible.remove(pos))
+    }
+
+    match player {
+        Player::P1 => take_from_buckets(
+            &mut state.p1_known_back_mons,
+            &mut state.p1_possible_back_mons,
+            sw,
+        ),
+        Player::P2 => take_from_buckets(
+            &mut state.p2_known_back_mons,
+            &mut state.p2_possible_back_mons,
+            sw,
+        ),
+    }
+}
+
+fn pass1_switch(
+    state: &mut UnknownBattleState,
+    sw: &SwitchState,
+    ctx: &BattleContext,
+    same_slot_illusion_collision: bool,
+    same_slot_incoming: Option<UnknownPokemonState>,
+    cross_slot_illusion_collision: bool,
+) {
     let player = &sw.slot.player;
     let slot_i = sw.slot.slot_index as usize;
     let species = &sw.species;
@@ -4113,7 +4469,8 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     // happens to coincide in species — a stale match there would silently
     // no-op the real replacement instead of running it through the normal
     // bench-matching logic below.
-    let already_placed = state.turn_number == 0
+    let already_placed = !same_slot_illusion_collision
+        && state.turn_number == 0
         && match player {
             Player::P1 => state.p1_active_mons.get(slot_i),
             Player::P2 => state.p2_active_mons.get(slot_i),
@@ -4150,7 +4507,10 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
         Player::P1 => state.p1_unresolved_zoroark_count,
         Player::P2 => state.p2_unresolved_zoroark_count,
     };
-    if unresolved_zoroark > 0 && species_active_elsewhere_on_side(state, *player, slot_i, species) {
+    if unresolved_zoroark > 0
+        && ((same_slot_illusion_collision && same_slot_incoming.is_none())
+            || cross_slot_illusion_collision)
+    {
         let mut mon = if let Some(template) = find_roster_template(state, *player, species) {
             let mut t = template.clone();
             t.possible_illusion_state = None; // defensive; templates never carry one
@@ -4205,25 +4565,7 @@ fn pass1_switch(state: &mut UnknownBattleState, sw: &SwitchState, ctx: &BattleCo
     // species matches the shown species is exactly the one being pulled onto
     // the field, hypothesis (if any) riding along automatically since the whole
     // `UnknownPokemonState` is moved, not rebuilt.
-    let known = match player {
-        Player::P1 => &mut state.p1_known_back_mons,
-        Player::P2 => &mut state.p2_known_back_mons,
-    };
-    let back_mon: Option<UnknownPokemonState> = if let Some(pos) = known
-        .iter()
-        .position(|m| unknown_is_known_as(&m.possible_species, species))
-    {
-        Some(known.remove(pos))
-    } else {
-        let possible = match player {
-            Player::P1 => &mut state.p1_possible_back_mons,
-            Player::P2 => &mut state.p2_possible_back_mons,
-        };
-        possible
-            .iter()
-            .position(|m| unknown_is_known_as(&m.possible_species, species))
-            .map(|pos| possible.remove(pos))
-    };
+    let back_mon = same_slot_incoming.or_else(|| take_matching_bench_mon(state, *player, sw));
 
     // S52 (fix later REVERTED, S53): a prior session added an eager bench-
     // restore here whenever the just-consumed entry carried a live Zoroark
@@ -4456,6 +4798,14 @@ fn recompute_stats_for_iv_mode(
     }
 }
 
+/// Apply a nature modifier with the same `f32` arithmetic as the simulator's
+/// canonical `calc_stat`. Casting the `0.9f32` value to `f64` first exposes its
+/// binary approximation (for example `40 * 0.899999…`) and can floor an exact
+/// in-game 36 to 35 (S61).
+fn apply_nature_modifier(pre_nature_stat: u16, modifier: f32) -> u16 {
+    (pre_nature_stat as f32 * modifier).floor() as u16
+}
+
 /// After a Mega Evolution / permanent Forme Change swaps in a new base-stat table for
 /// an already-tracked mon, remap the stat-bound fields against the new base using the
 /// mon's EXISTING (possibly already-tightened) EV/IV/nature bounds.
@@ -4499,8 +4849,8 @@ fn recompute_stat_bounds_for_species_change(
             .fold((f32::MAX, f32::MIN), |(mn, mx), &(m, _, _)| {
                 (mn.min(m), mx.max(m))
             });
-        mon.min_stats[si] = (bsv_lo as f64 * min_mod as f64).floor() as u16;
-        mon.max_stats[si] = (bsv_hi as f64 * max_mod as f64).floor() as u16;
+        mon.min_stats[si] = apply_nature_modifier(bsv_lo, min_mod);
+        mon.max_stats[si] = apply_nature_modifier(bsv_hi, max_mod);
     }
 }
 
@@ -4509,24 +4859,40 @@ fn apply_switch_state_to_mon(
     sw: &SwitchState,
     config: &InferenceConfig,
 ) {
-    mon.level = sw.level;
-    mon.hp = sw.hp.clone();
-    mon.status = sw.status.clone();
-    mon.switched_in_this_turn = true;
-    mon.entered_this_turn = true;
-    // Clear per-field flags on switch-in (mirrors helpers.rs:5396-5399).
-    mon.first_move_on_field = true;
-    mon.first_turn_on_field_pending = false; // caller can override for mid-turn entries
-    mon.used_moves_this_field = [false; 4];
-    if let Some(tt) = &sw.tera_type {
-        mon.is_tera = true;
-        mon.possible_tera_type = Unknown::Known(tt.clone());
+    fn apply_visible_switch_state(
+        mon: &mut UnknownPokemonState,
+        sw: &SwitchState,
+        config: &InferenceConfig,
+    ) {
+        mon.level = sw.level;
+        mon.hp = sw.hp.clone();
+        mon.status = sw.status.clone();
+        mon.switched_in_this_turn = true;
+        mon.entered_this_turn = true;
+        // Clear per-field flags on switch-in (mirrors helpers.rs:5396-5399).
+        mon.first_move_on_field = true;
+        mon.first_turn_on_field_pending = false; // caller can override for mid-turn entries
+        mon.used_moves_this_field = [false; 4];
+        if let Some(tt) = &sw.tera_type {
+            mon.is_tera = true;
+            mon.possible_tera_type = Unknown::Known(tt.clone());
+        }
+        // IV range is set by recompute_stats_for_iv_mode; this only enforces the
+        // flag for mons that arrive from back (already built without force_max).
+        if config.force_max_ivs {
+            mon.min_ivs = [31; 6];
+            mon.max_ivs = [31; 6];
+        }
     }
-    // IV range is set by recompute_stats_for_iv_mode; apply_switch_state_to_mon only
-    // enforces the flag for mons that arrive from back (already built without force_max).
-    if config.force_max_ivs {
-        mon.min_ivs = [31; 6];
-        mon.max_ivs = [31; 6];
+
+    apply_visible_switch_state(mon, sw, config);
+    // The hypothesis and primary describe the same physical occupant. A fresh
+    // hypothesis can be seeded from a same-species bench record immediately
+    // before this call; that record's old HP/status belong to the benched real
+    // mon, not to the entering disguised Zoroark. Keep every directly visible
+    // switch field synchronized before later reactions can promote the hypothesis.
+    if let Some(hypothesis) = mon.possible_illusion_state.as_deref_mut() {
+        apply_visible_switch_state(hypothesis, sw, config);
     }
 }
 
@@ -5018,7 +5384,20 @@ fn emit_extension_item_if_collapsed(
     if let Some(idx) = setter_idx
         && let Some(mon) = get_mon_mut_by_idx(state, idx)
     {
-        unknown_set_known(&mut mon.item, item, "ia-extension-item");
+        // The timer proves what the setter held when it created the effect, not
+        // necessarily what it holds now. If that holding epoch ended meanwhile,
+        // ItemLost already preserved the exact historical value in
+        // `consumed_item`/`removed_item`; never overwrite current None or a
+        // subsequently gained item (S62: Light Clay knocked off on the collapse
+        // turn). With no epoch boundary, the deduction still narrows the live item.
+        let historical_item_already_recorded =
+            mon.consumed_item.as_ref() == Some(&item) || mon.removed_item.as_ref() == Some(&item);
+        let current_epoch_changed = mon.item_lost
+            || mon.item_was_transferred
+            || matches!(&mon.item, Unknown::Known(current) if *current != item);
+        if !historical_item_already_recorded && !current_epoch_changed {
+            unknown_set_known(&mut mon.item, item, "ia-extension-item");
+        }
     }
 }
 
@@ -9352,8 +9731,8 @@ fn compute_attacker_stat_bounds(
                             attacker_speed_range,
                         );
                         if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
-                            let final_lo = (lo_v as f64 * *nat_mod as f64).floor() as u16;
-                            let final_hi = (hi_v as f64 * *nat_mod as f64).floor() as u16;
+                            let final_lo = apply_nature_modifier(lo_v, *nat_mod);
+                            let final_hi = apply_nature_modifier(hi_v, *nat_mod);
                             global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
                             global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
                             global_stat_lo =
@@ -9628,7 +10007,7 @@ fn find_feasible_bsv_range_b(
         if si == 0 {
             stats[0] = bsv; // HP: no nature
         } else {
-            stats[si] = (bsv as f64 * nat_mod as f64).floor() as u16;
+            stats[si] = apply_nature_modifier(bsv, nat_mod);
         }
         stats[5] = spe_override; // override speed (no-op for non-speed-dep moves)
         materialize_pokemon(&atk_unk_base, stats, item.clone(), ability.clone())
@@ -9811,7 +10190,7 @@ fn find_feasible_bsv_range_a(
         if si == 0 {
             def_stats[0] = bsv;
         } else {
-            let raw = (bsv as f64 * nat_mod as f64).floor() as u16;
+            let raw = apply_nature_modifier(bsv, nat_mod);
             def_stats[si] = if item_stat_mult != 1.0 {
                 (raw as f64 * item_stat_mult).floor() as u16
             } else {
@@ -10431,8 +10810,8 @@ fn compute_defender_stat_bounds(
             }
             if let (Some(lo_v), Some(hi_v)) = (found_lo_local, found_hi_local) {
                 let nat_mod = nature_classes[class_idx].0;
-                let final_lo = (lo_v as f64 * nat_mod as f64).floor() as u16;
-                let final_hi = (hi_v as f64 * nat_mod as f64).floor() as u16;
+                let final_lo = apply_nature_modifier(lo_v, nat_mod);
+                let final_hi = apply_nature_modifier(hi_v, nat_mod);
                 global_bsv_lo = Some(global_bsv_lo.map_or(lo_v, |g| g.min(lo_v)));
                 global_bsv_hi = Some(global_bsv_hi.map_or(hi_v, |g| g.max(hi_v)));
                 global_stat_lo = Some(global_stat_lo.map_or(final_lo, |g| g.min(final_lo)));
@@ -10712,6 +11091,11 @@ struct Mover {
     weather: Option<Weather>,
     /// S32: terrain as of just before this mover acted, for the Surge Surfer escape.
     terrain: Option<Terrain>,
+    /// Physical-mon indices whose individual Speed state changed after the
+    /// preceding mover was selected but before this mover was selected.  The
+    /// action queue is recalculated after each move, so those two movers were
+    /// not ordered from one shared set of per-mon multipliers (S58).
+    speed_changed_since_previous_move: HashSet<usize>,
     /// Encore can replace the queued move at execution time. The visible MoveUsed
     /// event names the replacement, whose priority may differ from the priority that
     /// actually positioned this action in the queue.
@@ -10724,12 +11108,10 @@ struct Mover {
 /// `pass4_speed_from_order` bake into a `SpeedComparison`'s numeric factors and
 /// escape disjuncts — and update the running snapshot state (S32).
 ///
-/// Deliberately narrow: `BoostsSwapped`/`BoostsCopied` are not tracked (which
-/// specific stats they move isn't recoverable from the event alone without the
-/// causing move; Heart Swap/Power Swap/Guard Swap mid-turn before a same-turn
-/// speed-relevant pairing is rare enough that leaving the snapshot stale here is an
-/// acceptable, documented residual gap rather than blocking the fix for the common
-/// cases (Thunder Wave, Icy Wind/Charm, Intimidate-adjacent, Tailwind, Haze).
+/// `speed_changed_since_previous_move` also records changes whose exact resulting
+/// stage is not recoverable from the event (`BoostsSwapped`/`BoostsCopied`).  Pass 4
+/// can then conservatively skip an affected adjacent pair instead of comparing two
+/// snapshots that did not participate in one ordering decision (S58).
 #[allow(clippy::too_many_arguments)]
 fn update_speed_snapshot_from_reactions(
     state: &UnknownBattleState,
@@ -10741,16 +11123,23 @@ fn update_speed_snapshot_from_reactions(
     weather: &mut Option<Weather>,
     terrain: &mut Option<Terrain>,
     priority_may_differ: &mut HashSet<usize>,
+    speed_changed_since_previous_move: &mut HashSet<usize>,
 ) {
     for r in reactions {
         match &r.kind {
             EventKind::StatusInflicted { target, status } => {
                 if let Some(idx) = mon_idx_for_active_slot(state, target) {
                     paralyzed.insert(idx, matches!(status, Status::Paralysis));
+                    if matches!(status, Status::Paralysis) {
+                        speed_changed_since_previous_move.insert(idx);
+                    }
                 }
             }
             EventKind::StatusCured { target, .. } => {
                 if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    if paralyzed.get(&idx).copied().unwrap_or(false) {
+                        speed_changed_since_previous_move.insert(idx);
+                    }
                     paralyzed.insert(idx, false);
                 }
             }
@@ -10762,17 +11151,29 @@ fn update_speed_snapshot_from_reactions(
                 if let Some(idx) = mon_idx_for_active_slot(state, target) {
                     let cur = *spe_boost.get(&idx).unwrap_or(&0);
                     spe_boost.insert(idx, (cur as i16 + *stages as i16).clamp(-6, 6) as i8);
+                    speed_changed_since_previous_move.insert(idx);
                 }
             }
             EventKind::BoostsCleared { target } => {
                 if let Some(idx) = mon_idx_for_active_slot(state, target) {
                     spe_boost.insert(idx, 0);
+                    speed_changed_since_previous_move.insert(idx);
                 }
             }
             EventKind::BoostsInverted { target } => {
                 if let Some(idx) = mon_idx_for_active_slot(state, target) {
                     let cur = *spe_boost.get(&idx).unwrap_or(&0);
                     spe_boost.insert(idx, -cur);
+                    speed_changed_since_previous_move.insert(idx);
+                }
+            }
+            EventKind::BoostsSwapped { source, target }
+            | EventKind::BoostsCopied { source, target } => {
+                if let Some(idx) = mon_idx_for_active_slot(state, source) {
+                    speed_changed_since_previous_move.insert(idx);
+                }
+                if let Some(idx) = mon_idx_for_active_slot(state, target) {
+                    speed_changed_since_previous_move.insert(idx);
                 }
             }
             EventKind::VolatileStart {
@@ -10834,6 +11235,7 @@ fn update_speed_snapshot_from_reactions(
             weather,
             terrain,
             priority_may_differ,
+            speed_changed_since_previous_move,
         );
     }
 }
@@ -10879,6 +11281,17 @@ fn pass4_speed_from_order(
     // (S4, S32).
     let mut spe_boost: HashMap<usize, i8> = HashMap::new();
     let mut paralyzed: HashMap<usize, bool> = HashMap::new();
+    // Seed every current mon, not only mons once they reach their own MoveUsed.
+    // An earlier spread move can change the Speed stage/status of two later
+    // movers before either has been lazily inserted. Starting such an update at
+    // zero loses their turn-start stage (S60: Icy Wind after prior Dragon
+    // Dance/Spe drops), producing a wrong comparison between those later movers.
+    for idx in 0..mons_count_battle(seed_state) {
+        if let Some(mon) = get_mon_by_idx(seed_state, idx) {
+            spe_boost.insert(idx, mon.boosts[4]);
+            paralyzed.insert(idx, matches!(mon.status, Some(Status::Paralysis)));
+        }
+    }
     let mut tailwind: HashMap<Player, bool> = HashMap::new();
     tailwind.insert(
         Player::P1,
@@ -10898,6 +11311,7 @@ fn pass4_speed_from_order(
     let mut weather = seed_state.weather.clone();
     let mut terrain = seed_state.terrain.clone();
     let mut priority_may_differ: HashSet<usize> = HashSet::new();
+    let mut speed_changed_since_previous_move: HashSet<usize> = HashSet::new();
 
     // Collect one Mover per top-level MoveUsed event, each carrying a snapshot taken
     // AS OF the point in the scan just before its own MoveUsed — i.e. reflecting
@@ -10941,6 +11355,7 @@ fn pass4_speed_from_order(
                     &mut weather,
                     &mut terrain,
                     &mut priority_may_differ,
+                    &mut speed_changed_since_previous_move,
                 );
                 continue;
             }
@@ -10996,8 +11411,10 @@ fn pass4_speed_from_order(
                     trick_room,
                     weather: weather.clone(),
                     terrain: terrain.clone(),
+                    speed_changed_since_previous_move: speed_changed_since_previous_move.clone(),
                     priority_may_differ: priority_may_differ.contains(&idx),
                 });
+                speed_changed_since_previous_move.clear();
             }
         }
         update_speed_snapshot_from_reactions(
@@ -11010,6 +11427,7 @@ fn pass4_speed_from_order(
             &mut weather,
             &mut terrain,
             &mut priority_may_differ,
+            &mut speed_changed_since_previous_move,
         );
     }
 
@@ -11039,6 +11457,37 @@ fn pass4_speed_from_order(
             )
         };
         if occupant_changed(idx0) || occupant_changed(idx1) {
+            continue;
+        }
+
+        // S58: from Gen VIII onward, the remaining action order is recalculated
+        // immediately after a Speed change.  If either participant was paralyzed,
+        // cured, or had its Speed stage changed between these two MoveUsed events,
+        // mover0 and mover1 were selected from different speed snapshots.  Using
+        // mover1's new multiplier to back-solve the earlier comparison can invent
+        // an impossible item/ability escape (for example, Thunderbolt paralyzing a
+        // later opponent under Trick Room).  There is no single sound numeric
+        // comparison for that adjacent pair, so omit it.
+        if mover1.speed_changed_since_previous_move.contains(&idx0)
+            || mover1.speed_changed_since_previous_move.contains(&idx1)
+        {
+            continue;
+        }
+
+        // Illusion copies only the displayed identity; ordering still uses the
+        // hidden user's real Speed. While either participant has a live Illusion
+        // hypothesis, its shown-species stat envelope is therefore not a sound
+        // basis for either a SpeedComparison or a priority-escape clause. Skip the
+        // pair until identity resolves. This intentionally gives up some temporary
+        // speed precision rather than asserting that a naturally-fast disguised
+        // Zoroark needed Quick Claw/Choice Scarf to outrun something its displayed
+        // species could not.
+        let has_unresolved_illusion = |idx: usize| {
+            get_mon_by_idx(seed_state, idx)
+                .or_else(|| get_mon_by_idx(state, idx))
+                .is_some_and(|mon| mon.possible_illusion_state.is_some())
+        };
+        if has_unresolved_illusion(idx0) || has_unresolved_illusion(idx1) {
             continue;
         }
 
